@@ -22,3 +22,10 @@ def test_no_audio_uses_stereo_silence():
     joined = " ".join(command)
     assert "anullsrc=r=48000:cl=stereo:d=2.000000" in joined
     assert "-ac 2" in joined
+
+
+def test_lower_original_audio_role_is_encoded_in_filter():
+    segment = RenderSegment("s1", "clip.mp4", 0, 2000, audio_role="lower_original")
+    probe = MediaProbeResult("clip.mp4", 2000, 1920, 1080, has_audio=True, audio_track_count=1)
+    command = build_segment_command(segment, RenderSettings(), RenderProfile(), output="out.mp4", probe=probe)
+    assert "volume=0.35" in " ".join(command)

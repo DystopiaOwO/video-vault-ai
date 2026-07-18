@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+import subprocess
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -140,7 +141,14 @@ def _run_job(cfg: Mapping[str, Any], store: RenderJobStore, job_id: str,
             )
             return rendered.path
 
-        engine = RenderEngine(engine_cfg, store, segment_renderer=segment_runner)
+        engine = RenderEngine(
+            engine_cfg,
+            store,
+            segment_renderer=segment_runner,
+            audio_mixer=lambda manifest_value, assembled, output: _mix_bgm(
+                engine_cfg, manifest_value, assembled, output
+            ),
+        )
         engine.render(manifest, job_id)
     except Exception as exc:
         current = store.get_job(job_id)
@@ -196,6 +204,47 @@ def _contract_values(data: Mapping[str, Any], contract: type) -> dict[str, Any]:
 def _segment_values(data: Mapping[str, Any]) -> dict[str, Any]:
     defaults = RenderSegment("", "", 0, 0)
     return {field: data.get(field, getattr(defaults, field)) for field in defaults.__dataclass_fields__}
+
+
+def _mix_bgm(cfg: Mapping[str, Any], manifest: RenderManifest, assembled: Path, output: Path) -> Path:
+    """Mix reviewed BGM into the normalized timeline when enabled."""
+
+    bgm = manifest.bgm
+    if not bgm.enabled or not bgm.source_file:
+        return assembled
+    source = Path(bgm.source_file)
+    if not source.exists():
+        raise FileNotFoundError(f"BGM 不存在：{source}")
+    from .render_profiles import get_render_profile
+
+    profile = get_render_profile(manifest.profile)
+    duration = max(0.001, manifest.timeline_duration_ms / 1000)
+    volume = 10 ** (bgm.volume_db / 20)
+    bgm_chain = f"aresample=48000,asetpts=PTS-STARTPTS,volume={volume:.8f}"
+    if bgm.fade_in_ms:
+        bgm_chain += f",afade=t=in:st=0:d={bgm.fade_in_ms / 1000:.3f}"
+    bgm_chain += f",atrim=duration={duration:.3f}"
+    if bgm.fade_out_ms:
+        fade_start = max(0.0, duration - bgm.fade_out_ms / 1000)
+        bgm_chain += f",afade=t=out:st={fade_start:.3f}:d={bgm.fade_out_ms / 1000:.3f}"
+    filters = (
+        f"[0:a]aresample=48000,asetpts=PTS-STARTPTS[a0];"
+        f"[1:a]{bgm_chain}[a1];"
+        f"[a0][a1]amix=inputs=2:duration=first:dropout_transition=0,"
+        f"alimiter=limit=0.95[aout]"
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        str(cfg.get("ffmpeg_path", "ffmpeg")), "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(assembled), "-stream_loop", "-1", "-i", str(source),
+        "-filter_complex", filters, "-map", "0:v", "-map", "[aout]",
+        "-c:v", manifest.settings.encoder or profile.video_encoder,
+        "-r", f"{profile.fps_num}/{profile.fps_den}", "-pix_fmt", profile.pixel_format,
+        "-c:a", "aac", "-ar", str(profile.audio_sample_rate), "-ac", str(profile.audio_channels),
+        "-t", f"{duration:.3f}", "-movflags", "+faststart", str(output),
+    ]
+    subprocess.run(command, check=True, capture_output=True, text=True, encoding="utf-8")
+    return output
 
 
 __all__ = ["cancel_render_job", "get_project_job", "get_project_outputs", "get_render_job", "job_store",

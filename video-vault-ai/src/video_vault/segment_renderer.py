@@ -72,6 +72,10 @@ def build_segment_ffmpeg_command(
         if speed != 1.0:
             af.append(atempo_chain(speed))
         af.extend(["aresample=48000", "aformat=sample_fmts=fltp:channel_layouts=stereo", "asetpts=PTS-STARTPTS"])
+        if segment.audio_role == "mute":
+            af.append("volume=0")
+        elif segment.audio_role == "lower_original":
+            af.append("volume=0.35")
         filter_complex.append(f"[0:a]{','.join(af)}[aout]")
         audio_map = "[aout]"
     else:
