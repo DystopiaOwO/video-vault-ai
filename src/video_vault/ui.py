@@ -22,6 +22,8 @@ from .opencut import OPENCUT_URL, export_opencut_handoff, opencut_status, start_
 from .paths import db_path
 from .planner import draft_plan, perceive_output, review_text, revise_plan, set_plan_status, video_dir, write_plan_files
 from .project import build_project_plan, can_project_render, create_project, list_projects, mark_project_needs_review, project_detail, project_dir, save_revision_notes, save_segment_review, set_review_status, sync_project_files
+from .render_job_api import RenderJobAPI
+from .render_job_manager import RenderJobManager
 from .renderer import render_approved
 from .scanner import scan_inbox
 
@@ -33,6 +35,9 @@ JOBS_LOCK = threading.Lock()
 def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
     db = db_path(cfg)
     init_db(db)
+    render_manager = RenderJobManager(cfg, db)
+    render_manager.start()
+    render_api = RenderJobAPI(render_manager)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -42,7 +47,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._file(_web_dist() / "index.html")
             elif parsed.path == "/classic" or (parsed.path == "/" and not _web_dist().exists()):
                 project_id = int(query.get("project_id", ["0"])[0] or 0)
-                self._html(render_page(cfg, db, project_id, query.get("message", [""])[0]))
+                self._html(render_page(cfg, db, project_id, query.get("message", [""])[0], render_manager))
             elif parsed.path == "/bgm" and _web_dist().exists():
                 self._file(_web_dist() / "index.html")
             elif parsed.path in {"/bgm", "/classic-bgm"}:
@@ -57,7 +62,13 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json(list_bgm(db))
             elif parsed.path == "/api/jobs":
                 project_id = int(query.get("project_id", ["0"])[0] or 0)
-                self._json(project_jobs(project_id) if project_id else [])
+                self._json(project_jobs(project_id, render_manager) if project_id else project_jobs(0, render_manager))
+            elif parsed.path == "/api/render-job":
+                self._json(render_api.get(query.get("id", [""])[0]))
+            elif parsed.path == "/api/render-jobs":
+                project_id = int(query.get("project_id", ["0"])[0] or 0)
+                result = render_api.list(project_id or None)
+                self._json(result)
             elif _web_dist().exists() and _static_file(parsed.path):
                 self._file(_static_file(parsed.path))
             else:
@@ -150,8 +161,11 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                         _open_folder(out)
                     self._redirect(project_id, f"已打開資料夾：{out}" if out.exists() else "尚未產生 HyperFrames 專案")
                 elif path == "/ui/stop-jobs":
-                    stop_project_jobs(project_id)
+                    stop_project_jobs(project_id, render_manager)
                     self._redirect(project_id, "已停止目前背景工作")
+                elif path == "/ui/render-job":
+                    result = render_api.create(project_id, data.get("output_path", ""))
+                    self._redirect(project_id, "正式輸出已排入工作佇列" if result.get("created") else str(result.get("error") or "正式輸出工作已在執行中"))
                 elif path == "/ui/project-bgm":
                     add_project_bgm(db, project_id, int(data.get("bgm_id", 0)))
                     mark_project_needs_review(cfg, db, project_id)
@@ -233,8 +247,12 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 started = start_hyperframes_job(cfg, db, project_id, bool(data.get("render")), int(data.get("max_segments", 20)))
                 self._json({"ok": started, "message": "HyperFrames 工作已開始" if started else "HyperFrames 工作已在執行中"})
             elif path == "/api/project/stop-jobs":
-                stop_project_jobs(int(data.get("project_id", 0)))
+                stop_project_jobs(int(data.get("project_id", 0)), render_manager)
                 self._json({"ok": True, "message": "已停止目前背景工作"})
+            elif path == "/api/project/render-job":
+                self._json(render_api.create(int(data.get("project_id", 0)), str(data.get("output_path", ""))))
+            elif path == "/api/render-job/cancel":
+                self._json(render_api.cancel(str(data.get("job_id", ""))))
             elif path == "/api/project/approve":
                 set_review_status(cfg, db, int(data.get("project_id", 0)), "approved", data.get("notes", ""))
                 self._json({"ok": True})
@@ -331,13 +349,13 @@ def _static_file(url_path: str) -> Path | None:
     return path if path.exists() and path.is_file() and dist in path.parents else None
 
 
-def render_page(cfg: dict, db: Path, project_id: int = 0, message: str = "") -> str:
+def render_page(cfg: dict, db: Path, project_id: int = 0, message: str = "", render_manager: RenderJobManager | None = None) -> str:
     projects = list_projects(db)
     if not project_id and projects:
         project_id = int(projects[0]["id"])
     detail = project_detail(cfg, db, project_id) if project_id else {}
     bgm = list_bgm(db)
-    jobs = project_jobs(project_id) if project_id else []
+    jobs = project_jobs(project_id, render_manager) if project_id else []
     refresh = '<meta http-equiv="refresh" content="3">' if any(j.get("status") in {"running", "queued"} for j in jobs) else ""
     return f"""<!doctype html>
 <html lang="zh-Hant">
@@ -469,29 +487,27 @@ def start_hyperframes_job(cfg: dict, db: Path, project_id: int, render: bool, ma
     return True
 
 
-def project_jobs(project_id: int) -> list[dict]:
+def project_jobs(project_id: int, render_manager: RenderJobManager | None = None) -> list[dict]:
     with JOBS_LOCK:
-        return [dict(job, project_id=pid) for (pid, _), job in JOBS.items() if pid == project_id]
+        legacy = [dict(job, project_id=pid) for (pid, _), job in JOBS.items() if project_id == 0 or pid == project_id]
+    persistent = []
+    if render_manager is not None:
+        persistent = [dict(job, kind="正式輸出") for job in render_manager.list(None if project_id == 0 else project_id)]
+    return legacy + persistent
 
 
-def stop_project_jobs(project_id: int) -> None:
+def stop_project_jobs(project_id: int, render_manager: RenderJobManager | None = None) -> None:
     with JOBS_LOCK:
         for (pid, _), job in JOBS.items():
             if pid == project_id and job.get("status") in {"queued", "running"}:
                 job.update(status="stopped", message="已由使用者停止", updated_at=time.time())
-    _kill_video_vault_processes()
+    if render_manager is not None:
+        render_manager.cancel_project(project_id)
 
 
 def _kill_video_vault_processes() -> None:
-    pattern = "D:\\VideoLibrary"
-    cmd = (
-        "Stop-Process -Name ffmpeg -Force -ErrorAction SilentlyContinue; "
-        "$names = @('ffmpeg.exe','node.exe','npx.cmd','bun.exe','chrome-headless-shell.exe','chrome.exe'); "
-        "Get-CimInstance Win32_Process | "
-        f"Where-Object {{$names -contains $_.Name -and ($_.CommandLine -like '*{pattern}*' -or $_.CommandLine -like '*hyperframes*')}} | "
-        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
-    )
-    subprocess.run(["powershell", "-NoProfile", "-Command", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    """Compatibility no-op; render cancellation is manager/PID scoped."""
+    return None
 
 
 def _set_job(project_id: int, name: str, **changes: object) -> None:

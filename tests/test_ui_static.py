@@ -23,10 +23,6 @@ def test_project_jobs_tracks_percent_and_stop(monkeypatch):
     assert project_jobs(7)[0]["status"] == "stopped"
 
 
-def test_stop_processes_kills_ffmpeg_by_name(monkeypatch):
-    seen = {}
-    monkeypatch.setattr(ui.subprocess, "run", lambda cmd, **kwargs: seen.setdefault("cmd", cmd))
-
+def test_stop_processes_does_not_use_global_process_kill(monkeypatch):
+    monkeypatch.setattr(ui.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("global process kill is forbidden")))
     _kill_video_vault_processes()
-
-    assert "Stop-Process -Name ffmpeg" in seen["cmd"][-1]
