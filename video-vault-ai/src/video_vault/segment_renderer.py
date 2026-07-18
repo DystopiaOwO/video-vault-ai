@@ -86,6 +86,47 @@ def build_segment_ffmpeg_command(
     return args
 
 
+def build_segment_command(
+    segment: RenderSegment,
+    settings: Any,
+    profile: RenderProfile | str,
+    *,
+    output: str | Path = "segment.mp4",
+    probe: MediaProbeResult,
+    ffmpeg_path: str = "ffmpeg",
+    encoder: str | None = None,
+) -> list[str]:
+    """Compatibility adapter for callers using the original command builder."""
+
+    color = getattr(settings, "color", None)
+    command = build_segment_ffmpeg_command(segment, probe, profile, ffmpeg_path=ffmpeg_path, output=output, encoder=encoder, color=color)
+    # Keep the old textual shape for scripts/tests that inspect commands, while
+    # the actual filter remains trim/atrim based and frame-accurate.
+    duration = (segment.source_out_ms - segment.source_in_ms) / 1000.0
+    start = segment.source_in_ms / 1000.0
+    end = segment.source_out_ms / 1000.0
+    replacements = {
+        f"trim=start={start:.3f}:duration={duration:.3f}": f"trim=start={start:.6f}:end={end:.6f}",
+        f"atrim=start={start:.3f}:duration={duration:.3f}": f"atrim=start={start:.6f}:end={end:.6f}",
+    }
+    rendered_args = [
+        _replace_filter_text(token, replacements)
+        for token in command
+    ]
+    if not probe.has_audio:
+        rendered_args = [
+            token.replace("anullsrc=r=48000:cl=stereo", f"anullsrc=r=48000:cl=stereo:d={duration / segment.speed:.6f}")
+            for token in rendered_args
+        ]
+    return rendered_args
+
+
+def _replace_filter_text(value: str, replacements: Mapping[str, str]) -> str:
+    for old, new in replacements.items():
+        value = value.replace(old, new)
+    return value
+
+
 def render_segment(
     segment: RenderSegment,
     cfg: Mapping[str, Any],
@@ -122,4 +163,4 @@ def render_segment(
     return SegmentRenderResult(paths.media, key, False, warnings)
 
 
-__all__ = ["SegmentRenderResult", "atempo_chain", "build_segment_ffmpeg_command", "render_segment"]
+__all__ = ["SegmentRenderResult", "atempo_chain", "build_segment_command", "build_segment_ffmpeg_command", "render_segment"]

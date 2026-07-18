@@ -22,6 +22,38 @@ class SegmentCachePaths:
     metadata: Path
     log: Path
 
+    @property
+    def media_path(self) -> Path:
+        return self.media
+
+    @property
+    def metadata_path(self) -> Path:
+        return self.metadata
+
+    @property
+    def log_path(self) -> Path:
+        return self.log
+
+
+class SegmentCache:
+    """Compatibility facade over the functional cache API."""
+
+    def __init__(self, root: str | Path):
+        self.root = Path(root)
+
+    def key(self, segment: RenderSegment, settings: Any, profile: RenderProfile | Mapping[str, Any] | str, *, encoder: str = "") -> str:
+        return segment_cache_key(segment, color=getattr(settings, "color", settings), profile=profile, encoder=encoder)
+
+    def entry(self, key: str) -> SegmentCachePaths:
+        return cache_paths(self.root, key)
+
+    def get(self, segment: RenderSegment, settings: Any, profile: RenderProfile | Mapping[str, Any] | str, *, encoder: str = "") -> SegmentCachePaths | None:
+        color = getattr(settings, "color", settings)
+        payload = cache_key_payload(segment, color=color, profile=profile, encoder=encoder)
+        key = segment_cache_key(segment, color=color, profile=profile, encoder=encoder)
+        paths = self.entry(key)
+        return paths if is_valid_cache(paths, payload) else None
+
 
 def cache_key_payload(
     segment: RenderSegment,
@@ -108,4 +140,4 @@ def _as_mapping(value: Any) -> dict[str, Any]:
     return {}
 
 
-__all__ = ["CACHE_VERSION", "ENGINE_VERSION", "SegmentCachePaths", "cache_key_payload", "segment_cache_key", "cache_paths", "is_valid_cache", "write_cache_metadata"]
+__all__ = ["CACHE_VERSION", "ENGINE_VERSION", "SegmentCache", "SegmentCachePaths", "cache_key_payload", "segment_cache_key", "cache_paths", "is_valid_cache", "write_cache_metadata"]
