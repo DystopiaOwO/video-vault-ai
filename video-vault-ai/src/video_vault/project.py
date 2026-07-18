@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 import re
 import shutil
+import hashlib
 
 from .bgm import auto_assign_bgm
 from .database import create_project_row, init_db, project, project_bgm_tracks, project_videos, projects, segments, set_project_status, set_project_videos
@@ -103,6 +104,7 @@ def build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
     bgm = [dict(track) for track in project_bgm_tracks(db, project_id)]
     plan = {
         "project_id": project_id,
+        "plan_id": f"project-{project_id}",
         "name": project_info["name"],
         "category": project_info["category"],
         "content_type": project_info["content_type"],
@@ -139,15 +141,106 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
 def set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes: str = "") -> Path:
     folder = project_dir(cfg, project_id)
     path = folder / "review_status.json"
-    data = {"project_id": project_id, "status": status, "approved_by_user": status == "approved", "notes": notes, "updated_at": datetime.now().isoformat(timespec="seconds")}
+    plan_path = folder / "project_plan.json"
+    plan = _read_json(plan_path)
+    approved = status == "approved"
+    data = {"project_id": project_id, "status": status, "approved_by_user": approved, "notes": notes, "updated_at": datetime.now().isoformat(timespec="seconds")}
+    if approved:
+        data.update({
+            "approved_plan_id": str(plan.get("plan_id") or f"project-{project_id}"),
+            "approved_manifest_hash": _approval_manifest_hash(plan, _read_json(folder / "render_settings.json")),
+            "approved_at": datetime.now().isoformat(timespec="seconds"),
+        })
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     set_project_status(db, project_id, status)
-    plan_path = folder / "project_plan.json"
     if plan_path.exists():
-        plan = json.loads(plan_path.read_text(encoding="utf-8"))
         plan["status"] = status
         plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def invalidate_project_approval(cfg: dict, db: Path, project_id: int, reason: str = "") -> Path:
+    """Invalidate approval after any render-affecting project change."""
+
+    folder = project_dir(cfg, project_id)
+    existing = _read_json(folder / "review_status.json")
+    data = {
+        **existing,
+        "project_id": project_id,
+        "status": "needs_review",
+        "approved_by_user": False,
+        "invalidated_reason": reason,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    data.pop("approved_manifest_hash", None)
+    data.pop("approved_plan_id", None)
+    data.pop("approved_at", None)
+    path = folder / "review_status.json"
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    plan_path = folder / "project_plan.json"
+    if plan_path.exists():
+        plan = _read_json(plan_path)
+        plan["status"] = "needs_review"
+        plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    set_project_status(db, project_id, "needs_review")
+    return path
+
+
+def can_project_render(cfg: dict, db: Path, project_id: int) -> tuple[bool, str]:
+    """Return whether the project has passed every server-side approval gate."""
+
+    init_db(db)
+    row = project(db, int(project_id))
+    if not row:
+        return False, f"找不到專案：{project_id}"
+    if str(row["status"]) != "approved":
+        return False, f"專案狀態為 {row['status']}，必須是 approved"
+    folder = project_dir(cfg, int(project_id))
+    review_path = folder / "review_status.json"
+    if not review_path.exists():
+        return False, "缺少 review_status.json"
+    review = _read_json(review_path)
+    if review.get("approved_by_user") is not True:
+        return False, "review_status.json 尚未取得使用者核准"
+    plan_path = folder / "project_plan.json"
+    if not plan_path.exists():
+        return False, "缺少 project_plan.json"
+    plan = _read_json(plan_path)
+    if plan.get("status") != "approved":
+        return False, f"最新 project_plan.json 狀態為 {plan.get('status') or 'missing'}，必須是 approved"
+    approved_plan_id = review.get("approved_plan_id")
+    current_plan_id = str(plan.get("plan_id") or f"project-{project_id}")
+    if approved_plan_id and str(approved_plan_id) != current_plan_id:
+        return False, "目前計畫 ID 與核准版本不一致，請重新核准"
+    approved_hash = review.get("approved_manifest_hash")
+    if approved_hash and approved_hash != _approval_manifest_hash(plan, _read_json(folder / "render_settings.json")):
+        return False, "目前計畫或輸出設定已變更，請重新核准"
+    return True, "project approval gate passed"
+
+
+def assert_project_approved(cfg: dict, db: Path, project_id: int, action: str = "render") -> None:
+    allowed, reason = can_project_render(cfg, db, project_id)
+    if not allowed:
+        raise PermissionError(f"{action} blocked by project approval gate: {reason}")
+
+
+def _approval_manifest_hash(plan: dict, settings: dict) -> str:
+    # Approval compares render-affecting content only.  Status and timestamps
+    # are workflow metadata and must not invalidate an otherwise unchanged plan.
+    plan_content = dict(plan)
+    plan_content.pop("created_at", None)
+    plan_content["status"] = "approved"
+    try:
+        from .render_manifest import compile_manifest
+        return compile_manifest(plan_content, None, settings).manifest_hash
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
+        pass
+    # Include the normalized plan as well as settings.  This keeps the
+    # approval snapshot conservative: even a plan-only edit that changes the
+    # available segment groups must be reviewed again.
+    payload = {"plan": plan_content, "settings": settings}
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def write_project_files(cfg: dict, plan: dict) -> tuple[Path, Path]:

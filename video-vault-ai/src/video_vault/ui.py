@@ -21,6 +21,8 @@ from .opencut import OPENCUT_URL, export_opencut_handoff, opencut_status, start_
 from .paths import db_path
 from .planner import draft_plan, perceive_output, review_text, revise_plan, set_plan_status, video_dir, write_plan_files
 from .project import build_project_plan, create_project, list_projects, project_detail, project_dir, set_review_status, sync_project_files
+from .job_api import cancel_render_job, get_render_job, list_render_jobs, list_render_outputs, start_render_job
+from .render_api import RenderApiError, compile_project, preflight_project, render_settings, update_render_settings
 from .renderer import render_approved
 from .scanner import scan_inbox
 
@@ -50,6 +52,15 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json(video_list(cfg, db))
             elif parsed.path == "/api/bgm":
                 self._json(list_bgm(db))
+            elif parsed.path == "/api/project/render/settings":
+                self._json({"ok": True, "settings": render_settings(cfg, int(query.get("project_id", ["0"])[0]))})
+            elif parsed.path == "/api/project/render/jobs":
+                self._json({"ok": True, "jobs": list_render_jobs(cfg, int(query.get("project_id", ["0"])[0]))})
+            elif parsed.path == "/api/project/render/job":
+                job = get_render_job(cfg, int(query.get("project_id", ["0"])[0]), query.get("job_id", [""])[0])
+                self._json({"ok": job is not None, "job": job})
+            elif parsed.path == "/api/project/render/outputs":
+                self._json({"ok": True, "outputs": list_render_outputs(cfg, int(query.get("project_id", ["0"])[0]))})
             else:
                 self.send_error(404)
 
@@ -140,7 +151,28 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._redirect(project_id, f"操作失敗：{exc}")
 
         def _api_post(self, path: str, data: dict) -> None:
-            if path == "/api/process-inbox":
+            try:
+                self._render_api_post(path, data)
+            except RenderApiError as exc:
+                self._json(exc.as_response())
+            except (ValueError, KeyError, OSError) as exc:
+                self._json({"ok": False, "error": {"code": "request_failed", "message": str(exc), "details": {}}})
+
+        def _render_api_post(self, path: str, data: dict) -> None:
+            project_id = int(data.get("project_id", 0) or 0)
+            if path == "/api/project/render/settings":
+                self._json({"ok": True, "settings": update_render_settings(cfg, db, project_id, data.get("settings", data))})
+            elif path == "/api/project/render/compile":
+                self._json(compile_project(cfg, db, project_id, data.get("settings")))
+            elif path == "/api/project/render/validate":
+                self._json(preflight_project(cfg, db, project_id, final=False, overrides=data.get("settings")))
+            elif path == "/api/project/render/preview":
+                self._json(start_render_job(cfg, db, project_id, "accurate_preview", data.get("settings")))
+            elif path == "/api/project/render/final":
+                self._json(start_render_job(cfg, db, project_id, "final", data.get("settings")))
+            elif path == "/api/project/render/cancel":
+                self._json(cancel_render_job(cfg, project_id, str(data.get("job_id", ""))))
+            elif path == "/api/process-inbox":
                 self._json(process_inbox(cfg, db))
             elif path == "/api/project/analyze":
                 self._json(analyze_project(cfg, db, int(data.get("project_id", 0)), bool(data.get("force"))))
