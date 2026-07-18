@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 
 from .analyzer.vision_pipeline import analyze_video_frames
 from .bgm import import_bgm, list_bgm, youtube_credits
@@ -173,7 +174,8 @@ def main(argv: list[str] | None = None) -> None:
             result = render_project(cfg, db, args.project_id, output_path=Path(args.output) if args.output else None)
             print(result.output_path)
         except (PermissionError, ProjectRenderError) as exc:
-            print(exc)
+            print(exc, file=sys.stderr)
+            raise SystemExit(1) from exc
     elif args.cmd == "add-bgm":
         track_id = import_bgm(
             cfg,

@@ -1,6 +1,8 @@
 import json
+import math
 import os
 import shutil
+import struct
 import subprocess
 from pathlib import Path
 
@@ -38,7 +40,7 @@ def _make_bgm(path: Path, duration: float = 0.5):
     ])
 
 
-def _create_project(cfg, db: Path, sources: list[Path], *, bgm: Path | None = None, loop: bool = True) -> int:
+def _create_project(cfg, db: Path, sources: list[Path], *, bgm: Path | None = None, loop: bool = True, gain_db: float = -12) -> int:
     videos = []
     for index, source in enumerate(sources):
         video_id = upsert_video(db, {"original_path": str(source), "current_path": str(source), "filename": source.name, "category": "travel", "duration_seconds": 1.5})
@@ -54,6 +56,7 @@ def _create_project(cfg, db: Path, sources: list[Path], *, bgm: Path | None = No
         add_project_bgm(db, project_id, track_id)
         settings_path = project_dir(cfg, project_id) / "render_settings.json"
         settings = {"profile_id": "final_1080p", "encoder": "cpu", "color": {"mode": "none", "lut_path": ""}, "audio": {"original_gain_db": 0, "lower_original_gain_db": -12, "bgm_gain_db": -12}, "transition": {"type": "cut", "duration_seconds": 0}, "overlay": {"enabled": False}, "bgm": [{"track_id": track_id, "loop": loop, "gain_db": -12, "fade_in_seconds": 0.1, "fade_out_seconds": 0.1}]}
+        settings["bgm"][0]["gain_db"] = gain_db
         settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
     set_review_status(cfg, db, project_id, "approved")
     return project_id
@@ -64,6 +67,20 @@ def _sample_rgb(path: Path, seconds: float) -> tuple[float, float, float]:
     assert result.returncode == 0 and result.stdout
     values = result.stdout
     return tuple(sum(values[index::3]) / max(1, len(values[index::3])) for index in range(3))
+
+
+def _tone_amplitude(path: Path, seconds: float, frequency: float) -> float:
+    result = subprocess.run(
+        [FFMPEG, "-hide_banner", "-loglevel", "error", "-ss", str(seconds), "-i", str(path), "-t", "0.3", "-vn", "-map", "0:a:0", "-ac", "1", "-ar", "8000", "-f", "f32le", "-"],
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0 and len(result.stdout) >= 32, result.stderr.decode(errors="replace")
+    count = len(result.stdout) // 4
+    samples = struct.unpack(f"<{count}f", result.stdout[: count * 4])
+    real = sum(sample * math.cos(2 * math.pi * frequency * index / 8000) for index, sample in enumerate(samples))
+    imaginary = sum(sample * math.sin(2 * math.pi * frequency * index / 8000) for index, sample in enumerate(samples))
+    return 2 * math.hypot(real, imaginary) / count
 
 
 def test_project_renderer_assembles_order_bgm_and_final_cache(tmp_path: Path):
@@ -100,6 +117,13 @@ def test_project_renderer_assembles_order_bgm_and_final_cache(tmp_path: Path):
     loop_project = _create_project(cfg, db, [red], bgm=bgm, loop=True)
     loop_result = render_project(cfg, db, loop_project)
     assert loop_result.bgm_used and loop_result.duration_seconds == pytest.approx(1.5, abs=0.2)
+    assert _tone_amplitude(loop_result.output_path, 1.1, 220) > 0.002
     nonloop_project = _create_project(cfg, db, [red], bgm=bgm, loop=False)
     nonloop_result = render_project(cfg, db, nonloop_project)
     assert nonloop_result.bgm_used and nonloop_result.duration_seconds == pytest.approx(1.5, abs=0.2)
+    assert _tone_amplitude(nonloop_result.output_path, 1.1, 880) > _tone_amplitude(nonloop_result.output_path, 1.1, 220) * 1.5
+    gain_zero_project = _create_project(cfg, db, [red], bgm=bgm, gain_db=0)
+    gain_zero_result = render_project(cfg, db, gain_zero_project)
+    gain_low_project = _create_project(cfg, db, [red], bgm=bgm, gain_db=-18)
+    gain_low_result = render_project(cfg, db, gain_low_project)
+    assert _tone_amplitude(gain_zero_result.output_path, 0.3, 220) > _tone_amplitude(gain_low_result.output_path, 0.3, 220) * 1.5

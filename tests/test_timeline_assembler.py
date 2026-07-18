@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -10,8 +11,14 @@ def test_concat_path_escapes_windows_and_special_characters(tmp_path: Path):
     source.parent.mkdir()
     source.write_bytes(b"clip")
     escaped = escape_ffconcat_path(source)
-    assert "C:/" in escaped
+    if os.name == "nt":
+        assert "C:/" in escaped
+    else:
+        assert escaped.startswith("/")
     assert "'\\''" in escaped
+    assert "Project dir,semi;[test]" in escaped
+    assert "quote 中文" in escaped
+    assert "clip #1.mp4" in escaped
     concat = build_concat_file([source], tmp_path / "timeline.ffconcat")
     text = concat.read_text(encoding="utf-8")
     assert text.startswith("ffconcat version 1.0\nfile '")
