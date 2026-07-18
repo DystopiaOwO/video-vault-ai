@@ -52,6 +52,12 @@ def color_filter(settings: ColorSettings | Mapping[str, Any] | None, *, lut_alre
     return ",".join(filters)
 
 
+def build_color_filter(settings: ColorSettings | Mapping[str, Any] | None, profile: Any = None, *, lut_already_applied: bool = False) -> str:
+    """Backward-compatible name used by the first Render v2 callers."""
+
+    return color_filter(settings, lut_already_applied=lut_already_applied)
+
+
 def check_color_metadata(metadata: Mapping[str, Any] | None) -> list[str]:
     """Return explicit warnings for HDR/HLG/PQ sources needing a project decision."""
 
@@ -75,4 +81,4 @@ def _escape_filter_path(path: str) -> str:
     return path.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
 
 
-__all__ = ["COLOR_MODES", "ColorPipelineError", "check_color_metadata", "color_filter", "validate_color_settings"]
+__all__ = ["COLOR_MODES", "ColorPipelineError", "build_color_filter", "check_color_metadata", "color_filter", "validate_color_settings"]
