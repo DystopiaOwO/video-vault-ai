@@ -51,15 +51,41 @@ def segment_cache_key(manifest: Mapping[str, Any], segment: Mapping[str, Any]) -
 
 def cache_paths(cache_root: str | Path, cache_key: str) -> dict[str, Path]:
     root = Path(cache_root)
-    return {"output": root / f"{cache_key}.mp4", "partial": root / f"{cache_key}.partial.mp4", "metadata": root / f"{cache_key}.json", "log": root / f"{cache_key}.log"}
+    metadata = root / f"{cache_key}.json"
+    return {
+        "output": root / f"{cache_key}.mp4",
+        "partial": root / f"{cache_key}.partial.mp4",
+        "metadata": metadata,
+        "metadata_temp": metadata.with_name(f".{metadata.name}.tmp"),
+        "log": root / f"{cache_key}.log",
+    }
 
 
 def write_cache_metadata(path: Path, cache_key: str, payload: Mapping[str, Any], **extra: Any) -> None:
+    temp = write_cache_metadata_temp(path, cache_key, payload, **extra)
+    temp.replace(path)
+
+
+def write_cache_metadata_temp(path: Path, cache_key: str, payload: Mapping[str, Any], **extra: Any) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {"cache_key": cache_key, "key_payload": dict(payload), **extra}
     temp = path.with_name(f".{path.name}.tmp")
     temp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temp.replace(path)
+    return temp
+
+
+def publish_cache_atomically(partial: Path, output: Path, metadata_temp: Path, metadata: Path) -> None:
+    """Publish the two cache files and remove every incomplete artifact on failure."""
+    try:
+        partial.replace(output)
+        metadata_temp.replace(metadata)
+    except OSError:
+        for path in (output, metadata, partial, metadata_temp):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
 
 
 def read_cache_metadata(path: Path) -> dict[str, Any] | None:
@@ -80,4 +106,14 @@ def _sha256_file(path: Path) -> str | None:
     return digest.hexdigest()
 
 
-__all__ = ["SEGMENT_RENDERER_CONTRACT_VERSION", "build_segment_cache_key", "cache_key_payload", "cache_paths", "read_cache_metadata", "segment_cache_key", "write_cache_metadata"]
+__all__ = [
+    "SEGMENT_RENDERER_CONTRACT_VERSION",
+    "build_segment_cache_key",
+    "cache_key_payload",
+    "cache_paths",
+    "publish_cache_atomically",
+    "read_cache_metadata",
+    "segment_cache_key",
+    "write_cache_metadata",
+    "write_cache_metadata_temp",
+]

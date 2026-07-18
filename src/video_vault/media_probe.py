@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import subprocess
-from typing import Any
+from typing import Any, Mapping
 
 from .render_errors import MediaProbeError
 
@@ -66,7 +66,7 @@ def _parse(source: Path, raw: dict[str, Any]) -> MediaProbe:
     if not video:
         raise MediaProbeError(f"no video stream found: {source}")
     audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
-    fps_num, fps_den = _fraction(video.get("avg_frame_rate") or video.get("r_frame_rate"))
+    fps_num, fps_den = _video_frame_rate(video)
     duration = _number((raw.get("format") or {}).get("duration")) or _number(video.get("duration")) or 0.0
     return MediaProbe(
         source_file=source,
@@ -87,14 +87,28 @@ def _parse(source: Path, raw: dict[str, Any]) -> MediaProbe:
 
 
 def _fraction(value: Any) -> tuple[int, int]:
-    if not value or str(value) in {"0/0", "N/A"}:
-        return 0, 1
+    if value is None or str(value).strip().upper() in {"", "N/A", "0/0"}:
+        raise MediaProbeError(f"invalid frame rate: {value!r}")
     try:
-        numerator, denominator = str(value).split("/", 1)
+        numerator, denominator = str(value).strip().split("/", 1)
+        num = int(numerator)
         den = int(denominator)
-        return int(numerator), den or 1
+        if num <= 0 or den <= 0:
+            raise ValueError
+        return num, den
     except (TypeError, ValueError):
         raise MediaProbeError(f"invalid frame rate: {value!r}")
+
+
+def _video_frame_rate(video: Mapping[str, Any]) -> tuple[int, int]:
+    failures: list[str] = []
+    for field in ("avg_frame_rate", "r_frame_rate"):
+        value = video.get(field)
+        try:
+            return _fraction(value)
+        except MediaProbeError as exc:
+            failures.append(f"{field}={value!r} ({exc})")
+    raise MediaProbeError("video has no valid frame rate; tried " + "; ".join(failures))
 
 
 def _number(value: Any) -> float | None:

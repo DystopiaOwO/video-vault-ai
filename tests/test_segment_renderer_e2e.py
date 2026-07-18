@@ -1,4 +1,5 @@
 import re
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -45,7 +46,7 @@ def _cfg(tmp_path):
 
 
 def _mean_volume(path: Path) -> float:
-    result = subprocess.run([FFMPEG, "-hide_banner", "-i", str(path), "-af", "volumedetect", "-f", "null", "NUL"], capture_output=True, text=True, encoding="utf-8", check=False)
+    result = subprocess.run([FFMPEG, "-hide_banner", "-i", str(path), "-af", "volumedetect", "-f", "null", os.devnull], capture_output=True, text=True, encoding="utf-8", check=False)
     match = re.search(r"mean_volume:\s*(-?inf|[-+]?\d+(?:\.\d+)?) dB", result.stderr)
     assert match, result.stderr
     return float("-inf") if match.group(1) == "-inf" else float(match.group(1))
@@ -58,8 +59,10 @@ def _identity_lut(path: Path):
 def test_real_renderer_handles_audio_silent_speed_cache_corruption_and_lut(tmp_path: Path):
     source = tmp_path / "with-audio.mp4"
     silent = tmp_path / "silent.mp4"
+    sixty = tmp_path / "sixty-fps.mp4"
     _make_source(source, size="1280x720", rate=24, duration=3, audio=True)
     _make_source(silent, size="640x360", rate=30, duration=3, audio=False)
+    _make_source(sixty, size="1280x720", rate=60, duration=1.2, audio=True)
     cfg = _cfg(tmp_path)
     cache_root = tmp_path / "cache"
 
@@ -101,7 +104,9 @@ def test_real_renderer_handles_audio_silent_speed_cache_corruption_and_lut(tmp_p
     # AAC encoding can leave a very small quantization floor instead of -inf.
     assert mute <= -80
 
-    lut = tmp_path / "identity.cube"
+    lut_dir = tmp_path / "LUT dir,semi;[test]'quote"
+    lut_dir.mkdir()
+    lut = lut_dir / "identity look.cube"
     _identity_lut(lut)
     lut_manifest, lut_segment = _manifest(source, segment_id="lut", end=1, settings={"color": {"mode": "dji_lut", "lut_path": str(lut)}})
     lut_result = render_segment(cfg, lut_manifest, lut_segment, cache_root=cache_root)
@@ -109,3 +114,9 @@ def test_real_renderer_handles_audio_silent_speed_cache_corruption_and_lut(tmp_p
     lut.write_text(lut.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
     changed_lut = render_segment(cfg, lut_manifest, lut_segment, cache_root=cache_root)
     assert changed_lut.cache_key != lut_result.cache_key and not changed_lut.cache_hit
+
+    sixty_manifest, sixty_segment = _manifest(sixty, segment_id="sixty", end=1)
+    sixty_probe = probe_media(FFPROBE, render_segment(cfg, sixty_manifest, sixty_segment, cache_root=cache_root).output_path)
+    assert (sixty_probe.width, sixty_probe.height, sixty_probe.fps, sixty_probe.pixel_format) == (1920, 1080, 30, "yuv420p")
+    assert sixty_probe.has_audio and (sixty_probe.sample_rate, sixty_probe.channels) == (48000, 2)
+    assert sixty_probe.duration_seconds == pytest.approx(1, abs=0.12)

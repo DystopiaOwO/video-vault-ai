@@ -23,6 +23,7 @@ FALLBACK_MARKERS = (
     "no capable devices found",
     "nvenc initialization failed",
     "no nvenc capable devices found",
+    "nvenc unavailable",
     "gpu encoder unavailable",
     "unsupported encoder",
 )

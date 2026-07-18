@@ -13,7 +13,14 @@ from .color_pipeline import build_color_filter
 from .media_probe import MediaProbe, probe_media
 from .render_errors import SegmentRenderError, is_encoder_fallback_error
 from .render_profiles import get_render_profile
-from .segment_cache import build_segment_cache_key, cache_key_payload, cache_paths, read_cache_metadata, write_cache_metadata
+from .segment_cache import (
+    build_segment_cache_key,
+    cache_key_payload,
+    cache_paths,
+    publish_cache_atomically,
+    read_cache_metadata,
+    write_cache_metadata_temp,
+)
 
 
 @dataclass(frozen=True)
@@ -73,24 +80,38 @@ def render_segment(
         return SegmentRenderResult(str(segment["segment_id"]), paths["output"], key, True, requested, used, expected, tuple(metadata.get("warnings") or []))
     _remove_invalid_cache(paths)
 
-    probe = probe_media(str(cfg.get("ffprobe_path") or "ffprobe"), source)
-    if probe.duration_seconds > 0 and end > probe.duration_seconds + 0.001:
-        raise SegmentRenderError(f"segment end {end} exceeds source duration {probe.duration_seconds}")
     warnings: list[str] = []
-    command = build_segment_ffmpeg_command(cfg, manifest, segment, probe, output=paths["partial"], encoder=encoder)
+    attempts: list[dict[str, Any]] = []
+    command: list[str] | None = None
+    used = encoder
+    qc_errors: tuple[str, ...] = ()
     try:
-        result, used = _run_with_fallback(command, encoder, requested, runner, warnings)
-    except Exception:
-        _cleanup_partial(paths)
-        raise
-    stderr = str(getattr(result, "stderr", "") or "")
-    paths["log"].write_text(stderr, encoding="utf-8")
-    qc = validate_segment_output(paths["partial"], profile, expected, str(cfg.get("ffprobe_path") or "ffprobe"))
-    if not qc.passed:
-        _cleanup_partial(paths)
-        raise SegmentRenderError("segment QC failed: " + "; ".join(qc.errors))
-    paths["partial"].replace(paths["output"])
-    write_cache_metadata(paths["metadata"], key, payload, encoder_requested=requested, encoder_used=used, duration_seconds=qc.duration_seconds, warnings=warnings)
+        probe = probe_media(str(cfg.get("ffprobe_path") or "ffprobe"), source)
+        if probe.duration_seconds > 0 and end > probe.duration_seconds + 0.001:
+            raise SegmentRenderError(f"segment end {end} exceeds source duration {probe.duration_seconds}")
+        command = build_segment_ffmpeg_command(cfg, manifest, segment, probe, output=paths["partial"], encoder=encoder)
+        result, used = _run_with_fallback(command, encoder, requested, runner, warnings, attempts)
+        qc = validate_segment_output(paths["partial"], profile, expected, str(cfg.get("ffprobe_path") or "ffprobe"))
+        qc_errors = qc.errors
+        if not qc.passed:
+            raise SegmentRenderError("segment QC failed: " + "; ".join(qc.errors))
+        write_cache_metadata_temp(
+            paths["metadata"],
+            key,
+            payload,
+            encoder_requested=requested,
+            encoder_used=used,
+            duration_seconds=qc.duration_seconds,
+            warnings=warnings,
+        )
+        publish_cache_atomically(paths["partial"], paths["output"], paths["metadata_temp"], paths["metadata"])
+    except Exception as exc:
+        _cleanup_cache(paths)
+        _write_render_log(paths["log"], str(segment.get("segment_id") or ""), key, requested, used, command, attempts, exc, qc_errors)
+        if isinstance(exc, SegmentRenderError):
+            raise
+        raise SegmentRenderError(str(exc)) from exc
+    _write_render_log(paths["log"], str(segment.get("segment_id") or ""), key, requested, used, command, attempts, None, ())
     return SegmentRenderResult(str(segment["segment_id"]), paths["output"], key, False, requested, used, qc.duration_seconds, tuple(warnings))
 
 
@@ -173,8 +194,15 @@ def map_encoder(requested: str) -> str:
     raise SegmentRenderError(f"unsupported encoder: {value}")
 
 
-def _run_with_fallback(command: list[str], encoder: str, requested: str, runner: Callable[..., Any] | None, warnings: list[str]) -> tuple[Any, str]:
-    result = _run(command, runner)
+def _run_with_fallback(
+    command: list[str],
+    encoder: str,
+    requested: str,
+    runner: Callable[..., Any] | None,
+    warnings: list[str],
+    attempts: list[dict[str, Any]],
+) -> tuple[Any, str]:
+    result = _run_and_record(command, encoder, runner, attempts)
     if _returncode(result) == 0:
         return result, encoder
     stderr = str(getattr(result, "stderr", "") or "")
@@ -183,11 +211,21 @@ def _run_with_fallback(command: list[str], encoder: str, requested: str, runner:
         fallback_command = list(command)
         index = fallback_command.index("-c:v") + 1
         fallback_command[index] = "libx264"
-        fallback_result = _run(fallback_command, runner)
+        fallback_result = _run_and_record(fallback_command, "libx264", runner, attempts)
         if _returncode(fallback_result) == 0:
             return fallback_result, "libx264"
         raise SegmentRenderError(f"FFmpeg fallback failed: {getattr(fallback_result, 'stderr', '')}")
     raise SegmentRenderError(f"FFmpeg failed: {stderr[-1000:]}")
+
+
+def _run_and_record(command: list[str], encoder: str, runner: Callable[..., Any] | None, attempts: list[dict[str, Any]]) -> Any:
+    try:
+        result = _run(command, runner)
+    except Exception as exc:
+        attempts.append({"encoder": encoder, "command": list(command), "returncode": "exception", "stderr": str(exc)})
+        raise
+    attempts.append({"encoder": encoder, "command": list(command), "returncode": _returncode(result), "stderr": str(getattr(result, "stderr", "") or "")})
+    return result
 
 
 def _run(command: list[str], runner: Callable[..., Any] | None) -> Any:
@@ -218,7 +256,7 @@ def _valid_cache(paths: dict[str, Path], payload: Mapping[str, Any], profile: Ma
 
 
 def _cleanup_partial(paths: dict[str, Path]) -> None:
-    for key in ("partial",):
+    for key in ("partial", "metadata_temp"):
         try:
             paths[key].unlink(missing_ok=True)
         except OSError:
@@ -226,11 +264,53 @@ def _cleanup_partial(paths: dict[str, Path]) -> None:
 
 
 def _remove_invalid_cache(paths: dict[str, Path]) -> None:
-    for key in ("output", "metadata"):
+    for key in ("output", "metadata", "partial", "metadata_temp"):
         try:
             paths[key].unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _cleanup_cache(paths: dict[str, Path]) -> None:
+    _remove_invalid_cache(paths)
+
+
+def _write_render_log(
+    path: Path,
+    segment_id: str,
+    cache_key: str,
+    requested: str,
+    used: str,
+    command: list[str] | None,
+    attempts: list[dict[str, Any]],
+    error: Exception | None,
+    qc_errors: tuple[str, ...],
+) -> None:
+    lines = [
+        f"segment_id: {segment_id}",
+        f"cache_key: {cache_key}",
+        f"encoder_requested: {requested}",
+        f"encoder_used_or_attempted: {used}",
+    ]
+    if command and not attempts:
+        lines.append(f"command: {subprocess.list2cmdline(command)}")
+    for index, attempt in enumerate(attempts, 1):
+        lines.extend(
+            [
+                f"attempt_{index}_encoder: {attempt.get('encoder', '')}",
+                f"attempt_{index}_return_code: {attempt.get('returncode', '')}",
+                f"attempt_{index}_command: {subprocess.list2cmdline(attempt.get('command') or [])}",
+                f"attempt_{index}_stderr:\n{attempt.get('stderr', '')}",
+            ]
+        )
+    if qc_errors:
+        lines.append("qc_errors:\n" + "\n".join(qc_errors))
+    if error:
+        lines.append(f"error: {error}")
+    try:
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError:
+        pass
 
 
 __all__ = ["SegmentQCResult", "SegmentRenderResult", "build_segment_ffmpeg_command", "map_encoder", "render_segment", "validate_segment_output"]
