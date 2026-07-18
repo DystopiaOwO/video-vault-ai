@@ -81,16 +81,16 @@ def build_timeline_command(
     return command
 
 
-def run_command(command: list[str], runner: Callable[..., Any] | None = None) -> Any:
+def run_command(command: list[str], runner: Callable[..., Any] | None = None, *, expected_duration_seconds: float | None = None) -> Any:
     if runner is None:
         return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False)
     if hasattr(runner, "run"):
         try:
-            return runner.run(command, capture_output=True, text=True, check=False)
+            return runner.run(command, capture_output=True, text=True, check=False, expected_duration_seconds=expected_duration_seconds)
         except TypeError:
             return runner.run(command)
     try:
-        return runner(command, capture_output=True, text=True, check=False)
+        return runner(command, capture_output=True, text=True, check=False, expected_duration_seconds=expected_duration_seconds)
     except TypeError:
         return runner(command)
 
@@ -106,7 +106,7 @@ def assemble_timeline(
 ) -> TimelineAssemblyResult:
     concat_path = build_concat_file(segment_paths, Path(work_dir) / "timeline.ffconcat")
     command = build_timeline_command(ffmpeg_path, concat_path, output_path, duration_seconds=duration_seconds)
-    result = run_command(command, runner)
+    result = run_command(command, runner, expected_duration_seconds=duration_seconds)
     if int(getattr(result, "returncode", 0) or 0) != 0:
         raise TimelineAssemblyError(str(getattr(result, "stderr", "") or "FFmpeg timeline assembly failed"))
     return TimelineAssemblyResult(Path(output_path), concat_path, float(duration_seconds or 0), tuple(command))

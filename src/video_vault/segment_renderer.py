@@ -12,6 +12,7 @@ from .audio_pipeline import atempo_filter, build_audio_filter, build_silence_fil
 from .color_pipeline import build_color_filter
 from .media_probe import MediaProbe, probe_media
 from .render_errors import SegmentRenderError, is_encoder_fallback_error
+from .render_job_models import RenderCancelled
 from .render_profiles import get_render_profile
 from .segment_cache import (
     build_segment_cache_key,
@@ -90,7 +91,7 @@ def render_segment(
         if probe.duration_seconds > 0 and end > probe.duration_seconds + 0.001:
             raise SegmentRenderError(f"segment end {end} exceeds source duration {probe.duration_seconds}")
         command = build_segment_ffmpeg_command(cfg, manifest, segment, probe, output=paths["partial"], encoder=encoder)
-        result, used = _run_with_fallback(command, encoder, requested, runner, warnings, attempts)
+        result, used = _run_with_fallback(command, encoder, requested, runner, warnings, attempts, expected)
         qc = validate_segment_output(paths["partial"], profile, expected, str(cfg.get("ffprobe_path") or "ffprobe"))
         qc_errors = qc.errors
         if not qc.passed:
@@ -105,6 +106,10 @@ def render_segment(
             warnings=warnings,
         )
         publish_cache_atomically(paths["partial"], paths["output"], paths["metadata_temp"], paths["metadata"])
+    except RenderCancelled:
+        _cleanup_cache(paths)
+        _write_render_log(paths["log"], str(segment.get("segment_id") or ""), key, requested, used, command, attempts, RenderCancelled("render cancellation requested"), qc_errors)
+        raise
     except Exception as exc:
         _cleanup_cache(paths)
         _write_render_log(paths["log"], str(segment.get("segment_id") or ""), key, requested, used, command, attempts, exc, qc_errors)
@@ -201,8 +206,9 @@ def _run_with_fallback(
     runner: Callable[..., Any] | None,
     warnings: list[str],
     attempts: list[dict[str, Any]],
+    expected_duration_seconds: float,
 ) -> tuple[Any, str]:
-    result = _run_and_record(command, encoder, runner, attempts)
+    result = _run_and_record(command, encoder, runner, attempts, expected_duration_seconds)
     if _returncode(result) == 0:
         return result, encoder
     stderr = str(getattr(result, "stderr", "") or "")
@@ -211,16 +217,16 @@ def _run_with_fallback(
         fallback_command = list(command)
         index = fallback_command.index("-c:v") + 1
         fallback_command[index] = "libx264"
-        fallback_result = _run_and_record(fallback_command, "libx264", runner, attempts)
+        fallback_result = _run_and_record(fallback_command, "libx264", runner, attempts, expected_duration_seconds)
         if _returncode(fallback_result) == 0:
             return fallback_result, "libx264"
         raise SegmentRenderError(f"FFmpeg fallback failed: {getattr(fallback_result, 'stderr', '')}")
     raise SegmentRenderError(f"FFmpeg failed: {stderr[-1000:]}")
 
 
-def _run_and_record(command: list[str], encoder: str, runner: Callable[..., Any] | None, attempts: list[dict[str, Any]]) -> Any:
+def _run_and_record(command: list[str], encoder: str, runner: Callable[..., Any] | None, attempts: list[dict[str, Any]], expected_duration_seconds: float | None = None) -> Any:
     try:
-        result = _run(command, runner)
+        result = _run(command, runner, expected_duration_seconds=expected_duration_seconds)
     except Exception as exc:
         attempts.append({"encoder": encoder, "command": list(command), "returncode": "exception", "stderr": str(exc)})
         raise
@@ -228,16 +234,16 @@ def _run_and_record(command: list[str], encoder: str, runner: Callable[..., Any]
     return result
 
 
-def _run(command: list[str], runner: Callable[..., Any] | None) -> Any:
+def _run(command: list[str], runner: Callable[..., Any] | None, *, expected_duration_seconds: float | None = None) -> Any:
     if runner is None:
         return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False)
     if hasattr(runner, "run"):
         try:
-            return runner.run(command, capture_output=True, text=True, check=False)
+            return runner.run(command, capture_output=True, text=True, check=False, expected_duration_seconds=expected_duration_seconds)
         except TypeError:
             return runner.run(command)
     try:
-        return runner(command, capture_output=True, text=True, check=False)
+        return runner(command, capture_output=True, text=True, check=False, expected_duration_seconds=expected_duration_seconds)
     except TypeError:
         return runner(command)
 
