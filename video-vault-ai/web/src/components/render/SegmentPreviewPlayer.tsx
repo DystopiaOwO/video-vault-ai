@@ -1,0 +1,2 @@
+import { useEffect, useRef } from "react";
+export function SegmentPreviewPlayer({ start, end }: { start: number; end: number }) { const ref = useRef<HTMLVideoElement>(null); useEffect(() => { if (ref.current) ref.current.currentTime = start; }, [start]); return <div className="preview"><video ref={ref} controls onTimeUpdate={(e) => { if (e.currentTarget.currentTime >= end) e.currentTarget.pause(); }} /><span>尚未接入素材 URL，這是播放器 skeleton。</span></div>; }
