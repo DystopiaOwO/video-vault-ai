@@ -173,7 +173,7 @@ def start_project_render(cfg: Mapping[str, Any], db: Path, project_id: int, kind
                          *, runner: Any = None) -> dict[str, Any]:
     try:
         from .job_api import start_render_job
-        result = start_render_job(cfg, db, project_id, kind, {"kind": kind})
+        result = start_render_job(cfg, db, project_id, kind, {"kind": kind}, runner=runner)
         return result
     except (RenderApiError, ValueError) as exc:
         return error_response("render_start_failed", str(exc), getattr(exc, "status", 400))

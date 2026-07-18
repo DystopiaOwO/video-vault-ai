@@ -8,7 +8,17 @@ from typing import Any, Mapping
 from .project import project_dir
 from .render_api import RenderApiError, compile_project, preflight_project
 from .render_jobs import RenderJobStore
-from .render_types import RenderJobStatus, RenderKind, RenderStage, to_dict
+from .render_types import (
+    BgmSettings,
+    ColorSettings,
+    RenderJobStatus,
+    RenderKind,
+    RenderManifest,
+    RenderSegment,
+    RenderSettings,
+    RenderStage,
+    to_dict,
+)
 
 
 _MANAGERS: dict[str, RenderJobStore] = {}
@@ -34,7 +44,7 @@ def get_render_job(cfg: Mapping[str, Any], project_id: int, job_id: str) -> dict
 
 
 def start_render_job(cfg: Mapping[str, Any], db: Path, project_id: int, kind: RenderKind | str,
-                     settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                     settings: Mapping[str, Any] | None = None, *, runner: Any = None) -> dict[str, Any]:
     kind = RenderKind(kind)
     effective_settings = dict(settings or {})
     effective_settings["kind"] = kind.value
@@ -52,7 +62,7 @@ def start_render_job(cfg: Mapping[str, Any], db: Path, project_id: int, kind: Re
         total = len(result["manifest"].get("segments", []))
     store = job_store(cfg, project_id)
     job = store.create_job(str(project_id), kind, encoder=encoder, total_segments=total)
-    thread = threading.Thread(target=_run_job, args=(store, job.job_id, result), daemon=True,
+    thread = threading.Thread(target=_run_job, args=(cfg, store, job.job_id, result, runner), daemon=True,
                               name=f"render-{job.job_id[:8]}")
     thread.start()
     return {"ok": True, "job_id": job.job_id, "manifest_hash": result["manifest_hash"], "message": "工作已排入佇列"}
@@ -93,14 +103,99 @@ def get_project_outputs(cfg: Mapping[str, Any], project_id: int) -> dict[str, An
     return {"ok": True, "project_id": int(project_id), "outputs": list_render_outputs(cfg, project_id)}
 
 
-def _run_job(store: RenderJobStore, job_id: str, result: Mapping[str, Any]) -> None:
+def _run_job(cfg: Mapping[str, Any], store: RenderJobStore, job_id: str,
+             result: Mapping[str, Any], runner: Any = None) -> None:
     store.update_job(job_id, status=RenderJobStatus.RUNNING, stage=RenderStage.PREFLIGHT,
                      started_at=store.clock(), percent=5.0)
-    # Agent C supplies the actual executor.  Keeping this explicit makes an
-    # incomplete engine visible to the client instead of claiming Completed.
-    store.update_job(job_id, status=RenderJobStatus.FAILED, stage=RenderStage.QUALITY_CHECK,
-                     percent=100.0, finished_at=store.clock(),
-                     error="Render Engine 尚未接入；目前只完成 Manifest 與 Preflight")
+    try:
+        manifest = _manifest_from_dict(result["manifest"])
+        job = store.get_job(job_id)
+        if job is None:
+            return
+        if runner is not None:
+            runner(manifest, job)
+            store.update_job(job_id, status=RenderJobStatus.COMPLETED,
+                             stage=RenderStage.QUALITY_CHECK, percent=100.0,
+                             finished_at=store.clock())
+            return
+
+        from .render_engine import RenderEngine
+        from .segment_renderer import render_segment
+
+        engine_cfg = dict(cfg)
+        engine_cfg["render_root"] = str(project_dir(dict(cfg), int(job.project_id)) / "render")
+        cache_dir = Path(engine_cfg["render_root"]) / "cache" / "segments"
+
+        def segment_runner(manifest_value: RenderManifest, item: Any, _cache_path: Path) -> Path:
+            segment = next((value for value in manifest_value.segments if value.segment_id == item.segment_id), None)
+            if segment is None:
+                raise ValueError(f"manifest segment not found: {item.segment_id}")
+            rendered = render_segment(
+                segment,
+                engine_cfg,
+                cache_dir=cache_dir,
+                profile=manifest_value.profile,
+                color=manifest_value.color,
+                encoder=manifest_value.settings.encoder,
+            )
+            return rendered.path
+
+        engine = RenderEngine(engine_cfg, store, segment_renderer=segment_runner)
+        engine.render(manifest, job_id)
+    except Exception as exc:
+        current = store.get_job(job_id)
+        if current and current.status not in {
+            RenderJobStatus.COMPLETED,
+            RenderJobStatus.FAILED,
+            RenderJobStatus.FAILED_QC,
+            RenderJobStatus.CANCELLED,
+        }:
+            store.update_job(job_id, status=RenderJobStatus.FAILED,
+                             stage=RenderStage.QUALITY_CHECK, percent=100.0,
+                             finished_at=store.clock(), error=str(exc))
+
+
+def _manifest_from_dict(data: Mapping[str, Any]) -> RenderManifest:
+    """Restore the shared dataclass contract after the API JSON boundary."""
+
+    settings_data = dict(data.get("settings") or {})
+    settings = RenderSettings(
+        kind=RenderKind(settings_data.get("kind", data.get("render_kind", RenderKind.ROUGH_PREVIEW.value))),
+        profile=str(settings_data.get("profile", data.get("profile", "preview_1080p30"))),
+        encoder=str(settings_data.get("encoder", "")),
+        transition=str(settings_data.get("transition", "cut")),
+        overlay_enabled=bool(settings_data.get("overlay_enabled", False)),
+        audio_role=str(settings_data.get("audio_role", "keep_original")),
+        audio_crossfade_ms=int(settings_data.get("audio_crossfade_ms", 80)),
+        bgm=BgmSettings(**_contract_values(dict(settings_data.get("bgm") or data.get("bgm") or {}), BgmSettings)),
+        color=ColorSettings(**_contract_values(dict(settings_data.get("color") or data.get("color") or {}), ColorSettings)),
+    )
+    segments = [RenderSegment(**_segment_values(item)) for item in data.get("segments", [])]
+    return RenderManifest(
+        schema_version=str(data.get("schema_version", "1.0")),
+        manifest_hash=str(data.get("manifest_hash", "")),
+        plan_id=str(data.get("plan_id", "")),
+        project_id=str(data.get("project_id", "")),
+        render_kind=RenderKind(data.get("render_kind", settings.kind.value)),
+        profile=str(data.get("profile", settings.profile)),
+        settings=settings,
+        segments=segments,
+        timeline_duration_ms=int(data.get("timeline_duration_ms", 0)),
+        bgm=BgmSettings(**_contract_values(dict(data.get("bgm") or {}), BgmSettings)),
+        color=ColorSettings(**_contract_values(dict(data.get("color") or {}), ColorSettings)),
+        overlays=list(data.get("overlays") or []),
+        created_at=str(data.get("created_at", "")),
+    )
+
+
+def _contract_values(data: Mapping[str, Any], contract: type) -> dict[str, Any]:
+    defaults = contract()
+    return {field: data.get(field, getattr(defaults, field)) for field in defaults.__dataclass_fields__}
+
+
+def _segment_values(data: Mapping[str, Any]) -> dict[str, Any]:
+    defaults = RenderSegment("", "", 0, 0)
+    return {field: data.get(field, getattr(defaults, field)) for field in defaults.__dataclass_fields__}
 
 
 __all__ = ["cancel_render_job", "get_project_job", "get_project_outputs", "get_render_job", "job_store",

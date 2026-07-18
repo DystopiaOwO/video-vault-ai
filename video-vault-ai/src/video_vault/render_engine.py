@@ -121,8 +121,13 @@ class RenderEngine:
         try:
             list_file.write_text(concat_file_lines(manifest, [str(path) for path in rendered]), encoding="utf-8")
             ffmpeg = str(self.cfg.get("ffmpeg_path", "ffmpeg"))
+            from .render_profiles import get_render_profile
+            profile = get_render_profile(manifest.profile)
             command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
-                       "-i", str(list_file), "-c", "copy", str(partial)]
+                       "-i", str(list_file), "-c:v", manifest.settings.encoder or profile.video_encoder,
+                       "-r", f"{profile.fps_num}/{profile.fps_den}", "-pix_fmt", profile.pixel_format,
+                       "-c:a", "aac", "-ar", str(profile.audio_sample_rate), "-ac", str(profile.audio_channels),
+                       "-movflags", "+faststart", str(partial)]
             code = self.process_manager.run(job_id, command)
             if code != 0: raise RuntimeError(f"ffmpeg assembly failed with exit code {code}")
         finally:
