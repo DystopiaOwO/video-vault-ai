@@ -308,11 +308,20 @@ def can_project_render(cfg: dict, db: Path, project_id: int) -> tuple[bool, str]
     manifest_path = folder / "render_manifest.json"
     if not manifest_path.exists():
         return False, "缺少 render_manifest.json"
-    from .render_manifest import manifest_hash
+    try:
+        from .render_manifest import build_render_manifest, manifest_hash, validate_render_manifest
 
-    current_manifest = _read_json(manifest_path)
-    if manifest_hash(current_manifest) != approved_hash:
-        return False, "approved_manifest_hash 已失效"
+        current_manifest = build_render_manifest(cfg, db, project_id)
+        if current_manifest["manifest_hash"] != approved_hash:
+            return False, "approved_manifest_hash 已失效"
+        snapshot = _read_json(manifest_path)
+        if snapshot.get("manifest_hash") != approved_hash or manifest_hash(snapshot) != approved_hash:
+            return False, "render_manifest 核准快照已失效"
+        snapshot_validation = validate_render_manifest(snapshot)
+        if not snapshot_validation["valid"]:
+            return False, "render_manifest 核准快照無效：" + "; ".join(snapshot_validation["errors"])
+    except Exception as exc:
+        return False, f"目前 Manifest 無法建立：{exc}"
     return True, "approved"
 
 

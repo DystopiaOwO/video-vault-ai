@@ -5,7 +5,7 @@ import pytest
 
 from video_vault.database import add_analysis, init_db, upsert_video
 from video_vault.project import build_project_plan, create_project, project_detail, save_segment_review
-from video_vault.render_manifest import compile_render_manifest, manifest_hash, validate_render_manifest
+from video_vault.render_manifest import build_render_manifest, compile_render_manifest, manifest_hash, validate_render_manifest
 
 
 def _project(tmp_path: Path, count: int = 2) -> tuple[dict, Path, int]:
@@ -82,6 +82,15 @@ def test_manifest_hash_is_deterministic_and_created_at_independent(tmp_path):
     assert changed["manifest_hash"] != first["manifest_hash"]
 
 
+def test_build_manifest_does_not_write_snapshot(tmp_path):
+    cfg, db, project_id = _project(tmp_path, count=1)
+    path = Path(tmp_path, "08_projects", f"project_{project_id}", "render_manifest.json")
+    assert not path.exists()
+    manifest = build_render_manifest(cfg, db, project_id)
+    assert manifest["manifest_hash"]
+    assert not path.exists()
+
+
 @pytest.mark.parametrize(
     "change, message",
     [
@@ -101,6 +110,21 @@ def test_manifest_validation_rejects_invalid_contract(tmp_path, change, message)
     result = validate_render_manifest(manifest)
     assert not result["valid"]
     assert any(message in error for error in result["errors"])
+
+
+def test_manifest_validation_rejects_duration_mismatch_and_profile_tampering(tmp_path):
+    cfg, db, project_id = _project(tmp_path, count=1)
+    manifest = compile_render_manifest(cfg, db, project_id)
+    manifest["segments"][0]["source_duration_seconds"] += 1
+    result = validate_render_manifest(manifest)
+    assert not result["valid"]
+    assert any("source_duration_seconds" in error for error in result["errors"])
+
+    manifest = compile_render_manifest(cfg, db, project_id)
+    manifest["profile"]["width"] = 640
+    result = validate_render_manifest(manifest)
+    assert not result["valid"]
+    assert any("profile width" in error for error in result["errors"])
 
 
 def test_schema_file_is_json_and_declares_manifest_fields():

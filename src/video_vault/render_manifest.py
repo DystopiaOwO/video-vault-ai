@@ -17,7 +17,7 @@ from .render_settings import load_render_settings
 ALLOWED_AUDIO_ROLES = {"keep_original", "lower_original", "mute"}
 
 
-def compile_render_manifest(cfg: dict, db: Path, project_id: int, profile_id: str | None = None) -> dict[str, Any]:
+def build_render_manifest(cfg: dict, db: Path, project_id: int, profile_id: str | None = None) -> dict[str, Any]:
     folder = project_dir(cfg, project_id)
     plan_path = folder / "project_plan.json"
     if not plan_path.exists():
@@ -53,7 +53,12 @@ def compile_render_manifest(cfg: dict, db: Path, project_id: int, profile_id: st
     if validation["errors"]:
         raise ValueError("invalid render manifest: " + "; ".join(validation["errors"]))
     manifest["validation"] = validation
-    path = folder / "render_manifest.json"
+    return manifest
+
+
+def compile_render_manifest(cfg: dict, db: Path, project_id: int, profile_id: str | None = None) -> dict[str, Any]:
+    manifest = build_render_manifest(cfg, db, project_id, profile_id)
+    path = project_dir(cfg, project_id) / "render_manifest.json"
     path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return manifest
 
@@ -70,7 +75,10 @@ def validate_render_manifest(manifest: dict[str, Any], check_files: bool = False
         errors.append("profile is required")
     else:
         try:
-            get_render_profile(str(profile["profile_id"]))
+            canonical = get_render_profile(str(profile["profile_id"]))
+            for field in ("width", "height", "fps", "video_codec", "pixel_format", "audio_codec", "audio_sample_rate", "audio_channels"):
+                if profile.get(field) != canonical[field]:
+                    errors.append(f"profile {field} does not match canonical profile")
         except ValueError as exc:
             errors.append(str(exc))
 
@@ -79,9 +87,15 @@ def validate_render_manifest(manifest: dict[str, Any], check_files: bool = False
         errors.append("manifest must contain at least one segment")
         segments = []
     ids = [item.get("segment_id") for item in segments if isinstance(item, dict)]
+    for index, segment in enumerate(segments, 1):
+        if isinstance(segment, dict) and not str(segment.get("segment_id") or "").strip():
+            errors.append(f"segment {index}: segment_id is required")
     if len(ids) != len(set(ids)):
         errors.append("segment_id values must be unique")
     orders = [item.get("order") for item in segments if isinstance(item, dict)]
+    for index, order in enumerate(orders, 1):
+        if isinstance(order, bool) or not isinstance(order, int) or order <= 0:
+            errors.append(f"segment {index}: order must be a positive integer")
     if len(orders) != len(set(orders)):
         errors.append("segment order values must be unique")
     if sorted(order for order in orders if isinstance(order, int)) != list(range(1, len(orders) + 1)):
@@ -93,6 +107,11 @@ def validate_render_manifest(manifest: dict[str, Any], check_files: bool = False
             errors.append(f"segment {index} must be an object")
             continue
         segment_id = str(segment.get("segment_id") or f"#{index}")
+        if not str(segment.get("clip_id") or "").strip():
+            errors.append(f"{segment_id}: clip_id is required")
+        video_id = segment.get("video_id")
+        if isinstance(video_id, bool) or not isinstance(video_id, int) or video_id <= 0:
+            errors.append(f"{segment_id}: video_id must be a positive integer")
         source_file = str(segment.get("source_file") or "")
         if not source_file:
             errors.append(f"{segment_id}: source_file is required")
@@ -107,10 +126,21 @@ def validate_render_manifest(manifest: dict[str, Any], check_files: bool = False
             errors.append(f"{segment_id}: source_out_seconds must be greater than source_in_seconds")
         if speed is not None and speed <= 0:
             errors.append(f"{segment_id}: speed must be > 0")
+        source_duration = _number(segment.get("source_duration_seconds"), f"{segment_id} source_duration_seconds", errors)
+        timeline_duration = _number(segment.get("timeline_duration_seconds"), f"{segment_id} timeline_duration_seconds", errors)
+        if source_duration is not None and source_duration <= 0:
+            errors.append(f"{segment_id}: source_duration_seconds must be finite and > 0")
+        if timeline_duration is not None and timeline_duration <= 0:
+            errors.append(f"{segment_id}: timeline_duration_seconds must be finite and > 0")
+        if source_duration is not None and start is not None and end is not None and abs(source_duration - (end - start)) > 0.001:
+            errors.append(f"{segment_id}: source_duration_seconds does not match source range")
+        if timeline_duration is not None and source_duration is not None and speed is not None and speed > 0 and abs(timeline_duration - (source_duration / speed)) > 0.001:
+            errors.append(f"{segment_id}: timeline_duration_seconds does not match source duration and speed")
         role = segment.get("audio_role")
         if role not in ALLOWED_AUDIO_ROLES:
             errors.append(f"{segment_id}: invalid audio_role {role!r}")
-        duration += float(segment.get("timeline_duration_seconds") or 0)
+        if timeline_duration is not None:
+            duration += timeline_duration
 
     expected = _number(manifest.get("expected_duration_seconds"), "expected_duration_seconds", errors)
     if expected is not None and abs(expected - duration) > 0.001:
@@ -199,4 +229,4 @@ def _number(value: Any, field: str, errors: list[str]) -> float | None:
     return number
 
 
-__all__ = ["ALLOWED_AUDIO_ROLES", "compile_render_manifest", "manifest_hash", "validate_render_manifest"]
+__all__ = ["ALLOWED_AUDIO_ROLES", "build_render_manifest", "compile_render_manifest", "manifest_hash", "validate_render_manifest"]
