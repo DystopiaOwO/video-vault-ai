@@ -8,7 +8,7 @@ import subprocess
 import urllib.request
 
 from .color import color_filter, run_ffmpeg, video_encode_args
-from .project import build_project_plan, project_detail, project_dir
+from .project import assert_project_approved, build_project_plan, project_detail, project_dir
 
 OPENCUT_URL = "http://127.0.0.1:3000/projects"
 
@@ -42,13 +42,19 @@ def _bun() -> Path | None:
 
 
 def export_opencut_handoff(cfg: dict, db: Path, project_id: int, render_clips: bool = False, max_segments: int = 20) -> Path:
-    plan = build_project_plan(cfg, db, project_id)
     detail = project_detail(cfg, db, project_id)
+    plan = detail.get("plan") or build_project_plan(cfg, db, project_id)
+    if render_clips:
+        # JSON/CSV/README handoff remains available during review; only
+        # material-changing graded clip rendering requires approval.
+        assert_project_approved(cfg, db, project_id, "OpenCut 調色片段輸出")
+    manifest = load_render_manifest(cfg, project_id)
     out = project_dir(cfg, project_id) / "output" / "opencut_handoff"
     assets = out / "assets"
     clips_dir = out / "graded_clips"
     assets.mkdir(parents=True, exist_ok=True)
-    clips_dir.mkdir(parents=True, exist_ok=True)
+    if render_clips:
+        clips_dir.mkdir(parents=True, exist_ok=True)
 
     lut = Path(cfg.get("color", {}).get("dji_lut_path", ""))
     if lut.is_file():
@@ -58,8 +64,9 @@ def export_opencut_handoff(cfg: dict, db: Path, project_id: int, render_clips: b
         if src.exists():
             shutil.copy2(src, assets / src.name)
 
-    segments = _segments(plan, max_segments)
-    (out / "opencut_handoff.json").write_text(json.dumps({"project": detail["project"], "clips": detail["clips"], "bgm": detail.get("bgm", []), "title_cards": plan.get("title_cards", []), "segments": segments}, ensure_ascii=False, indent=2), encoding="utf-8")
+    segments = _segments(detail, plan, max_segments, manifest)
+    payload = _handoff_payload(detail, plan, segments, manifest)
+    (out / "opencut_handoff.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     _write_csv(out / "recommended_segments.csv", segments)
     (out / "README.md").write_text(_readme(detail, segments, render_clips), encoding="utf-8")
 
@@ -72,12 +79,77 @@ def export_opencut_handoff(cfg: dict, db: Path, project_id: int, render_clips: b
         for stale in clips_dir.glob("*.mp4"):
             if stale.name not in targets:
                 stale.unlink(missing_ok=True)
-        (out / "opencut_handoff.json").write_text(json.dumps({"project": detail["project"], "clips": detail["clips"], "bgm": detail.get("bgm", []), "title_cards": plan.get("title_cards", []), "segments": segments}, ensure_ascii=False, indent=2), encoding="utf-8")
+        (out / "opencut_handoff.json").write_text(json.dumps(_handoff_payload(detail, plan, segments, manifest), ensure_ascii=False, indent=2), encoding="utf-8")
         _write_csv(out / "recommended_segments.csv", segments)
     return out
 
 
-def _segments(plan: dict, max_segments: int = 20) -> list[dict]:
+def load_render_manifest(cfg: dict, project_id: int) -> dict | None:
+    folder = project_dir(cfg, project_id)
+    candidates = (
+        folder / "render_manifest.json",
+        folder / "output" / "render_manifest.json",
+        folder / "render" / "manifest" / "render_manifest.json",
+        folder / "output" / "render" / "render_manifest.json",
+    )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Render Manifest 無法讀取：{path}") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("segments", []), list):
+            raise ValueError(f"Render Manifest 格式錯誤：{path}")
+        return data
+    return None
+
+
+def _handoff_payload(detail: dict, plan: dict, segments: list[dict], manifest: dict | None) -> dict:
+    return {
+        "project": detail["project"],
+        "clips": detail["clips"],
+        "bgm": detail.get("bgm", []),
+        "bgm_recommendations": plan.get("bgm_recommendations", []),
+        "title_cards": (manifest or {}).get("overlays") or plan.get("title_cards", []),
+        "manifest": {key: manifest[key] for key in ("schema_version", "manifest_hash", "plan_id", "project_id") if key in manifest} if manifest else None,
+        "segments": segments,
+    }
+
+
+def _segments(detail: dict, plan: dict, max_segments: int = 20, manifest: dict | None = None) -> list[dict]:
+    if manifest is not None:
+        rows = []
+        for index, raw in enumerate(manifest.get("segments", []), 1):
+            if not raw.get("include", True):
+                continue
+            start = _seconds(raw, "source_in", "source_in_ms")
+            end = _seconds(raw, "source_out", "source_out_ms")
+            speed = float(raw.get("speed", 1.0) or 1.0)
+            if end <= start or speed <= 0:
+                continue
+            order = int(raw.get("manual_order", raw.get("order", index)) or index)
+            rows.append({
+                **raw,
+                "order": order,
+                "manual_order": order,
+                "include": True,
+                "clip_id": raw.get("clip_id") or raw.get("segment_id") or f"segment_{index:03}",
+                "source_file": str(raw.get("source_file") or raw.get("source_path") or ""),
+                "start_seconds": start,
+                "end_seconds": end,
+                "timeline_duration_seconds": (end - start) / speed,
+                "speed": speed,
+                "audio_role": raw.get("audio_role", "keep_original"),
+                "title": raw.get("title", ""),
+                "suggested_use": raw.get("suggested_use", raw.get("scene_role", "")),
+                "score": raw.get("score", 0),
+            })
+        return sorted(rows, key=lambda row: (row["order"], row["clip_id"]))[:max_segments]
+    return _legacy_segments(plan, max_segments)
+
+
+def _legacy_segments(plan: dict, max_segments: int = 20) -> list[dict]:
     if plan.get("content_type") == "travel_diary":
         return _travel_segments(plan, max_segments)
     rows = []
@@ -110,8 +182,18 @@ def _travel_segments(plan: dict, max_segments: int) -> list[dict]:
     return sorted(rows, key=lambda s: (s["group_order"], s["clip_id"], float(s.get("start_seconds") or 0)))
 
 
+def _seconds(raw: dict, seconds_key: str, milliseconds_key: str) -> float:
+    if raw.get(milliseconds_key) is not None:
+        return float(raw[milliseconds_key]) / 1000.0
+    return float(raw.get(seconds_key, 0) or 0)
+
+
 def _write_csv(path: Path, segments: list[dict]) -> None:
-    fields = ["group", "clip_id", "source_file", "start_seconds", "end_seconds", "title", "suggested_use", "score", "graded_clip"]
+    fields = [
+        "order", "include", "group", "clip_id", "source_file",
+        "start_seconds", "end_seconds", "timeline_duration_seconds", "speed",
+        "audio_role", "title", "suggested_use", "score", "graded_clip",
+    ]
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
@@ -120,7 +202,9 @@ def _write_csv(path: Path, segments: list[dict]) -> None:
 
 def _render_segment(cfg: dict, seg: dict, out: Path) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
-    duration = max(0.1, float(seg["end_seconds"]) - float(seg["start_seconds"]))
+    speed = float(seg.get("speed", 1.0) or 1.0)
+    duration = max(0.1, (float(seg["end_seconds"]) - float(seg["start_seconds"])) / speed)
+    video_filter = f"setpts=PTS/{speed:g},{color_filter(cfg.get('color', {}).get('default_mode', 'dji_lut'), cfg, Path(seg['source_file']))}"
     cmd = [
         cfg["ffmpeg_path"],
         "-hide_banner",
@@ -134,7 +218,7 @@ def _render_segment(cfg: dict, seg: dict, out: Path) -> Path:
         "-i",
         seg["source_file"],
         "-vf",
-        color_filter(cfg.get("color", {}).get("default_mode", "dji_lut"), cfg, Path(seg["source_file"])),
+        video_filter,
         *video_encode_args(cfg),
         "-pix_fmt",
         "yuv420p",

@@ -28,6 +28,8 @@ python -m video_vault render-approved --video-id 1
 
 `render-approved` 只會 render 已核准的 `edit_plan.json`。未審核或被退回的 plan 只會停在建議階段。
 
+Render Pipeline v2 相容層會優先使用人工審核後的 Render Manifest：HyperFrames 保留 `source_in` 與 Manifest 順序，OpenCut handoff 保留 `order`、速度、音訊角色與取用狀態。JSON／CSV／README handoff 可在審核階段產生；graded clips 與正式 MP4 仍受 project approval gate 保護。遷移細節請見 `docs/render-v2/migration.md`。
+
 預設資料庫在 `D:/VideoLibrary/05_index/video_vault.sqlite3`，報告輸出到 `D:/VideoLibrary/06_reports`。
 
 ## 設定
