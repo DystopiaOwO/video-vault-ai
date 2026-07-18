@@ -12,6 +12,7 @@ DEFAULT_CONFIG = {
     "default_ingest_mode": "copy",
     "ffmpeg_path": "ffmpeg",
     "ffprobe_path": "ffprobe",
+    "render": {"max_concurrent_jobs": 1},
     "ai": {
         "provider": "mock",
         "local": {"ollama_url": "http://localhost:11434", "model": "gemma4:12b"},
