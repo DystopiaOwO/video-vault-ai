@@ -9,6 +9,8 @@ from .bgm import import_bgm, list_bgm, youtube_credits
 from .config import check_tools, load_config, save_default_config
 from .color import render_color_preview
 from .database import add_frame, frames as db_frames, init_db, set_video_status, upsert_video, videos, write_json_index
+from .davinci import build_timeline_plans, create_timeline, export_all
+from .davinci.export_formats import planned_files
 from .ffmpeg_tools import extract_frames, frame_timestamp, make_proxy, metadata
 from .hyperframes import export_hyperframes_project, render_fast_draft, render_hyperframes_project
 from .ingest import ingest_file
@@ -58,6 +60,9 @@ def main(argv: list[str] | None = None) -> None:
     hf_render_parser = sub.add_parser("hyperframes-render")
     hf_render_parser.add_argument("--project-id", type=int, required=True)
     hf_render_parser.add_argument("--max-segments", type=int, default=20)
+    for name in ("davinci-export", "davinci-create-timeline"):
+        p = sub.add_parser(name)
+        p.add_argument("--dry-run", action="store_true")
     for name in ("review-plan", "approve-plan", "reject-plan", "revise-plan", "render-approved"):
         sub.choices[name].add_argument("--video-id", type=int)
     sub.choices["render-approved"].add_argument("--dry-run", action="store_true")
@@ -73,7 +78,7 @@ def main(argv: list[str] | None = None) -> None:
 
     cfg = load_config(args.config)
     db = db_path(cfg)
-    if args.cmd != "dry-run":
+    if args.cmd != "dry-run" and not (getattr(args, "dry_run", False) and args.cmd.startswith("davinci-")):
         init_db(db)
 
     if args.cmd == "dry-run":
@@ -139,6 +144,10 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "report":
         for video in videos(db):
             print(write_report(dict(video), db, root(cfg) / "06_reports"))
+    elif args.cmd == "davinci-export":
+        davinci_export(cfg, db, args.dry_run)
+    elif args.cmd == "davinci-create-timeline":
+        davinci_create_timeline(cfg, db, args.dry_run)
     elif args.cmd == "ui":
         run_ui(cfg, args.host, args.port)
     elif args.cmd == "color-preview":
@@ -147,22 +156,12 @@ def main(argv: list[str] | None = None) -> None:
         out = root(cfg) / "08_projects" / "color_previews" / f"video_{args.video_id}_{mode}.mp4"
         print(render_color_preview(Path(video["current_path"]), out, cfg, mode, args.seconds))
     elif args.cmd == "opencut-export":
-        try:
-            print(export_opencut_handoff(cfg, db, args.project_id, args.render_clips, args.max_segments))
-        except PermissionError as exc:
-            print(exc)
+        print(export_opencut_handoff(cfg, db, args.project_id, args.render_clips, args.max_segments))
     elif args.cmd == "hyperframes-export":
-        try:
-            print(export_hyperframes_project(cfg, db, args.project_id, args.render_clips, args.max_segments))
-        except PermissionError as exc:
-            print(exc)
+        print(export_hyperframes_project(cfg, db, args.project_id, args.render_clips, args.max_segments))
     elif args.cmd == "hyperframes-render":
-        try:
-            out = export_hyperframes_project(cfg, db, args.project_id, True, args.max_segments)
-            result = render_fast_draft(out, cfg, db=db, project_id=args.project_id)
-        except PermissionError as exc:
-            print(exc)
-            return
+        out = export_hyperframes_project(cfg, db, args.project_id, True, args.max_segments)
+        result = render_fast_draft(out, cfg)
         print(result["output"] if result["ok"] else result["stderr"])
     elif args.cmd == "add-bgm":
         track_id = import_bgm(
@@ -211,3 +210,38 @@ def analyze_one_video(cfg: dict, db: Path, video: dict) -> None:
 def _target_video_ids(args, db: Path) -> list[int]:
     return [args.video_id] if getattr(args, "video_id", None) else all_video_ids(db)
 
+
+def davinci_export(cfg: dict, db: Path, dry_run: bool = False) -> dict:
+    out_dir = root(cfg) / "08_projects" / "davinci"
+    results = []
+    for plan in build_timeline_plans(db, root(cfg) / "05_index" / "segments.json"):
+        files = planned_files(plan, out_dir) if dry_run else export_all(plan, out_dir)
+        _print_davinci(plan, files, dry_run)
+        results.append({"plan": plan, "files": files})
+    return {"timelines": results}
+
+
+def davinci_create_timeline(cfg: dict, db: Path, dry_run: bool = False) -> dict:
+    result = davinci_export(cfg, db, dry_run)
+    if dry_run:
+        print("resolve: skipped dry-run")
+        result["resolve"] = {"status": "skipped", "reason": "dry-run"}
+        return result
+    resolve_results = []
+    for item in result["timelines"]:
+        resolve_result = create_timeline(item["plan"])
+        print(f"resolve {item['plan']['timeline_name']}: {resolve_result['status']}")
+        if resolve_result.get("reason"):
+            print(resolve_result["reason"])
+        resolve_results.append(resolve_result)
+    result["resolve"] = resolve_results
+    return result
+
+
+def _print_davinci(plan: dict, files: dict[str, Path], dry_run: bool) -> None:
+    print(f"timeline: {plan['timeline_name']}")
+    print(f"clips: {len(plan['clips'])}")
+    for kind, path in files.items():
+        print(f"{kind}: {path}")
+    if dry_run:
+        print("no files changed")

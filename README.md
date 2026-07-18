@@ -1,6 +1,6 @@
 # video-vault-ai
 
-Windows 本機用的 AI 影片素材管理與初剪工具。主流程是 WebUI-first：一個專案可以放多支影片，先做內容感知與故事整理，人工審核後才正式輸出。
+Windows 本機用的 AI 影片素材管理與初步內容感知工具。先做能跑的核心流程：掃描、匯入、metadata、抽幀、proxy、SQLite index、mock 分析、Markdown 報告。
 
 ## 安裝
 
@@ -17,19 +17,18 @@ pip install -e ".[dev]"
 
 ```powershell
 python -m video_vault init
-python -m video_vault ui
+python -m video_vault scan
+python -m video_vault ingest
+python -m video_vault perceive
+python -m video_vault draft-plan
+python -m video_vault review-plan --video-id 1
+python -m video_vault approve-plan --video-id 1
+python -m video_vault render-approved --video-id 1
 ```
 
-打開 `http://127.0.0.1:8765/`：
+`render-approved` 只會 render 已核准的 `edit_plan.json`。未審核或被退回的 plan 只會停在建議階段。
 
-1. 新增專案。
-2. 匯入一支或多支影片。
-3. 跑待感知素材，或全部重跑感知。
-4. 產生故事整理，調整片段順序/取用/時間。
-5. 核准專案。
-6. 輸出 HyperFrames 初剪或 OpenCut 素材包。
-
-正式輸出有 project-level approval gate；`needs_review` / `rejected` / `draft` 只能預覽與規劃，不能輸出 MP4 或調色片段。
+Render Pipeline v2 相容層會優先使用人工審核後的 Render Manifest：HyperFrames 保留 `source_in` 與 Manifest 順序，OpenCut handoff 保留 `order`、速度、音訊角色與取用狀態。JSON／CSV／README handoff 可在審核階段產生；graded clips 與正式 MP4 仍受 project approval gate 保護。遷移細節請見 `docs/render-v2/migration.md`。
 
 預設資料庫在 `D:/VideoLibrary/05_index/video_vault.sqlite3`，報告輸出到 `D:/VideoLibrary/06_reports`。
 
@@ -60,19 +59,35 @@ ai:
 
 每次只上傳抽出的 frame，不上傳整支影片；raw response 快取在 `05_index/raw_ai_outputs`。
 
-## Human-in-the-loop Project Flow
+## Human-in-the-loop Planner
 
-新流程不會丟影片後直接剪完。WebUI 會保留：
+新流程不會丟影片後直接剪完：
 
-- 專案素材：`08_projects/project_<id>/source`
-- 專案計畫：`08_projects/project_<id>/project_plan.json`
-- 故事整理：`08_projects/project_<id>/project_script.md`
-- 審核狀態：`08_projects/project_<id>/review_status.json`
-- 片段審核：`08_projects/project_<id>/feedback/segment_review.json`
+```powershell
+python -m video_vault perceive
+python -m video_vault draft-plan
+python -m video_vault review-plan --video-id 1
+python -m video_vault approve-plan --video-id 1
+python -m video_vault render-approved --video-id 1
+```
+
+每支影片會產生：
+
+- `05_index/video_<id>/perception.json`
+- `05_index/video_<id>/edit_plan.json`
+- `05_index/video_<id>/edit_script.md`
+- `05_index/video_<id>/review_status.json`
+
+退回修改：
+
+```powershell
+notepad D:/VideoLibrary/05_index/video_1/revision_prompt.txt
+python -m video_vault revise-plan --video-id 1
+```
 
 ## BGM Library
 
-BGM 要先登錄到本地資料庫，保留來源和授權。WebUI 總覽在 `http://127.0.0.1:8765/bgm`，舊版上傳頁在 `http://127.0.0.1:8765/classic-bgm`。
+BGM 要先登錄到本地資料庫，保留來源和授權：
 
 ```powershell
 python -m video_vault add-bgm D:/music/song.mp3 `

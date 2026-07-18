@@ -1,9 +1,7 @@
 import re
 import sys
 
-import pytest
-
-from video_vault.cli import main
+from video_vault.cli import davinci_export, main
 from video_vault.database import add_analysis, init_db, upsert_video
 from video_vault.davinci import build_timeline_plan, build_timeline_plans
 from video_vault.davinci.export_formats import export_all
@@ -60,11 +58,18 @@ def test_resolve_unavailable_is_skipped(monkeypatch):
     assert result["status"] == "skipped"
 
 
-def test_davinci_cli_is_not_part_of_flow(tmp_path):
+def test_davinci_export_dry_run_writes_nothing(tmp_path):
+    cfg = {"library_root": str(tmp_path)}
+    result = davinci_export(cfg, _db(tmp_path), dry_run=True)
+    assert result["timelines"][0]["plan"]["clips"]
+    assert not (tmp_path / "08_projects").exists()
+
+
+def test_davinci_cli_dry_run_does_not_create_db(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text(f'library_root: "{tmp_path}"\n', encoding="utf-8")
-    with pytest.raises(SystemExit):
-        main(["--config", str(cfg), "davinci-export", "--dry-run"])
+    main(["--config", str(cfg), "davinci-export", "--dry-run"])
+    assert not (tmp_path / "05_index").exists()
 
 
 def test_davinci_plans_are_per_video(tmp_path):
@@ -74,4 +79,3 @@ def test_davinci_plans_are_per_video(tmp_path):
     plans = build_timeline_plans(db)
     assert len(plans) == 2
     assert {plan["clips"][0]["source_file"] for plan in plans} == {"sorted.mp4", "other.mp4"}
-

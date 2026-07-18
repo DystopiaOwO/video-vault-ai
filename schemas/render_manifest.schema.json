@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://video-vault-ai.local/schemas/render_manifest.schema.json",
+  "title": "video-vault-ai Render Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "manifest_hash",
+    "plan_id",
+    "project_id",
+    "render_kind",
+    "profile",
+    "settings",
+    "segments",
+    "timeline_duration_ms",
+    "bgm",
+    "color",
+    "overlays",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "minLength": 1 },
+    "manifest_hash": { "type": "string" },
+    "plan_id": { "type": "string" },
+    "project_id": { "type": "string" },
+    "render_kind": { "$ref": "#/$defs/renderKind" },
+    "profile": { "type": "string", "minLength": 1 },
+    "settings": { "$ref": "#/$defs/renderSettings" },
+    "segments": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/renderSegment" }
+    },
+    "timeline_duration_ms": { "type": "integer", "minimum": 0 },
+    "bgm": { "$ref": "#/$defs/bgmSettings" },
+    "color": { "$ref": "#/$defs/colorSettings" },
+    "overlays": { "type": "array", "items": { "type": "object" } },
+    "created_at": { "type": "string" }
+  },
+  "$defs": {
+    "renderKind": {
+      "type": "string",
+      "enum": ["rough_preview", "accurate_preview", "final"]
+    },
+    "renderSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "profile", "encoder", "transition", "overlay_enabled",
+        "audio_role", "audio_crossfade_ms", "bgm", "color"
+      ],
+      "properties": {
+        "kind": { "$ref": "#/$defs/renderKind" },
+        "profile": { "type": "string" },
+        "encoder": { "type": "string" },
+        "transition": { "type": "string" },
+        "overlay_enabled": { "type": "boolean" },
+        "audio_role": { "type": "string" },
+        "audio_crossfade_ms": { "type": "integer", "minimum": 0 },
+        "bgm": { "$ref": "#/$defs/bgmSettings" },
+        "color": { "$ref": "#/$defs/colorSettings" }
+      }
+    },
+    "bgmSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled", "source_file", "track_id", "volume_db", "fade_in_ms",
+        "fade_out_ms", "loop", "attribution", "license_name", "source_url"
+      ],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "source_file": { "type": ["string", "null"] },
+        "track_id": { "type": ["string", "null"] },
+        "volume_db": { "type": "number" },
+        "fade_in_ms": { "type": "integer", "minimum": 0 },
+        "fade_out_ms": { "type": "integer", "minimum": 0 },
+        "loop": { "type": "boolean" },
+        "attribution": { "type": "string" },
+        "license_name": { "type": "string" },
+        "source_url": { "type": "string" }
+      }
+    },
+    "colorSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode", "lut_path", "decision", "reference_clip_id",
+        "brightness", "saturation", "gamma"
+      ],
+      "properties": {
+        "mode": { "type": "string" },
+        "lut_path": { "type": ["string", "null"] },
+        "decision": { "type": "string" },
+        "reference_clip_id": { "type": ["string", "null"] },
+        "brightness": { "type": "number" },
+        "saturation": { "type": "number" },
+        "gamma": { "type": "number" }
+      }
+    },
+    "renderSegment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segment_id", "source_file", "source_in_ms", "source_out_ms",
+        "manual_order", "include", "speed", "audio_role", "scene_role",
+        "title", "timeline_start_ms", "timeline_duration_ms",
+        "source_duration_ms", "overlay"
+      ],
+      "properties": {
+        "segment_id": { "type": "string", "minLength": 1 },
+        "source_file": { "type": "string", "minLength": 1 },
+        "source_in_ms": { "type": "integer", "minimum": 0 },
+        "source_out_ms": { "type": "integer", "minimum": 0 },
+        "manual_order": { "type": "integer" },
+        "include": { "type": "boolean" },
+        "speed": { "type": "number", "exclusiveMinimum": 0 },
+        "audio_role": { "type": "string" },
+        "scene_role": { "type": "string" },
+        "title": { "type": "string" },
+        "timeline_start_ms": { "type": "integer", "minimum": 0 },
+        "timeline_duration_ms": { "type": "integer", "minimum": 0 },
+        "source_duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "overlay": { "type": "object" }
+      }
+    }
+  }
+}
