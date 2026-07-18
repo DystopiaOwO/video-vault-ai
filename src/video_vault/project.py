@@ -5,10 +5,9 @@ from pathlib import Path
 import json
 import re
 import shutil
-import hashlib
 
-from .bgm import auto_assign_bgm
-from .database import create_project_row, init_db, project, project_bgm_tracks, project_videos, projects, segments, set_project_status, set_project_videos
+from .bgm import recommend_bgm_for_groups
+from .database import create_project_row, frames, init_db, project, project_bgm_tracks, project_videos, projects, segments, set_project_status, set_project_videos
 
 
 def create_project(db: Path, name: str, video_ids: list[int], kind: str = "auto", category: str = "unknown", content_type: str = "diary_montage", platform: str = "YouTube", target_duration_seconds: float = 0) -> int:
@@ -51,6 +50,7 @@ def sync_project_files(cfg: dict, db: Path, project_id: int) -> list[dict]:
             "time_of_day": _time_label(video),
             "status": video.get("status") or "uploaded",
             "segment_count": len(list(segments(db, int(video["id"])))),
+            "visual_summary": _visual_summary(db, int(video["id"])),
         }
         (clip_dir / "clip.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         result.append(data)
@@ -100,14 +100,21 @@ def build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
         group["clips"] = _dedupe(group["clips"])
         group["segments"].sort(key=lambda s: (s["clip_id"], float(s["start_seconds"] or 0)) if itinerary or project_info_is_travel(row) else (-float(s["score"] or 0), s["clip_id"], float(s["start_seconds"] or 0)))
     project_info = dict(row)
-    auto_assign_bgm(cfg, db, project_id, project_info, ordered)
+    pipeline = pipeline_for_project(project_info)
+    bgm_recommendations = recommend_bgm_for_groups(cfg, db, project_id, project_info, ordered)
+    by_group = {item["group"]: item for item in bgm_recommendations}
+    for group in ordered:
+        if group["label"] in by_group:
+            group["bgm"] = by_group[group["label"]]["track"]
     bgm = [dict(track) for track in project_bgm_tracks(db, project_id)]
+    revision_notes = _revision_notes(cfg, project_id)
     plan = {
         "project_id": project_id,
-        "plan_id": f"project-{project_id}",
         "name": project_info["name"],
         "category": project_info["category"],
         "content_type": project_info["content_type"],
+        "pipeline_id": pipeline.get("pipeline_id", ""),
+        "pipeline": pipeline,
         "platform": project_info["platform"],
         "target_duration_seconds": project_info["target_duration_seconds"],
         "status": "needs_review",
@@ -115,10 +122,16 @@ def build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
         "clips": [_clip_summary(c) for c in clips],
         "groups": ordered,
         "bgm": bgm,
+        "bgm_recommendations": bgm_recommendations,
         "title_cards": _title_cards(project_info, ordered),
+        "revision_notes": revision_notes,
+        "feedback_applied": [],
+        "feedback_unresolved": ["已記錄審核備註；自動重排片段留到 segment review 階段。"] if revision_notes else [],
     }
     write_project_files(cfg, plan)
-    set_project_status(db, project_id, "needs_review")
+    append_decision(cfg, project_id, "plan_created", f"建立 {plan['content_type']} 故事計畫", "build_project_plan", plan_id=plan.get("plan_id", ""), confidence=1.0)
+    write_checkpoint(cfg, project_id, "plan_created", "passed", plan_id=plan.get("plan_id", ""), outputs=["project_plan.json", "project_script.md"])
+    mark_project_needs_review(cfg, db, project_id)
     return plan
 
 
@@ -128,127 +141,239 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
     if not row:
         return {}
     folder = project_dir(cfg, project_id)
+    plan = _read_json(folder / "project_plan.json")
+    ok, reason = can_project_render(cfg, db, project_id)
     return {
         "project": dict(row),
         "clips": sync_project_files(cfg, db, project_id),
         "bgm": [dict(row) for row in project_bgm_tracks(db, project_id)],
-        "plan": _read_json(folder / "project_plan.json"),
+        "plan": plan,
+        "workflow": project_workflow(cfg, db, project_id, plan),
+        "segments": project_segments(cfg, project_id, plan),
+        "review": _read_json(folder / "review_status.json"),
+        "can_render": ok,
+        "render_gate_reason": reason,
         "script": (folder / "project_script.md").read_text(encoding="utf-8") if (folder / "project_script.md").exists() else "",
         "folder": str(folder),
     }
 
 
-def set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes: str = "") -> Path:
+def project_workflow(cfg: dict, db: Path, project_id: int, plan: dict | None = None) -> dict:
     folder = project_dir(cfg, project_id)
-    path = folder / "review_status.json"
-    plan_path = folder / "project_plan.json"
-    plan = _read_json(plan_path)
-    approved = status == "approved"
-    data = {"project_id": project_id, "status": status, "approved_by_user": approved, "notes": notes, "updated_at": datetime.now().isoformat(timespec="seconds")}
-    if approved:
-        data.update({
-            "approved_plan_id": str(plan.get("plan_id") or f"project-{project_id}"),
-            "approved_manifest_hash": _approval_manifest_hash(plan, _read_json(folder / "render_settings.json")),
-            "approved_at": datetime.now().isoformat(timespec="seconds"),
-        })
+    clips = sync_project_files(cfg, db, project_id)
+    plan = plan or _read_json(folder / "project_plan.json")
+    review = _read_json(folder / "review_status.json")
+    segments = project_segments(cfg, project_id, plan)
+    outputs = folder / "output"
+    stages = [
+        _stage("import", "匯入素材", bool(clips), [folder / "source"]),
+        _stage("perception", "內容感知", any(c.get("segment_count", 0) for c in clips), [folder / "clips"]),
+        _stage("story", "故事整理", bool(plan.get("groups")), [folder / "project_plan.json", folder / "project_script.md"]),
+        _stage("review", "人工審核", review.get("approved_by_user") is True, [folder / "feedback", folder / "review_status.json"]),
+        _stage("handoff", "剪輯交接", (outputs / "opencut_handoff").exists() or (outputs / "hyperframes").exists(), [outputs / "opencut_handoff", outputs / "hyperframes"]),
+        _stage("render", "正式輸出", any(outputs.glob("**/*.mp4")) if outputs.exists() else False, [outputs]),
+    ]
+    return {"style": "openmontage_skeleton", "current": next((s["id"] for s in stages if s["status"] != "done"), "done"), "stages": stages}
+
+
+def project_segments(cfg: dict, project_id: int, plan: dict) -> list[dict]:
+    reviews = {row.get("segment_id"): row for row in _segment_review(cfg, project_id)}
+    rows = []
+    for group in plan.get("groups", []):
+        for order, seg in enumerate(group.get("segments", []), 1):
+            segment_id = f"{seg.get('clip_id', 'clip')}_{int(float(seg.get('start_seconds') or 0) * 1000):08d}"
+            rows.append(
+                {
+                    **seg,
+                    "segment_id": segment_id,
+                    "group": group.get("label", ""),
+                    "manual_order": len(rows) + 1,
+                    "scene_role": _scene_role(seg),
+                    "story_position": group.get("activity", ""),
+                    "include": True,
+                    "audio_role": "lower_original",
+                    "speed": 1.0,
+                    "user_notes": "",
+                    "group_order": int(group.get("order", 999)),
+                    **reviews.get(segment_id, {}),
+                }
+            )
+    return sorted(rows, key=lambda row: (int(row.get("manual_order") or 999999), int(row.get("group_order") or 999), row.get("clip_id", ""), float(row.get("start_seconds") or 0)))
+
+
+def _stage(stage_id: str, label: str, done: bool, artifacts: list[Path]) -> dict:
+    return {"id": stage_id, "label": label, "status": "done" if done else "pending", "artifacts": [str(path) for path in artifacts]}
+
+
+def save_segment_review(cfg: dict, db: Path, project_id: int, rows: list[dict]) -> Path:
+    allowed = {"segment_id", "include", "user_notes", "manual_order", "scene_role", "story_position", "audio_role", "speed", "start_seconds", "end_seconds"}
+    data = [_clean_segment_review({**row, "manual_order": index}, allowed) for index, row in enumerate(rows, 1) if row.get("segment_id")]
+    path = project_dir(cfg, project_id) / "feedback" / "segment_review.json"
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    set_project_status(db, project_id, status)
-    if plan_path.exists():
-        plan["status"] = status
-        plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    append_decision(cfg, project_id, "segment_review", f"更新 {len(data)} 段片段審核", "segment_review", affected_segments=[row.get("segment_id", "") for row in data])
+    mark_project_needs_review(cfg, db, project_id)
     return path
 
 
-def invalidate_project_approval(cfg: dict, db: Path, project_id: int, reason: str = "") -> Path:
-    """Invalidate approval after any render-affecting project change."""
+def _clean_segment_review(row: dict, allowed: set[str]) -> dict:
+    data = {key: row[key] for key in allowed if key in row}
+    if "start_seconds" in data or "end_seconds" in data:
+        start = max(0.0, float(data.get("start_seconds") or 0))
+        end = max(start + 0.1, float(data.get("end_seconds") or start + 0.1))
+        data["start_seconds"] = round(start, 3)
+        data["end_seconds"] = round(end, 3)
+    return data
 
+
+def set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes: str = "") -> Path:
     folder = project_dir(cfg, project_id)
-    existing = _read_json(folder / "review_status.json")
-    data = {
-        **existing,
-        "project_id": project_id,
-        "status": "needs_review",
-        "approved_by_user": False,
-        "invalidated_reason": reason,
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
-    }
-    data.pop("approved_manifest_hash", None)
-    data.pop("approved_plan_id", None)
-    data.pop("approved_at", None)
     path = folder / "review_status.json"
+    data = {"project_id": project_id, "status": status, "approved_by_user": status == "approved", "notes": notes, "updated_at": datetime.now().isoformat(timespec="seconds")}
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    save_revision_notes(cfg, project_id, notes)
+    set_project_status(db, project_id, status)
+    plan_path = folder / "project_plan.json"
+    if plan_path.exists():
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["status"] = status
+        plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    append_decision(cfg, project_id, f"review_{status}", f"使用者將專案標記為 {status}", "user_review", reason=notes)
+    if status == "approved":
+        write_checkpoint(cfg, project_id, "review_approved", "passed", plan_id=_read_json(plan_path).get("plan_id", ""), inputs=["review_status.json", "project_plan.json"])
+    return path
+
+
+def save_revision_notes(cfg: dict, project_id: int, notes: str) -> Path | None:
+    text = (notes or "").strip()
+    if not text:
+        return None
+    folder = project_dir(cfg, project_id) / "feedback"
+    latest = folder / "revision_notes.md"
+    stamped = folder / f"revision_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    latest.write_text(text, encoding="utf-8")
+    stamped.write_text(text, encoding="utf-8")
+    return latest
+
+
+def mark_project_needs_review(cfg: dict, db: Path, project_id: int) -> None:
+    folder = project_dir(cfg, project_id)
+    set_project_status(db, project_id, "needs_review")
+    review_path = folder / "review_status.json"
+    if review_path.exists():
+        review = _read_json(review_path)
+        review.update({"status": "needs_review", "approved_by_user": False, "updated_at": datetime.now().isoformat(timespec="seconds")})
+        review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
     plan_path = folder / "project_plan.json"
     if plan_path.exists():
         plan = _read_json(plan_path)
         plan["status"] = "needs_review"
         plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
-    set_project_status(db, project_id, "needs_review")
-    return path
 
 
 def can_project_render(cfg: dict, db: Path, project_id: int) -> tuple[bool, str]:
-    """Return whether the project has passed every server-side approval gate."""
-
     init_db(db)
-    row = project(db, int(project_id))
+    row = project(db, project_id)
     if not row:
-        return False, f"找不到專案：{project_id}"
-    if str(row["status"]) != "approved":
-        return False, f"專案狀態為 {row['status']}，必須是 approved"
-    folder = project_dir(cfg, int(project_id))
+        return False, f"找不到專案 #{project_id}"
+    if row["status"] != "approved":
+        return False, f"專案狀態是 {row['status']}，尚未核准"
+    folder = project_dir(cfg, project_id)
     review_path = folder / "review_status.json"
     if not review_path.exists():
         return False, "缺少 review_status.json"
     review = _read_json(review_path)
     if review.get("approved_by_user") is not True:
-        return False, "review_status.json 尚未取得使用者核准"
+        return False, "review_status.json 尚未由使用者核准"
     plan_path = folder / "project_plan.json"
     if not plan_path.exists():
         return False, "缺少 project_plan.json"
     plan = _read_json(plan_path)
     if plan.get("status") != "approved":
-        return False, f"最新 project_plan.json 狀態為 {plan.get('status') or 'missing'}，必須是 approved"
-    approved_plan_id = review.get("approved_plan_id")
-    current_plan_id = str(plan.get("plan_id") or f"project-{project_id}")
-    if approved_plan_id and str(approved_plan_id) != current_plan_id:
-        return False, "目前計畫 ID 與核准版本不一致，請重新核准"
-    approved_hash = review.get("approved_manifest_hash")
-    if approved_hash and approved_hash != _approval_manifest_hash(plan, _read_json(folder / "render_settings.json")):
-        return False, "目前計畫或輸出設定已變更，請重新核准"
-    return True, "project approval gate passed"
+        return False, f"project_plan.json 狀態是 {plan.get('status', 'unknown')}，不是 approved"
+    return True, "approved"
 
 
 def assert_project_approved(cfg: dict, db: Path, project_id: int, action: str = "render") -> None:
-    allowed, reason = can_project_render(cfg, db, project_id)
-    if not allowed:
-        raise PermissionError(f"{action} blocked by project approval gate: {reason}")
+    ok, reason = can_project_render(cfg, db, project_id)
+    if not ok:
+        raise PermissionError(f"{action} 被擋下：{reason}")
+    report = pre_render_validation(cfg, db, project_id)
+    if report["errors"]:
+        raise PermissionError(f"{action} 被擋下：pre-render validation failed")
 
 
-def _approval_manifest_hash(plan: dict, settings: dict) -> str:
-    # Approval compares render-affecting content only.  Status and timestamps
-    # are workflow metadata and must not invalidate an otherwise unchanged plan.
-    plan_content = dict(plan)
-    plan_content.pop("created_at", None)
-    plan_content["status"] = "approved"
-    try:
-        from .render_manifest import compile_manifest
-        return compile_manifest(plan_content, None, settings).manifest_hash
-    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
-        pass
-    # Include the normalized plan as well as settings.  This keeps the
-    # approval snapshot conservative: even a plan-only edit that changes the
-    # available segment groups must be reviewed again.
-    payload = {"plan": plan_content, "settings": settings}
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+def pre_render_validation(cfg: dict, db: Path, project_id: int) -> dict:
+    ok, reason = can_project_render(cfg, db, project_id)
+    folder = project_dir(cfg, project_id)
+    plan = _read_json(folder / "project_plan.json")
+    errors = [] if ok else [reason]
+    warnings = []
+    for clip in sync_project_files(cfg, db, project_id):
+        if not Path(clip["source_path"]).exists():
+            errors.append(f"source missing: {clip['source_path']}")
+    for seg in project_segments(cfg, project_id, plan):
+        if float(seg.get("end_seconds") or 0) <= float(seg.get("start_seconds") or 0):
+            errors.append(f"bad segment range: {seg.get('segment_id')}")
+    for track in project_bgm_tracks(db, project_id):
+        if not track["source_url"] or not track["license_name"] or not track["attribution_text"]:
+            warnings.append(f"BGM license incomplete: {track['title']}")
+    report = {"project_id": project_id, "plan_id": plan.get("plan_id", ""), "status": "failed" if errors else "passed", "created_at": datetime.now().isoformat(timespec="seconds"), "errors": errors, "warnings": warnings}
+    out = folder / "validation"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "pre_render_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    (out / "pre_render_report.md").write_text(_validation_md(report), encoding="utf-8")
+    if not errors:
+        write_checkpoint(cfg, project_id, "pre_render_validation_passed", "passed", plan_id=plan.get("plan_id", ""), outputs=["validation/pre_render_report.json"])
+    return report
+
+
+def append_decision(cfg: dict, project_id: int, decision_type: str, decision: str, source: str, reason: str = "", plan_id: str = "", confidence: float = 1.0, affected_segments: list[str] | None = None) -> Path:
+    path = project_dir(cfg, project_id) / "decisions" / "decision_log.jsonl"
+    row = {"created_at": datetime.now().isoformat(timespec="seconds"), "project_id": project_id, "plan_id": plan_id, "decision_type": decision_type, "decision": decision, "reason": reason, "source": source, "confidence": confidence, "affected_segments": affected_segments or []}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return path
+
+
+def write_checkpoint(cfg: dict, project_id: int, checkpoint_id: str, status: str, plan_id: str = "", inputs: list[str] | None = None, outputs: list[str] | None = None, warnings: list[str] | None = None, errors: list[str] | None = None) -> Path:
+    path = project_dir(cfg, project_id) / "checkpoints" / f"{checkpoint_id}.json"
+    data = {"checkpoint_id": checkpoint_id, "project_id": project_id, "plan_id": plan_id, "status": status, "created_at": datetime.now().isoformat(timespec="seconds"), "inputs": inputs or [], "outputs": outputs or [], "warnings": warnings or [], "errors": errors or []}
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def pipeline_for_project(project_info: dict) -> dict:
+    candidates = _pipeline_defs()
+    category = str(project_info.get("category", "")).lower()
+    content_type = str(project_info.get("content_type", "")).lower()
+    for pipe in candidates:
+        if pipe.get("pipeline_id", "").startswith(category):
+            return pipe
+    return next((pipe for pipe in candidates if content_type in pipe.get("content_types", [])), candidates[0] if candidates else {})
 
 
 def write_project_files(cfg: dict, plan: dict) -> tuple[Path, Path]:
     folder = project_dir(cfg, int(plan["project_id"]))
+    plans_dir = folder / "plans"
+    version = _next_plan_version(plans_dir, plan["content_type"])
+    plan_id = f"{plan['content_type']}_v{version:03d}"
+    plan["plan_id"] = plan_id
+    plan["version"] = version
+    plan["parent_plan_id"] = _latest_plan_id(plans_dir)
+    plan["created_reason"] = "revision_notes" if plan.get("revision_notes") else "build_project_plan"
     plan_path = folder / "project_plan.json"
     script_path = folder / "project_script.md"
-    plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
-    script_path.write_text(project_script(plan), encoding="utf-8")
+    version_path = plans_dir / f"{plan_id}.json"
+    version_script_path = plans_dir / f"{plan_id}.md"
+    latest_path = plans_dir / "latest.json"
+    script = project_script(plan)
+    payload = json.dumps(plan, ensure_ascii=False, indent=2)
+    plan_path.write_text(payload, encoding="utf-8")
+    script_path.write_text(script, encoding="utf-8")
+    version_path.write_text(payload, encoding="utf-8")
+    version_script_path.write_text(script, encoding="utf-8")
+    latest_path.write_text(json.dumps({"plan_id": plan_id, "path": str(version_path), "script_path": str(version_script_path)}, ensure_ascii=False, indent=2), encoding="utf-8")
     return plan_path, script_path
 
 
@@ -261,10 +386,13 @@ def project_script(plan: dict) -> str:
         f"- 這個專案有 {len(plan['clips'])} 支素材，目前找到 {len(segments)} 段可用片段。",
         f"- 建議先做成「{_content_type_label(plan['content_type'])}」，用時間順序當主線，再穿插特寫與氣氛鏡頭。",
         f"- 先不要急著全剪進去，優先挑每組分數最高的片段做第一版。",
-        _bgm_line(plan.get("bgm", [])),
-        "",
-        "## 自動字卡",
+        _bgm_line(plan.get("bgm_recommendations", []) or plan.get("bgm", [])),
     ]
+    if plan.get("revision_notes"):
+        lines += ["", "## 審核備註", plan["revision_notes"]]
+        for item in plan.get("feedback_unresolved", []):
+            lines.append(f"- 尚未自動處理：{item}")
+    lines += ["", "## 自動字卡"]
     for card in plan.get("title_cards", []):
         lines.append(f"- {card['where']}｜{card['text']}｜{card['style']}")
     lines += [
@@ -295,12 +423,15 @@ def _content_type_label(value: str) -> str:
     return {"travel_diary": "旅行日記", "diary_montage": "日常紀錄", "process_montage": "過程剪輯", "highlight": "精華短片"}.get(value, value)
 
 
-def _bgm_line(bgm: list[dict]) -> str:
-    if not bgm:
+def _bgm_line(bgm_items: list[dict]) -> str:
+    if not bgm_items:
         return "- BGM：目前資料庫沒有可套用的音樂，先略過。"
-    track = bgm[0]
-    credit = track.get("attribution_text") or track.get("source_url") or "請確認授權資訊"
-    return f"- BGM：已套用「{track.get('title', '')}」；YouTube 說明欄署名：{credit}"
+    if "track" not in bgm_items[0]:
+        track = bgm_items[0]
+        credit = track.get("attribution_text") or track.get("source_url") or "請確認授權資訊"
+        return f"- BGM：已套用「{track.get('title', '')}」；YouTube 說明欄署名：{credit}"
+    names = "、".join(f"{item['group']}→{item['track'].get('title', '')}" for item in bgm_items[:4])
+    return f"- BGM：依內容分組推薦：{names}。"
 
 
 def _title_cards(project_info: dict, groups: list[dict]) -> list[dict]:
@@ -332,7 +463,26 @@ def _group_role(activity: str) -> str:
 
 
 def _use_label(value: str) -> str:
-    return {"B-roll": "補畫面", "Shorts": "可當亮點/短影音", "Product closeup": "特寫"}.get(value, value)
+    return {
+        "B-roll": "補畫面",
+        "Shorts": "可當亮點/短影音",
+        "Product closeup": "特寫",
+        "補畫面": "補畫面",
+        "短影音": "可當亮點/短影音",
+        "產品特寫": "特寫",
+    }.get(value, value)
+
+
+def _scene_role(seg: dict) -> str:
+    tags = {str(tag).lower() for tag in seg.get("tags", [])}
+    title = str(seg.get("title", "")).lower()
+    if "closeup" in tags or "close" in title:
+        return "detail"
+    if tags & {"street", "landscape", "travel"}:
+        return "establishing_shot"
+    if tags & {"hands", "coffee", "matcha", "food", "dripping", "steam"}:
+        return "main_action"
+    return "transition"
 
 
 def _empty_group_note(group: dict) -> str:
@@ -343,7 +493,7 @@ def _empty_group_note(group: dict) -> str:
 
 def project_dir(cfg: dict, project_id: int) -> Path:
     path = Path(cfg["library_root"]) / "08_projects" / f"project_{project_id}"
-    for name in ("source", "clips", "plans", "output", "feedback"):
+    for name in ("source", "clips", "plans", "output", "feedback", "decisions", "checkpoints", "validation"):
         (path / name).mkdir(parents=True, exist_ok=True)
     return path
 
@@ -361,7 +511,18 @@ def project_info_is_travel(row) -> bool:
 
 
 def _clip_summary(clip: dict) -> dict:
-    return {k: clip[k] for k in ("clip_id", "video_id", "filename", "source_path", "order", "duration_seconds", "detected_category", "time_of_day", "status", "segment_count")}
+    return {k: clip[k] for k in ("clip_id", "video_id", "filename", "source_path", "order", "duration_seconds", "detected_category", "time_of_day", "status", "segment_count", "visual_summary")}
+
+
+def _visual_summary(db: Path, video_id: int) -> str:
+    summaries = []
+    for frame in frames(db, video_id):
+        text = str(frame["vision_summary"] or "").strip()
+        if text and text not in summaries:
+            summaries.append(text)
+        if len(summaries) >= 3:
+            break
+    return " / ".join(summaries)
 
 
 def _dedupe(items: list[dict]) -> list[dict]:
@@ -414,3 +575,60 @@ def _time(seconds: float) -> str:
 
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def _validation_md(report: dict) -> str:
+    lines = [f"# Pre-render validation: {report['status']}", "", f"- project_id: {report['project_id']}", f"- plan_id: {report.get('plan_id', '')}", "", "## Errors"]
+    lines += [f"- {item}" for item in report["errors"]] or ["- none"]
+    lines += ["", "## Warnings"]
+    lines += [f"- {item}" for item in report["warnings"]] or ["- none"]
+    return "\n".join(lines)
+
+
+def _pipeline_defs() -> list[dict]:
+    root = Path(__file__).resolve().parents[2] / "pipeline_defs"
+    return [_parse_pipeline(path) for path in sorted(root.glob("*.yaml"))]
+
+
+def _parse_pipeline(path: Path) -> dict:
+    data: dict[str, object] = {}
+    current = ""
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.rstrip()
+        if not line or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" ") and ":" in line:
+            key, _, value = line.partition(":")
+            current = key.strip()
+            data[current] = value.strip() or []
+        elif line.strip().startswith("-") and current:
+            data.setdefault(current, [])
+            if isinstance(data[current], list):
+                data[current].append(line.strip()[1:].strip())
+    return data
+
+
+def _revision_notes(cfg: dict, project_id: int) -> str:
+    path = project_dir(cfg, project_id) / "feedback" / "revision_notes.md"
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def _segment_review(cfg: dict, project_id: int) -> list[dict]:
+    data = _read_json(project_dir(cfg, project_id) / "feedback" / "segment_review.json")
+    return data if isinstance(data, list) else []
+
+
+def _next_plan_version(plans_dir: Path, content_type: str) -> int:
+    prefix = f"{content_type}_v"
+    versions = []
+    for path in plans_dir.glob(f"{prefix}[0-9][0-9][0-9].json"):
+        try:
+            versions.append(int(path.stem.removeprefix(prefix)))
+        except ValueError:
+            pass
+    return max(versions, default=0) + 1
+
+
+def _latest_plan_id(plans_dir: Path) -> str:
+    latest = _read_json(plans_dir / "latest.json")
+    return str(latest.get("plan_id") or "")

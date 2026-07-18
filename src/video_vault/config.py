@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-import re
 import shutil
-
-import yaml
 
 DEFAULT_CONFIG = {
     "library_root": "D:/VideoLibrary",
@@ -17,13 +14,7 @@ DEFAULT_CONFIG = {
     "ffprobe_path": "ffprobe",
     "ai": {
         "provider": "mock",
-        "local": {
-            "base_url": "http://127.0.0.1:1234/v1",
-            "model": "qwen/qwen2.5-vl-7b",
-            "max_concurrent_requests": 1,
-            "use_same_model_for_revision": True,
-            "revision_model": "",
-        },
+        "local": {"ollama_url": "http://localhost:11434", "model": "gemma4:12b"},
         "cloud": {"provider": "openai", "model": "gpt-4.1-mini", "api_key_env": "OPENAI_API_KEY"},
     },
 }
@@ -35,39 +26,14 @@ def config_path(path: str | None = None) -> Path:
 
 def load_config(path: str | None = None) -> dict:
     file = config_path(path)
-    text = file.read_text(encoding="utf-8") if file.exists() else ""
-    data = _safe_load_config(text, file) if text else {}
-    if data is None:
-        data = {}
-    if not isinstance(data, dict):
-        raise ValueError(f"Config root must be a mapping: {file}")
+    data = _parse_yaml(file.read_text(encoding="utf-8")) if file.exists() else {}
     return _merge(DEFAULT_CONFIG, data or {})
-
-
-def _safe_load_config(text: str, file: Path) -> dict:
-    try:
-        data = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        # Keep compatibility with old Windows config writers that emitted
-        # unescaped backslashes inside double-quoted path values.
-        repaired = re.sub(
-            r'(?m)^(\s*[^:#\n]+:\s*)"([^"\n]*)"\s*$',
-            lambda match: f'{match.group(1)}"{match.group(2).replace("\\", "\\\\")}"',
-            text,
-        )
-        if repaired == text:
-            raise ValueError(f"Invalid YAML config: {file}") from exc
-        try:
-            data = yaml.safe_load(repaired)
-        except yaml.YAMLError as repaired_exc:
-            raise ValueError(f"Invalid YAML config: {file}") from repaired_exc
-    return data
 
 
 def save_default_config(path: str | None = None) -> Path:
     file = config_path(path)
     if not file.exists():
-        file.write_text(yaml.safe_dump(DEFAULT_CONFIG, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        file.write_text(_dump_yaml(DEFAULT_CONFIG), encoding="utf-8")
     return file
 
 
@@ -86,3 +52,40 @@ def _merge(base: dict, extra: dict) -> dict:
     return out
 
 
+def _parse_yaml(text: str) -> dict:
+    # ponytail: tiny parser for this fixed config shape; use PyYAML if config grows lists/types.
+    root: dict = {}
+    stack: list[tuple[int, dict]] = [(-1, root)]
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        key, _, value = raw.strip().lstrip("\ufeff").partition(":")
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        parent = stack[-1][1]
+        if value.strip():
+            parent[key] = _scalar(value.strip())
+        else:
+            parent[key] = {}
+            stack.append((indent, parent[key]))
+    return root
+
+
+def _scalar(value: str):
+    value = value.strip("'\"")
+    if value.isdigit():
+        return int(value)
+    return value
+
+
+def _dump_yaml(data: dict, indent: int = 0) -> str:
+    lines = []
+    for key, value in data.items():
+        pad = " " * indent
+        if isinstance(value, dict):
+            lines.append(f"{pad}{key}:")
+            lines.append(_dump_yaml(value, indent + 2).rstrip())
+        else:
+            lines.append(f'{pad}{key}: "{value}"' if isinstance(value, str) else f"{pad}{key}: {value}")
+    return "\n".join(lines) + "\n"

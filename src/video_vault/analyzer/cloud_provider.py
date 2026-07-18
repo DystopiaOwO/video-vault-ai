@@ -7,11 +7,12 @@ import os
 import time
 import urllib.request
 
-from .frame_analysis import TAGS
+from .frame_analysis import PROMPT_VERSION, TAGS, has_cjk
 
 
 class CloudProvider:
     provider = "cloud"
+    prompt_version = PROMPT_VERSION
 
     def __init__(self, cfg: dict):
         cloud = cfg.get("ai", {}).get("cloud", {})
@@ -26,20 +27,25 @@ class CloudProvider:
         for attempt in range(3):
             try:
                 raw = self._post(body)
-                return _parse(raw), raw
+                parsed = _parse(raw)
+                if not has_cjk(parsed["summary"] + parsed["suggested_use"]):
+                    raw = self._post(self._request_body(frame_path, timestamp, video, "你剛剛回英文了。請重新輸出同一個 JSON，但 summary 與 suggested_use 必須全部使用繁體中文。"))
+                    parsed = _parse(raw)
+                return parsed, raw
             except Exception as exc:
                 last_error = exc
                 time.sleep(2 ** attempt)
         raise RuntimeError(f"vision API failed after retries: {last_error}")
 
-    def _request_body(self, frame_path: Path, timestamp: float, video: dict) -> dict:
+    def _request_body(self, frame_path: Path, timestamp: float, video: dict, extra: str = "") -> dict:
         image = base64.b64encode(frame_path.read_bytes()).decode("ascii")
         prompt = (
-            "Analyze this single video frame. Return JSON only with keys: "
+            "請分析這張從影片抽出的單一畫面。只回傳 JSON，欄位包含："
             "summary string, tags array, visual_quality_score number 0-1, "
-            "usefulness_score number 0-1, suggested_use string. "
-            f"Allowed tags: {', '.join(TAGS)}. "
-            f"Video filename: {video.get('filename')}; timestamp: {timestamp:.1f}s."
+            "usefulness_score number 0-1, suggested_use string。"
+            "summary 必須用繁體中文描述畫面；suggested_use 必須用繁體中文，例如：短影音、補畫面、產品特寫、轉場、開場。"
+            f"tags 必須維持英文，且只能使用：{', '.join(TAGS)}。"
+            f"Video filename: {video.get('filename')}; timestamp: {timestamp:.1f}s. {extra}"
         )
         return {
             "model": self.model,
@@ -78,5 +84,5 @@ def _parse(raw: dict) -> dict:
         "tags": tags,
         "visual_quality_score": float(data.get("visual_quality_score", 0)),
         "usefulness_score": float(data.get("usefulness_score", 0)),
-        "suggested_use": str(data.get("suggested_use", "B-roll")),
+        "suggested_use": str(data.get("suggested_use", "補畫面")),
     }
