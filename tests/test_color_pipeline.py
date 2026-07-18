@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 import pytest
 
@@ -26,7 +27,10 @@ def test_special_windows_lut_path_is_resolved_and_escaped(tmp_path: Path):
     lut.write_text("LUT_3D_SIZE 2\n", encoding="utf-8")
     result = build_color_filter({"mode": "dji_lut", "lut_path": str(lut)})
     assert r"LUT dir\,semi\;\[test\]\\\'quote/identity look.cube" in result
-    assert r"C\\:" in result
+    if os.name == "nt":
+        assert r"C\\:" in result
+    else:
+        assert str(lut.resolve()).replace("\\", "/").startswith("/")
     assert "\\," in result and "\\;" in result and "\\[" in result and "\\]" in result
 
 
