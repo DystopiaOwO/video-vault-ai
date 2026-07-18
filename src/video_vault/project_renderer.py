@@ -53,6 +53,7 @@ def render_project(
     *,
     output_path: Path | None = None,
     runner: Callable[..., Any] | None = None,
+    execution: Any | None = None,
 ) -> ProjectRenderResult:
     allowed, reason = can_project_render(cfg, db, project_id)
     if not allowed:
@@ -68,6 +69,8 @@ def render_project(
     if validation["errors"]:
         raise ProjectRenderError("approved render manifest is invalid: " + "; ".join(validation["errors"]))
     _validate_phase4a_settings(manifest)
+    _execution_check(execution)
+    _execution_update(execution, stage="validating", percent=5, message="核准與 Manifest 驗證完成")
     segments = sorted(manifest["segments"], key=lambda item: int(item["order"]))
     tracks = list(manifest.get("bgm") or [])
     if len(tracks) > 1:
@@ -99,6 +102,8 @@ def render_project(
     report_temp = paths.report_temp
     log_path = paths.log
     if paths.cache_hit:
+        _execution_check(execution)
+        _execution_update(execution, stage="done", percent=100, message="Final Cache 命中，正式輸出已存在")
         report = _read_json(report_path)
         cache_root = folder / "cache" / "segments"
         cached_results = tuple(
@@ -129,28 +134,51 @@ def render_project(
     report_temp_created = False
     output_published = False
     report_published = False
+    total_segment_duration = max(0.001, sum(float(item["timeline_duration_seconds"]) for item in segments))
+    completed_segment_duration = 0.0
     try:
         work_dir.mkdir(parents=True, exist_ok=True)
-        for segment in segments:
+        for index, segment in enumerate(segments, 1):
+            _execution_check(execution)
+            segment_duration = float(segment["timeline_duration_seconds"])
+            segment_start = 5 + 70 * (completed_segment_duration / total_segment_duration)
+            segment_span = 70 * (segment_duration / total_segment_duration)
+            _execution_begin_ffmpeg(execution, "segments", segment_start, segment_span, segment_duration, f"正在輸出片段 {index}/{len(segments)}")
             segment_results.append(render_segment(cfg, manifest, segment, runner=runner))
+            completed_segment_duration += segment_duration
+            _execution_check(execution)
+            _execution_update(execution, stage="segments", percent=5 + 70 * (completed_segment_duration / total_segment_duration), message=f"已完成片段 {index}/{len(segments)}", current_segment_id=str(segment.get("segment_id") or ""), current_segment_index=index)
         concat_path = build_concat_file([item.output_path for item in segment_results], concat_path)
+        _execution_check(execution)
+        _execution_begin_ffmpeg(execution, "assembling", 75, 20, expected, "正在組合時間軸與混音")
         if track is None:
             command = build_timeline_command(ffmpeg_path, concat_path, partial, duration_seconds=expected)
         else:
             command = build_bgm_mix_command(ffmpeg_path, concat_path, partial, track, expected, manifest["profile"])
         partial_created = True
-        result = run_command(command, runner)
+        try:
+            result = run_command(command, runner, expected_duration_seconds=expected)
+        except TypeError as exc:
+            # Keep Phase 3/4A test and caller callables compatible with the new optional hint.
+            if "expected_duration_seconds" not in str(exc):
+                raise
+            result = run_command(command, runner)
         if int(getattr(result, "returncode", 0) or 0) != 0:
             raise ProjectRenderError(str(getattr(result, "stderr", "") or "FFmpeg project render failed"))
+        _execution_check(execution)
+        _execution_update(execution, stage="final_qc", percent=95, message="正在進行 Final QC")
         qc = validate_final_output(partial, manifest, ffprobe_path)
         if not qc.passed:
             raise ProjectRenderError("final QC failed: " + "; ".join(qc.errors))
         report = build_render_report(project_id, manifest, output, qc, segment_results, track, bgm_fp, output_size=partial.stat().st_size)
         report_temp_created = True
         report_temp.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _execution_check(execution)
+        _execution_update(execution, stage="publishing", percent=98, message="正在發佈正式輸出")
         output_published, report_published = publish_final_render_atomically(partial, report_temp, output, report_path)
         _write_log(log_path, project_id, approved_hash, segment_results, concat_path, command, result, qc, track, None)
         concat_path.unlink(missing_ok=True)
+        _execution_update(execution, stage="done", percent=100, message="正式輸出完成")
         return ProjectRenderResult(project_id, output, approved_hash, False, qc.duration_seconds, tuple(segment_results), track is not None, tuple(qc.warnings))
     except Exception as exc:
         _cleanup_render_files(paths, partial_created, report_temp_created, output_published, report_published)
@@ -380,6 +408,21 @@ def _write_log(path: Path, project_id: int, manifest_id: str, segment_results: l
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _execution_check(execution: Any | None) -> None:
+    if execution is not None:
+        execution.check_cancelled()
+
+
+def _execution_update(execution: Any | None, **changes: Any) -> None:
+    if execution is not None:
+        execution.update(**changes)
+
+
+def _execution_begin_ffmpeg(execution: Any | None, stage: str, base_percent: float, span_percent: float, expected_duration: float, message: str) -> None:
+    if execution is not None:
+        execution.begin_ffmpeg(stage, base_percent, span_percent, expected_duration, message)
 
 
 __all__ = [
