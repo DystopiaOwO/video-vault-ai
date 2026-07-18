@@ -31,6 +31,21 @@ JOBS: dict[tuple[int, str], dict] = {}
 JOBS_LOCK = threading.Lock()
 
 
+def _web_dist() -> Path:
+    return Path(__file__).resolve().parents[2] / "web" / "dist"
+
+
+def _static_file(request_path: str) -> Path | None:
+    """Resolve a built web asset without allowing paths outside web/dist."""
+    relative = urlparse(request_path).path.lstrip("/")
+    candidate = (_web_dist() / relative).resolve()
+    try:
+        candidate.relative_to(_web_dist().resolve())
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
+
+
 def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
     db = db_path(cfg)
     init_db(db)

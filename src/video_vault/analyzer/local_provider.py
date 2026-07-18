@@ -3,10 +3,56 @@ from __future__ import annotations
 from pathlib import Path
 import base64
 import json
+import shutil
+import subprocess
+import time
 import urllib.request
 from urllib.error import HTTPError
 
 from .frame_analysis import TAGS
+
+
+def ensure_local_model_server(cfg: dict, base_url: str, model: str) -> bool:
+    """Best-effort start/load for the optional LM Studio local server."""
+    local = (cfg or {}).get("ai", {}).get("local", {})
+    launcher = shutil.which("lms")
+    if not launcher:
+        return False
+
+    subprocess.run([launcher, "server", "start"], check=False)
+    command = [
+        launcher,
+        "load",
+        model,
+        "--gpu",
+        str(local.get("gpu", "max")),
+        "-c",
+        str(local.get("context_length", 8192)),
+        "--parallel",
+        str(local.get("parallel", 1)),
+        "--ttl",
+        str(local.get("ttl_seconds", 300)),
+        "--identifier",
+        model,
+        "-y",
+    ]
+    subprocess.run(command, check=False)
+
+    for _ in range(int(local.get("ready_retries", 30))):
+        if _model_ready(base_url, model):
+            return True
+        time.sleep(float(local.get("ready_interval_seconds", 1)))
+    return False
+
+
+def _model_ready(base_url: str, model: str) -> bool:
+    try:
+        with urllib.request.urlopen(f"{base_url.rstrip('/')}/models", timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        models = payload.get("data", [])
+        return any(str(item.get("id")) == model for item in models if isinstance(item, dict))
+    except Exception:
+        return False
 
 
 class LocalProvider:
