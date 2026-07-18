@@ -6,7 +6,6 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 import cgi
 import json
-import mimetypes
 import subprocess
 import threading
 import time
@@ -14,20 +13,37 @@ import time
 from .analyzer.vision_pipeline import analyze_video_frames
 from .bgm import import_bgm, list_bgm
 from .color import render_color_preview
-from .database import add_frame, add_project_bgm, frames as db_frames, init_db, project_videos, set_project_videos, set_video_status, update_video_summary, upsert_video, videos
+from .database import add_frame, add_project_bgm, frames as db_frames, init_db, project_videos, set_project_videos, set_video_status, upsert_video, videos
 from .ffmpeg_tools import extract_frames, frame_timestamp, metadata
 from .hyperframes import export_hyperframes_project, render_fast_draft
 from .naming import rename_after_perception
 from .opencut import OPENCUT_URL, export_opencut_handoff, opencut_status, start_opencut
 from .paths import db_path
 from .planner import draft_plan, perceive_output, review_text, revise_plan, set_plan_status, video_dir, write_plan_files
-from .project import build_project_plan, can_project_render, create_project, list_projects, mark_project_needs_review, project_detail, project_dir, save_revision_notes, save_segment_review, set_review_status, sync_project_files
+from .project import build_project_plan, create_project, list_projects, project_detail, project_dir, set_review_status, sync_project_files
+from .job_api import cancel_render_job, get_render_job, list_render_jobs, list_render_outputs, start_render_job
+from .render_api import RenderApiError, compile_project, preflight_project, render_settings, update_render_settings
 from .renderer import render_approved
 from .scanner import scan_inbox
 
 
 JOBS: dict[tuple[int, str], dict] = {}
 JOBS_LOCK = threading.Lock()
+
+
+def _web_dist() -> Path:
+    return Path(__file__).resolve().parents[2] / "web" / "dist"
+
+
+def _static_file(request_path: str) -> Path | None:
+    """Resolve a built web asset without allowing paths outside web/dist."""
+    relative = urlparse(request_path).path.lstrip("/")
+    candidate = (_web_dist() / relative).resolve()
+    try:
+        candidate.relative_to(_web_dist().resolve())
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
 
 
 def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
@@ -38,14 +54,10 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
-            if parsed.path == "/" and _web_dist().exists():
-                self._file(_web_dist() / "index.html")
-            elif parsed.path == "/classic" or (parsed.path == "/" and not _web_dist().exists()):
+            if parsed.path == "/":
                 project_id = int(query.get("project_id", ["0"])[0] or 0)
                 self._html(render_page(cfg, db, project_id, query.get("message", [""])[0]))
-            elif parsed.path == "/bgm" and _web_dist().exists():
-                self._file(_web_dist() / "index.html")
-            elif parsed.path in {"/bgm", "/classic-bgm"}:
+            elif parsed.path == "/bgm":
                 self._html(render_bgm_page(db, query.get("message", [""])[0]))
             elif parsed.path == "/api/projects":
                 self._json(list_projects(db))
@@ -55,11 +67,15 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json(video_list(cfg, db))
             elif parsed.path == "/api/bgm":
                 self._json(list_bgm(db))
-            elif parsed.path == "/api/jobs":
-                project_id = int(query.get("project_id", ["0"])[0] or 0)
-                self._json(project_jobs(project_id) if project_id else [])
-            elif _web_dist().exists() and _static_file(parsed.path):
-                self._file(_static_file(parsed.path))
+            elif parsed.path == "/api/project/render/settings":
+                self._json({"ok": True, "settings": render_settings(cfg, int(query.get("project_id", ["0"])[0]))})
+            elif parsed.path == "/api/project/render/jobs":
+                self._json({"ok": True, "jobs": list_render_jobs(cfg, int(query.get("project_id", ["0"])[0]))})
+            elif parsed.path == "/api/project/render/job":
+                job = get_render_job(cfg, int(query.get("project_id", ["0"])[0]), query.get("job_id", [""])[0])
+                self._json({"ok": job is not None, "job": job})
+            elif parsed.path == "/api/project/render/outputs":
+                self._json({"ok": True, "outputs": list_render_outputs(cfg, int(query.get("project_id", ["0"])[0]))})
             else:
                 self.send_error(404)
 
@@ -102,8 +118,8 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     started = start_analyze_job(cfg, db, project_id, data.get("force") == "1")
                     self._redirect(project_id, "內容感知已開始" if started else "內容感知已在執行中")
                 elif path == "/ui/analyze-video":
-                    started = start_analyze_video_job(cfg, db, project_id, int(data.get("video_id", 0)))
-                    self._redirect(project_id, "單支素材感知已開始" if started else "內容感知已在執行中")
+                    analyze_project_video(cfg, db, project_id, int(data.get("video_id", 0)))
+                    self._redirect(project_id, "單支素材感知完成")
                 elif path == "/ui/build-plan":
                     build_project_plan(cfg, db, project_id)
                     self._redirect(project_id, "故事整理已更新")
@@ -117,13 +133,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     started = start_color_job(cfg, db, project_id, data.get("mode") or cfg.get("color", {}).get("default_mode", "safe_restore"))
                     self._redirect(project_id, "調色預覽已開始" if started else "調色預覽已在執行中")
                 elif path == "/ui/opencut-export":
-                    render_clips = data.get("render_clips") == "1"
-                    if render_clips:
-                        ok, reason = can_project_render(cfg, db, project_id)
-                        if not ok:
-                            self._redirect(project_id, f"正式輸出被擋下：{reason}")
-                            return
-                    out = export_opencut_handoff(cfg, db, project_id, render_clips, int(data.get("max_segments", 20)))
+                    out = export_opencut_handoff(cfg, db, project_id, data.get("render_clips") == "1", int(data.get("max_segments", 20)))
                     self._redirect(project_id, f"OpenCut 匯出完成：{out}")
                 elif path == "/ui/opencut-handoff":
                     started = start_opencut_job(cfg, db, project_id, data.get("render_clips") == "1", int(data.get("max_segments", 20)))
@@ -137,11 +147,6 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     status = start_opencut()
                     self._redirect(project_id, "OpenCut 已啟動" if status.get("running") else f"OpenCut 啟動失敗：{status.get('error', '')}")
                 elif path == "/ui/hyperframes-export":
-                    if data.get("render") == "1":
-                        ok, reason = can_project_render(cfg, db, project_id)
-                        if not ok:
-                            self._redirect(project_id, f"正式輸出被擋下：{reason}")
-                            return
                     started = start_hyperframes_job(cfg, db, project_id, data.get("render") == "1", int(data.get("max_segments", 20)))
                     self._redirect(project_id, "正在產生 HyperFrames 初剪" if started else "HyperFrames 工作已在執行中")
                 elif path == "/ui/hyperframes-folder":
@@ -154,87 +159,54 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     self._redirect(project_id, "已停止目前背景工作")
                 elif path == "/ui/project-bgm":
                     add_project_bgm(db, project_id, int(data.get("bgm_id", 0)))
-                    mark_project_needs_review(cfg, db, project_id)
-                    self._redirect(project_id, "BGM 已加入本專案，專案已回到待審")
+                    self._redirect(project_id, "BGM 已加入本專案")
                 else:
                     self.send_error(404)
             except Exception as exc:
                 self._redirect(project_id, f"操作失敗：{exc}")
 
         def _api_post(self, path: str, data: dict) -> None:
-            if path == "/api/process-inbox":
+            try:
+                self._render_api_post(path, data)
+            except RenderApiError as exc:
+                self._json(exc.as_response())
+            except (ValueError, KeyError, OSError) as exc:
+                self._json({"ok": False, "error": {"code": "request_failed", "message": str(exc), "details": {}}})
+
+        def _render_api_post(self, path: str, data: dict) -> None:
+            project_id = int(data.get("project_id", 0) or 0)
+            if path == "/api/project/render/settings":
+                self._json({"ok": True, "settings": update_render_settings(cfg, db, project_id, data.get("settings", data))})
+            elif path == "/api/project/render/compile":
+                self._json(compile_project(cfg, db, project_id, data.get("settings")))
+            elif path == "/api/project/render/validate":
+                self._json(preflight_project(cfg, db, project_id, final=False, overrides=data.get("settings")))
+            elif path == "/api/project/render/preview":
+                self._json(start_render_job(cfg, db, project_id, "accurate_preview", data.get("settings")))
+            elif path == "/api/project/render/final":
+                self._json(start_render_job(cfg, db, project_id, "final", data.get("settings")))
+            elif path == "/api/project/render/cancel":
+                self._json(cancel_render_job(cfg, project_id, str(data.get("job_id", ""))))
+            elif path == "/api/process-inbox":
                 self._json(process_inbox(cfg, db))
             elif path == "/api/project/analyze":
                 self._json(analyze_project(cfg, db, int(data.get("project_id", 0)), bool(data.get("force"))))
-            elif path == "/api/project/analyze-job":
-                project_id = int(data.get("project_id", 0))
-                started = start_analyze_job(cfg, db, project_id, bool(data.get("force")))
-                self._json({"ok": started, "message": "內容感知已開始" if started else "內容感知已在執行中"})
             elif path == "/api/project/analyze-video":
-                project_id = int(data.get("project_id", 0))
-                started = start_analyze_video_job(cfg, db, project_id, int(data.get("video_id", 0)))
-                self._json({"ok": started, "message": "單支素材感知已開始" if started else "內容感知已在執行中"})
-            elif path == "/api/project/clip-summary":
-                project_id = int(data.get("project_id", 0))
-                ok = update_clip_summary(cfg, db, project_id, int(data.get("video_id", 0)), str(data.get("summary", "")))
-                self._json({"ok": ok})
+                self._json(analyze_project_video(cfg, db, int(data.get("project_id", 0)), int(data.get("video_id", 0))))
             elif path == "/api/projects":
                 project_id = create_project(db, data.get("name", ""), [int(v) for v in data.get("video_ids", [])], category=data.get("category", "unknown"), content_type=data.get("content_type", "diary_montage"), platform=data.get("platform", "YouTube"), target_duration_seconds=float(data.get("target_duration_seconds") or 0))
                 sync_project_files(cfg, db, project_id)
                 self._json({"ok": True, "id": project_id})
             elif path == "/api/project/build-plan":
                 self._json({"ok": True, "plan": build_project_plan(cfg, db, int(data.get("project_id", 0)))})
-            elif path == "/api/project/revise":
-                project_id = int(data.get("project_id", 0))
-                save_revision_notes(cfg, project_id, data.get("notes", ""))
-                self._json({"ok": True, "plan": build_project_plan(cfg, db, project_id)})
-            elif path == "/api/project/segments":
-                project_id = int(data.get("project_id", 0))
-                self._json({"ok": True, "path": str(save_segment_review(cfg, db, project_id, data.get("segments", [])))})
             elif path == "/api/project/bgm":
                 add_project_bgm(db, int(data.get("project_id", 0)), int(data.get("bgm_id", 0)))
-                mark_project_needs_review(cfg, db, int(data.get("project_id", 0)))
                 self._json({"ok": True})
             elif path == "/api/project/color-preview":
                 self._json(color_preview_project(cfg, db, int(data.get("project_id", 0)), data.get("mode") or cfg.get("color", {}).get("default_mode", "safe_restore")))
-            elif path == "/api/project/color-job":
-                project_id = int(data.get("project_id", 0))
-                started = start_color_job(cfg, db, project_id, data.get("mode") or cfg.get("color", {}).get("default_mode", "safe_restore"))
-                self._json({"ok": started, "message": "調色預覽已開始" if started else "調色預覽已在執行中"})
             elif path == "/api/project/opencut-export":
-                project_id = int(data.get("project_id", 0))
-                if bool(data.get("render_clips")):
-                    ok, reason = can_project_render(cfg, db, project_id)
-                    if not ok:
-                        self._json({"ok": False, "error": f"正式輸出被擋下：{reason}"})
-                        return
-                out = export_opencut_handoff(cfg, db, project_id, bool(data.get("render_clips")), int(data.get("max_segments", 20)))
+                out = export_opencut_handoff(cfg, db, int(data.get("project_id", 0)), bool(data.get("render_clips")), int(data.get("max_segments", 20)))
                 self._json({"ok": True, "folder": str(out)})
-            elif path == "/api/project/opencut-job":
-                project_id = int(data.get("project_id", 0))
-                started = start_opencut_job(cfg, db, project_id, bool(data.get("render_clips")), int(data.get("max_segments", 20)))
-                self._json({"ok": started, "message": "OpenCut 工作已開始" if started else "OpenCut 工作已在執行中"})
-            elif path == "/api/project/hyperframes-export":
-                project_id = int(data.get("project_id", 0))
-                render = bool(data.get("render"))
-                if render:
-                    ok, reason = can_project_render(cfg, db, project_id)
-                    if not ok:
-                        self._json({"ok": False, "error": f"正式輸出被擋下：{reason}"})
-                        return
-                out = export_hyperframes_project(cfg, db, project_id, render, int(data.get("max_segments", 20)))
-                result = render_fast_draft(out, cfg, db=db, project_id=project_id) if render else None
-                if result and not result["ok"]:
-                    self._json({"ok": False, "folder": str(out), "error": f"快速輸出 MP4 失敗：{result['stderr'][-500:]}"})
-                    return
-                self._json({"ok": True, "folder": str(out), "output": result["output"] if result else ""})
-            elif path == "/api/project/hyperframes-job":
-                project_id = int(data.get("project_id", 0))
-                started = start_hyperframes_job(cfg, db, project_id, bool(data.get("render")), int(data.get("max_segments", 20)))
-                self._json({"ok": started, "message": "HyperFrames 工作已開始" if started else "HyperFrames 工作已在執行中"})
-            elif path == "/api/project/stop-jobs":
-                stop_project_jobs(int(data.get("project_id", 0)))
-                self._json({"ok": True, "message": "已停止目前背景工作"})
             elif path == "/api/project/approve":
                 set_review_status(cfg, db, int(data.get("project_id", 0)), "approved", data.get("notes", ""))
                 self._json({"ok": True})
@@ -242,8 +214,8 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 set_review_status(cfg, db, int(data.get("project_id", 0)), "rejected", data.get("notes", ""))
                 self._json({"ok": True})
             elif path == "/api/project/render-dry-run":
-                ok, reason = can_project_render(cfg, db, int(data.get("project_id", 0)))
-                self._json({"ok": ok, "message": "已核准，可以進入輸出檢查" if ok else reason})
+                review = _read_json(Path(cfg["library_root"]) / "08_projects" / f"project_{data.get('project_id', 0)}" / "review_status.json")
+                self._json({"ok": bool(review.get("approved_by_user")), "message": "已核准，可以進入輸出檢查" if review.get("approved_by_user") else "尚未核准，不能輸出"})
             else:
                 self._video_post(path, data, db)
 
@@ -305,30 +277,11 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             self.end_headers()
             self.wfile.write(body)
 
-        def _file(self, path: Path) -> None:
-            body = path.read_bytes()
-            self.send_response(200)
-            self.send_header("content-type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
-            self.send_header("cache-control", "no-store")
-            self.send_header("content-length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
         def log_message(self, fmt: str, *args) -> None:
             return
 
     print(f"video-vault-ai UI: http://{host}:{port}")
     ThreadingHTTPServer((host, port), Handler).serve_forever()
-
-
-def _web_dist() -> Path:
-    return Path(__file__).resolve().parents[2] / "web" / "dist"
-
-
-def _static_file(url_path: str) -> Path | None:
-    dist = _web_dist().resolve()
-    path = (dist / url_path.lstrip("/")).resolve()
-    return path if path.exists() and path.is_file() and dist in path.parents else None
 
 
 def render_page(cfg: dict, db: Path, project_id: int = 0, message: str = "") -> str:
@@ -421,18 +374,6 @@ def start_analyze_job(cfg: dict, db: Path, project_id: int, force: bool) -> bool
     return True
 
 
-def start_analyze_video_job(cfg: dict, db: Path, project_id: int, video_id: int) -> bool:
-    key = (project_id, "analyze")
-    with JOBS_LOCK:
-        current = JOBS.get(key)
-        if current and current.get("status") in {"queued", "running"}:
-            return False
-        JOBS[key] = {"kind": "內容感知", "status": "queued", "message": "等待開始", "done": 0, "total": 1, "percent": 0, "updated_at": time.time()}
-    thread = threading.Thread(target=_analyze_video_job, args=(cfg, db, project_id, video_id), daemon=True)
-    thread.start()
-    return True
-
-
 def start_color_job(cfg: dict, db: Path, project_id: int, mode: str) -> bool:
     key = (project_id, "color")
     with JOBS_LOCK:
@@ -479,16 +420,14 @@ def stop_project_jobs(project_id: int) -> None:
         for (pid, _), job in JOBS.items():
             if pid == project_id and job.get("status") in {"queued", "running"}:
                 job.update(status="stopped", message="已由使用者停止", updated_at=time.time())
-    _kill_video_vault_processes()
+    _kill_video_vault_ffmpeg()
 
 
-def _kill_video_vault_processes() -> None:
+def _kill_video_vault_ffmpeg() -> None:
     pattern = "D:\\VideoLibrary"
     cmd = (
-        "Stop-Process -Name ffmpeg -Force -ErrorAction SilentlyContinue; "
-        "$names = @('ffmpeg.exe','node.exe','npx.cmd','bun.exe','chrome-headless-shell.exe','chrome.exe'); "
-        "Get-CimInstance Win32_Process | "
-        f"Where-Object {{$names -contains $_.Name -and ($_.CommandLine -like '*{pattern}*' -or $_.CommandLine -like '*hyperframes*')}} | "
+        "Get-CimInstance Win32_Process -Filter \"name='ffmpeg.exe'\" | "
+        f"Where-Object {{$_.CommandLine -like '*{pattern}*'}} | "
         "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
     )
     subprocess.run(["powershell", "-NoProfile", "-Command", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -516,7 +455,7 @@ def _analyze_job(cfg: dict, db: Path, project_id: int, force: bool) -> None:
             if _job_stopped(project_id, "analyze"):
                 return
             _set_job(project_id, "analyze", message=f"正在分析 {video.get('filename', '')}", done=index - 1)
-            analyze_ui_video(cfg, db, video, _analyze_progress(project_id, video.get("filename", ""), index - 1, max(len(todo), 1)))
+            analyze_ui_video(cfg, db, video)
             video = rename_after_perception(cfg, db, video)
             perceive_output(cfg, db, video)
             write_plan_files(cfg, draft_plan(cfg, db, video))
@@ -527,29 +466,6 @@ def _analyze_job(cfg: dict, db: Path, project_id: int, force: bool) -> None:
         _set_job(project_id, "analyze", status="done", message=f"內容感知完成：{len(processed)} 支", processed=processed, percent=100)
     except Exception as exc:
         _set_job(project_id, "analyze", status="failed", message=f"內容感知失敗：{exc}")
-
-
-def _analyze_video_job(cfg: dict, db: Path, project_id: int, video_id: int) -> None:
-    try:
-        video = next((dict(v) for v in project_videos(db, project_id) if int(v["id"]) == video_id), None)
-        if not video:
-            _set_job(project_id, "analyze", status="failed", message="找不到這支素材", percent=100)
-            return
-        _set_job(project_id, "analyze", status="running", message=f"正在分析 {video.get('filename', '')}", done=0, total=1, percent=0)
-        analyze_project_video(cfg, db, project_id, video_id, _analyze_progress(project_id, video.get("filename", ""), 0, 1))
-        _set_job(project_id, "analyze", status="done", message=f"單支素材感知完成：{video.get('filename', '')}", done=1, total=1, percent=100)
-    except Exception as exc:
-        _set_job(project_id, "analyze", status="failed", message=f"單支素材感知失敗：{exc}")
-
-
-def _analyze_progress(project_id: int, filename: str, base: int, total_videos: int):
-    def update(frame_index: int, frame_total: int, frame: dict) -> None:
-        if not frame_total:
-            return
-        percent = int(((base + frame_index / frame_total) / total_videos) * 100)
-        _set_job(project_id, "analyze", message=f"正在分析 {filename}：frame {frame_index}/{frame_total}", percent=min(99, percent))
-
-    return update
 
 
 def _color_job(cfg: dict, db: Path, project_id: int, mode: str) -> None:
@@ -567,18 +483,11 @@ def _color_job(cfg: dict, db: Path, project_id: int, mode: str) -> None:
             _set_job(project_id, "color", message=f"已完成 {video.get('filename', '')}", done=index)
         _set_job(project_id, "color", status="done", message=f"調色預覽完成：{len(files)} 支", files=files, percent=100)
     except Exception as exc:
-        if _job_stopped(project_id, "color"):
-            return
         _set_job(project_id, "color", status="failed", message=f"調色預覽失敗：{exc}")
 
 
 def _opencut_job(cfg: dict, db: Path, project_id: int, render_clips: bool, max_segments: int) -> None:
     try:
-        if render_clips:
-            ok, reason = can_project_render(cfg, db, project_id)
-            if not ok:
-                _set_job(project_id, "opencut", status="failed", message=f"正式輸出被擋下：{reason}", percent=100)
-                return
         if _job_stopped(project_id, "opencut"):
             return
         _set_job(project_id, "opencut", status="running", message="正在檢查並啟動 OpenCut", done=0, percent=5)
@@ -596,35 +505,25 @@ def _opencut_job(cfg: dict, db: Path, project_id: int, render_clips: bool, max_s
         _open_folder(out)
         _set_job(project_id, "opencut", status="done", message=f"OpenCut 已啟動，素材包已完成：{out}", done=3, folder=str(out), percent=100)
     except Exception as exc:
-        if _job_stopped(project_id, "opencut"):
-            return
         _set_job(project_id, "opencut", status="failed", message=f"OpenCut 交接失敗：{exc}")
 
 
 def _hyperframes_job(cfg: dict, db: Path, project_id: int, render: bool, max_segments: int) -> None:
     try:
-        if render:
-            ok, reason = can_project_render(cfg, db, project_id)
-            if not ok:
-                _set_job(project_id, "hyperframes", status="failed", message=f"正式輸出被擋下：{reason}", percent=100)
-                return
-            _set_job(project_id, "hyperframes", status="running", message="正在卸載本機模型以釋放顯存", done=0, percent=3)
-        _set_job(project_id, "hyperframes", status="running", message="正在產生 HyperFrames timeline" + (" 與調色片段" if render else ""), done=0, percent=5)
-        out = export_hyperframes_project(cfg, db, project_id, render, max_segments)
+        _set_job(project_id, "hyperframes", status="running", message="正在產生調色片段與 HyperFrames timeline", done=0, percent=5)
+        out = export_hyperframes_project(cfg, db, project_id, True, max_segments)
         if _job_stopped(project_id, "hyperframes"):
             return
         _set_job(project_id, "hyperframes", message="正在打開初剪資料夾", done=1, percent=60 if render else 80)
         _open_folder(out)
         if render:
             _set_job(project_id, "hyperframes", message="正在快速輸出 story_draft_fast.mp4", done=2, percent=75)
-            result = render_fast_draft(out, cfg, db=db, project_id=project_id)
+            result = render_fast_draft(out, cfg)
             if not result["ok"]:
                 _set_job(project_id, "hyperframes", status="failed", message=f"快速初剪輸出失敗：{result['stderr'][-500:]}", done=2, folder=str(out))
                 return
         _set_job(project_id, "hyperframes", status="done", message=f"HyperFrames 初剪已完成：{out}", done=3 if render else 2, folder=str(out), percent=100)
     except Exception as exc:
-        if _job_stopped(project_id, "hyperframes"):
-            return
         _set_job(project_id, "hyperframes", status="failed", message=f"HyperFrames 初剪失敗：{exc}")
 
 
@@ -826,7 +725,6 @@ def upload_project(handler: BaseHTTPRequestHandler, cfg: dict, db: Path) -> dict
         name = Path(item.filename).name
         if Path(name).suffix.lower() not in {".mp4", ".mov", ".m4v"}:
             continue
-        source_dir.mkdir(parents=True, exist_ok=True)
         out = source_dir / name
         with out.open("wb") as f:
             while chunk := item.file.read(1024 * 1024):
@@ -836,8 +734,6 @@ def upload_project(handler: BaseHTTPRequestHandler, cfg: dict, db: Path) -> dict
         saved.append(str(out))
     set_project_videos(db, project_id, list(dict.fromkeys(existing)))
     sync_project_files(cfg, db, project_id)
-    if saved:
-        mark_project_needs_review(cfg, db, project_id)
     return {"ok": bool(saved), "files": saved, "project_id": project_id}
 
 
@@ -884,26 +780,17 @@ def analyze_project(cfg: dict, db: Path, project_id: int, force: bool = False) -
     return {"ok": True, "processed": processed}
 
 
-def analyze_project_video(cfg: dict, db: Path, project_id: int, video_id: int, progress=None) -> dict:
+def analyze_project_video(cfg: dict, db: Path, project_id: int, video_id: int) -> dict:
     video = next((dict(v) for v in project_videos(db, project_id) if int(v["id"]) == video_id), None)
     if not video:
         return {"ok": False, "error": "video not found in project"}
-    analyze_ui_video(cfg, db, video, progress)
+    analyze_ui_video(cfg, db, video)
     video = rename_after_perception(cfg, db, video)
     perceive_output(cfg, db, video)
     write_plan_files(cfg, draft_plan(cfg, db, video))
     set_video_status(db, video_id, "perceived")
     build_project_plan(cfg, db, project_id)
     return {"ok": True, "processed": [{"id": video_id, "filename": video["filename"]}]}
-
-
-def update_clip_summary(cfg: dict, db: Path, project_id: int, video_id: int, summary: str) -> bool:
-    if not any(int(v["id"]) == video_id for v in project_videos(db, project_id)):
-        return False
-    ok = update_video_summary(db, video_id, summary.strip())
-    if ok:
-        mark_project_needs_review(cfg, db, project_id)
-    return ok
 
 
 def color_preview_project(cfg: dict, db: Path, project_id: int, mode: str) -> dict:
@@ -915,12 +802,12 @@ def color_preview_project(cfg: dict, db: Path, project_id: int, mode: str) -> di
     return {"ok": True, "mode": mode, "files": files}
 
 
-def analyze_ui_video(cfg: dict, db: Path, video: dict, progress=None) -> None:
+def analyze_ui_video(cfg: dict, db: Path, video: dict) -> None:
     if not db_frames(db, int(video["id"])):
         out_dir = Path(cfg["library_root"]) / "03_frames" / Path(video["filename"]).stem
         for frame in extract_frames(Path(video["current_path"]), out_dir, cfg):
             add_frame(db, int(video["id"]), frame, frame_timestamp(frame, cfg))
-    analyze_video_frames(db, video, cfg, progress)
+    analyze_video_frames(db, video, cfg)
 
 
 def video_detail(cfg: dict, video_id: int) -> dict:

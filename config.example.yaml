@@ -10,8 +10,12 @@ ffprobe_path: "ffprobe"
 ai:
   provider: "mock"
   local:
-    ollama_url: "http://localhost:11434"
-    model: "gemma4:12b"
+    # LM Studio / OpenAI-compatible local endpoint.
+    base_url: "http://127.0.0.1:1234/v1"
+    model: "qwen/qwen2.5-vl-7b"
+    max_concurrent_requests: 1
+    use_same_model_for_revision: true
+    revision_model: ""
   cloud:
     provider: "openai"
     model: "gpt-4.1-mini"

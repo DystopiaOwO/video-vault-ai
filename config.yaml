@@ -1,0 +1,20 @@
+library_root: "D:/VideoLibrary"
+inbox_dir: "00_inbox"
+frame_interval_seconds: 5
+proxy_height: 1080
+default_ingest_mode: "copy"
+ffmpeg_path: "ffmpeg"
+ffprobe_path: "ffprobe"
+color:
+  default_mode: "dji_lut"
+  dji_lut_path: "C:/Users/b3b3b/Downloads/DJI OSMO Pocket 4 D-Log to Rec.709 vivid V1.0.cube"
+  video_encoder: "h264_nvenc"
+ai:
+  provider: "local"
+  local:
+    base_url: "http://127.0.0.1:1234/v1"
+    model: "qwen/qwen2.5-vl-7b"
+  cloud:
+    provider: "openai"
+    model: "gpt-4.1-mini"
+    api_key_env: "OPENAI_API_KEY"

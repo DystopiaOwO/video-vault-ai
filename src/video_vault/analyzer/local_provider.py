@@ -9,35 +9,71 @@ import time
 import urllib.request
 from urllib.error import HTTPError
 
-from .frame_analysis import PROMPT_VERSION, TAGS, has_cjk
+from .frame_analysis import TAGS
+
+
+def ensure_local_model_server(cfg: dict, base_url: str, model: str) -> bool:
+    """Best-effort start/load for the optional LM Studio local server."""
+    local = (cfg or {}).get("ai", {}).get("local", {})
+    launcher = shutil.which("lms")
+    if not launcher:
+        return False
+
+    subprocess.run([launcher, "server", "start"], check=False)
+    command = [
+        launcher,
+        "load",
+        model,
+        "--gpu",
+        str(local.get("gpu", "max")),
+        "-c",
+        str(local.get("context_length", 8192)),
+        "--parallel",
+        str(local.get("parallel", 1)),
+        "--ttl",
+        str(local.get("ttl_seconds", 300)),
+        "--identifier",
+        model,
+        "-y",
+    ]
+    subprocess.run(command, check=False)
+
+    for _ in range(int(local.get("ready_retries", 30))):
+        if _model_ready(base_url, model):
+            return True
+        time.sleep(float(local.get("ready_interval_seconds", 1)))
+    return False
+
+
+def _model_ready(base_url: str, model: str) -> bool:
+    try:
+        with urllib.request.urlopen(f"{base_url.rstrip('/')}/models", timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        models = payload.get("data", [])
+        return any(str(item.get("id")) == model for item in models if isinstance(item, dict))
+    except Exception:
+        return False
 
 
 class LocalProvider:
     provider = "local"
-    prompt_version = PROMPT_VERSION
 
     def __init__(self, cfg: dict | None = None):
         local = (cfg or {}).get("ai", {}).get("local", {})
         self.base_url = str(local.get("base_url") or local.get("lmstudio_url") or "http://127.0.0.1:1234/v1").rstrip("/")
         self.model = str(local.get("model") or "local-vision")
-        ensure_local_model_server(cfg or {}, self.base_url, self.model)
 
     def analyze_frame(self, frame_path: Path, timestamp: float, video: dict) -> tuple[dict, dict]:
         raw = self._post(self._request_body(frame_path, timestamp, video))
-        parsed = _parse(raw)
-        if not has_cjk(parsed["summary"] + parsed["suggested_use"]):
-            raw = self._post(self._request_body(frame_path, timestamp, video, "你剛剛回英文了。請重新輸出同一個 JSON，但 summary 與 suggested_use 必須全部使用繁體中文。"))
-            parsed = _parse(raw)
-        return parsed, raw
+        return _parse(raw), raw
 
-    def _request_body(self, frame_path: Path, timestamp: float, video: dict, extra: str = "") -> dict:
+    def _request_body(self, frame_path: Path, timestamp: float, video: dict) -> dict:
         image = base64.b64encode(frame_path.read_bytes()).decode("ascii")
         prompt = (
-            "請分析這張從影片抽出的單一畫面，供影片剪輯使用。只回傳 strict JSON，不要 Markdown，不要解釋："
+            "Analyze one sampled video frame for a video editor. Return strict JSON only: "
             '{"summary": string, "tags": string[], "visual_quality_score": number, '
             '"usefulness_score": number, "suggested_use": string}. '
-            "summary 必須用繁體中文描述看得見的畫面內容；suggested_use 必須用繁體中文，例如：短影音、補畫面、產品特寫、轉場、開場。"
-            f"tags 必須維持英文，且只能使用這些 tag：{', '.join(TAGS)}。不要猜測畫面中看不到的 tag。"
+            f"Use only these tags: {', '.join(TAGS)}. Do not guess tags that are not visible. "
             "coffee means coffee gear, beans, espresso, pour-over, cup, kettle, dripper, or cafe scene. "
             "matcha means green tea powder, whisk, bowl, or matcha drink. "
             "roasting means beans, roaster, roasting machine, smoke, or roast process. "
@@ -45,8 +81,8 @@ class LocalProvider:
             "food means edible food or drinks. landscape means wide outdoor/scenery view. "
             "closeup means subject fills the frame. hands means visible hands. "
             "steam means visible vapor. dripping means visible liquid drip/pour. "
-            "usefulness_score 對清楚動作、穩定構圖、特寫、手部、蒸氣、滴落、明確建立場景給高分；模糊、過暗、過曝、不清楚給低分。"
-            f"Filename: {video.get('filename')}; timestamp: {timestamp:.1f}s. {extra}"
+            "Score usefulness higher for clear action, stable framing, closeups, hands, steam, dripping, or strong establishing shots; lower for blur, darkness, overexposure, or unclear frames. "
+            f"Filename: {video.get('filename')}; timestamp: {timestamp:.1f}s."
         )
         return {
             "model": self.model,
@@ -87,7 +123,7 @@ def _parse(raw: dict) -> dict:
         "tags": tags,
         "visual_quality_score": _score(data.get("visual_quality_score", 0)),
         "usefulness_score": _score(data.get("usefulness_score", 0)),
-        "suggested_use": str(data.get("suggested_use", "補畫面")),
+        "suggested_use": str(data.get("suggested_use", "B-roll")),
     }
 
 
@@ -96,35 +132,3 @@ def _score(value: object) -> float:
     if score > 1:
         score = score / 10
     return max(0.0, min(1.0, score))
-
-
-def ensure_local_model_server(cfg: dict, base_url: str, model: str) -> None:
-    if _model_ready(base_url, model):
-        return
-    lms = shutil.which("lms")
-    if not lms:
-        raise RuntimeError("找不到 lms CLI，請先在 LM Studio 安裝 CLI")
-    subprocess.run([lms, "server", "start"], capture_output=True, text=True, timeout=30)
-    if _model_ready(base_url, model, wait_seconds=8):
-        return
-    local = cfg.get("ai", {}).get("local", {})
-    context = str(local.get("context_length") or 8192)
-    parallel = str(local.get("parallel") or 1)
-    gpu = str(local.get("gpu") or "max")
-    ttl = str(local.get("ttl_seconds") or 300)
-    subprocess.run([lms, "load", model, "--gpu", gpu, "-c", context, "--parallel", parallel, "--ttl", ttl, "--identifier", model, "-y"], capture_output=True, text=True, timeout=180)
-    if not _model_ready(base_url, model, wait_seconds=20):
-        raise RuntimeError(f"LM Studio server 已啟動，但模型尚未可用：{model}")
-
-
-def _model_ready(base_url: str, model: str, wait_seconds: int = 0) -> bool:
-    end = time.time() + wait_seconds
-    while True:
-        try:
-            with urllib.request.urlopen(f"{base_url}/models", timeout=2) as res:
-                data = json.loads(res.read().decode("utf-8"))
-                return any(item.get("id") == model for item in data.get("data", []))
-        except Exception:
-            if time.time() >= end:
-                return False
-            time.sleep(1)

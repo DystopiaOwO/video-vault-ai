@@ -7,8 +7,6 @@ def test_mock_analyze_returns_segments():
     result = MockProvider().analyze({"filename": "coffee.mp4", "category": "coffee", "duration_seconds": 90})
     assert result["segments"]
     assert result["segments"][0]["segment_type"] == "shorts"
-    assert result["segments"][0]["suggested_use"] == "短影音"
-    assert "初步內容感知" in result["summary"]
 
 
 def test_mock_frame_pipeline_writes_cache_and_segments(tmp_path):
@@ -21,8 +19,6 @@ def test_mock_frame_pipeline_writes_cache_and_segments(tmp_path):
     cfg = {"library_root": str(tmp_path), "frame_interval_seconds": 5, "ai": {"provider": "mock"}}
     result = analyze_video_frames(db, {"id": video_id, "filename": "a.mp4", "category": "coffee"}, cfg)
     assert result["frames"][0]["tags"]
-    assert "咖啡" in result["frames"][0]["summary"]
-    assert result["segments"][0]["suggested_use"] == "短影音"
     assert frames(db, video_id)[0]["vision_summary"]
     assert segments(db, video_id)
     assert list((tmp_path / "05_index" / "raw_ai_outputs").glob("*.json"))
