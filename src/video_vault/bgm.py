@@ -5,7 +5,7 @@ import shutil
 import re
 import urllib.request
 
-from .database import add_bgm_track, add_project_bgm, bgm_tracks, project_bgm_tracks
+from .database import add_bgm_track, add_project_bgm, bgm_tracks
 from .ffmpeg_tools import metadata
 
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
@@ -50,20 +50,25 @@ ONLINE_BGM = {
 
 
 def auto_assign_bgm(cfg: dict, db: Path, project_id: int, project_info: dict, groups: list[dict]) -> dict | None:
-    if project_bgm_tracks(db, project_id):
-        return None
+    recommendations = recommend_bgm_for_groups(cfg, db, project_id, project_info, groups)
+    return recommendations[0]["track"] if recommendations else None
+
+
+def recommend_bgm_for_groups(cfg: dict, db: Path, project_id: int, project_info: dict, groups: list[dict]) -> list[dict]:
     tracks = [dict(row) for row in bgm_tracks(db)]
     if not tracks:
         online = download_online_bgm(cfg, db, _online_key(project_info, groups))
         if online:
             tracks = [online]
     if not tracks:
-        return None
-    target = _project_mood(project_info, groups)
-    ranked = sorted(tracks, key=lambda track: _bgm_score(track, target), reverse=True)
-    chosen = ranked[0]
-    add_project_bgm(db, project_id, int(chosen["id"]))
-    return chosen
+        return []
+    result = []
+    for group in groups:
+        target = _group_mood(project_info, group)
+        chosen = sorted(tracks, key=lambda track: _bgm_score(track, target), reverse=True)[0]
+        add_project_bgm(db, project_id, int(chosen["id"]))
+        result.append({"group": group.get("label", ""), "activity": group.get("activity", ""), "mood": sorted(target), "track": chosen})
+    return result
 
 
 def download_online_bgm(cfg: dict, db: Path, key: str = "default") -> dict | None:
@@ -128,6 +133,10 @@ def _project_mood(project_info: dict, groups: list[dict]) -> set[str]:
     if {"coffee", "matcha", "food", "飲食"} & words:
         return {"coffee", "food", "warm", "chill", "lofi", "cozy"}
     return {"vlog", "chill", "bright"}
+
+
+def _group_mood(project_info: dict, group: dict) -> set[str]:
+    return _project_mood(project_info, [group])
 
 
 def _online_key(project_info: dict, groups: list[dict]) -> str:

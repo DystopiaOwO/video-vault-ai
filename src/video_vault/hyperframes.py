@@ -3,17 +3,19 @@ from __future__ import annotations
 from html import escape
 from pathlib import Path
 import json
-import re
 import shutil
 import subprocess
 
+from .color import run_ffmpeg, video_decode_args, video_encode_args
 from .opencut import export_opencut_handoff
-from .paths import db_path
 from .project import assert_project_approved, project_dir
 
 
 def export_hyperframes_project(cfg: dict, db: Path, project_id: int, render_clips: bool = True, max_segments: int = 20) -> Path:
-    handoff = export_opencut_handoff(cfg, db, project_id, render_clips=render_clips, max_segments=max_segments)
+    if render_clips:
+        unload_local_llm_model(cfg)
+    # ponytail: avoid CPU-heavy LUT pre-render here; dedicated OpenCut graded clips can do that when explicitly requested.
+    handoff = export_opencut_handoff(cfg, db, project_id, render_clips=False, max_segments=max_segments)
     data = json.loads((handoff / "opencut_handoff.json").read_text(encoding="utf-8"))
     out = project_dir(cfg, project_id) / "output" / "hyperframes"
     media = out / "media"
@@ -26,40 +28,22 @@ def export_hyperframes_project(cfg: dict, db: Path, project_id: int, render_clip
         dst = media / f"{i:03}_{src.name}"
         if src.exists() and not dst.exists():
             shutil.copy2(src, dst)
-        speed = float(seg.get("speed", 1.0) or 1.0)
-        source_in = 0.0 if seg.get("graded_clip") else float(seg.get("start_seconds", seg.get("source_in", 0)) or 0)
-        source_out = float(seg.get("end_seconds", seg.get("source_out", source_in)) or source_in)
         duration = _duration(seg)
-        clips.append({
-            **seg,
-            "file": dst.name,
-            "source_in": round(source_in, 3),
-            "source_out": round(source_out, 3),
-            "timeline_start": round(t, 3),
-            "duration": round(duration, 3),
-            "speed": speed,
-        })
+        clips.append({**seg, "file": dst.name, "timeline_start": round(t, 3), "duration": round(duration, 3)})
         t += duration
 
     bgm = _copy_bgm(data, media)
-    timeline = {
-        "kind": "hyperframes_preview",
-        "project": data["project"],
-        "manifest": data.get("manifest"),
-        "clips": clips,
-        "title_cards": data.get("title_cards", []),
-        "bgm": bgm,
-        "duration": round(t, 3),
-    }
-    (out / "timeline.json").write_text(json.dumps(timeline, ensure_ascii=False, indent=2), encoding="utf-8")
-    (out / "index.html").write_text(_html(data["project"]["name"], clips, bgm, t, data.get("title_cards", [])), encoding="utf-8")
+    (out / "timeline.json").write_text(json.dumps({"project": data["project"], "clips": clips, "bgm": bgm, "duration": round(t, 3)}, ensure_ascii=False, indent=2), encoding="utf-8")
+    (out / "index.html").write_text(_html(data["project"]["name"], clips, bgm, t), encoding="utf-8")
     (out / "README.md").write_text(_readme(out), encoding="utf-8")
     return out
 
 
-def render_hyperframes_project(project: Path, output: Path | None = None, cfg: dict | None = None,
-                               db: Path | None = None, project_id: int | None = None) -> dict:
-    _assert_managed_project_approved(cfg, db, project, project_id, "HyperFrames MP4 輸出")
+def render_hyperframes_project(project: Path, output: Path | None = None, cfg: dict | None = None, db: Path | None = None, project_id: int | None = None) -> dict:
+    if cfg is not None and db is not None and project_id is not None:
+        assert_project_approved(cfg, db, project_id, "HyperFrames MP4 輸出")
+    if cfg is not None:
+        unload_local_llm_model(cfg)
     output = output or project / "story_draft.mp4"
     npx = shutil.which("npx.cmd") or shutil.which("npx")
     if not npx:
@@ -69,27 +53,33 @@ def render_hyperframes_project(project: Path, output: Path | None = None, cfg: d
     return {"ok": proc.returncode == 0, "output": str(output), "stdout": proc.stdout, "stderr": proc.stderr}
 
 
-def render_fast_draft(project: Path, cfg: dict, output: Path | None = None,
-                      db: Path | None = None, project_id: int | None = None) -> dict:
-    """Legacy Rough Preview only; this is never Accurate Preview or Final."""
-    _assert_managed_project_approved(cfg, db, project, project_id, "HyperFrames 粗略預覽輸出")
+def render_fast_draft(project: Path, cfg: dict, output: Path | None = None, db: Path | None = None, project_id: int | None = None) -> dict:
+    if db is not None and project_id is not None:
+        assert_project_approved(cfg, db, project_id, "HyperFrames MP4 輸出")
+    unload_local_llm_model(cfg)
     timeline = json.loads((project / "timeline.json").read_text(encoding="utf-8"))
     output = output or project / "story_draft_fast.mp4"
+    fast_dir = project / "fast_segments"
+    fast_dir.mkdir(exist_ok=True)
+    segment_files = [_fast_segment(project, fast_dir, clip, cfg, i) for i, clip in enumerate(timeline["clips"], 1)]
     list_file = project / "concat.txt"
-    list_file.write_text("".join(f"file '{(project / 'media' / clip['file']).as_posix()}'\n" for clip in timeline["clips"]), encoding="utf-8")
-    tmp = project / "story_draft_video.mp4"
-    subprocess.run([cfg["ffmpeg_path"], "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", "-movflags", "+faststart", str(tmp)], check=True)
+    list_file.write_text("".join(f"file '{path.as_posix()}'\n" for path in segment_files), encoding="utf-8")
     bgm = timeline.get("bgm")
     if bgm:
-        subprocess.run(
+        run_ffmpeg(
             [
                 cfg["ffmpeg_path"],
                 "-hide_banner",
                 "-loglevel",
                 "error",
                 "-y",
+                *video_decode_args(cfg),
+                "-f",
+                "concat",
+                "-safe",
+                "0",
                 "-i",
-                str(tmp),
+                str(list_file),
                 "-stream_loop",
                 "-1",
                 "-i",
@@ -100,8 +90,7 @@ def render_fast_draft(project: Path, cfg: dict, output: Path | None = None,
                 "0:v",
                 "-map",
                 "[a]",
-                "-c:v",
-                "copy",
+                *video_encode_args(cfg),
                 "-c:a",
                 "aac",
                 "-shortest",
@@ -109,34 +98,44 @@ def render_fast_draft(project: Path, cfg: dict, output: Path | None = None,
                 "+faststart",
                 str(output),
             ],
-            check=True,
+            cfg,
         )
     else:
-        shutil.copy2(tmp, output)
-    return {"ok": True, "kind": "legacy_rough_preview", "output": str(output), "stdout": "", "stderr": ""}
+        run_ffmpeg([cfg["ffmpeg_path"], "-hide_banner", "-loglevel", "error", "-y", *video_decode_args(cfg), "-f", "concat", "-safe", "0", "-i", str(list_file), *video_encode_args(cfg), "-an", "-movflags", "+faststart", str(output)], cfg)
+    return {"ok": True, "output": str(output), "stdout": "", "stderr": ""}
 
 
-def _assert_managed_project_approved(cfg: dict | None, db: Path | None, project: Path,
-                                     project_id: int | None, action: str) -> None:
-    """Apply the gate when called from a managed project or an explicit API call."""
-    if cfg is None:
-        return
-    if project_id is None:
-        match = re.search(r"project_(\d+)", str(project))
-        if match:
-            project_id = int(match.group(1))
-    if project_id is None:
-        return
-    db = db or db_path(cfg)
-    if db.exists():
-        assert_project_approved(cfg, db, project_id, action)
+def _fast_segment(project: Path, out_dir: Path, clip: dict, cfg: dict, index: int) -> Path:
+    src = project / "media" / clip["file"]
+    start = float(clip.get("start_seconds") or 0)
+    duration = max(0.1, float(clip.get("end_seconds") or start + clip.get("duration", 0.1)) - start)
+    out = out_dir / f"{index:03}_{int(start * 10):06d}_{src.name}"
+    if out.exists() and out.stat().st_size > 1024 * 1024:
+        return out
+    subprocess.run([cfg["ffmpeg_path"], "-hide_banner", "-loglevel", "error", "-y", "-ss", str(start), "-t", str(duration), "-i", str(src), "-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-avoid_negative_ts", "make_zero", str(out)], check=True)
+    return out
+
+
+def unload_local_llm_model(cfg: dict) -> dict:
+    if str(cfg.get("render", {}).get("stop_local_llm_server", "true")).lower() in {"0", "false", "no"}:
+        return {"ok": True, "skipped": True}
+    lms = shutil.which("lms")
+    if not lms:
+        return {"ok": False, "stderr": "找不到 lms CLI"}
+    model = str(cfg.get("ai", {}).get("local", {}).get("model") or "")
+    cmd = [lms, "unload", model] if model else [lms, "unload", "--all"]
+    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return {"ok": proc.returncode == 0, "model": model, "stdout": proc.stdout.strip(), "stderr": proc.stderr.strip()}
+
+
+def stop_local_llm_server(cfg: dict) -> dict:
+    return unload_local_llm_model(cfg)
 
 
 def _duration(seg: dict) -> float:
-    start = float(seg.get("start_seconds", seg.get("source_in", 0)) or 0)
-    end = float(seg.get("end_seconds", seg.get("source_out", start)) or start)
-    speed = float(seg.get("speed", 1.0) or 1.0)
-    return max(0.1, (end - start) / speed)
+    if seg.get("graded_clip") and Path(seg["graded_clip"]).exists():
+        return max(0.1, float(seg["end_seconds"]) - float(seg["start_seconds"]))
+    return max(0.1, float(seg["end_seconds"]) - float(seg["start_seconds"]))
 
 
 def _copy_bgm(data: dict, media: Path) -> dict | None:
@@ -152,25 +151,16 @@ def _copy_bgm(data: dict, media: Path) -> dict | None:
     return {**tracks[0], "file": dst.name}
 
 
-def _html(title: str, clips: list[dict], bgm: dict | None, duration: float,
-          title_cards: list[dict] | None = None) -> str:
+def _html(title: str, clips: list[dict], bgm: dict | None, duration: float) -> str:
     videos = "\n".join(
-        f'<video class="clip scene" data-start="{clip["timeline_start"]}" data-duration="{clip["duration"]}" data-track-index="0" data-media-start="{clip.get("source_in", 0)}" src="media/{escape(clip["file"], quote=True)}" muted playsinline></video>'
+        f'<video class="clip scene" data-start="{clip["timeline_start"]}" data-duration="{clip["duration"]}" data-track-index="0" data-media-start="0" src="media/{escape(clip["file"], quote=True)}" muted playsinline></video>'
         for clip in clips
     )
     cards = []
     seen = set()
-    for card in title_cards or []:
-        text = card.get("text") or card.get("title") or card.get("label")
-        if not text:
-            continue
-        start = card.get("timeline_start", card.get("start_seconds", 0))
-        if card.get("timeline_start_ms") is not None:
-            start = float(card["timeline_start_ms"]) / 1000.0
-        cards.append(f'<div class="clip card" data-start="{float(start):.3f}" data-duration="{float(card.get("duration", 2) or 2):.3f}" data-track-index="1">{escape(str(text))}</div>')
     for clip in clips:
         group = clip.get("group", "")
-        if group and group not in seen and not title_cards:
+        if group and group not in seen:
             seen.add(group)
             cards.append(f'<div class="clip card" data-start="{clip["timeline_start"]}" data-duration="2" data-track-index="1">{escape(group)}</div>')
     audio = f'<audio class="clip" data-start="0" data-duration="{duration}" data-track-index="2" data-volume="0.35" src="media/{escape(bgm["file"], quote=True)}"></audio>' if bgm else ""

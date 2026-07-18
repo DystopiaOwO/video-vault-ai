@@ -14,7 +14,7 @@ Audio analysis and transcription.
 
 ## Phase 4
 
-Auto segment list, Shorts ideas, DaVinci Resolve EDL/XML export.
+Auto segment list, Shorts ideas, OpenCut / HyperFrames handoff.
 
 ## Phase 5
 

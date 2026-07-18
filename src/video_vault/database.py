@@ -219,6 +219,15 @@ def frames(db: Path, video_id: int) -> list[sqlite3.Row]:
         return con.execute("select * from frames where video_id=? order by timestamp_seconds", (video_id,)).fetchall()
 
 
+def update_video_summary(db: Path, video_id: int, summary: str) -> bool:
+    with connect(db) as con:
+        row = con.execute("select id from frames where video_id=? order by timestamp_seconds limit 1", (video_id,)).fetchone()
+        if not row:
+            return False
+        con.execute("update frames set vision_summary=? where video_id=?", (summary, video_id))
+        return True
+
+
 def set_video_status(db: Path, video_id: int, status: str) -> None:
     with connect(db) as con:
         con.execute("update videos set status=? where id=?", (status, video_id))
