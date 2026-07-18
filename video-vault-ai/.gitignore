@@ -1,0 +1,15 @@
+.pytest_cache/
+.pytest-tmp/
+tmpsp_*/
+__pycache__/
+*.py[cod]
+*.sqlite
+*.sqlite3
+*.db
+*.log
+web/node_modules/
+web/dist/
+05_index/
+08_projects/
+99_output/
+raw_ai_outputs/
