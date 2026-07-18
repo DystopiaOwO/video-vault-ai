@@ -228,7 +228,17 @@ def _clean_segment_review(row: dict, allowed: set[str]) -> dict:
 def set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes: str = "") -> Path:
     folder = project_dir(cfg, project_id)
     path = folder / "review_status.json"
-    data = {"project_id": project_id, "status": status, "approved_by_user": status == "approved", "notes": notes, "updated_at": datetime.now().isoformat(timespec="seconds")}
+    snapshot = {}
+    if status == "approved":
+        from .render_manifest import compile_render_manifest
+
+        manifest = compile_render_manifest(cfg, db, project_id)
+        snapshot = {
+            "approved_manifest_hash": manifest["manifest_hash"],
+            "approved_plan_id": manifest.get("plan_id", ""),
+            "approved_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    data = {"project_id": project_id, "status": status, "approved_by_user": status == "approved", "notes": notes, "updated_at": datetime.now().isoformat(timespec="seconds"), **snapshot}
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     save_revision_notes(cfg, project_id, notes)
     set_project_status(db, project_id, status)
@@ -262,6 +272,8 @@ def mark_project_needs_review(cfg: dict, db: Path, project_id: int) -> None:
     if review_path.exists():
         review = _read_json(review_path)
         review.update({"status": "needs_review", "approved_by_user": False, "updated_at": datetime.now().isoformat(timespec="seconds")})
+        for key in ("approved_manifest_hash", "approved_plan_id", "approved_at"):
+            review.pop(key, None)
         review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
     plan_path = folder / "project_plan.json"
     if plan_path.exists():
@@ -290,6 +302,17 @@ def can_project_render(cfg: dict, db: Path, project_id: int) -> tuple[bool, str]
     plan = _read_json(plan_path)
     if plan.get("status") != "approved":
         return False, f"project_plan.json 狀態是 {plan.get('status', 'unknown')}，不是 approved"
+    approved_hash = review.get("approved_manifest_hash")
+    if not approved_hash:
+        return False, "review_status.json 缺少 approved_manifest_hash"
+    manifest_path = folder / "render_manifest.json"
+    if not manifest_path.exists():
+        return False, "缺少 render_manifest.json"
+    from .render_manifest import manifest_hash
+
+    current_manifest = _read_json(manifest_path)
+    if manifest_hash(current_manifest) != approved_hash:
+        return False, "approved_manifest_hash 已失效"
     return True, "approved"
 
 
@@ -614,7 +637,11 @@ def _revision_notes(cfg: dict, project_id: int) -> str:
 
 
 def _segment_review(cfg: dict, project_id: int) -> list[dict]:
-    data = _read_json(project_dir(cfg, project_id) / "feedback" / "segment_review.json")
+    folder = project_dir(cfg, project_id)
+    path = folder / "feedback" / "segment_review.json"
+    if not path.exists():
+        path = folder / "segment_review.json"
+    data = _read_json(path)
     return data if isinstance(data, list) else []
 
 
