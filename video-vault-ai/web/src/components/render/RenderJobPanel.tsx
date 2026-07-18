@@ -1,0 +1,2 @@
+import type { Job } from "../../api";
+export function RenderJobPanel({ jobs, onCancel }: { jobs: Job[]; onCancel: () => void }) { const running = jobs.some((job) => job.status === "queued" || job.status === "running"); return <div className="jobs">{running && <button className="danger" onClick={onCancel}>停止目前工作</button>}{jobs.map((job) => <div className="job" key={job.kind}><b>{job.kind}</b><span>{job.status} · {job.percent}%</span><progress value={job.percent} max={100} /><small>{job.message}</small></div>)}</div>; }

@@ -1,0 +1,3 @@
+export function RenderActions({ onAction, busy, canRender }: { onAction: (action: string) => void; busy?: boolean; canRender: boolean }) {
+  return <div className="actions"><button disabled={busy} onClick={() => onAction("project")}>產生初剪專案</button><button disabled={busy} onClick={() => onAction("rough")}>粗略排序預覽</button><small>剪點可能不精準，僅供確認排序</small><button disabled={busy || !canRender} onClick={() => onAction("accurate")}>精準預覽</button><button className="primary" disabled={busy || !canRender} onClick={() => onAction("final")}>正式輸出</button><button disabled={busy} onClick={() => onAction("opencut")}>OpenCut 素材包</button><button disabled={busy || !canRender} onClick={() => onAction("opencut-render")}>OpenCut 調色片段</button></div>;
+}
