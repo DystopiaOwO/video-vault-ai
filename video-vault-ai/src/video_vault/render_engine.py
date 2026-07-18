@@ -26,16 +26,19 @@ class RenderCancelled(RuntimeError):
 
 
 SegmentRenderer = Callable[[RenderManifest, Any, Path], Path]
+AudioMixer = Callable[[RenderManifest, Path, Path], Path]
 
 
 class RenderEngine:
     def __init__(self, cfg: Mapping[str, Any], job_store: RenderJobStore,
                  process_manager: FFmpegProcessManager | None = None,
-                 segment_renderer: SegmentRenderer | None = None):
+                 segment_renderer: SegmentRenderer | None = None,
+                 audio_mixer: AudioMixer | None = None):
         self.cfg = dict(cfg)
         self.job_store = job_store
         self.process_manager = process_manager or FFmpegProcessManager()
         self.segment_renderer = segment_renderer
+        self.audio_mixer = audio_mixer
 
     def render(self, manifest: RenderManifest, job: RenderJob | str) -> QcReport:
         current = self.job_store.get_job(job) if isinstance(job, str) else job
@@ -79,6 +82,7 @@ class RenderEngine:
             self._concat(job_id, manifest, rendered, partial)
             self._stage(job_id, RenderStage.MIX_AUDIO, 78.0)
             self._check_cancel(job_id)
+            mixed = self._mix_audio(job_id, manifest, partial)
             self._stage(job_id, RenderStage.RENDER_OVERLAYS, 82.0)
             self._stage(job_id, RenderStage.ENCODE_OUTPUT, 90.0)
             self._check_cancel(job_id)
@@ -89,12 +93,14 @@ class RenderEngine:
                 profile = get_render_profile(manifest.profile)
             except ValueError:
                 pass
-            report = quality_check(partial, self.cfg, expected_duration_ms=manifest.timeline_duration_ms, profile=profile)
+            report = quality_check(mixed, self.cfg, expected_duration_ms=manifest.timeline_duration_ms, profile=profile)
             write_qc_report(report, qc_root)
             if not report.passed:
                 self._update(job_id, status=RenderJobStatus.FAILED_QC, percent=100.0, error="; ".join(report.errors), output=str(partial), finished_at=_now())
                 return report
             final = output_root / partial.name.removesuffix(".partial")
+            if mixed != partial:
+                os.replace(mixed, partial)
             os.replace(partial, final)
             report = QcReport(True, status="passed", output=str(final), duration_ms=report.duration_ms,
                               metrics=report.metrics, warnings=report.warnings, errors=report.errors)
@@ -121,6 +127,17 @@ class RenderEngine:
             if code != 0: raise RuntimeError(f"ffmpeg assembly failed with exit code {code}")
         finally:
             list_file.unlink(missing_ok=True)
+
+    def _mix_audio(self, job_id: str, manifest: RenderManifest, assembled: Path) -> Path:
+        """Run the injected audio mixer, keeping its result temporary."""
+        if self.audio_mixer is None:
+            return assembled
+        mixed = assembled.with_name(assembled.name.removesuffix(".partial") + ".mixed.mp4.partial")
+        produced = Path(self.audio_mixer(manifest, assembled, mixed))
+        if produced != mixed:
+            os.replace(produced, mixed)
+        self._check_cancel(job_id)
+        return mixed
 
     def _stage(self, job_id: str, stage: RenderStage, percent: float) -> None:
         self._check_cancel(job_id); self._update(job_id, stage=stage, percent=percent)
