@@ -16,6 +16,7 @@ from .naming import rename_after_perception
 from .opencut import export_opencut_handoff
 from .paths import db_path, ensure_library, index_json_path, root
 from .planner import all_video_ids, draft_plan, perceive_output, review_text, revise_plan, set_plan_status, write_plan_files
+from .project_renderer import ProjectRenderError, render_project
 from .report import write_report
 from .renderer import render_approved
 from .scanner import scan_inbox
@@ -58,6 +59,9 @@ def main(argv: list[str] | None = None) -> None:
     hf_render_parser = sub.add_parser("hyperframes-render")
     hf_render_parser.add_argument("--project-id", type=int, required=True)
     hf_render_parser.add_argument("--max-segments", type=int, default=20)
+    project_render_parser = sub.add_parser("render-project")
+    project_render_parser.add_argument("--project-id", type=int, required=True)
+    project_render_parser.add_argument("--output", default="")
     for name in ("review-plan", "approve-plan", "reject-plan", "revise-plan", "render-approved"):
         sub.choices[name].add_argument("--video-id", type=int)
     sub.choices["render-approved"].add_argument("--dry-run", action="store_true")
@@ -164,6 +168,12 @@ def main(argv: list[str] | None = None) -> None:
             print(exc)
             return
         print(result["output"] if result["ok"] else result["stderr"])
+    elif args.cmd == "render-project":
+        try:
+            result = render_project(cfg, db, args.project_id, output_path=Path(args.output) if args.output else None)
+            print(result.output_path)
+        except (PermissionError, ProjectRenderError) as exc:
+            print(exc)
     elif args.cmd == "add-bgm":
         track_id = import_bgm(
             cfg,
