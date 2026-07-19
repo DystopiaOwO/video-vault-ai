@@ -116,7 +116,10 @@ class ManagedFFmpegRunner:
             process = subprocess.Popen(managed_command, **popen_kwargs)
             with self._lock:
                 self._process = process
-                self._process_group_id = _initial_process_group_id(process.pid)
+                # start_new_session=True makes the child the session and
+                # process-group leader. Using pid avoids the fork/setsid race
+                # in an immediate os.getpgid(pid) call.
+                self._process_group_id = int(process.pid) if os.name != "nt" else None
                 self._cancel_sent = False
 
             self._invoke_fatal("on_process", self.on_process, process.pid)
