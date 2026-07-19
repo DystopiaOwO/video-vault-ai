@@ -1,10 +1,12 @@
-import { StrictMode, useEffect, useState } from "react";
+import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { ChangeEvent, ReactNode } from "react";
 import { api, BgmTrack, Job, Project, ProjectDetail, Segment } from "./api";
+import { RenderJobPanel } from "./components/render/RenderJobPanel";
+import { ProjectDataLoadOptions, ProjectDataLoader } from "./projectDataLoader";
 import "./styles.css";
 
-function App() {
+export function App() {
   if (window.location.pathname === "/bgm") return <BgmPage />;
   const [projects, setProjects] = useState<Project[]>([]);
   const [currentId, setCurrentId] = useState<number>(0);
@@ -14,32 +16,64 @@ function App() {
   const [notes, setNotes] = useState("");
   const [message, setMessage] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
+  const currentIdRef = useRef(0);
+  const mountedRef = useRef(true);
+  const loaderRef = useRef<ProjectDataLoader | null>(null);
+  if (!loaderRef.current) {
+    loaderRef.current = new ProjectDataLoader(
+      { project: api.project, jobs: api.jobs },
+      (projectId) => projectId === currentIdRef.current,
+      () => mountedRef.current,
+      (project, nextJobs) => {
+        setDetail(project);
+        setJobs(nextJobs);
+      },
+      (error) => setMessage(`狀態更新失敗：${error instanceof Error ? error.message : "未知錯誤"}`),
+    );
+  }
 
   useEffect(() => {
     loadProjects();
-    api.bgm().then(setBgmTracks);
+    api.bgm().then(setBgmTracks).catch((error) => setMessage(`BGM 載入失敗：${error instanceof Error ? error.message : "未知錯誤"}`));
   }, []);
 
   function loadProjects() {
     return api.projects().then((rows) => {
       setProjects(rows);
       setCurrentId((id) => id || rows[0]?.id || 0);
-    });
+    }).catch((error) => setMessage(`專案載入失敗：${error instanceof Error ? error.message : "未知錯誤"}`));
+  }
+
+  useEffect(() => {
+    currentIdRef.current = currentId;
+  }, [currentId]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      loaderRef.current?.invalidate();
+    };
+  }, []);
+
+  function loadProjectData(requestedProjectId: number, options: ProjectDataLoadOptions = {}): Promise<Job[]> {
+    return loaderRef.current?.load(requestedProjectId, options) || Promise.resolve([]);
   }
 
   useEffect(() => {
     if (!currentId) return;
-    let alive = true;
-    const load = () => Promise.all([api.project(currentId), api.jobs(currentId)]).then(([project, jobs]) => {
-      if (!alive) return;
-      setDetail(project);
-      setJobs(jobs);
-    });
-    load();
-    const timer = setInterval(load, 3000);
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      if (cancelled) return;
+      await loadProjectData(currentId);
+      if (!cancelled) timer = window.setTimeout(() => void poll(), 1500);
+    };
+    void poll();
     return () => {
-      alive = false;
-      clearInterval(timer);
+      cancelled = true;
+      loaderRef.current?.invalidate();
+      if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [currentId]);
 
@@ -69,11 +103,8 @@ function App() {
     setMessage("專案已建立，下一步請匯入素材。");
   }
 
-  async function refreshProject() {
-    if (!currentId) return;
-    const [project, jobs] = await Promise.all([api.project(currentId), api.jobs(currentId)]);
-    setDetail(project);
-    setJobs(jobs);
+  async function refreshProject(projectId: number, options: ProjectDataLoadOptions = {}): Promise<Job[]> {
+    return loadProjectData(projectId, options);
   }
 
   return (
@@ -97,7 +128,7 @@ function App() {
       </aside>
       <section>
         {message && <div className="notice">{message}</div>}
-        {!detail ? <div className="card">尚未選擇專案</div> : <ProjectView detail={detail} jobs={jobs} bgmTracks={bgmTracks} notes={notes} setNotes={setNotes} setMessage={setMessage} refreshProject={refreshProject} review={review} revise={revise} />}
+        {!detail ? <div className="card">尚未選擇專案</div> : <ProjectView key={detail.project.id} detail={detail} jobs={jobs} bgmTracks={bgmTracks} notes={notes} setNotes={setNotes} setMessage={setMessage} refreshProject={refreshProject} review={review} revise={revise} />}
       </section>
     </main>
   );
@@ -139,12 +170,14 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   notes: string;
   setNotes: (value: string) => void;
   setMessage: (value: string) => void;
-  refreshProject: () => Promise<void>;
+  refreshProject: (projectId: number, options?: ProjectDataLoadOptions) => Promise<Job[]>;
   review: (action: "approve" | "reject") => void;
   revise: () => void;
 }) {
   const [selectedBgm, setSelectedBgm] = useState("");
   const [colorMode, setColorMode] = useState("dji_lut");
+  const [submitting, setSubmitting] = useState(false);
+  const refreshCurrentProject = (options: ProjectDataLoadOptions = {}) => refreshProject(detail.project.id, options);
   return (
     <>
       <div className="hero">
@@ -154,7 +187,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
         </div>
         <Status value={detail.project.status} />
       </div>
-      <Jobs jobs={jobs} projectId={detail.project.id} setMessage={setMessage} refreshProject={refreshProject} />
+      <RenderJobPanel jobs={jobs} projectId={detail.project.id} setMessage={setMessage} refreshProject={refreshCurrentProject} />
       <Workflow detail={detail} />
       <div className="grid">
         <Card title="審核">
@@ -169,6 +202,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
         <Card title="輸出">
           <button onClick={() => exportProject("hyperframes")}>產生初剪專案</button>
           <button disabled={!detail.can_render} onClick={() => exportProject("hyperframes-render")}>快速輸出 MP4</button>
+          <button className="good" disabled={submitting || !detail.can_render || jobs.some((job) => Boolean(job.job_id) && ["queued", "running", "cancelling"].includes(job.status))} onClick={startFormalRender}>{submitting ? "正在建立正式輸出…" : "正式輸出（Render Job）"}</button>
           <button onClick={() => exportProject("opencut")}>OpenCut 素材包</button>
           <button disabled={!detail.can_render} onClick={() => exportProject("opencut-render")}>OpenCut 調色片段</button>
         </Card>
@@ -189,7 +223,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
               </div>
               {c.filename}
               <span>{c.status} | {c.segment_count} 段 | {Math.round(c.duration_seconds || 0)}s | {c.time_of_day}</span>
-              <ClipSummary projectId={detail.project.id} clip={c} setMessage={setMessage} refreshProject={refreshProject} />
+              <ClipSummary projectId={detail.project.id} clip={c} setMessage={setMessage} refreshProject={refreshCurrentProject} />
             </div>
           ))}
         </Card>
@@ -237,12 +271,43 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   );
 
   async function exportProject(kind: "hyperframes" | "hyperframes-render" | "opencut" | "opencut-render") {
-    setMessage("工作已送出，請看工作狀態百分比。");
-    const result = kind.startsWith("hyperframes")
-      ? await api.hyperframesJob(detail.project.id, kind === "hyperframes-render")
-      : await api.opencutJob(detail.project.id, kind === "opencut-render");
-    setMessage(result.message || (result.ok ? "工作已開始" : "工作已在執行中"));
-    await refreshProject();
+    try {
+      setMessage("工作已送出，請看 Render Job 狀態與進度。");
+      const result = kind.startsWith("hyperframes")
+        ? await api.hyperframesJob(detail.project.id, kind === "hyperframes-render")
+        : await api.opencutJob(detail.project.id, kind === "opencut-render");
+      await refreshCurrentProject({ forceFresh: true });
+      if (!result.ok) {
+        setMessage(`工作啟動失敗：${result.error || result.message || "工作未成功送出"}`);
+        return;
+      }
+      setMessage(result.message || "工作已開始");
+    } catch (error) {
+      setMessage(`工作啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+    }
+  }
+
+  async function startFormalRender() {
+    if (!detail.can_render) {
+      setMessage(`正式輸出被擋下：${detail.render_gate_reason}`);
+      return;
+    }
+    const requestedProjectId = detail.project.id;
+    try {
+      setSubmitting(true);
+      setMessage("正在建立正式輸出…");
+      const result = await api.createRenderJob(requestedProjectId);
+      if (!result.ok) {
+        setMessage(`正式輸出失敗：${result.error || "建立 Render Job 未成功"}`);
+        return;
+      }
+      await refreshProject(requestedProjectId, { forceFresh: true });
+      setMessage(result.created ? "正式輸出已排入佇列" : "正式輸出工作已在執行中");
+    } catch (error) {
+      setMessage(`正式輸出啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   async function uploadFiles(event: ChangeEvent<HTMLInputElement>) {
@@ -252,35 +317,35 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
     const result = await api.uploadProject(detail.project.id, files);
     event.target.value = "";
     setMessage(result.ok ? `已匯入 ${result.files?.length || 0} 支素材，下一步請跑內容感知。` : result.error || "匯入失敗");
-    await refreshProject();
+    await refreshCurrentProject();
   }
 
   async function analyze(force: boolean) {
     setMessage(force ? "已送出全部重跑感知。" : "已送出待感知素材。");
     const result = await api.analyzeJob(detail.project.id, force);
     setMessage(result.message || "內容感知工作已開始");
-    await refreshProject();
+    await refreshCurrentProject();
   }
 
   async function analyzeOne(videoId: number) {
     setMessage("已送出單支素材感知，請看工作狀態百分比。");
     const result = await api.analyzeVideo(detail.project.id, videoId);
     setMessage(result.message || "單支素材感知已開始");
-    await refreshProject();
+    await refreshCurrentProject();
   }
 
   async function colorPreview() {
     setMessage("已送出調色預覽，請看工作狀態百分比。");
     const result = await api.colorPreview(detail.project.id, colorMode);
     setMessage(result.message || "調色預覽已開始");
-    await refreshProject();
+    await refreshCurrentProject();
   }
 
   async function buildPlan() {
     setMessage("正在產生故事整理...");
     await api.buildPlan(detail.project.id);
     setMessage("故事整理已更新，請審核片段。");
-    await refreshProject();
+    await refreshCurrentProject();
   }
 
   async function assignBgm() {
@@ -290,11 +355,11 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
     await api.assignBgm(detail.project.id, bgmId);
     setSelectedBgm("");
     setMessage("BGM 已加入本專案，專案已回到待審。");
-    await refreshProject();
+    await refreshCurrentProject();
   }
 }
 
-function ClipSummary({ projectId, clip, setMessage, refreshProject }: { projectId: number; clip: { video_id: number; visual_summary: string }; setMessage: (value: string) => void; refreshProject: () => Promise<void> }) {
+function ClipSummary({ projectId, clip, setMessage, refreshProject }: { projectId: number; clip: { video_id: number; visual_summary: string }; setMessage: (value: string) => void; refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]> }) {
   const [text, setText] = useState(clip.visual_summary || "");
   useEffect(() => setText(clip.visual_summary || ""), [clip.visual_summary]);
   async function save() {
@@ -388,17 +453,6 @@ function SegmentTable({ detail }: { detail: ProjectDetail }) {
   }
 }
 
-function Jobs({ jobs, projectId, setMessage, refreshProject }: { jobs: Job[]; projectId: number; setMessage: (value: string) => void; refreshProject: () => Promise<void> }) {
-  if (!jobs.length) return null;
-  const running = jobs.some((job) => job.status === "queued" || job.status === "running");
-  async function stop() {
-    const result = await api.stopJobs(projectId);
-    setMessage(result.message || "已停止目前背景工作");
-    await refreshProject();
-  }
-  return <Card title="工作狀態">{running && <button className="danger" onClick={stop}>停止目前工作</button>}{jobs.map((job, i) => <div className="item" key={i}><b>{job.kind} | {job.status} | {job.percent}%</b><span>{job.message}</span><progress value={job.percent} max={100} /></div>)}</Card>;
-}
-
 function TimeBox({ label, seconds, onChange }: { label: string; seconds: number; onChange: (value: number) => void }) {
   const value = Math.max(0, Math.round(seconds || 0));
   const minutes = Math.floor(value / 60);
@@ -450,4 +504,5 @@ function Status({ value }: { value: string }) {
   return <span className={value === "approved" ? "pill ok" : "pill"}>{value}</span>;
 }
 
-createRoot(document.getElementById("root")!).render(<StrictMode><App /></StrictMode>);
+const rootElement = document.getElementById("root");
+if (rootElement) createRoot(rootElement).render(<StrictMode><App /></StrictMode>);

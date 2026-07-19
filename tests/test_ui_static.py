@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from video_vault import ui
-from video_vault.ui import JOBS, JOBS_LOCK, _kill_video_vault_processes, _set_job, _static_file, _web_dist, project_jobs, stop_project_jobs
+from video_vault.ui import JOBS, JOBS_LOCK, _kill_video_vault_processes, _set_job, _static_file, _web_dist, cancel_legacy_job, project_jobs, stop_project_jobs
 
 
 def test_static_file_serving_stays_inside_web_dist():
@@ -21,6 +21,30 @@ def test_project_jobs_tracks_percent_and_stop(monkeypatch):
 
     stop_project_jobs(7)
     assert project_jobs(7)[0]["status"] == "stopped"
+
+
+def test_cancel_legacy_job_is_scoped_to_one_key(monkeypatch):
+    with JOBS_LOCK:
+        JOBS.clear()
+    _set_job(7, "analyze", kind="內容感知", status="running", done=1, total=2)
+    _set_job(7, "color", kind="調色預覽", status="running", done=1, total=2)
+
+    class GuardManager:
+        def list(self, project_id):
+            return [{"job_id": "formal-1", "status": "running", "project_id": 7}]
+
+        def cancel_project(self, project_id):
+            raise AssertionError("legacy cancellation must not cancel persistent Render Jobs")
+
+    result = cancel_legacy_job(7, "analyze")
+
+    assert result["ok"] is True
+    assert result["job"]["legacy_job_key"] == "analyze"
+    jobs = project_jobs(7, GuardManager())
+    legacy_jobs = {job["legacy_job_key"]: job for job in jobs if "legacy_job_key" in job}
+    assert legacy_jobs["analyze"]["status"] == "stopped"
+    assert legacy_jobs["color"]["status"] == "running"
+    assert next(job for job in jobs if job.get("job_id") == "formal-1")["status"] == "running"
 
 
 def test_stop_processes_does_not_use_global_process_kill(monkeypatch):

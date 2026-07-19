@@ -249,6 +249,8 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif path == "/api/project/stop-jobs":
                 stop_project_jobs(int(data.get("project_id", 0)), render_manager)
                 self._json({"ok": True, "message": "已停止目前背景工作"})
+            elif path == "/api/project/legacy-job/cancel":
+                self._json(cancel_legacy_job(int(data.get("project_id", 0)), str(data.get("legacy_job_key", ""))))
             elif path == "/api/project/render-job":
                 self._json(render_api.create(int(data.get("project_id", 0)), str(data.get("output_path", ""))))
             elif path == "/api/render-job/cancel":
@@ -489,7 +491,11 @@ def start_hyperframes_job(cfg: dict, db: Path, project_id: int, render: bool, ma
 
 def project_jobs(project_id: int, render_manager: RenderJobManager | None = None) -> list[dict]:
     with JOBS_LOCK:
-        legacy = [dict(job, project_id=pid) for (pid, _), job in JOBS.items() if project_id == 0 or pid == project_id]
+        legacy = [
+            dict(job, project_id=pid, legacy_job_key=name)
+            for (pid, name), job in JOBS.items()
+            if project_id == 0 or pid == project_id
+        ]
     persistent = []
     if render_manager is not None:
         persistent = [dict(job, kind="正式輸出") for job in render_manager.list(None if project_id == 0 else project_id)]
@@ -503,6 +509,24 @@ def stop_project_jobs(project_id: int, render_manager: RenderJobManager | None =
                 job.update(status="stopped", message="已由使用者停止", updated_at=time.time())
     if render_manager is not None:
         render_manager.cancel_project(project_id)
+
+
+def cancel_legacy_job(project_id: int, legacy_job_key: str) -> dict:
+    """Stop one in-memory legacy job without touching persistent Render Jobs."""
+    key = (int(project_id), str(legacy_job_key or "").strip())
+    if not key[1]:
+        return {"ok": False, "error": "缺少 legacy_job_key"}
+    with JOBS_LOCK:
+        job = JOBS.get(key)
+        if job is None:
+            return {"ok": False, "error": "找不到指定背景工作"}
+        if job.get("status") in {"queued", "running"}:
+            job.update(status="stopped", message="已由使用者停止", updated_at=time.time())
+        return {
+            "ok": True,
+            "message": "已停止指定背景工作" if job.get("status") == "stopped" else "工作已結束",
+            "job": dict(job, project_id=key[0], legacy_job_key=key[1]),
+        }
 
 
 def _kill_video_vault_processes() -> None:
