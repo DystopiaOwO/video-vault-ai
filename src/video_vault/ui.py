@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from email import policy
+from email.parser import BytesParser
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
-import cgi
 import json
 import mimetypes
+import os
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -30,6 +33,185 @@ from .scanner import scan_inbox
 
 JOBS: dict[tuple[int, str], dict] = {}
 JOBS_LOCK = threading.Lock()
+
+
+class MultipartFormError(ValueError):
+    """A client-side multipart request was malformed or truncated."""
+
+
+UPLOAD_READ_CHUNK = 64 * 1024
+UPLOAD_SPOOL_THRESHOLD = 8 * 1024 * 1024
+MAX_MULTIPART_HEADER = 64 * 1024
+MAX_TEXT_FIELD = 1024 * 1024
+
+
+class _UploadPart:
+    def __init__(self, filename: str, file, value: str = ""):
+        self.filename = filename
+        self.file = file
+        self.value = value
+
+    def close(self) -> None:
+        try:
+            self.file.close()
+        except (OSError, ValueError):
+            pass
+
+
+class _BoundedRequestReader:
+    def __init__(self, stream, length: int):
+        self.stream = stream
+        self.remaining = length
+
+    def read_chunk(self) -> bytes:
+        if self.remaining <= 0:
+            return b""
+        size = min(UPLOAD_READ_CHUNK, self.remaining)
+        try:
+            chunk = self.stream.read(size)
+        except (OSError, ValueError) as exc:
+            raise MultipartFormError(f"讀取上傳內容失敗：{exc}") from exc
+        if not chunk:
+            raise MultipartFormError("multipart request 被截斷")
+        if len(chunk) > size:
+            raise MultipartFormError("上傳串流違反固定大小讀取限制")
+        self.remaining -= len(chunk)
+        return bytes(chunk)
+
+
+class _StreamingMultipartReader:
+    def __init__(self, request: _BoundedRequestReader, boundary: bytes):
+        self.request = request
+        self.boundary = boundary
+        self.buffer = bytearray()
+
+    def _fill(self) -> None:
+        chunk = self.request.read_chunk()
+        if not chunk:
+            raise MultipartFormError("multipart request 缺少結束 boundary")
+        self.buffer.extend(chunk)
+
+    def _read_until(self, marker: bytes, *, limit: int) -> bytes:
+        while True:
+            index = self.buffer.find(marker)
+            if index >= 0:
+                result = bytes(self.buffer[:index])
+                del self.buffer[: index + len(marker)]
+                return result
+            if len(self.buffer) > limit:
+                raise MultipartFormError("multipart header 超過大小限制")
+            self._fill()
+
+    def _read_exact(self, size: int) -> bytes:
+        while len(self.buffer) < size:
+            self._fill()
+        result = bytes(self.buffer[:size])
+        del self.buffer[:size]
+        return result
+
+    def read_part(self, target, text_buffer: bytearray | None) -> None:
+        marker = b"\r\n--" + self.boundary
+        keep = len(marker) - 1
+        while True:
+            index = self.buffer.find(marker)
+            if index >= 0:
+                payload = bytes(self.buffer[:index])
+                del self.buffer[: index + len(marker)]
+                _consume_part_payload(target, text_buffer, payload)
+                return
+            if len(self.buffer) > keep:
+                payload = bytes(self.buffer[:-keep])
+                del self.buffer[:-keep]
+                _consume_part_payload(target, text_buffer, payload)
+            self._fill()
+
+
+def _consume_part_payload(target, text_buffer: bytearray | None, payload: bytes) -> None:
+    if not payload:
+        return
+    if target is not None:
+        target.write(payload)
+        return
+    if text_buffer is None:
+        return
+    if len(text_buffer) + len(payload) > MAX_TEXT_FIELD:
+        raise MultipartFormError("文字欄位超過大小限制")
+    text_buffer.extend(payload)
+
+
+def _part_headers(raw_headers: bytes):
+    try:
+        return BytesParser(policy=policy.default).parsebytes(raw_headers + b"\r\n\r\n")
+    except (ValueError, UnicodeError) as exc:
+        raise MultipartFormError(f"multipart part header 無法解析：{exc}") from exc
+
+
+def _close_form(form: dict[str, list[_UploadPart]]) -> None:
+    for items in form.values():
+        for item in items:
+            item.close()
+
+
+def _multipart_form(handler: BaseHTTPRequestHandler) -> dict[str, list[_UploadPart]]:
+    raw_length = handler.headers.get("content-length", "")
+    try:
+        length = int(str(raw_length or "").strip())
+    except (TypeError, ValueError) as exc:
+        raise MultipartFormError("Content-Length 無效") from exc
+    if length < 0:
+        raise MultipartFormError("Content-Length 不可為負數")
+    content_type = str(handler.headers.get("content-type", "") or "")
+    header = BytesParser(policy=policy.default).parsebytes(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
+    boundary_text = header.get_boundary()
+    if not boundary_text:
+        raise MultipartFormError("multipart request 缺少 boundary")
+    boundary = str(boundary_text).encode("utf-8")
+    reader = _StreamingMultipartReader(_BoundedRequestReader(handler.rfile, length), boundary)
+    fields: dict[str, list[_UploadPart]] = {}
+    try:
+        initial = reader._read_until(b"\r\n", limit=MAX_MULTIPART_HEADER)
+        if initial != b"--" + boundary:
+            raise MultipartFormError("multipart request 起始 boundary 無效")
+        while True:
+            raw_headers = reader._read_until(b"\r\n\r\n", limit=MAX_MULTIPART_HEADER)
+            part = _part_headers(raw_headers)
+            name = part.get_param("name", header="content-disposition")
+            filename = part.get_filename() or ""
+            stored_file = tempfile.SpooledTemporaryFile(max_size=UPLOAD_SPOOL_THRESHOLD, mode="w+b") if name and filename else None
+            text_buffer = bytearray() if name and not filename else None
+            reader.read_part(stored_file, text_buffer)
+            closing = reader._read_exact(2)
+            if closing not in {b"\r\n", b"--"}:
+                if stored_file is not None:
+                    stored_file.close()
+                raise MultipartFormError("multipart boundary 結尾無效")
+            if name:
+                if stored_file is not None:
+                    stored_file.seek(0)
+                    fields.setdefault(str(name), []).append(_UploadPart(str(filename), stored_file))
+                else:
+                    charset = part.get_content_charset() or "utf-8"
+                    value = bytes(text_buffer or b"").decode(charset, errors="replace")
+                    empty = tempfile.SpooledTemporaryFile(max_size=0, mode="w+b")
+                    fields.setdefault(str(name), []).append(_UploadPart("", empty, value))
+            if closing == b"--":
+                if reader.request.remaining:
+                    trailing = reader.request.read_chunk()
+                    if trailing.strip(b"\r\n"):
+                        raise MultipartFormError("multipart request 在結束 boundary 後仍有無效內容")
+                return fields
+    except BaseException:
+        _close_form(fields)
+        raise
+
+
+def _form_items(form: dict[str, list[_UploadPart]], name: str) -> list[_UploadPart]:
+    return form.get(name, [])
+
+
+def _form_value(form: dict[str, list[_UploadPart]], name: str) -> str:
+    items = _form_items(form, name)
+    return items[0].value if items else ""
 
 
 def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
@@ -827,6 +1009,30 @@ def h(value: object) -> str:
     return escape(str(value or ""), quote=True)
 
 
+def _stage_upload(item: _UploadPart, directory: Path, filename: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    suffix = Path(filename).suffix
+    handle = tempfile.NamedTemporaryFile(prefix=".video-vault-upload-", suffix=suffix, dir=directory, delete=False)
+    staged = Path(handle.name)
+    try:
+        item.file.seek(0)
+        with handle:
+            while chunk := item.file.read(UPLOAD_READ_CHUNK):
+                handle.write(chunk)
+        return staged
+    except BaseException:
+        handle.close()
+        staged.unlink(missing_ok=True)
+        raise
+
+
+def _parse_upload_form(handler: BaseHTTPRequestHandler) -> tuple[dict[str, list[_UploadPart]] | None, dict | None]:
+    try:
+        return _multipart_form(handler), None
+    except MultipartFormError as exc:
+        return None, {"ok": False, "error": str(exc)}
+
+
 def video_list(cfg: dict, db: Path) -> list[dict]:
     result = []
     for video in videos(db):
@@ -837,61 +1043,101 @@ def video_list(cfg: dict, db: Path) -> list[dict]:
 
 
 def upload(handler: BaseHTTPRequestHandler, cfg: dict) -> dict:
-    form = cgi.FieldStorage(fp=handler.rfile, headers=handler.headers, environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": handler.headers["content-type"]})
-    items = form["file"] if isinstance(form["file"], list) else [form["file"]]
+    form, error = _parse_upload_form(handler)
+    if error:
+        return error | {"files": []}
+    assert form is not None
     saved = []
-    for item in items:
-        name = Path(item.filename).name
-        if Path(name).suffix.lower() not in {".mp4", ".mov", ".m4v"}:
-            continue
-        out = Path(cfg["library_root"]) / cfg["inbox_dir"] / name
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with out.open("wb") as f:
-            while chunk := item.file.read(1024 * 1024):
-                f.write(chunk)
-        saved.append(str(out))
-    return {"ok": bool(saved), "files": saved}
+    try:
+        items = _form_items(form, "file")
+        if not items:
+            return {"ok": False, "error": "缺少 file 欄位", "files": []}
+        for item in items:
+            name = Path(item.filename).name
+            if Path(name).suffix.lower() not in {".mp4", ".mov", ".m4v"}:
+                continue
+            out = Path(cfg["library_root"]) / cfg["inbox_dir"] / name
+            staged = _stage_upload(item, out.parent, name)
+            try:
+                os.replace(staged, out)
+            finally:
+                staged.unlink(missing_ok=True)
+            saved.append(str(out))
+        if not saved:
+            return {"ok": False, "error": "沒有可匯入的影片檔案", "files": []}
+        return {"ok": True, "files": saved}
+    except Exception as exc:
+        return {"ok": False, "error": f"匯入素材失敗：{exc}", "files": saved}
+    finally:
+        _close_form(form)
 
 
 def upload_project(handler: BaseHTTPRequestHandler, cfg: dict, db: Path) -> dict:
-    form = cgi.FieldStorage(fp=handler.rfile, headers=handler.headers, environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": handler.headers["content-type"]})
-    project_id = int(form.getvalue("project_id") or 0)
-    if not project_id:
-        return {"ok": False, "error": "project_id required", "project_id": 0}
-    source_dir = project_dir(cfg, project_id) / "source"
-    items = form["file"] if isinstance(form["file"], list) else [form["file"]]
-    existing = [int(v["id"]) for v in project_videos(db, project_id)]
+    form, error = _parse_upload_form(handler)
+    if error:
+        return error | {"project_id": 0, "files": []}
+    assert form is not None
     saved = []
-    for item in items:
-        name = Path(item.filename).name
-        if Path(name).suffix.lower() not in {".mp4", ".mov", ".m4v"}:
-            continue
-        source_dir.mkdir(parents=True, exist_ok=True)
-        out = source_dir / name
-        with out.open("wb") as f:
-            while chunk := item.file.read(1024 * 1024):
-                f.write(chunk)
-        video_id = upsert_video(db, {"original_path": str(out), "current_path": str(out), "filename": out.name, "category": "unknown", **metadata(out, cfg), "status": "uploaded"})
-        existing.append(video_id)
-        saved.append(str(out))
-    set_project_videos(db, project_id, list(dict.fromkeys(existing)))
-    sync_project_files(cfg, db, project_id)
-    if saved:
+    try:
+        try:
+            project_id = int(_form_value(form, "project_id") or 0)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "project_id 無效", "project_id": 0, "files": []}
+        if not project_id:
+            return {"ok": False, "error": "project_id required", "project_id": 0, "files": []}
+        source_dir = project_dir(cfg, project_id) / "source"
+        items = _form_items(form, "file")
+        if not items:
+            return {"ok": False, "error": "缺少 file 欄位", "project_id": project_id, "files": []}
+        existing = [int(v["id"]) for v in project_videos(db, project_id)]
+        for item in items:
+            name = Path(item.filename).name
+            if Path(name).suffix.lower() not in {".mp4", ".mov", ".m4v"}:
+                continue
+            out = source_dir / name
+            staged = _stage_upload(item, source_dir, name)
+            try:
+                video_info = {"original_path": str(out), "current_path": str(out), "filename": out.name, "category": "unknown", **metadata(staged, cfg), "status": "uploaded"}
+                os.replace(staged, out)
+                video_id = upsert_video(db, video_info)
+            except Exception as exc:
+                return {"ok": False, "error": f"素材 metadata 失敗：{exc}", "project_id": project_id, "files": saved}
+            finally:
+                staged.unlink(missing_ok=True)
+            existing.append(video_id)
+            saved.append(str(out))
+        if not saved:
+            return {"ok": False, "error": "沒有可匯入的影片檔案", "project_id": project_id, "files": []}
+        set_project_videos(db, project_id, list(dict.fromkeys(existing)))
+        sync_project_files(cfg, db, project_id)
         mark_project_needs_review(cfg, db, project_id)
-    return {"ok": bool(saved), "files": saved, "project_id": project_id}
+        return {"ok": True, "files": saved, "project_id": project_id}
+    finally:
+        _close_form(form)
 
 
 def upload_bgm(handler: BaseHTTPRequestHandler, cfg: dict, db: Path) -> dict:
-    form = cgi.FieldStorage(fp=handler.rfile, headers=handler.headers, environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": handler.headers["content-type"]})
-    item = form["file"]
-    tmp = Path(cfg["library_root"]) / "04_audio" / "_incoming_bgm" / Path(item.filename).name
-    tmp.parent.mkdir(parents=True, exist_ok=True)
-    with tmp.open("wb") as f:
-        while chunk := item.file.read(1024 * 1024):
-            f.write(chunk)
-    info = {k: str(form.getvalue(k) or "") for k in ("title", "artist", "source_url", "license_name", "license_url", "attribution_text", "mood")}
-    info["attribution_required"] = str(form.getvalue("attribution_required") or "") == "on"
-    return {"ok": True, "id": import_bgm(cfg, db, tmp, info)}
+    form, error = _parse_upload_form(handler)
+    if error:
+        return error
+    assert form is not None
+    staged: Path | None = None
+    try:
+        items = _form_items(form, "file")
+        if not items or not items[0].filename:
+            return {"ok": False, "error": "缺少 file 欄位"}
+        item = items[0]
+        name = Path(item.filename).name
+        staged = _stage_upload(item, Path(cfg["library_root"]) / "04_audio" / "_incoming_bgm", name)
+        info = {k: _form_value(form, k) for k in ("title", "artist", "source_url", "license_name", "license_url", "attribution_text", "mood")}
+        info["attribution_required"] = _form_value(form, "attribution_required") == "on"
+        return {"ok": True, "id": import_bgm(cfg, db, staged, info)}
+    except Exception as exc:
+        return {"ok": False, "error": f"BGM 匯入失敗：{exc}"}
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
+        _close_form(form)
 
 
 def process_inbox(cfg: dict, db: Path) -> dict:

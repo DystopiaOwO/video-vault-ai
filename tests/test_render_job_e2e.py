@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+import hashlib
 import json
 import os
 import shutil
@@ -22,6 +23,10 @@ FFPROBE = shutil.which("ffprobe")
 def _run(command):
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False)
     assert result.returncode == 0, result.stderr
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _make_source(path: Path, color: str, frequency: int, duration: float = 2.2):
@@ -54,12 +59,13 @@ def _create_approved_project(tmp_path: Path) -> tuple[dict, Path]:
     settings = {"profile_id": "final_1080p", "encoder": "cpu", "color": {"mode": "none", "lut_path": ""}, "audio": {"original_gain_db": 0, "lower_original_gain_db": -12, "bgm_gain_db": -18}, "transition": {"type": "cut", "duration_seconds": 0}, "overlay": {"enabled": False}}
     (project_dir(cfg, project_id) / "render_settings.json").write_text(json.dumps(settings), encoding="utf-8")
     set_review_status(cfg, db, project_id, "approved")
-    return {"cfg": cfg, "db": db, "project_id": project_id}, library
+    return {"cfg": cfg, "db": db, "project_id": project_id, "sources": sources}, library
 
 
 @pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed")
 def test_background_render_job_reports_real_stages_and_final_cache(tmp_path: Path):
     setup, library = _create_approved_project(tmp_path)
+    source_hashes = {path: _sha256(path) for path in setup["sources"]}
     manager = RenderJobManager(setup["cfg"], setup["db"])
     try:
         created = manager.enqueue(setup["project_id"])
@@ -85,15 +91,23 @@ def test_background_render_job_reports_real_stages_and_final_cache(tmp_path: Pat
         assert percents == sorted(percents)
         output = Path(final["output_path"])
         assert output.exists()
+        first_output_hash = _sha256(output)
         assert output.with_name(output.name + ".render.json").exists()
         assert Path(final["log_path"]).exists()
         assert (library / "08_projects" / f"project_{setup['project_id']}" / "renders" / "jobs" / f"{job_id}.json").exists()
+        project_folder = library / "08_projects" / f"project_{setup['project_id']}"
+        assert not list(project_folder.rglob("*.partial.mp4"))
+        assert not list(project_folder.rglob("*.tmp"))
+        assert all(_sha256(path) == digest for path, digest in source_hashes.items())
 
         second = manager.enqueue(setup["project_id"])
         second_id = second["job"]["job_id"]
         second_final = _wait_for(manager, second_id, {"succeeded"}, timeout=30)
         assert second_final["cache_hit"] is True
         assert second_final["percent"] == 100
+        assert Path(second_final["output_path"]) == output
+        assert _sha256(output) == first_output_hash
+        assert all(_sha256(path) == digest for path, digest in source_hashes.items())
     finally:
         manager.shutdown()
 
@@ -105,6 +119,7 @@ def test_background_cancel_uses_real_process_and_preserves_source(tmp_path: Path
     folder = project_dir({"library_root": str(tmp_path)}, 1)
     source = tmp_path / "source.mp4"
     source.write_bytes(b"original source")
+    source_hash = _sha256(source)
     manifest = {"project_id": 1, "manifest_hash": "a" * 64, "segments": [{"segment_id": "a"}]}
     (folder / "render_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     (folder / "review_status.json").write_text(json.dumps({"approved_manifest_hash": "a" * 64}), encoding="utf-8")
@@ -133,7 +148,7 @@ def test_background_cancel_uses_real_process_and_preserves_source(tmp_path: Path
         final = _wait_for(manager, job_id, {"cancelled"}, timeout=15)
         assert final["process_id"] is None
         assert not _pid_exists(child_pid)
-        assert source.read_bytes() == b"original source"
+        assert _sha256(source) == source_hash
         assert not (tmp_path / "never.mp4").exists()
         assert Path(final["log_path"]).exists()
     finally:
@@ -143,6 +158,7 @@ def test_background_cancel_uses_real_process_and_preserves_source(tmp_path: Path
 @pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed")
 def test_cancel_after_publish_started_still_succeeds(tmp_path: Path, monkeypatch):
     setup, library = _create_approved_project(tmp_path)
+    source_hashes = {path: _sha256(path) for path in setup["sources"]}
     import video_vault.project_renderer as renderer_module
 
     publish_started = threading.Event()
@@ -173,6 +189,7 @@ def test_cancel_after_publish_started_still_succeeds(tmp_path: Path, monkeypatch
         assert report.exists()
         assert not output.with_name(f"{output.stem}.partial.mp4").exists()
         assert not report.with_name(f".{report.name}.tmp").exists()
+        assert all(_sha256(path) == digest for path, digest in source_hashes.items())
     finally:
         release_publish.set()
         manager.shutdown()

@@ -19,6 +19,7 @@ FALLBACK_MARKERS = (
     "unknown encoder",
     "encoder not found",
     "cannot load nvcuda",
+    "cannot load libcuda",
     "cannot load nvenc",
     "no capable devices found",
     "nvenc initialization failed",
