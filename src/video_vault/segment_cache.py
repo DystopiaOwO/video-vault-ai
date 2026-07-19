@@ -16,7 +16,7 @@ def cache_key_payload(manifest: Mapping[str, Any], segment: Mapping[str, Any]) -
     stat = source.stat() if source.exists() else None
     profile = dict(manifest.get("profile") or {})
     settings = dict(manifest.get("settings") or {})
-    color = dict(settings.get("color") or {})
+    color = dict(segment.get("color") or settings.get("color") or {})
     lut = Path(str(color.get("lut_path"))).expanduser().resolve() if color.get("lut_path") else None
     lut_stat = lut.stat() if lut and lut.exists() else None
     return {
@@ -33,6 +33,8 @@ def cache_key_payload(manifest: Mapping[str, Any], segment: Mapping[str, Any]) -
         "encoder": settings.get("encoder", "auto"),
         "audio": dict(settings.get("audio") or {}),
         "color_mode": color.get("mode", "none"),
+        "color_settings": {key: color.get(key) for key in ("mode", "lut_kind", "exposure", "temperature", "tint", "contrast", "saturation", "gamma", "enabled")},
+        "color_reference_id": str((settings.get("color_consistency") or {}).get("reference_id") or ""),
         "lut_path": str(lut) if lut else None,
         "lut_size": lut_stat.st_size if lut_stat else None,
         "lut_mtime_ns": lut_stat.st_mtime_ns if lut_stat else None,

@@ -17,6 +17,7 @@ import time
 from .analyzer.vision_pipeline import analyze_video_frames
 from .bgm import import_bgm, list_bgm
 from .color import render_color_preview
+from .color_consistency import analyze_project_color, render_project_color_previews, set_color_reference, update_color_state
 from .database import add_frame, add_project_bgm, connect, frames as db_frames, init_db, project as db_project, project_videos, set_project_videos, set_video_status, update_video_summary, upsert_video, videos
 from .ffmpeg_tools import extract_frames, frame_timestamp, metadata
 from .hyperframes import export_hyperframes_project, render_fast_draft
@@ -397,11 +398,34 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 mark_project_needs_review(cfg, db, int(data.get("project_id", 0)))
                 self._json({"ok": True})
             elif path == "/api/project/color-preview":
-                self._json(color_preview_project(cfg, db, int(data.get("project_id", 0)), data.get("mode") or cfg.get("color", {}).get("default_mode", "safe_restore")))
+                try:
+                    self._json(color_preview_project(cfg, db, int(data.get("project_id", 0)), data.get("mode") or cfg.get("color", {}).get("default_mode", "safe_restore"), force=bool(data.get("force"))))
+                except Exception as exc:
+                    self._json({"ok": False, "error": f"調色預覽失敗：{exc}"})
             elif path == "/api/project/color-job":
                 project_id = int(data.get("project_id", 0))
                 started = start_color_job(cfg, db, project_id, data.get("mode") or cfg.get("color", {}).get("default_mode", "safe_restore"))
                 self._json({"ok": started, "message": "調色預覽已開始" if started else "調色預覽已在執行中"})
+            elif path == "/api/project/color-analyze":
+                try:
+                    state = analyze_project_color(cfg, db, int(data.get("project_id", 0)), force=bool(data.get("force")))
+                    self._json({"ok": True, "state": state})
+                except Exception as exc:
+                    self._json({"ok": False, "error": f"色彩分析失敗：{exc}"})
+            elif path == "/api/project/color-settings":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    patch = data.get("state") if isinstance(data.get("state"), dict) else data.get("patch", {})
+                    state = update_color_state(cfg, db, project_id, patch if isinstance(patch, dict) else {})
+                    self._json({"ok": True, "state": state})
+                except Exception as exc:
+                    self._json({"ok": False, "error": f"色彩設定儲存失敗：{exc}"})
+            elif path == "/api/project/color-reference":
+                try:
+                    state = set_color_reference(cfg, db, int(data.get("project_id", 0)), str(data.get("reference_id", "")))
+                    self._json({"ok": True, "state": state})
+                except Exception as exc:
+                    self._json({"ok": False, "error": f"色彩基準更新失敗：{exc}"})
             elif path == "/api/project/opencut-export":
                 project_id = int(data.get("project_id", 0))
                 if bool(data.get("render_clips")):
@@ -781,18 +805,12 @@ def _analyze_progress(project_id: int, filename: str, base: int, total_videos: i
 
 def _color_job(cfg: dict, db: Path, project_id: int, mode: str) -> None:
     try:
-        rows = [dict(row) for row in project_videos(db, project_id)]
-        out_dir = project_dir(cfg, project_id) / "output" / "color_previews"
-        files = []
-        _set_job(project_id, "color", status="running", message=f"正在準備調色預覽：{mode}", done=0, total=len(rows), percent=0)
-        for index, video in enumerate(rows, 1):
-            if _job_stopped(project_id, "color"):
-                return
-            _set_job(project_id, "color", message=f"正在調色 {video.get('filename', '')}", done=index - 1)
-            out = out_dir / f"video_{video['id']}_{mode}.mp4"
-            files.append(str(render_color_preview(Path(video["current_path"]), out, cfg, mode)))
-            _set_job(project_id, "color", message=f"已完成 {video.get('filename', '')}", done=index)
-        _set_job(project_id, "color", status="done", message=f"調色預覽完成：{len(files)} 支", files=files, percent=100)
+        _set_job(project_id, "color", status="running", message="正在分析色彩基準並產生 Before/After 預覽", done=0, total=1, percent=5)
+        result = render_project_color_previews(cfg, db, project_id)
+        if _job_stopped(project_id, "color"):
+            return
+        files = result.get("files", [])
+        _set_job(project_id, "color", status="done", message=f"調色預覽完成：{len(files)} 支", files=files, previews=result.get("previews", []), state=result.get("state", {}), done=1, total=1, percent=100)
     except Exception as exc:
         if _job_stopped(project_id, "color"):
             return
@@ -1433,13 +1451,9 @@ def update_clip_summary(cfg: dict, db: Path, project_id: int, video_id: int, sum
     return ok
 
 
-def color_preview_project(cfg: dict, db: Path, project_id: int, mode: str) -> dict:
-    out_dir = project_dir(cfg, project_id) / "output" / "color_previews"
-    files = []
-    for video in project_videos(db, project_id):
-        out = out_dir / f"video_{video['id']}_{mode}.mp4"
-        files.append(str(render_color_preview(Path(video["current_path"]), out, cfg, mode)))
-    return {"ok": True, "mode": mode, "files": files}
+def color_preview_project(cfg: dict, db: Path, project_id: int, mode: str, *, force: bool = False) -> dict:
+    result = render_project_color_previews(cfg, db, project_id, force=force)
+    return {**result, "mode": mode}
 
 
 def analyze_ui_video(cfg: dict, db: Path, video: dict, progress=None) -> None:

@@ -15,7 +15,17 @@ def default_render_settings() -> dict[str, Any]:
     return {
         "profile_id": "final_1080p",
         "encoder": "auto",
-        "color": {"mode": "none", "lut_path": ""},
+        "color": {
+            "mode": "none",
+            "lut_path": "",
+            "lut_kind": "",
+            "exposure": 0.0,
+            "temperature": 0.0,
+            "tint": 0.0,
+            "contrast": 1.0,
+            "saturation": 1.0,
+            "gamma": 1.0,
+        },
         "audio": {
             "original_gain_db": 0.0,
             "lower_original_gain_db": -12.0,
@@ -60,6 +70,9 @@ def _normalize(settings: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("render settings color must be an object")
     color["mode"] = str(color.get("mode") or "none")
     color["lut_path"] = str(color.get("lut_path") or "")
+    color["lut_kind"] = str(color.get("lut_kind") or "")
+    for key in ("exposure", "temperature", "tint", "contrast", "saturation", "gamma"):
+        color[key] = _finite_float(color.get(key), key)
 
     audio = result["audio"]
     if not isinstance(audio, dict):
