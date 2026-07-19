@@ -1,6 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 import json
+import threading
+import time
 
 import pytest
 
@@ -229,6 +231,73 @@ def test_segment_failure_keeps_log_but_no_formal_output(monkeypatch, tmp_path: P
     assert not output.with_name("new-output.mp4.render.json").exists()
     assert not output.with_name("new-output.partial.mp4").exists()
     assert list((tmp_path / "08_projects" / "project_1" / "renders" / "logs").glob("*.log"))
+
+
+def test_cancelled_project_render_cleans_final_temps_and_keeps_segment_cache(monkeypatch, tmp_path: Path):
+    import video_vault.project_renderer as renderer
+    from video_vault.render_job_models import RenderCancelled
+    from video_vault.segment_renderer import SegmentRenderResult
+
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"original source")
+    manifest = _manifest(tmp_path)
+    manifest["segments"][0].update({"source_file": str(source), "source_duration_seconds": 1, "source_in_seconds": 0, "source_out_seconds": 1, "video_id": 1, "clip_id": "a"})
+    folder = _write_approved_project(tmp_path, manifest)
+    _patch_approved(monkeypatch)
+    cache_file = folder / "cache" / "segments" / "cache-a.mp4"
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_bytes(b"completed segment cache")
+    fake_segment = SegmentRenderResult("a", cache_file, "cache-a", True, "cpu", "libx264", 1)
+    monkeypatch.setattr(renderer, "render_segment", lambda *args, **kwargs: fake_segment)
+
+    def fake_concat(paths, output):
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("ffconcat", encoding="utf-8")
+        return output
+
+    monkeypatch.setattr(renderer, "build_concat_file", fake_concat)
+    monkeypatch.setattr(renderer, "build_timeline_command", lambda *args, **kwargs: ["fake-ffmpeg", str(args[2])])
+    started = threading.Event()
+
+    class SlowRunner:
+        def __init__(self):
+            self.cancel_event = threading.Event()
+
+        def run(self, command, **kwargs):
+            partial = Path(command[-1])
+            partial.parent.mkdir(parents=True, exist_ok=True)
+            partial.write_bytes(b"final partial")
+            started.set()
+            while not self.cancel_event.is_set():
+                time.sleep(0.01)
+            raise RenderCancelled("cancelled by test")
+
+    runner = SlowRunner()
+    output = tmp_path / "cancelled.mp4"
+    errors = []
+
+    def render():
+        try:
+            renderer.render_project({"library_root": str(tmp_path)}, tmp_path / "db.sqlite3", 1, output_path=output, runner=runner)
+        except Exception as exc:  # noqa: BLE001 - cancellation is asserted below.
+            errors.append(exc)
+
+    thread = threading.Thread(target=render)
+    thread.start()
+    assert started.wait(timeout=5)
+    runner.cancel_event.set()
+    thread.join(timeout=8)
+    assert not thread.is_alive()
+    assert isinstance(errors[0], RenderCancelled)
+    report = output.with_name(output.name + ".render.json")
+    assert not output.exists()
+    assert not report.exists()
+    assert not output.with_name("cancelled.partial.mp4").exists()
+    assert not list((folder / "work").rglob("*.tmp"))
+    assert not list((folder / "work").rglob("*.ffconcat"))
+    assert cache_file.read_bytes() == b"completed segment cache"
+    assert source.read_bytes() == b"original source"
+    assert list((folder / "renders" / "logs").glob("*.log"))
 
 
 def test_mp4_publish_failure_does_not_delete_existing_target(monkeypatch, tmp_path: Path):
