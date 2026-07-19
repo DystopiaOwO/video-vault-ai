@@ -51,6 +51,7 @@ export type Segment = {
 export type Job = {
   job_id?: string;
   project_id?: number;
+  legacy_job_key?: string;
   kind: string;
   status: string;
   stage?: string;
@@ -60,8 +61,6 @@ export type Job = {
   current_segment_index?: number;
   segment_count?: number;
   cache_hit?: boolean;
-  encoder?: string;
-  encoder_used?: string;
   output_path?: string;
   error?: string;
   log_path?: string;
@@ -147,6 +146,8 @@ export const api = {
     json<{ ok: boolean; created: boolean; job?: Job; error?: string }>("/api/project/render-job", post({ project_id: projectId, output_path: outputPath })),
   cancelRenderJob: (jobId: string) =>
     json<{ ok: boolean; job?: Job; reason?: string }>("/api/render-job/cancel", post({ job_id: jobId })),
+  cancelLegacyJob: (projectId: number, legacyJobKey: string) =>
+    json<{ ok: boolean; message?: string; job?: Job; error?: string }>("/api/project/legacy-job/cancel", post({ project_id: projectId, legacy_job_key: legacyJobKey })),
   stopJobs: (projectId: number) =>
     json<{ ok: boolean; message?: string }>("/api/project/stop-jobs", post({ project_id: projectId }))
 };

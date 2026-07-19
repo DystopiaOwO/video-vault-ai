@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { api, Job } from "../../api";
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "cancelling"]);
@@ -8,6 +9,7 @@ const STATUS_LABELS: Record<string, string> = {
   cancelling: "停止中",
   cancelled: "已取消",
   succeeded: "已完成",
+  done: "已完成",
   failed: "失敗",
   interrupted: "已中斷",
   stopped: "已停止",
@@ -31,20 +33,29 @@ type Props = {
 };
 
 export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject }: Props) {
+  const [cancelling, setCancelling] = useState<Set<string>>(new Set());
   const activeJobs = jobs.filter((job) => ACTIVE_STATUSES.has(job.status));
   const hasFormalJob = jobs.some((job) => Boolean(job.job_id));
 
   async function cancel(job: Job) {
+    const key = job.job_id || `${projectId}:${job.legacy_job_key || job.kind}`;
+    setCancelling((current) => new Set(current).add(key));
     setMessage("正在停止指定工作...");
     try {
       const result = job.job_id
         ? await api.cancelRenderJob(job.job_id)
-        : await api.stopJobs(projectId);
+        : await api.cancelLegacyJob(projectId, job.legacy_job_key || job.kind);
       const message = "message" in result ? result.message : ("reason" in result ? result.reason : undefined);
       setMessage(message || "停止要求已送出");
       await refreshProject();
     } catch (error) {
       setMessage(`停止失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+    } finally {
+      setCancelling((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
     }
   }
 
@@ -70,7 +81,7 @@ export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject }: 
               </div>
               <span className="job-message">{job.message || "等待更新"}</span>
               {job.stage && <span className="job-stage">階段：{STAGE_LABELS[job.stage] || job.stage}</span>}
-              {job.current_segment_id && (
+              {job.job_id && ACTIVE_STATUSES.has(job.status) && job.current_segment_id && (
                 <span className="job-stage">
                   目前片段：{job.current_segment_id} {job.current_segment_index && job.segment_count ? `（${job.current_segment_index}/${job.segment_count}）` : ""}
                 </span>
@@ -81,14 +92,18 @@ export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject }: 
               <progress value={safePercent(job.percent)} max={100} />
             </div>
             <div className="job-meta">
-              {job.encoder_used && <span>編碼器：{job.encoder_used}</span>}
-              {job.cache_hit !== undefined && <span>Cache：{job.cache_hit ? "命中" : "新建"}</span>}
+              {job.job_id && job.status === "succeeded" && job.cache_hit !== undefined && <span>Final Cache：{job.cache_hit ? "命中" : "本次建立"}</span>}
               {job.output_path && <span className="job-path" title={job.output_path}>輸出：{job.output_path}</span>}
+              {job.log_path && <span className="job-path" title={job.log_path}>記錄：{job.log_path}</span>}
               {job.error && <span className="job-error">錯誤：{job.error}</span>}
             </div>
             {ACTIVE_STATUSES.has(job.status) && (
-              <button className="danger compact" onClick={() => cancel(job)} disabled={job.status === "cancelling"}>
-                {job.status === "cancelling" ? "停止中..." : job.job_id ? "停止此 Render" : "停止工作"}
+              <button
+                className="danger compact"
+                onClick={() => cancel(job)}
+                disabled={job.status === "cancelling" || cancelling.has(job.job_id || `${projectId}:${job.legacy_job_key || job.kind}`)}
+              >
+                {job.status === "cancelling" || cancelling.has(job.job_id || `${projectId}:${job.legacy_job_key || job.kind}`) ? "停止中..." : job.job_id ? "停止此 Render" : "停止此工作"}
               </button>
             )}
           </article>
@@ -108,7 +123,7 @@ function formatPercent(value: number | undefined) {
 }
 
 function statusClass(status: string) {
-  if (status === "succeeded") return "success";
+  if (status === "succeeded" || status === "done") return "success";
   if (status === "failed" || status === "interrupted") return "error";
   if (ACTIVE_STATUSES.has(status)) return "working";
   return "neutral";
