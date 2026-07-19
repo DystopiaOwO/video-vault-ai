@@ -6,7 +6,7 @@ import { RenderJobPanel } from "./components/render/RenderJobPanel";
 import { ProjectDataLoadOptions, ProjectDataLoader } from "./projectDataLoader";
 import "./styles.css";
 
-function App() {
+export function App() {
   if (window.location.pathname === "/bgm") return <BgmPage />;
   const [projects, setProjects] = useState<Project[]>([]);
   const [currentId, setCurrentId] = useState<number>(0);
@@ -103,8 +103,8 @@ function App() {
     setMessage("專案已建立，下一步請匯入素材。");
   }
 
-  async function refreshProject(options: ProjectDataLoadOptions = {}): Promise<Job[]> {
-    return loadProjectData(currentIdRef.current, options);
+  async function refreshProject(projectId: number, options: ProjectDataLoadOptions = {}): Promise<Job[]> {
+    return loadProjectData(projectId, options);
   }
 
   return (
@@ -128,7 +128,7 @@ function App() {
       </aside>
       <section>
         {message && <div className="notice">{message}</div>}
-        {!detail ? <div className="card">尚未選擇專案</div> : <ProjectView detail={detail} jobs={jobs} bgmTracks={bgmTracks} notes={notes} setNotes={setNotes} setMessage={setMessage} refreshProject={refreshProject} review={review} revise={revise} />}
+        {!detail ? <div className="card">尚未選擇專案</div> : <ProjectView key={detail.project.id} detail={detail} jobs={jobs} bgmTracks={bgmTracks} notes={notes} setNotes={setNotes} setMessage={setMessage} refreshProject={refreshProject} review={review} revise={revise} />}
       </section>
     </main>
   );
@@ -170,18 +170,14 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   notes: string;
   setNotes: (value: string) => void;
   setMessage: (value: string) => void;
-  refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]>;
+  refreshProject: (projectId: number, options?: ProjectDataLoadOptions) => Promise<Job[]>;
   review: (action: "approve" | "reject") => void;
   revise: () => void;
 }) {
   const [selectedBgm, setSelectedBgm] = useState("");
   const [colorMode, setColorMode] = useState("dji_lut");
   const [submitting, setSubmitting] = useState(false);
-  useEffect(() => {
-    if (submitting && jobs.some((job) => Boolean(job.job_id) && ["queued", "running", "cancelling"].includes(job.status))) {
-      setSubmitting(false);
-    }
-  }, [jobs, submitting]);
+  const refreshCurrentProject = (options: ProjectDataLoadOptions = {}) => refreshProject(detail.project.id, options);
   return (
     <>
       <div className="hero">
@@ -191,7 +187,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
         </div>
         <Status value={detail.project.status} />
       </div>
-      <RenderJobPanel jobs={jobs} projectId={detail.project.id} setMessage={setMessage} refreshProject={refreshProject} />
+      <RenderJobPanel jobs={jobs} projectId={detail.project.id} setMessage={setMessage} refreshProject={refreshCurrentProject} />
       <Workflow detail={detail} />
       <div className="grid">
         <Card title="審核">
@@ -227,7 +223,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
               </div>
               {c.filename}
               <span>{c.status} | {c.segment_count} 段 | {Math.round(c.duration_seconds || 0)}s | {c.time_of_day}</span>
-              <ClipSummary projectId={detail.project.id} clip={c} setMessage={setMessage} refreshProject={refreshProject} />
+              <ClipSummary projectId={detail.project.id} clip={c} setMessage={setMessage} refreshProject={refreshCurrentProject} />
             </div>
           ))}
         </Card>
@@ -280,7 +276,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
       const result = kind.startsWith("hyperframes")
         ? await api.hyperframesJob(detail.project.id, kind === "hyperframes-render")
         : await api.opencutJob(detail.project.id, kind === "opencut-render");
-      await refreshProject({ forceFresh: true });
+      await refreshCurrentProject({ forceFresh: true });
       if (!result.ok) {
         setMessage(`工作啟動失敗：${result.error || result.message || "工作未成功送出"}`);
         return;
@@ -296,22 +292,21 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
       setMessage(`正式輸出被擋下：${detail.render_gate_reason}`);
       return;
     }
-    let waitingForActiveJob = false;
+    const requestedProjectId = detail.project.id;
     try {
       setSubmitting(true);
       setMessage("正在建立正式輸出…");
-      const result = await api.createRenderJob(detail.project.id);
+      const result = await api.createRenderJob(requestedProjectId);
       if (!result.ok) {
         setMessage(`正式輸出失敗：${result.error || "建立 Render Job 未成功"}`);
         return;
       }
-      const nextJobs = await refreshProject({ forceFresh: true });
-      waitingForActiveJob = !nextJobs.some((job) => Boolean(job.job_id) && ["queued", "running", "cancelling"].includes(job.status));
+      await refreshProject(requestedProjectId, { forceFresh: true });
       setMessage(result.created ? "正式輸出已排入佇列" : "正式輸出工作已在執行中");
     } catch (error) {
       setMessage(`正式輸出啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
     } finally {
-      if (!waitingForActiveJob) setSubmitting(false);
+      setSubmitting(false);
     }
   }
 
@@ -322,35 +317,35 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
     const result = await api.uploadProject(detail.project.id, files);
     event.target.value = "";
     setMessage(result.ok ? `已匯入 ${result.files?.length || 0} 支素材，下一步請跑內容感知。` : result.error || "匯入失敗");
-    await refreshProject();
+    await refreshCurrentProject();
   }
 
   async function analyze(force: boolean) {
     setMessage(force ? "已送出全部重跑感知。" : "已送出待感知素材。");
     const result = await api.analyzeJob(detail.project.id, force);
     setMessage(result.message || "內容感知工作已開始");
-    await refreshProject();
+    await refreshCurrentProject();
   }
 
   async function analyzeOne(videoId: number) {
     setMessage("已送出單支素材感知，請看工作狀態百分比。");
     const result = await api.analyzeVideo(detail.project.id, videoId);
     setMessage(result.message || "單支素材感知已開始");
-    await refreshProject();
+    await refreshCurrentProject();
   }
 
   async function colorPreview() {
     setMessage("已送出調色預覽，請看工作狀態百分比。");
     const result = await api.colorPreview(detail.project.id, colorMode);
     setMessage(result.message || "調色預覽已開始");
-    await refreshProject();
+    await refreshCurrentProject();
   }
 
   async function buildPlan() {
     setMessage("正在產生故事整理...");
     await api.buildPlan(detail.project.id);
     setMessage("故事整理已更新，請審核片段。");
-    await refreshProject();
+    await refreshCurrentProject();
   }
 
   async function assignBgm() {
@@ -360,7 +355,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
     await api.assignBgm(detail.project.id, bgmId);
     setSelectedBgm("");
     setMessage("BGM 已加入本專案，專案已回到待審。");
-    await refreshProject();
+    await refreshCurrentProject();
   }
 }
 
@@ -509,4 +504,5 @@ function Status({ value }: { value: string }) {
   return <span className={value === "approved" ? "pill ok" : "pill"}>{value}</span>;
 }
 
-createRoot(document.getElementById("root")!).render(<StrictMode><App /></StrictMode>);
+const rootElement = document.getElementById("root");
+if (rootElement) createRoot(rootElement).render(<StrictMode><App /></StrictMode>);
