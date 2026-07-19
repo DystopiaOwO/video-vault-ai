@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api, Job } from "../../api";
+import { ProjectDataLoadOptions } from "../../projectDataLoader";
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "cancelling"]);
 
@@ -29,7 +30,7 @@ type Props = {
   jobs: Job[];
   projectId: number;
   setMessage: (value: string) => void;
-  refreshProject: () => Promise<void>;
+  refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]>;
 };
 
 export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject }: Props) {
@@ -45,9 +46,15 @@ export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject }: 
       const result = job.job_id
         ? await api.cancelRenderJob(job.job_id)
         : await api.cancelLegacyJob(projectId, job.legacy_job_key || job.kind);
+      if (!result.ok) {
+        const error = ("error" in result && result.error) || ("reason" in result && result.reason) || "停止要求未成功";
+        await refreshProject({ forceFresh: true });
+        setMessage(`停止失敗：${error}`);
+        return;
+      }
+      await refreshProject({ forceFresh: true });
       const message = "message" in result ? result.message : ("reason" in result ? result.reason : undefined);
       setMessage(message || "停止要求已送出");
-      await refreshProject();
     } catch (error) {
       setMessage(`停止失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
     } finally {

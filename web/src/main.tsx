@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import type { ChangeEvent, ReactNode } from "react";
 import { api, BgmTrack, Job, Project, ProjectDetail, Segment } from "./api";
 import { RenderJobPanel } from "./components/render/RenderJobPanel";
+import { ProjectDataLoadOptions, ProjectDataLoader } from "./projectDataLoader";
 import "./styles.css";
 
 function App() {
@@ -16,9 +17,20 @@ function App() {
   const [message, setMessage] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
   const currentIdRef = useRef(0);
-  const generationRef = useRef(0);
   const mountedRef = useRef(true);
-  const inFlightRef = useRef<{ projectId: number; promise: Promise<void> } | null>(null);
+  const loaderRef = useRef<ProjectDataLoader | null>(null);
+  if (!loaderRef.current) {
+    loaderRef.current = new ProjectDataLoader(
+      { project: api.project, jobs: api.jobs },
+      (projectId) => projectId === currentIdRef.current,
+      () => mountedRef.current,
+      (project, nextJobs) => {
+        setDetail(project);
+        setJobs(nextJobs);
+      },
+      (error) => setMessage(`狀態更新失敗：${error instanceof Error ? error.message : "未知錯誤"}`),
+    );
+  }
 
   useEffect(() => {
     loadProjects();
@@ -40,43 +52,18 @@ function App() {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      generationRef.current += 1;
+      loaderRef.current?.invalidate();
     };
   }, []);
 
-  async function loadProjectData(requestedProjectId: number): Promise<void> {
-    if (!requestedProjectId) return;
-    const currentRequest = inFlightRef.current;
-    if (currentRequest?.projectId === requestedProjectId) {
-      await currentRequest.promise;
-      return;
-    }
-    const generation = ++generationRef.current;
-    const request = (async () => {
-      try {
-        const [project, nextJobs] = await Promise.all([api.project(requestedProjectId), api.jobs(requestedProjectId)]);
-        if (!mountedRef.current || generation !== generationRef.current || requestedProjectId !== currentIdRef.current) return;
-        setDetail(project);
-        setJobs(nextJobs);
-      } catch (error) {
-        if (mountedRef.current && generation === generationRef.current && requestedProjectId === currentIdRef.current) {
-          setMessage(`狀態更新失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
-        }
-      }
-    })();
-    inFlightRef.current = { projectId: requestedProjectId, promise: request };
-    try {
-      await request;
-    } finally {
-      if (inFlightRef.current?.promise === request) inFlightRef.current = null;
-    }
+  function loadProjectData(requestedProjectId: number, options: ProjectDataLoadOptions = {}): Promise<Job[]> {
+    return loaderRef.current?.load(requestedProjectId, options) || Promise.resolve([]);
   }
 
   useEffect(() => {
     if (!currentId) return;
     let cancelled = false;
     let timer: number | undefined;
-    generationRef.current += 1;
     const poll = async () => {
       if (cancelled) return;
       await loadProjectData(currentId);
@@ -85,7 +72,7 @@ function App() {
     void poll();
     return () => {
       cancelled = true;
-      generationRef.current += 1;
+      loaderRef.current?.invalidate();
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [currentId]);
@@ -116,8 +103,8 @@ function App() {
     setMessage("專案已建立，下一步請匯入素材。");
   }
 
-  async function refreshProject() {
-    await loadProjectData(currentIdRef.current);
+  async function refreshProject(options: ProjectDataLoadOptions = {}): Promise<Job[]> {
+    return loadProjectData(currentIdRef.current, options);
   }
 
   return (
@@ -183,13 +170,18 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   notes: string;
   setNotes: (value: string) => void;
   setMessage: (value: string) => void;
-  refreshProject: () => Promise<void>;
+  refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]>;
   review: (action: "approve" | "reject") => void;
   revise: () => void;
 }) {
   const [selectedBgm, setSelectedBgm] = useState("");
   const [colorMode, setColorMode] = useState("dji_lut");
   const [submitting, setSubmitting] = useState(false);
+  useEffect(() => {
+    if (submitting && jobs.some((job) => Boolean(job.job_id) && ["queued", "running", "cancelling"].includes(job.status))) {
+      setSubmitting(false);
+    }
+  }, [jobs, submitting]);
   return (
     <>
       <div className="hero">
@@ -288,8 +280,12 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
       const result = kind.startsWith("hyperframes")
         ? await api.hyperframesJob(detail.project.id, kind === "hyperframes-render")
         : await api.opencutJob(detail.project.id, kind === "opencut-render");
-      setMessage(result.message || (result.ok ? "工作已開始" : "工作已在執行中"));
-      await refreshProject();
+      await refreshProject({ forceFresh: true });
+      if (!result.ok) {
+        setMessage(`工作啟動失敗：${result.error || result.message || "工作未成功送出"}`);
+        return;
+      }
+      setMessage(result.message || "工作已開始");
     } catch (error) {
       setMessage(`工作啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
     }
@@ -300,16 +296,22 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
       setMessage(`正式輸出被擋下：${detail.render_gate_reason}`);
       return;
     }
+    let waitingForActiveJob = false;
     try {
       setSubmitting(true);
       setMessage("正在建立正式輸出…");
       const result = await api.createRenderJob(detail.project.id);
-      setMessage(result.error || (result.created ? "正式輸出已排入佇列" : "正式輸出工作已在執行中"));
-      await refreshProject();
+      if (!result.ok) {
+        setMessage(`正式輸出失敗：${result.error || "建立 Render Job 未成功"}`);
+        return;
+      }
+      const nextJobs = await refreshProject({ forceFresh: true });
+      waitingForActiveJob = !nextJobs.some((job) => Boolean(job.job_id) && ["queued", "running", "cancelling"].includes(job.status));
+      setMessage(result.created ? "正式輸出已排入佇列" : "正式輸出工作已在執行中");
     } catch (error) {
       setMessage(`正式輸出啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
     } finally {
-      setSubmitting(false);
+      if (!waitingForActiveJob) setSubmitting(false);
     }
   }
 
@@ -362,7 +364,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   }
 }
 
-function ClipSummary({ projectId, clip, setMessage, refreshProject }: { projectId: number; clip: { video_id: number; visual_summary: string }; setMessage: (value: string) => void; refreshProject: () => Promise<void> }) {
+function ClipSummary({ projectId, clip, setMessage, refreshProject }: { projectId: number; clip: { video_id: number; visual_summary: string }; setMessage: (value: string) => void; refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]> }) {
   const [text, setText] = useState(clip.visual_summary || "");
   useEffect(() => setText(clip.visual_summary || ""), [clip.visual_summary]);
   async function save() {

@@ -139,13 +139,13 @@ export const api = {
   hyperframesExport: (projectId: number, render = false) =>
     json<{ ok: boolean; folder?: string; output?: string; error?: string }>("/api/project/hyperframes-export", post({ project_id: projectId, render, max_segments: 20 })),
   opencutJob: (projectId: number, renderClips = false) =>
-    json<{ ok: boolean; message?: string }>("/api/project/opencut-job", post({ project_id: projectId, render_clips: renderClips, max_segments: 20 })),
+    json<{ ok: boolean; message?: string; error?: string }>("/api/project/opencut-job", post({ project_id: projectId, render_clips: renderClips, max_segments: 20 })),
   hyperframesJob: (projectId: number, render = false) =>
-    json<{ ok: boolean; message?: string }>("/api/project/hyperframes-job", post({ project_id: projectId, render, max_segments: 20 })),
+    json<{ ok: boolean; message?: string; error?: string }>("/api/project/hyperframes-job", post({ project_id: projectId, render, max_segments: 20 })),
   createRenderJob: (projectId: number, outputPath = "") =>
     json<{ ok: boolean; created: boolean; job?: Job; error?: string }>("/api/project/render-job", post({ project_id: projectId, output_path: outputPath })),
   cancelRenderJob: (jobId: string) =>
-    json<{ ok: boolean; job?: Job; reason?: string }>("/api/render-job/cancel", post({ job_id: jobId })),
+    json<{ ok: boolean; job?: Job; error?: string; reason?: string }>("/api/render-job/cancel", post({ job_id: jobId })),
   cancelLegacyJob: (projectId: number, legacyJobKey: string) =>
     json<{ ok: boolean; message?: string; job?: Job; error?: string }>("/api/project/legacy-job/cancel", post({ project_id: projectId, legacy_job_key: legacyJobKey })),
   stopJobs: (projectId: number) =>
