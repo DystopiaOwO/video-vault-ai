@@ -94,6 +94,101 @@ def test_queued_cancel_does_not_start_worker(manager: RenderJobManager, monkeypa
     assert started == [1]
 
 
+def test_queued_cancel_wins_before_worker_claim(manager: RenderJobManager, monkeypatch):
+    worker_ready = threading.Event()
+    release_worker = threading.Event()
+    started: list[int] = []
+    original_execute = manager._execute
+
+    def gated_execute(job_id: str):
+        worker_ready.set()
+        assert release_worker.wait(timeout=5)
+        return original_execute(job_id)
+
+    monkeypatch.setattr(manager, "_execute", gated_execute)
+    monkeypatch.setattr(manager_module, "render_project", lambda *args, **kwargs: started.append(args[2]))
+    created = manager.enqueue(1)
+    job_id = created["job"]["job_id"]
+    assert worker_ready.wait(timeout=5)
+    cancelled = manager.cancel(job_id)
+    assert cancelled["ok"] is True
+    assert cancelled["job"]["status"] == "cancelled"
+    release_worker.set()
+    _wait_for(manager, job_id, {"cancelled"})
+    assert started == []
+    assert job_id not in manager._active
+
+
+def test_worker_claim_wins_and_running_job_has_runtime(manager: RenderJobManager, monkeypatch):
+    claim_barrier = threading.Barrier(2)
+    cancel_started = threading.Event()
+    release_render = threading.Event()
+    original_transition = manager.store.transition
+
+    def synchronized_transition(job_id, expected_statuses, **changes):
+        if expected_statuses == {"queued"} and changes.get("status") == "running":
+            claim_barrier.wait(timeout=5)
+        return original_transition(job_id, expected_statuses, **changes)
+
+    monkeypatch.setattr(manager.store, "transition", synchronized_transition)
+
+    def fake_render(cfg, db, project_id, *, execution=None, **kwargs):
+        while not release_render.is_set():
+            execution.check_cancelled()
+            time.sleep(0.01)
+        return SimpleNamespace(output_path=Path("out.mp4"), cache_hit=False)
+
+    monkeypatch.setattr(manager_module, "render_project", fake_render)
+    created = manager.enqueue(1)
+    job_id = created["job"]["job_id"]
+
+    cancel_result: dict = {}
+
+    def cancel_later():
+        cancel_started.set()
+        cancel_result.update(manager.cancel(job_id))
+
+    cancel_thread = threading.Thread(target=cancel_later)
+    cancel_thread.start()
+    assert cancel_started.wait(timeout=5)
+    claim_barrier.wait(timeout=5)
+    cancel_thread.join(timeout=5)
+    assert not cancel_thread.is_alive()
+    assert cancel_result["ok"] is True
+    assert cancel_result["job"]["status"] in {"cancelling", "cancelled"}
+    assert job_id in manager._active or manager.get(job_id)["status"] == "cancelled"
+    if job_id in manager._active:
+        assert manager._active[job_id].cancel_event.is_set()
+    release_render.set()
+    final = _wait_for(manager, job_id, {"cancelled"})
+    assert final["status"] == "cancelled"
+
+
+def test_shutdown_timeout_keeps_worker_and_blocks_second_start(manager: RenderJobManager, monkeypatch):
+    release_render = threading.Event()
+    monkeypatch.setattr(manager_module, "_SHUTDOWN_TIMEOUT_SECONDS", 0.05)
+
+    def fake_render(cfg, db, project_id, *, execution=None, **kwargs):
+        while not release_render.is_set():
+            time.sleep(0.01)
+        return SimpleNamespace(output_path=Path("out.mp4"), cache_hit=False)
+
+    monkeypatch.setattr(manager_module, "render_project", fake_render)
+    created = manager.enqueue(1)
+    job_id = created["job"]["job_id"]
+    _wait_for(manager, job_id, {"running"})
+    old_worker = manager._worker
+    assert old_worker is not None
+    assert manager.shutdown(wait=True) is False
+    assert manager._started is True
+    assert manager._worker is old_worker
+    manager.start()
+    assert manager._worker is old_worker
+    release_render.set()
+    assert manager.shutdown(wait=True) is True
+    assert manager._worker is None
+
+
 def test_running_cancel_is_idempotent_and_not_failed(manager: RenderJobManager, monkeypatch):
     def fake_render(cfg, db, project_id, *, execution=None, **kwargs):
         while True:
@@ -110,6 +205,34 @@ def test_running_cancel_is_idempotent_and_not_failed(manager: RenderJobManager, 
     assert final["status"] == "cancelled"
     assert final["status"] != "failed"
     assert final["process_id"] is None
+
+
+def test_current_segment_is_persisted_before_segment_work(manager: RenderJobManager, monkeypatch):
+    segment_visible = threading.Event()
+    release = threading.Event()
+
+    def fake_render(cfg, db, project_id, *, execution=None, **kwargs):
+        execution.update(
+            stage="segments",
+            percent=5,
+            message="正在輸出片段 1/2",
+            current_segment_id="segment-001",
+            current_segment_index=1,
+            force=True,
+        )
+        segment_visible.set()
+        release.wait(timeout=5)
+        return SimpleNamespace(output_path=Path("out.mp4"), cache_hit=False)
+
+    monkeypatch.setattr(manager_module, "render_project", fake_render)
+    created = manager.enqueue(1)
+    job_id = created["job"]["job_id"]
+    assert segment_visible.wait(timeout=5)
+    current = manager.get(job_id)
+    assert current["current_segment_id"] == "segment-001"
+    assert current["current_segment_index"] == 1
+    release.set()
+    _wait_for(manager, job_id, {"succeeded"})
 
 
 def test_failed_job_does_not_block_next_job(manager: RenderJobManager, monkeypatch):

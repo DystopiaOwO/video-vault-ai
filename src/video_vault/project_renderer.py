@@ -143,6 +143,15 @@ def render_project(
             segment_duration = float(segment["timeline_duration_seconds"])
             segment_start = 5 + 70 * (completed_segment_duration / total_segment_duration)
             segment_span = 70 * (segment_duration / total_segment_duration)
+            _execution_update(
+                execution,
+                stage="segments",
+                percent=segment_start,
+                message=f"正在輸出片段 {index}/{len(segments)}",
+                current_segment_id=str(segment.get("segment_id") or ""),
+                current_segment_index=index,
+                force=True,
+            )
             _execution_begin_ffmpeg(execution, "segments", segment_start, segment_span, segment_duration, f"正在輸出片段 {index}/{len(segments)}")
             segment_results.append(render_segment(cfg, manifest, segment, runner=runner))
             completed_segment_duration += segment_duration
@@ -181,7 +190,7 @@ def render_project(
         _execution_update(execution, stage="done", percent=100, message="正式輸出完成")
         return ProjectRenderResult(project_id, output, approved_hash, False, qc.duration_seconds, tuple(segment_results), track is not None, tuple(qc.warnings))
     except Exception as exc:
-        _cleanup_render_files(paths, partial_created, report_temp_created, output_published, report_published)
+        _cleanup_render_files(paths, concat_path, partial_created, report_temp_created, output_published, report_published)
         _write_log(log_path, project_id, approved_hash, segment_results, concat_path, command, locals().get("result"), locals().get("qc"), track, exc)
         if isinstance(exc, (ProjectRenderError, PermissionError)):
             raise
@@ -295,7 +304,8 @@ def publish_final_render_atomically(partial: Path, report_temp: Path, output: Pa
     return True, True
 
 
-def _cleanup_render_files(paths: FinalOutputPaths, partial_created: bool, report_temp_created: bool, output_published: bool, report_published: bool) -> None:
+def _cleanup_render_files(paths: FinalOutputPaths, concat_path: Path, partial_created: bool, report_temp_created: bool, output_published: bool, report_published: bool) -> None:
+    _unlink_if_exists(concat_path)
     if partial_created:
         _unlink_if_exists(paths.partial)
     if report_temp_created:

@@ -17,6 +17,17 @@ def test_store_create_update_is_atomic_and_percent_never_decreases(tmp_path: Pat
     assert store.update(job_id, percent=10)["percent"] == 35
 
 
+def test_transition_is_conditional_and_atomic(tmp_path: Path):
+    store = RenderJobStore({"library_root": str(tmp_path)})
+    job = store.create(project_id=1, manifest_hash="a", approved_manifest_hash="a")
+    assert store.transition(job["job_id"], {"running"}, status="failed") is None
+    assert store.get(job["job_id"])["status"] == "queued"
+    changed = store.transition(job["job_id"], {"queued"}, status="running", stage="validating", process_id=None)
+    assert changed and changed["status"] == "running"
+    assert store.transition(job["job_id"], {"queued"}, status="cancelled") is None
+    assert store.get(job["job_id"])["status"] == "running"
+
+
 def test_store_list_filters_and_sorts_projects(tmp_path: Path):
     store = RenderJobStore({"library_root": str(tmp_path)})
     first = store.create(project_id=1, manifest_hash="a", approved_manifest_hash="a")

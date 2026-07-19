@@ -85,6 +85,29 @@ class RenderJobStore:
             self._write_json(path, current)
             return current
 
+    def transition(
+        self,
+        job_id: str,
+        expected_statuses: set[str] | frozenset[str],
+        **changes: Any,
+    ) -> dict[str, Any] | None:
+        """Conditionally update a job without releasing the store lock."""
+        with _STORE_LOCK:
+            path = self.job_path(job_id)
+            if path is None:
+                return None
+            current = self._read_json(path)
+            if current is None or current.get("status") not in expected_statuses:
+                return None
+            if "percent" in changes:
+                requested = max(0.0, min(100.0, float(changes["percent"])))
+                changes["percent"] = max(float(current.get("percent", 0)), requested)
+            current.update(changes)
+            current["updated_at"] = utc_now()
+            validate_job_fields(current)
+            self._write_json(path, current)
+            return current
+
     def list(self, project_id: int | None = None) -> list[dict[str, Any]]:
         with _STORE_LOCK:
             if not self.projects_root.exists():

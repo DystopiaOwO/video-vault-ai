@@ -18,6 +18,9 @@ from .render_job_models import ACTIVE_JOB_STATUSES, RenderCancelled, utc_now
 from .render_job_store import RenderJobStore
 
 
+_SHUTDOWN_TIMEOUT_SECONDS = 10.0
+
+
 @dataclass
 class _Runtime:
     cancel_event: threading.Event
@@ -111,26 +114,38 @@ class RenderJobManager:
             self._worker = threading.Thread(target=self._worker_loop, name="video-vault-render-worker", daemon=True)
             self._worker.start()
 
-    def shutdown(self, wait: bool = True) -> None:
+    def shutdown(self, wait: bool = True) -> bool:
         with self._lock:
             if not self._started:
-                return
+                return True
             self._stop.set()
             active = list(self._active.values())
             queued = [job for job in self.store.list() if job.get("status") == "queued"]
         for job in queued:
             try:
-                self.store.update(job["job_id"], status="cancelled", stage="done", cancel_requested=True, message="Render Manager 已關閉", process_id=None, finished_at=utc_now())
+                self.store.transition(
+                    job["job_id"],
+                    {"queued"},
+                    status="cancelled",
+                    stage="done",
+                    cancel_requested=True,
+                    message="Render Manager 已關閉",
+                    process_id=None,
+                    finished_at=utc_now(),
+                )
             except (KeyError, ValueError):
                 pass
         for runtime in active:
             runtime.runner.request_cancel()
         worker = self._worker
         if wait and worker is not None:
-            worker.join(timeout=10)
+            worker.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         with self._lock:
+            if worker is not None and worker.is_alive():
+                return False
             self._started = False
             self._worker = None
+            return True
 
     def enqueue(self, project_id: int, output_path: Path | None = None) -> dict[str, Any]:
         allowed, reason = can_project_render(self.cfg, self.db, int(project_id))
@@ -161,20 +176,59 @@ class RenderJobManager:
         return self.store.list(project_id)
 
     def cancel(self, job_id: str) -> dict[str, Any]:
-        job = self.store.get(job_id)
-        if not job:
-            return {"ok": False, "reason": "job not found"}
-        status = str(job.get("status"))
-        if status not in ACTIVE_JOB_STATUSES:
-            return {"ok": False, "reason": "job is already finished", "job": job}
-        if status == "queued":
-            updated = self.store.update(job_id, status="cancelled", stage="done", percent=job.get("percent", 0), message="已取消排隊中的正式輸出", cancel_requested=True, process_id=None, finished_at=utc_now())
-            return {"ok": True, "job": updated}
-        runtime = None
         with self._lock:
+            job = self.store.get(job_id)
+            if not job:
+                return {"ok": False, "reason": "job not found"}
+            status = str(job.get("status"))
+            if status == "queued":
+                updated = self.store.transition(
+                    job_id,
+                    {"queued"},
+                    status="cancelled",
+                    stage="done",
+                    percent=job.get("percent", 0),
+                    message="已取消排隊中的正式輸出",
+                    cancel_requested=True,
+                    process_id=None,
+                    finished_at=utc_now(),
+                )
+                if updated is not None:
+                    return {"ok": True, "job": updated}
+                job = self.store.get(job_id)
+                status = str(job.get("status")) if job else ""
+            if status not in ACTIVE_JOB_STATUSES:
+                return {"ok": False, "reason": "job is already finished", "job": job}
             runtime = self._active.get(job_id)
-        updated = self.store.update(job_id, status="cancelling", message="正在停止正式輸出", cancel_requested=True)
+            if status == "running":
+                updated = self.store.transition(
+                    job_id,
+                    {"running"},
+                    status="cancelling",
+                    message="正在停止正式輸出",
+                    cancel_requested=True,
+                )
+                if updated is None:
+                    job = self.store.get(job_id)
+                    status = str(job.get("status")) if job else ""
+                    if status == "cancelling":
+                        updated = job
+                    elif status not in ACTIVE_JOB_STATUSES:
+                        return {"ok": False, "reason": "job is already finished", "job": job}
+                    else:
+                        updated = self.store.transition(
+                            job_id,
+                            {"running"},
+                            status="cancelling",
+                            message="正在停止正式輸出",
+                            cancel_requested=True,
+                        )
+                if updated is None:
+                    return {"ok": False, "reason": "job state changed", "job": self.store.get(job_id)}
+            else:
+                updated = job
         if runtime is not None:
+            runtime.cancel_event.set()
             runtime.runner.request_cancel()
         return {"ok": True, "job": updated}
 
@@ -191,13 +245,28 @@ class RenderJobManager:
                 continue
             try:
                 self._execute(job_id)
+            except Exception:
+                traceback.print_exc()
+                with self._lock:
+                    self._active.pop(job_id, None)
+                try:
+                    current = self.store.get(job_id)
+                    if current and current.get("status") in ACTIVE_JOB_STATUSES:
+                        self.store.update(
+                            job_id,
+                            status="failed",
+                            stage="done",
+                            message="Render Worker 發生未預期錯誤",
+                            error="render worker exception",
+                            process_id=None,
+                            finished_at=utc_now(),
+                        )
+                except Exception:
+                    traceback.print_exc()
             finally:
                 self._queue.task_done()
 
     def _execute(self, job_id: str) -> None:
-        job = self.store.get(job_id)
-        if not job or job.get("status") != "queued":
-            return
         cancel_event = threading.Event()
         runner = ManagedFFmpegRunner(
             cancel_event=cancel_event,
@@ -207,10 +276,22 @@ class RenderJobManager:
         context = RenderExecutionContext(job_id, runner, cancel_event, lambda **changes: self._progress_update(job_id, **changes))
         runner.on_progress = context._on_runner_progress
         with self._lock:
+            claimed = self.store.transition(
+                job_id,
+                {"queued"},
+                status="running",
+                stage="validating",
+                message="正在驗證正式輸出條件",
+                started_at=utc_now(),
+                process_id=None,
+            )
+            if claimed is None:
+                return
             self._active[job_id] = _Runtime(cancel_event, runner)
         try:
-            current = self.store.update(job_id, status="running", stage="validating", message="正在驗證正式輸出條件", started_at=utc_now(), process_id=None)
+            current = claimed
             self.store.append_log(job_id, f"started_at: {current.get('started_at')}\n")
+            context.check_cancelled()
             result = render_project(
                 self.cfg,
                 self.db,
@@ -219,6 +300,7 @@ class RenderJobManager:
                 runner=runner,
                 execution=context,
             )
+            context.check_cancelled()
         except RenderCancelled:
             self.store.append_log(job_id, "result: cancelled")
             self.store.update(job_id, status="cancelled", stage="done", message="正式輸出已取消", error="", process_id=None, finished_at=utc_now())
