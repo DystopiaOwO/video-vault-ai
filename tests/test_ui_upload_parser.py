@@ -1,6 +1,8 @@
 from io import BytesIO
 from types import SimpleNamespace
+import errno
 import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -144,11 +146,104 @@ def test_project_duplicate_filename_is_rejected_without_upsert(monkeypatch, tmp_
     result = ui.upload_project(_handler(body, boundary), cfg, db)
 
     assert result["ok"] is False
-    assert result["code"] == "duplicate_filename"
+    assert result.get("code") == "duplicate_filename", result
     assert "同名" in result["error"]
     assert _sha256(existing) == digest
     assert calls == []
     assert not list(source_dir.glob(".video-vault-upload-*"))
+
+
+def test_project_upload_uses_successful_no_clobber_fallback(monkeypatch, tmp_path):
+    cfg, db, project_id, _, source_dir = _project_upload_setup(tmp_path)
+    monkeypatch.setattr(ui, "metadata", _metadata)
+
+    def no_hard_links(*args):
+        raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
+
+    monkeypatch.setattr(ui.os, "link", no_hard_links)
+    payload = b"fallback video bytes"
+    body, boundary = _body([("project_id", None, str(project_id)), ("file", "fallback.mp4", payload)])
+
+    result = ui.upload_project(_handler(body, boundary), cfg, db)
+
+    destination = source_dir / "fallback.mp4"
+    assert result["ok"] is True
+    assert destination.read_bytes() == payload
+    assert destination.stat().st_size == len(payload)
+    assert not list(source_dir.glob(".video-vault-upload-*"))
+    assert len(ui.videos(db)) == 1
+    assert len(project_videos(db, project_id)) == 1
+
+
+def test_project_upload_fallback_partial_copy_rolls_back(monkeypatch, tmp_path):
+    cfg, db, project_id, _, source_dir = _project_upload_setup(tmp_path)
+    monkeypatch.setattr(ui, "metadata", _metadata)
+    real_fdopen = ui.os.fdopen
+
+    def no_hard_links(*args):
+        raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
+
+    class FailingOutput:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            self.inner.close()
+            return False
+
+        def write(self, value):
+            self.inner.write(value[:1])
+            raise OSError("destination write failed")
+
+        def flush(self):
+            return self.inner.flush()
+
+        def fileno(self):
+            return self.inner.fileno()
+
+    monkeypatch.setattr(ui.os, "link", no_hard_links)
+    monkeypatch.setattr(ui.os, "fdopen", lambda fd, mode: FailingOutput(real_fdopen(fd, mode)))
+    body, boundary = _body([("project_id", None, str(project_id)), ("file", "partial.mp4", b"partial payload")])
+
+    result = ui.upload_project(_handler(body, boundary), cfg, db)
+
+    assert result["ok"] is False
+    assert "素材發布失敗" in result["error"]
+    assert not (source_dir / "partial.mp4").exists()
+    assert not list(source_dir.glob(".video-vault-upload-*"))
+    assert ui.videos(db) == []
+    assert project_videos(db, project_id) == []
+
+
+def test_project_upload_fallback_race_preserves_existing_destination(monkeypatch, tmp_path):
+    cfg, db, project_id, _, source_dir = _project_upload_setup(tmp_path)
+    monkeypatch.setattr(ui, "metadata", _metadata)
+    real_open = ui.os.open
+
+    def no_hard_links(*args):
+        raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
+
+    def racing_open(path, flags, mode=0o777):
+        if Path(path).name == "raced.mp4":
+            Path(path).write_bytes(b"racing upload")
+            raise FileExistsError(errno.EEXIST, "destination appeared")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(ui.os, "link", no_hard_links)
+    monkeypatch.setattr(ui.os, "open", racing_open)
+    body, boundary = _body([("project_id", None, str(project_id)), ("file", "raced.mp4", b"new payload")])
+
+    result = ui.upload_project(_handler(body, boundary), cfg, db)
+
+    assert result["ok"] is False
+    assert result.get("code") == "duplicate_filename", result
+    assert (source_dir / "raced.mp4").read_bytes() == b"racing upload"
+    assert not list(source_dir.glob(".video-vault-upload-*"))
+    assert ui.videos(db) == []
+    assert project_videos(db, project_id) == []
 
 
 def test_upsert_failure_rolls_back_published_file_and_registration(monkeypatch, tmp_path):

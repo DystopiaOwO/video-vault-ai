@@ -1063,11 +1063,11 @@ def _publish_upload_no_clobber(staged: Path, destination: Path) -> None:
                 fd = os.open(destination, flags, 0o600)
             except FileExistsError as exc:
                 raise DuplicateUploadError(f"同名素材已存在：{destination.name}") from exc
+            created = True
             try:
-                with os.fdopen(fd, "wb") as output:
+                with staged.open("rb") as source, os.fdopen(fd, "wb") as output:
                     fd = -1
-                    staged.seek(0)
-                    while chunk := staged.read(UPLOAD_READ_CHUNK):
+                    while chunk := source.read(UPLOAD_READ_CHUNK):
                         output.write(chunk)
                     output.flush()
                     os.fsync(output.fileno())
@@ -1075,7 +1075,6 @@ def _publish_upload_no_clobber(staged: Path, destination: Path) -> None:
                 if fd >= 0:
                     os.close(fd)
                 raise
-            created = True
         staged.unlink()
     except BaseException:
         if created:
@@ -1313,9 +1312,11 @@ def upload_project(handler: BaseHTTPRequestHandler, cfg: dict, db: Path) -> dict
                 staged_paths.remove(record["staged"])
                 published_paths.append(record["out"])
         except DuplicateUploadError as exc:
-            return _upload_project_failure(
+            failure = _upload_project_failure(
                 error=str(exc), project_id=project_id, failed_files=[record["name"] for record in records], staged_paths=staged_paths, published_paths=published_paths, source_dir=source_dir, source_dir_existed=source_dir_existed, db=db, previous_video_ids=previous_video_ids, new_video_ids=[], previous_status=previous_project.get("status"), previous_updated_at=previous_project.get("updated_at"), clips_folder=clips_folder, clips_snapshot=clips_snapshot, review_path=review_path, review_snapshot=review_snapshot, plan_path=plan_path, plan_snapshot=plan_snapshot,
             )
+            failure["code"] = "duplicate_filename"
+            return failure
         except OSError as exc:
             return _upload_project_failure(
                 error=f"素材發布失敗：{exc}", project_id=project_id, failed_files=[record["name"] for record in records], staged_paths=staged_paths, published_paths=published_paths, source_dir=source_dir, source_dir_existed=source_dir_existed, db=db, previous_video_ids=previous_video_ids, new_video_ids=[], previous_status=previous_project.get("status"), previous_updated_at=previous_project.get("updated_at"), clips_folder=clips_folder, clips_snapshot=clips_snapshot, review_path=review_path, review_snapshot=review_snapshot, plan_path=plan_path, plan_snapshot=plan_snapshot,
