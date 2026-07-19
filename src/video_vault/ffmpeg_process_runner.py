@@ -137,8 +137,9 @@ class ManagedFFmpegRunner:
             while process.poll() is None or closed_streams < 2 or not events.empty():
                 if self.cancel_event.is_set() and not cancelled:
                     cancelled = True
-                    self._terminate_process(process)
                     cancel_deadline = time.monotonic() + 2.0
+                    self._terminate_process(process)
+                    self._close_process_pipes(process)
                 # A child in an independent process group may inherit these
                 # pipes. Once the managed parent has exited, waiting for EOF
                 # from that unrelated child can otherwise block forever.
@@ -214,7 +215,13 @@ class ManagedFFmpegRunner:
             process_group_id = self._process_group_id
             self._cancel_sent = True
         if process is not None and not already_sent:
-            self._terminate_process(process, process_group_id=process_group_id)
+            try:
+                self._terminate_process(process, process_group_id=process_group_id)
+            finally:
+                # A separately-created process group may inherit the managed
+                # pipes. Closing this runner's descriptors prevents cancel
+                # from waiting for an unrelated child to close them.
+                self._close_process_pipes(process)
 
     def current_pid(self) -> int | None:
         with self._lock:
