@@ -10,7 +10,7 @@
 - Phase 4B 分支：`codex/render-v2-render-jobs`
 - Phase 4B PR #6：<https://github.com/DystopiaOwO/video-vault-ai/pull/6>
 - PR #6 目前保持開啟，尚未合併。
-- PR #6 最新 commit：`0ff034528e2429c4d71ff2179915f52c27ddf83e`
+- PR #6 最新 commit：`0ece1b5aebca0c2cbdf6de0e0f47f3ce1a6483b2`
 
 ## Phase 4B 已完成
 
@@ -25,6 +25,9 @@
 - Windows 只終止指定 Job 的 process tree；未使用全域 kill ffmpeg。
 - 取消狀態：`cancelling` → `cancelled`，並保留可追蹤的錯誤與 log。
 - `render_project()` 保留同步呼叫相容性，並可接收 Job execution context。
+- atomic publish 開始後才到達的取消要求不會撤銷已成功發布的 MP4/Report；Job 會保持 `succeeded`。
+- shutdown 在同一個 Manager lock 內取消 queued jobs，避免 Worker claim 競態。
+- shutdown 期間拒絕新 enqueue；timeout 後保留原 Worker 與 shutdown 狀態，不會建立第二條 Worker。
 - 後端 API：
   - `POST /api/project/render-job`
   - `GET /api/render-job?id=...`
@@ -51,25 +54,29 @@
 - `dfde8e5` `feat: add managed ffmpeg process runner with progress`
 - `d3e6c2c` `feat: add targeted render cancellation`
 - `0ff0345` `feat: expose render job backend APIs`
+- `51b7814` `fix: harden render job concurrency and process lifecycle`
+- `0ece1b5` `fix: close render publish and shutdown races`
 
 ## 本機驗證
 
-- `pytest`：152 passed，1 warning。
-- Render Job E2E：2 passed。
+- `pytest`：164 passed，2 skipped（Windows 平台跳過 POSIX process-group 測試）。
+- Render Job Manager：11 passed。
+- FFmpeg Process Runner：6 passed，2 skipped。
+- Render Job E2E：3 passed。
+- Project Renderer：17 passed。
 - Project Renderer E2E：1 passed。
 - Segment Renderer E2E：1 passed。
 - CLI tests：3 passed。
 - `npm run build`：成功。
 - `git diff --check`：成功。
 - FFmpeg / FFprobe：8.1.2。
-- Warning 為既有 Python 3.13 的 `cgi` deprecated warning，來源是 `src/video_vault/ui.py`。
 
 ## 明日建議順序
 
 1. 先檢查 PR #6 的 diff、review comments 與 CI 狀態，再決定是否合併。
 2. 啟動實際 WebUI，建立已核准專案，測試建立 job、輪詢進度、取消 job。
 3. 確認 `/api/jobs` 與新 Render Job 資料的相容輸出。
-4. 審查取消邊界：接近 publish、manager shutdown、服務重啟時的 process handle。
+4. 審查服務重啟時的 process handle 與 interrupted job 顯示。
 5. 視需要補上 Render Job CLI；Phase 4B 目前沒有新增 CLI。
 6. 下一階段再做 React Render Job UI，顯示 status、stage、percent、current segment、encoder、output、error 與停止按鈕。
 
