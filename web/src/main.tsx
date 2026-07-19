@@ -2,6 +2,7 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { ChangeEvent, ReactNode } from "react";
 import { api, BgmTrack, Job, Project, ProjectDetail, Segment } from "./api";
+import { RenderJobPanel } from "./components/render/RenderJobPanel";
 import "./styles.css";
 
 function App() {
@@ -36,7 +37,7 @@ function App() {
       setJobs(jobs);
     });
     load();
-    const timer = setInterval(load, 3000);
+    const timer = setInterval(load, 1500);
     return () => {
       alive = false;
       clearInterval(timer);
@@ -154,7 +155,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
         </div>
         <Status value={detail.project.status} />
       </div>
-      <Jobs jobs={jobs} projectId={detail.project.id} setMessage={setMessage} refreshProject={refreshProject} />
+      <RenderJobPanel jobs={jobs} projectId={detail.project.id} setMessage={setMessage} refreshProject={refreshProject} />
       <Workflow detail={detail} />
       <div className="grid">
         <Card title="審核">
@@ -169,6 +170,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
         <Card title="輸出">
           <button onClick={() => exportProject("hyperframes")}>產生初剪專案</button>
           <button disabled={!detail.can_render} onClick={() => exportProject("hyperframes-render")}>快速輸出 MP4</button>
+          <button className="good" disabled={!detail.can_render || jobs.some((job) => Boolean(job.job_id) && ["queued", "running", "cancelling"].includes(job.status))} onClick={startFormalRender}>正式輸出（Render Job）</button>
           <button onClick={() => exportProject("opencut")}>OpenCut 素材包</button>
           <button disabled={!detail.can_render} onClick={() => exportProject("opencut-render")}>OpenCut 調色片段</button>
         </Card>
@@ -237,12 +239,31 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   );
 
   async function exportProject(kind: "hyperframes" | "hyperframes-render" | "opencut" | "opencut-render") {
-    setMessage("工作已送出，請看工作狀態百分比。");
-    const result = kind.startsWith("hyperframes")
-      ? await api.hyperframesJob(detail.project.id, kind === "hyperframes-render")
-      : await api.opencutJob(detail.project.id, kind === "opencut-render");
-    setMessage(result.message || (result.ok ? "工作已開始" : "工作已在執行中"));
-    await refreshProject();
+    try {
+      setMessage("工作已送出，請看 Render Job 狀態與進度。");
+      const result = kind.startsWith("hyperframes")
+        ? await api.hyperframesJob(detail.project.id, kind === "hyperframes-render")
+        : await api.opencutJob(detail.project.id, kind === "opencut-render");
+      setMessage(result.message || (result.ok ? "工作已開始" : "工作已在執行中"));
+      await refreshProject();
+    } catch (error) {
+      setMessage(`工作啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+    }
+  }
+
+  async function startFormalRender() {
+    if (!detail.can_render) {
+      setMessage(`正式輸出被擋下：${detail.render_gate_reason}`);
+      return;
+    }
+    try {
+      setMessage("正在建立正式輸出 Render Job...");
+      const result = await api.createRenderJob(detail.project.id);
+      setMessage(result.error || (result.created ? "正式輸出已排入佇列" : "正式輸出工作已在執行中"));
+      await refreshProject();
+    } catch (error) {
+      setMessage(`正式輸出啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+    }
   }
 
   async function uploadFiles(event: ChangeEvent<HTMLInputElement>) {
@@ -386,17 +407,6 @@ function SegmentTable({ detail }: { detail: ProjectDetail }) {
     setRows(next);
     setSaved("");
   }
-}
-
-function Jobs({ jobs, projectId, setMessage, refreshProject }: { jobs: Job[]; projectId: number; setMessage: (value: string) => void; refreshProject: () => Promise<void> }) {
-  if (!jobs.length) return null;
-  const running = jobs.some((job) => job.status === "queued" || job.status === "running");
-  async function stop() {
-    const result = await api.stopJobs(projectId);
-    setMessage(result.message || "已停止目前背景工作");
-    await refreshProject();
-  }
-  return <Card title="工作狀態">{running && <button className="danger" onClick={stop}>停止目前工作</button>}{jobs.map((job, i) => <div className="item" key={i}><b>{job.kind} | {job.status} | {job.percent}%</b><span>{job.message}</span><progress value={job.percent} max={100} /></div>)}</Card>;
 }
 
 function TimeBox({ label, seconds, onChange }: { label: string; seconds: number; onChange: (value: number) => void }) {
