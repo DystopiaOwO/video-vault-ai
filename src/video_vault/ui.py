@@ -17,7 +17,7 @@ import time
 from .analyzer.vision_pipeline import analyze_video_frames
 from .bgm import import_bgm, list_bgm
 from .color import render_color_preview
-from .database import add_frame, add_project_bgm, frames as db_frames, init_db, project_videos, set_project_videos, set_video_status, update_video_summary, upsert_video, videos
+from .database import add_frame, add_project_bgm, connect, frames as db_frames, init_db, project as db_project, project_videos, set_project_videos, set_video_status, update_video_summary, upsert_video, videos
 from .ffmpeg_tools import extract_frames, frame_timestamp, metadata
 from .hyperframes import export_hyperframes_project, render_fast_draft
 from .naming import rename_after_perception
@@ -177,29 +177,34 @@ def _multipart_form(handler: BaseHTTPRequestHandler) -> dict[str, list[_UploadPa
             part = _part_headers(raw_headers)
             name = part.get_param("name", header="content-disposition")
             filename = part.get_filename() or ""
-            stored_file = tempfile.SpooledTemporaryFile(max_size=UPLOAD_SPOOL_THRESHOLD, mode="w+b") if name and filename else None
-            text_buffer = bytearray() if name and not filename else None
-            reader.read_part(stored_file, text_buffer)
-            closing = reader._read_exact(2)
-            if closing not in {b"\r\n", b"--"}:
+            stored_file = None
+            try:
+                stored_file = tempfile.SpooledTemporaryFile(max_size=UPLOAD_SPOOL_THRESHOLD, mode="w+b") if name and filename else None
+                text_buffer = bytearray() if name and not filename else None
+                reader.read_part(stored_file, text_buffer)
+                closing = reader._read_exact(2)
+                if closing not in {b"\r\n", b"--"}:
+                    raise MultipartFormError("multipart boundary 結尾無效")
+                if name:
+                    if stored_file is not None:
+                        stored_file.seek(0)
+                        fields.setdefault(str(name), []).append(_UploadPart(str(filename), stored_file))
+                        stored_file = None
+                    else:
+                        charset = part.get_content_charset() or "utf-8"
+                        value = bytes(text_buffer or b"").decode(charset, errors="replace")
+                        empty = tempfile.SpooledTemporaryFile(max_size=0, mode="w+b")
+                        fields.setdefault(str(name), []).append(_UploadPart("", empty, value))
+                if closing == b"--":
+                    if reader.request.remaining:
+                        trailing = reader.request.read_chunk()
+                        if trailing.strip(b"\r\n"):
+                            raise MultipartFormError("multipart request 在結束 boundary 後仍有無效內容")
+                    return fields
+            except BaseException:
                 if stored_file is not None:
                     stored_file.close()
-                raise MultipartFormError("multipart boundary 結尾無效")
-            if name:
-                if stored_file is not None:
-                    stored_file.seek(0)
-                    fields.setdefault(str(name), []).append(_UploadPart(str(filename), stored_file))
-                else:
-                    charset = part.get_content_charset() or "utf-8"
-                    value = bytes(text_buffer or b"").decode(charset, errors="replace")
-                    empty = tempfile.SpooledTemporaryFile(max_size=0, mode="w+b")
-                    fields.setdefault(str(name), []).append(_UploadPart("", empty, value))
-            if closing == b"--":
-                if reader.request.remaining:
-                    trailing = reader.request.read_chunk()
-                    if trailing.strip(b"\r\n"):
-                        raise MultipartFormError("multipart request 在結束 boundary 後仍有無效內容")
-                return fields
+                raise
     except BaseException:
         _close_form(fields)
         raise
@@ -1033,6 +1038,159 @@ def _parse_upload_form(handler: BaseHTTPRequestHandler) -> tuple[dict[str, list[
         return None, {"ok": False, "error": str(exc)}
 
 
+class DuplicateUploadError(ValueError):
+    """The requested project upload would clobber an existing source."""
+
+
+def _publish_upload_no_clobber(staged: Path, destination: Path) -> None:
+    """Publish one staged file without ever replacing an existing path."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        raise DuplicateUploadError(f"同名素材已存在：{destination.name}")
+    created = False
+    try:
+        try:
+            # Same-directory hard-link creation is atomic and O_EXCL-like.
+            os.link(staged, destination)
+            created = True
+        except FileExistsError as exc:
+            raise DuplicateUploadError(f"同名素材已存在：{destination.name}") from exc
+        except OSError:
+            # Filesystems without hard-link support still get an exclusive
+            # create; a concurrent destination cannot be overwritten.
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+            try:
+                fd = os.open(destination, flags, 0o600)
+            except FileExistsError as exc:
+                raise DuplicateUploadError(f"同名素材已存在：{destination.name}") from exc
+            try:
+                with os.fdopen(fd, "wb") as output:
+                    fd = -1
+                    staged.seek(0)
+                    while chunk := staged.read(UPLOAD_READ_CHUNK):
+                        output.write(chunk)
+                    output.flush()
+                    os.fsync(output.fileno())
+            except BaseException:
+                if fd >= 0:
+                    os.close(fd)
+                raise
+            created = True
+        staged.unlink()
+    except BaseException:
+        if created:
+            destination.unlink(missing_ok=True)
+        raise
+
+
+def _snapshot_project_clips(folder: Path) -> dict[Path, bytes]:
+    root = folder / "clips"
+    if not root.exists():
+        return {}
+    return {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+def _restore_project_clips(folder: Path, snapshot: dict[Path, bytes]) -> None:
+    root = folder / "clips"
+    current = {path.relative_to(root) for path in root.rglob("*") if path.is_file()} if root.exists() else set()
+    for relative in current - set(snapshot):
+        (root / relative).unlink(missing_ok=True)
+    for relative, content in snapshot.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+
+def _restore_project_registration(
+    db: Path,
+    project_id: int,
+    previous_video_ids: list[int],
+    new_video_ids: list[int],
+    previous_status: str | None,
+    previous_updated_at: str | None,
+) -> None:
+    """Restore the project relation and remove only rows created by this request."""
+    with connect(db) as con:
+        con.execute("delete from project_videos where project_id=?", (project_id,))
+        for order, video_id in enumerate(previous_video_ids, 1):
+            con.execute(
+                "insert into project_videos(project_id, video_id, sort_order) values(?, ?, ?)",
+                (project_id, video_id, order),
+            )
+        if previous_status is not None:
+            if previous_updated_at is None:
+                con.execute("update projects set status=? where id=?", (previous_status, project_id))
+            else:
+                con.execute("update projects set status=?, updated_at=? where id=?", (previous_status, previous_updated_at, project_id))
+        for video_id in new_video_ids:
+            con.execute("delete from project_videos where video_id=?", (video_id,))
+            con.execute("delete from segments where video_id=?", (video_id,))
+            con.execute("delete from frames where video_id=?", (video_id,))
+            con.execute("delete from analysis_runs where video_id=?", (video_id,))
+            con.execute("delete from videos where id=?", (video_id,))
+
+
+def _upload_project_failure(
+    *,
+    error: str,
+    project_id: int,
+    failed_files: list[str],
+    staged_paths: list[Path],
+    published_paths: list[Path],
+    source_dir: Path,
+    source_dir_existed: bool,
+    db: Path,
+    previous_video_ids: list[int],
+    new_video_ids: list[int],
+    previous_status: str | None,
+    previous_updated_at: str | None,
+    clips_folder: Path,
+    clips_snapshot: dict[Path, bytes],
+    review_path: Path,
+    review_snapshot: bytes | None,
+    plan_path: Path,
+    plan_snapshot: bytes | None,
+) -> dict:
+    cleanup_errors = []
+    for path in staged_paths + published_paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            cleanup_errors.append(str(exc))
+    try:
+        _restore_project_registration(db, project_id, previous_video_ids, new_video_ids, previous_status, previous_updated_at)
+    except Exception as exc:  # noqa: BLE001 - preserve the original upload failure.
+        cleanup_errors.append(f"DB rollback: {exc}")
+    try:
+        _restore_project_clips(clips_folder.parent, clips_snapshot)
+    except OSError as exc:
+        cleanup_errors.append(f"clips rollback: {exc}")
+    for path, snapshot in ((review_path, review_snapshot), (plan_path, plan_snapshot)):
+        try:
+            if snapshot is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(snapshot)
+        except OSError as exc:
+            cleanup_errors.append(f"project metadata rollback: {exc}")
+    if not source_dir_existed:
+        try:
+            source_dir.rmdir()
+        except OSError:
+            pass
+    result = {"ok": False, "error": error, "project_id": project_id, "files": [], "failed_files": failed_files}
+    if staged_paths or published_paths:
+        result["rolled_back_files"] = list(failed_files)
+    if cleanup_errors:
+        result["rollback_warnings"] = cleanup_errors
+    return result
+
+
 def video_list(cfg: dict, db: Path) -> list[dict]:
     result = []
     for video in videos(db):
@@ -1085,32 +1243,114 @@ def upload_project(handler: BaseHTTPRequestHandler, cfg: dict, db: Path) -> dict
             return {"ok": False, "error": "project_id 無效", "project_id": 0, "files": []}
         if not project_id:
             return {"ok": False, "error": "project_id required", "project_id": 0, "files": []}
-        source_dir = project_dir(cfg, project_id) / "source"
+        project_row = db_project(db, project_id)
+        if not project_row:
+            return {"ok": False, "error": "找不到指定專案", "project_id": project_id, "files": []}
+        project_folder_path = Path(cfg["library_root"]) / "08_projects" / f"project_{project_id}"
+        source_dir = project_folder_path / "source"
+        source_dir_existed = source_dir.exists()
         items = _form_items(form, "file")
         if not items:
             return {"ok": False, "error": "缺少 file 欄位", "project_id": project_id, "files": []}
-        existing = [int(v["id"]) for v in project_videos(db, project_id)]
+        project_folder = project_dir(cfg, project_id)
+        clips_folder = project_folder / "clips"
+        clips_snapshot = _snapshot_project_clips(project_folder)
+        review_path = project_folder / "review_status.json"
+        plan_path = project_folder / "project_plan.json"
+        review_snapshot = review_path.read_bytes() if review_path.exists() else None
+        plan_snapshot = plan_path.read_bytes() if plan_path.exists() else None
+        previous_project = dict(project_row)
+        previous_video_ids = [int(v["id"]) for v in project_videos(db, project_id)]
+        before_video_ids = {int(v["id"]) for v in videos(db)}
+        existing_paths = {
+            str(Path(value).expanduser().resolve(strict=False)).casefold()
+            for row in videos(db)
+            for value in (row["original_path"], row["current_path"])
+            if value
+        }
+        records = []
+        seen_names: set[str] = set()
+        staged_paths: list[Path] = []
+        published_paths: list[Path] = []
+
+        # Validate the whole request before creating any staged file.
         for item in items:
             name = Path(item.filename).name
+            if not name:
+                return {"ok": False, "error": "缺少檔名", "project_id": project_id, "files": []}
             if Path(name).suffix.lower() not in {".mp4", ".mov", ".m4v"}:
-                continue
+                return {"ok": False, "error": f"不支援的影片副檔名：{name}", "project_id": project_id, "files": [], "failed_files": [name]}
+            if name.casefold() in seen_names:
+                return {"ok": False, "error": f"上傳內容包含重複檔名：{name}", "project_id": project_id, "files": [], "failed_files": [name]}
+            seen_names.add(name.casefold())
             out = source_dir / name
-            staged = _stage_upload(item, source_dir, name)
-            try:
-                video_info = {"original_path": str(out), "current_path": str(out), "filename": out.name, "category": "unknown", **metadata(staged, cfg), "status": "uploaded"}
-                os.replace(staged, out)
-                video_id = upsert_video(db, video_info)
-            except Exception as exc:
-                return {"ok": False, "error": f"素材 metadata 失敗：{exc}", "project_id": project_id, "files": saved}
-            finally:
-                staged.unlink(missing_ok=True)
-            existing.append(video_id)
-            saved.append(str(out))
-        if not saved:
-            return {"ok": False, "error": "沒有可匯入的影片檔案", "project_id": project_id, "files": []}
-        set_project_videos(db, project_id, list(dict.fromkeys(existing)))
-        sync_project_files(cfg, db, project_id)
-        mark_project_needs_review(cfg, db, project_id)
+            if out.exists() or str(out.resolve(strict=False)).casefold() in existing_paths:
+                return {"ok": False, "error": f"同名素材已存在：{name}", "code": "duplicate_filename", "project_id": project_id, "files": [], "failed_files": [name]}
+            records.append({"item": item, "name": name, "out": out})
+
+        # Stage and probe every file before any formal destination is created.
+        try:
+            for record in records:
+                staged = _stage_upload(record["item"], source_dir, record["name"])
+                staged_paths.append(staged)
+                record["staged"] = staged
+                try:
+                    record["info"] = {"original_path": str(record["out"]), "current_path": str(record["out"]), "filename": record["out"].name, "category": "unknown", **metadata(staged, cfg), "status": "uploaded"}
+                except Exception as exc:
+                    return _upload_project_failure(
+                        error=f"素材 metadata 失敗：{exc}", project_id=project_id, failed_files=[item["name"] for item in records], staged_paths=staged_paths, published_paths=published_paths, source_dir=source_dir, source_dir_existed=source_dir_existed, db=db, previous_video_ids=previous_video_ids, new_video_ids=[], previous_status=previous_project.get("status"), previous_updated_at=previous_project.get("updated_at"), clips_folder=clips_folder, clips_snapshot=clips_snapshot, review_path=review_path, review_snapshot=review_snapshot, plan_path=plan_path, plan_snapshot=plan_snapshot,
+                    )
+        except Exception as exc:
+            return _upload_project_failure(
+                error=f"素材暫存失敗：{exc}", project_id=project_id, failed_files=[record["name"] for record in records], staged_paths=staged_paths, published_paths=published_paths, source_dir=source_dir, source_dir_existed=source_dir_existed, db=db, previous_video_ids=previous_video_ids, new_video_ids=[], previous_status=previous_project.get("status"), previous_updated_at=previous_project.get("updated_at"), clips_folder=clips_folder, clips_snapshot=clips_snapshot, review_path=review_path, review_snapshot=review_snapshot, plan_path=plan_path, plan_snapshot=plan_snapshot,
+            )
+
+        # Publish with no-clobber semantics. A race with another upload still
+        # rolls back the files already published by this request.
+        try:
+            for record in records:
+                _publish_upload_no_clobber(record["staged"], record["out"])
+                staged_paths.remove(record["staged"])
+                published_paths.append(record["out"])
+        except DuplicateUploadError as exc:
+            return _upload_project_failure(
+                error=str(exc), project_id=project_id, failed_files=[record["name"] for record in records], staged_paths=staged_paths, published_paths=published_paths, source_dir=source_dir, source_dir_existed=source_dir_existed, db=db, previous_video_ids=previous_video_ids, new_video_ids=[], previous_status=previous_project.get("status"), previous_updated_at=previous_project.get("updated_at"), clips_folder=clips_folder, clips_snapshot=clips_snapshot, review_path=review_path, review_snapshot=review_snapshot, plan_path=plan_path, plan_snapshot=plan_snapshot,
+            )
+        except OSError as exc:
+            return _upload_project_failure(
+                error=f"素材發布失敗：{exc}", project_id=project_id, failed_files=[record["name"] for record in records], staged_paths=staged_paths, published_paths=published_paths, source_dir=source_dir, source_dir_existed=source_dir_existed, db=db, previous_video_ids=previous_video_ids, new_video_ids=[], previous_status=previous_project.get("status"), previous_updated_at=previous_project.get("updated_at"), clips_folder=clips_folder, clips_snapshot=clips_snapshot, review_path=review_path, review_snapshot=review_snapshot, plan_path=plan_path, plan_snapshot=plan_snapshot,
+            )
+
+        registered_ids: list[int] = []
+        try:
+            for record in records:
+                registered_ids.append(upsert_video(db, record["info"]))
+        except Exception as exc:
+            new_ids = [video_id for video_id in registered_ids if video_id not in before_video_ids]
+            return _upload_project_failure(
+                error=f"素材資料庫登記失敗：{exc}", project_id=project_id, failed_files=[record["name"] for record in records], staged_paths=staged_paths, published_paths=published_paths, source_dir=source_dir, source_dir_existed=source_dir_existed, db=db, previous_video_ids=previous_video_ids, new_video_ids=new_ids, previous_status=previous_project.get("status"), previous_updated_at=previous_project.get("updated_at"), clips_folder=clips_folder, clips_snapshot=clips_snapshot, review_path=review_path, review_snapshot=review_snapshot, plan_path=plan_path, plan_snapshot=plan_snapshot,
+            )
+
+        new_ids = [video_id for video_id in registered_ids if video_id not in before_video_ids]
+        try:
+            set_project_videos(db, project_id, previous_video_ids + registered_ids)
+        except Exception as exc:
+            return _upload_project_failure(
+                error=f"專案素材關聯失敗：{exc}", project_id=project_id, failed_files=[record["name"] for record in records], staged_paths=staged_paths, published_paths=published_paths, source_dir=source_dir, source_dir_existed=source_dir_existed, db=db, previous_video_ids=previous_video_ids, new_video_ids=new_ids, previous_status=previous_project.get("status"), previous_updated_at=previous_project.get("updated_at"), clips_folder=clips_folder, clips_snapshot=clips_snapshot, review_path=review_path, review_snapshot=review_snapshot, plan_path=plan_path, plan_snapshot=plan_snapshot,
+            )
+        try:
+            sync_project_files(cfg, db, project_id)
+        except Exception as exc:
+            return _upload_project_failure(
+                error=f"專案檔案同步失敗：{exc}", project_id=project_id, failed_files=[record["name"] for record in records], staged_paths=staged_paths, published_paths=published_paths, source_dir=source_dir, source_dir_existed=source_dir_existed, db=db, previous_video_ids=previous_video_ids, new_video_ids=new_ids, previous_status=previous_project.get("status"), previous_updated_at=previous_project.get("updated_at"), clips_folder=clips_folder, clips_snapshot=clips_snapshot, review_path=review_path, review_snapshot=review_snapshot, plan_path=plan_path, plan_snapshot=plan_snapshot,
+            )
+        try:
+            mark_project_needs_review(cfg, db, project_id)
+        except Exception as exc:
+            return _upload_project_failure(
+                error=f"專案狀態更新失敗：{exc}", project_id=project_id, failed_files=[record["name"] for record in records], staged_paths=staged_paths, published_paths=published_paths, source_dir=source_dir, source_dir_existed=source_dir_existed, db=db, previous_video_ids=previous_video_ids, new_video_ids=new_ids, previous_status=previous_project.get("status"), previous_updated_at=previous_project.get("updated_at"), clips_folder=clips_folder, clips_snapshot=clips_snapshot, review_path=review_path, review_snapshot=review_snapshot, plan_path=plan_path, plan_snapshot=plan_snapshot,
+            )
+        saved = [str(record["out"]) for record in records]
         return {"ok": True, "files": saved, "project_id": project_id}
     finally:
         _close_form(form)

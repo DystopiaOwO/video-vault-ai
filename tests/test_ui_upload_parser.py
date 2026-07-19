@@ -1,9 +1,11 @@
 from io import BytesIO
 from types import SimpleNamespace
+import hashlib
 
 import pytest
 
 import video_vault.ui as ui
+from video_vault.database import connect, create_project_row, init_db, project_videos
 
 
 def _body(parts, boundary="video-vault-test"):
@@ -97,19 +99,154 @@ def test_missing_file_field_returns_structured_upload_error(tmp_path):
 
 
 def test_metadata_failure_removes_staged_file_and_preserves_existing_source(monkeypatch, tmp_path):
-    body, boundary = _body([("project_id", None, "7"), ("file", "clip.mp4", b"new")])
-    source_dir = tmp_path / "project" / "source"
-    source_dir.mkdir(parents=True)
-    existing = source_dir / "clip.mp4"
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    project_id = create_project_row(db, "test")
+    cfg = {"library_root": str(tmp_path / "library")}
+    source_dir = ui.project_dir(cfg, project_id) / "source"
+    existing = source_dir / "old.mp4"
     existing.write_bytes(b"old")
-    monkeypatch.setattr(ui, "project_dir", lambda cfg, project_id: tmp_path / "project")
-    monkeypatch.setattr(ui, "project_videos", lambda db, project_id: [])
     monkeypatch.setattr(ui, "metadata", lambda *args: (_ for _ in ()).throw(RuntimeError("probe failed")))
-    result = ui.upload_project(_handler(body, boundary), {"library_root": str(tmp_path)}, tmp_path / "db.sqlite3")
+    body, boundary = _body([("project_id", None, str(project_id)), ("file", "clip.mp4", b"new")])
+    result = ui.upload_project(_handler(body, boundary), cfg, db)
     assert result["ok"] is False
     assert "metadata" in result["error"]
     assert existing.read_bytes() == b"old"
     assert not list(source_dir.glob(".video-vault-upload-*"))
+
+
+def _project_upload_setup(tmp_path):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    project_id = create_project_row(db, "upload test")
+    cfg = {"library_root": str(tmp_path / "library")}
+    folder = ui.project_dir(cfg, project_id)
+    return cfg, db, project_id, folder, folder / "source"
+
+
+def _metadata(*args):
+    return {"duration_seconds": 1.0, "width": 1280, "height": 720, "fps": 30.0, "codec": "h264", "file_size": 3}
+
+
+def _sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_project_duplicate_filename_is_rejected_without_upsert(monkeypatch, tmp_path):
+    cfg, db, project_id, _, source_dir = _project_upload_setup(tmp_path)
+    existing = source_dir / "clip.mp4"
+    existing.write_bytes(b"original")
+    digest = _sha256(existing)
+    calls = []
+    monkeypatch.setattr(ui, "upsert_video", lambda *args: calls.append(args) or 99)
+    body, boundary = _body([("project_id", None, str(project_id)), ("file", "clip.mp4", b"new")])
+
+    result = ui.upload_project(_handler(body, boundary), cfg, db)
+
+    assert result["ok"] is False
+    assert result["code"] == "duplicate_filename"
+    assert "同名" in result["error"]
+    assert _sha256(existing) == digest
+    assert calls == []
+    assert not list(source_dir.glob(".video-vault-upload-*"))
+
+
+def test_upsert_failure_rolls_back_published_file_and_registration(monkeypatch, tmp_path):
+    cfg, db, project_id, _, source_dir = _project_upload_setup(tmp_path)
+    monkeypatch.setattr(ui, "metadata", _metadata)
+    monkeypatch.setattr(ui, "upsert_video", lambda *args: (_ for _ in ()).throw(RuntimeError("db unavailable")))
+    body, boundary = _body([("project_id", None, str(project_id)), ("file", "new.mp4", b"new")])
+
+    result = ui.upload_project(_handler(body, boundary), cfg, db)
+
+    assert result["ok"] is False
+    assert "資料庫登記失敗" in result["error"]
+    assert not (source_dir / "new.mp4").exists()
+    assert project_videos(db, project_id) == []
+    assert not list(source_dir.glob(".video-vault-upload-*"))
+
+
+@pytest.mark.parametrize("failure_name", ["set_project_videos", "sync_project_files"])
+def test_project_registration_failure_restores_existing_relation_and_source(monkeypatch, tmp_path, failure_name):
+    cfg, db, project_id, _, source_dir = _project_upload_setup(tmp_path)
+    existing_source = source_dir / "old.mp4"
+    existing_source.write_bytes(b"old")
+    monkeypatch.setattr(ui, "metadata", _metadata)
+    existing_video_id = ui.upsert_video(db, {"original_path": str(existing_source), "current_path": str(existing_source), "filename": existing_source.name, "category": "unknown", **_metadata(), "status": "uploaded"})
+    ui.set_project_videos(db, project_id, [existing_video_id])
+    original_digest = _sha256(existing_source)
+    original_relation = [int(row["id"]) for row in project_videos(db, project_id)]
+    if failure_name == "set_project_videos":
+        monkeypatch.setattr(ui, "set_project_videos", lambda *args: (_ for _ in ()).throw(RuntimeError("relation unavailable")))
+    else:
+        monkeypatch.setattr(ui, "sync_project_files", lambda *args: (_ for _ in ()).throw(RuntimeError("sync unavailable")))
+    body, boundary = _body([("project_id", None, str(project_id)), ("file", "new.mp4", b"new")])
+
+    result = ui.upload_project(_handler(body, boundary), cfg, db)
+
+    assert result["ok"] is False
+    assert "關聯失敗" in result["error"] or "同步失敗" in result["error"]
+    assert _sha256(existing_source) == original_digest
+    assert [int(row["id"]) for row in project_videos(db, project_id)] == original_relation
+    assert not (source_dir / "new.mp4").exists()
+    assert not list(source_dir.glob(".video-vault-upload-*"))
+
+
+def test_second_file_metadata_failure_is_request_level_all_or_nothing(monkeypatch, tmp_path):
+    cfg, db, project_id, _, source_dir = _project_upload_setup(tmp_path)
+    calls = []
+
+    def metadata_for_file(path, _cfg):
+        calls.append(path.name)
+        if len(calls) == 2:
+            raise RuntimeError("bad media")
+        return _metadata()
+
+    monkeypatch.setattr(ui, "metadata", metadata_for_file)
+    body, boundary = _body([("project_id", None, str(project_id)), ("file", "good.mp4", b"good"), ("file", "bad.mp4", b"bad")])
+
+    result = ui.upload_project(_handler(body, boundary), cfg, db)
+
+    assert result["ok"] is False
+    assert "metadata" in result["error"]
+    assert len(calls) == 2
+    assert not (source_dir / "good.mp4").exists()
+    assert not (source_dir / "bad.mp4").exists()
+    assert project_videos(db, project_id) == []
+    assert not list(source_dir.glob(".video-vault-upload-*"))
+
+
+def test_truncated_large_part_closes_rolled_spool(monkeypatch):
+    monkeypatch.setattr(ui, "UPLOAD_SPOOL_THRESHOLD", 8)
+    body, boundary = _body([("file", "large.mp4", b"0123456789abcdef")])
+    real_spool = ui.tempfile.SpooledTemporaryFile
+
+    class TrackingSpool:
+        instances = []
+
+        def __init__(self, *args, **kwargs):
+            self.inner = real_spool(*args, **kwargs)
+            self.closed = False
+            self.rolled = False
+            self.__class__.instances.append(self)
+
+        def write(self, value):
+            result = self.inner.write(value)
+            self.rolled = bool(getattr(self.inner, "_rolled", False))
+            return result
+
+        def seek(self, *args):
+            return self.inner.seek(*args)
+
+        def close(self):
+            self.closed = True
+            return self.inner.close()
+
+    monkeypatch.setattr(ui.tempfile, "SpooledTemporaryFile", TrackingSpool)
+    with pytest.raises(ui.MultipartFormError):
+        ui._multipart_form(_handler(body[:-5], boundary, content_length=len(body) - 5))
+    assert TrackingSpool.instances[0].rolled is True
+    assert TrackingSpool.instances[0].closed is True
 
 
 @pytest.mark.parametrize(
