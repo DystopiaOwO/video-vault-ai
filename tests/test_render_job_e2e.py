@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import sys
 import time
 
@@ -136,6 +137,44 @@ def test_background_cancel_uses_real_process_and_preserves_source(tmp_path: Path
         assert not (tmp_path / "never.mp4").exists()
         assert Path(final["log_path"]).exists()
     finally:
+        manager.shutdown()
+
+
+@pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed")
+def test_cancel_after_publish_started_still_succeeds(tmp_path: Path, monkeypatch):
+    setup, library = _create_approved_project(tmp_path)
+    import video_vault.project_renderer as renderer_module
+
+    publish_started = threading.Event()
+    release_publish = threading.Event()
+    original_publish = renderer_module.publish_final_render_atomically
+
+    def gated_publish(partial, report_temp, output, report_path):
+        publish_started.set()
+        assert release_publish.wait(timeout=10)
+        return original_publish(partial, report_temp, output, report_path)
+
+    monkeypatch.setattr(renderer_module, "publish_final_render_atomically", gated_publish)
+    manager = RenderJobManager(setup["cfg"], setup["db"])
+    try:
+        created = manager.enqueue(setup["project_id"])
+        job_id = created["job"]["job_id"]
+        assert publish_started.wait(timeout=90)
+        cancelling = manager.cancel(job_id)
+        assert cancelling["ok"] is True
+        assert cancelling["job"]["status"] == "cancelling"
+        release_publish.set()
+        final = _wait_for(manager, job_id, {"succeeded", "failed", "cancelled"}, timeout=90)
+        assert final["status"] == "succeeded"
+        assert final["percent"] == 100
+        output = Path(final["output_path"])
+        report = output.with_name(output.name + ".render.json")
+        assert output.exists()
+        assert report.exists()
+        assert not output.with_name(f"{output.stem}.partial.mp4").exists()
+        assert not report.with_name(f".{report.name}.tmp").exists()
+    finally:
+        release_publish.set()
         manager.shutdown()
 
 

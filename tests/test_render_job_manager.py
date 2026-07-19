@@ -136,6 +136,7 @@ def test_worker_claim_wins_and_running_job_has_runtime(manager: RenderJobManager
         while not release_render.is_set():
             execution.check_cancelled()
             time.sleep(0.01)
+        execution.check_cancelled()
         return SimpleNamespace(output_path=Path("out.mp4"), cache_hit=False)
 
     monkeypatch.setattr(manager_module, "render_project", fake_render)
@@ -164,6 +165,60 @@ def test_worker_claim_wins_and_running_job_has_runtime(manager: RenderJobManager
     assert final["status"] == "cancelled"
 
 
+def test_shutdown_cancels_queued_job_before_worker_claim(manager: RenderJobManager, monkeypatch):
+    worker_ready = threading.Event()
+    release_worker = threading.Event()
+    render_started: list[int] = []
+    shutdown_result: dict = {}
+    original_execute = manager._execute
+
+    def gated_execute(job_id: str):
+        worker_ready.set()
+        assert release_worker.wait(timeout=5)
+        return original_execute(job_id)
+
+    def fake_render(cfg, db, project_id, **kwargs):
+        render_started.append(project_id)
+        return SimpleNamespace(output_path=Path("out.mp4"), cache_hit=False)
+
+    monkeypatch.setattr(manager, "_execute", gated_execute)
+    monkeypatch.setattr(manager_module, "render_project", fake_render)
+    created = manager.enqueue(1)
+    job_id = created["job"]["job_id"]
+    assert worker_ready.wait(timeout=5)
+
+    shutdown_thread = threading.Thread(target=lambda: shutdown_result.update(result=manager.shutdown()))
+    shutdown_thread.start()
+    _wait_for(manager, job_id, {"cancelled"})
+    release_worker.set()
+    shutdown_thread.join(timeout=8)
+    assert not shutdown_thread.is_alive()
+    assert shutdown_result["result"] is True
+    assert manager.get(job_id)["status"] == "cancelled"
+    assert render_started == []
+    assert job_id not in manager._active
+
+
+def test_shutdown_cancels_claimed_runtime_and_runner(manager: RenderJobManager, monkeypatch):
+    render_started = threading.Event()
+
+    def fake_render(cfg, db, project_id, *, execution=None, **kwargs):
+        render_started.set()
+        while True:
+            execution.check_cancelled()
+            time.sleep(0.01)
+
+    monkeypatch.setattr(manager_module, "render_project", fake_render)
+    created = manager.enqueue(1)
+    job_id = created["job"]["job_id"]
+    assert render_started.wait(timeout=5)
+    assert _wait_for(manager, job_id, {"running"})["status"] == "running"
+    assert manager.shutdown() is True
+    final = _wait_for(manager, job_id, {"cancelled"})
+    assert final["status"] == "cancelled"
+    assert manager._worker is None
+
+
 def test_shutdown_timeout_keeps_worker_and_blocks_second_start(manager: RenderJobManager, monkeypatch):
     release_render = threading.Event()
     monkeypatch.setattr(manager_module, "_SHUTDOWN_TIMEOUT_SECONDS", 0.05)
@@ -184,9 +239,15 @@ def test_shutdown_timeout_keeps_worker_and_blocks_second_start(manager: RenderJo
     assert manager._worker is old_worker
     manager.start()
     assert manager._worker is old_worker
+    rejected = manager.enqueue(2)
+    assert rejected == {"created": False, "ok": False, "error": "Render Manager 正在關閉"}
+    assert manager.list(2) == []
     release_render.set()
     assert manager.shutdown(wait=True) is True
     assert manager._worker is None
+    restarted = manager.enqueue(2)
+    assert restarted["created"] is True
+    assert _wait_for(manager, restarted["job"]["job_id"], {"succeeded"})["status"] == "succeeded"
 
 
 def test_running_cancel_is_idempotent_and_not_failed(manager: RenderJobManager, monkeypatch):

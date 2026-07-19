@@ -103,41 +103,50 @@ class RenderJobManager:
         self._worker: threading.Thread | None = None
         self._stop = threading.Event()
         self._started = False
+        self._shutting_down = False
 
     def start(self) -> None:
         with self._lock:
-            if self._started:
+            if self._started or self._shutting_down:
                 return
-            self.store.mark_stale_jobs_interrupted()
-            self._stop.clear()
-            self._started = True
-            self._worker = threading.Thread(target=self._worker_loop, name="video-vault-render-worker", daemon=True)
-            self._worker.start()
+            self._start_locked()
+
+    def _start_locked(self) -> None:
+        if self._started or self._shutting_down:
+            return
+        self.store.mark_stale_jobs_interrupted()
+        self._stop.clear()
+        self._started = True
+        self._shutting_down = False
+        self._worker = threading.Thread(target=self._worker_loop, name="video-vault-render-worker", daemon=True)
+        self._worker.start()
 
     def shutdown(self, wait: bool = True) -> bool:
         with self._lock:
             if not self._started:
                 return True
+            self._shutting_down = True
             self._stop.set()
+            queued_jobs = [job for job in self.store.list() if job.get("status") == "queued"]
+            for job in queued_jobs:
+                try:
+                    self.store.transition(
+                        job["job_id"],
+                        {"queued"},
+                        status="cancelled",
+                        stage="done",
+                        cancel_requested=True,
+                        message="Render Manager 已關閉",
+                        process_id=None,
+                        finished_at=utc_now(),
+                    )
+                except (KeyError, ValueError):
+                    pass
             active = list(self._active.values())
-            queued = [job for job in self.store.list() if job.get("status") == "queued"]
-        for job in queued:
-            try:
-                self.store.transition(
-                    job["job_id"],
-                    {"queued"},
-                    status="cancelled",
-                    stage="done",
-                    cancel_requested=True,
-                    message="Render Manager 已關閉",
-                    process_id=None,
-                    finished_at=utc_now(),
-                )
-            except (KeyError, ValueError):
-                pass
+            worker = self._worker
         for runtime in active:
+            runtime.cancel_event.set()
             runtime.runner.request_cancel()
-        worker = self._worker
         if wait and worker is not None:
             worker.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         with self._lock:
@@ -145,14 +154,20 @@ class RenderJobManager:
                 return False
             self._started = False
             self._worker = None
+            self._shutting_down = False
             return True
 
     def enqueue(self, project_id: int, output_path: Path | None = None) -> dict[str, Any]:
         allowed, reason = can_project_render(self.cfg, self.db, int(project_id))
         if not allowed:
             return {"created": False, "ok": False, "error": reason}
-        self.start()
         with self._lock:
+            if self._shutting_down:
+                return {"created": False, "ok": False, "error": "Render Manager 正在關閉"}
+            if not self._started:
+                self._start_locked()
+            if self._shutting_down:
+                return {"created": False, "ok": False, "error": "Render Manager 正在關閉"}
             existing = next((job for job in self.store.list(int(project_id)) if job.get("status") in ACTIVE_JOB_STATUSES), None)
             if existing:
                 return {"created": False, "ok": True, "job": existing}
@@ -300,7 +315,6 @@ class RenderJobManager:
                 runner=runner,
                 execution=context,
             )
-            context.check_cancelled()
         except RenderCancelled:
             self.store.append_log(job_id, "result: cancelled")
             self.store.update(job_id, status="cancelled", stage="done", message="正式輸出已取消", error="", process_id=None, finished_at=utc_now())
