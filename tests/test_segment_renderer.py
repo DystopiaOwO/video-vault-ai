@@ -57,6 +57,7 @@ def test_encoder_mapping(requested, expected):
 
 def test_fallback_only_matches_encoder_failures():
     assert is_encoder_fallback_error("Cannot load NVENC")
+    assert is_encoder_fallback_error("Cannot load libcuda.so.1")
     assert is_encoder_fallback_error("No capable devices found")
     assert not is_encoder_fallback_error("Invalid argument in filter graph")
     assert not is_encoder_fallback_error("No such file or directory: source.mp4")

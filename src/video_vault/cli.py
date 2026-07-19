@@ -10,6 +10,7 @@ from .bgm import import_bgm, list_bgm, youtube_credits
 from .config import check_tools, load_config, save_default_config
 from .color import render_color_preview
 from .database import add_frame, frames as db_frames, init_db, set_video_status, upsert_video, videos, write_json_index
+from .doctor import run_doctor
 from .ffmpeg_tools import extract_frames, frame_timestamp, make_proxy, metadata
 from .hyperframes import export_hyperframes_project, render_fast_draft, render_hyperframes_project
 from .ingest import ingest_file
@@ -24,12 +25,15 @@ from .scanner import scan_inbox
 from .ui import run_ui
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="video-vault")
     parser.add_argument("--config", default="config.yaml")
     sub = parser.add_subparsers(dest="cmd", required=True)
     for name in ("init", "scan", "ingest", "extract-frames", "make-proxy", "index", "analyze", "perceive", "draft-plan", "review-plan", "approve-plan", "reject-plan", "revise-plan", "render-approved", "report", "dry-run"):
         sub.add_parser(name)
+    doctor_parser = sub.add_parser("doctor")
+    doctor_parser.add_argument("--json", action="store_true", dest="json_output")
+    doctor_parser.add_argument("--dev", action="store_true")
     bgm_parser = sub.add_parser("add-bgm")
     bgm_parser.add_argument("file")
     bgm_parser.add_argument("--title", default="")
@@ -74,7 +78,10 @@ def main(argv: list[str] | None = None) -> None:
         ensure_library(cfg)
         init_db(db_path(cfg))
         print(f"created {cfg_path} and {root(cfg)}")
-        return
+        return 0
+
+    if args.cmd == "doctor":
+        return run_doctor(args.config, json_output=args.json_output, dev=args.dev)
 
     cfg = load_config(args.config)
     db = db_path(cfg)
@@ -198,6 +205,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"#{track['id']} {track['title']} - {track['artist']} [{track['license_name']}] {track['source_url']}")
     elif args.cmd == "bgm-credits":
         print(youtube_credits(db))
+    return 0
 
 
 def dry_run(cfg: dict) -> None:

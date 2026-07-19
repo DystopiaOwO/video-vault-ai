@@ -116,7 +116,10 @@ class ManagedFFmpegRunner:
             process = subprocess.Popen(managed_command, **popen_kwargs)
             with self._lock:
                 self._process = process
-                self._process_group_id = _initial_process_group_id(process.pid)
+                # start_new_session=True makes the child the session and
+                # process-group leader. Using pid avoids the fork/setsid race
+                # in an immediate os.getpgid(pid) call.
+                self._process_group_id = int(process.pid) if os.name != "nt" else None
                 self._cancel_sent = False
 
             self._invoke_fatal("on_process", self.on_process, process.pid)
@@ -132,11 +135,23 @@ class ManagedFFmpegRunner:
             progress_values: dict[str, str] = {}
             closed_streams = 0
             cancelled = False
+            cancel_deadline: float | None = None
 
             while process.poll() is None or closed_streams < 2 or not events.empty():
                 if self.cancel_event.is_set() and not cancelled:
                     cancelled = True
+                    cancel_deadline = time.monotonic() + 2.0
                     self._terminate_process(process)
+                    self._close_process_pipes(process)
+                # A child in an independent process group may inherit these
+                # pipes. Once the managed parent has exited, waiting for EOF
+                # from that unrelated child can otherwise block forever.
+                if cancelled and process.poll() is not None:
+                    self._close_process_pipes(process)
+                    break
+                if cancel_deadline is not None and time.monotonic() >= cancel_deadline:
+                    self._close_process_pipes(process)
+                    break
                 try:
                     stream_name, line = events.get(timeout=0.05)
                 except queue.Empty:
@@ -157,9 +172,14 @@ class ManagedFFmpegRunner:
                 if fraction is not None:
                     self._invoke_fatal("on_progress", self.on_progress, fraction, dict(progress_values))
 
-            while process.poll() is None:
-                time.sleep(0.01)
-            returncode = int(process.returncode or 0)
+            try:
+                returncode = int(process.wait(timeout=2.0))
+            except subprocess.TimeoutExpired:
+                self._terminate_process(process)
+                try:
+                    returncode = int(process.wait(timeout=2.0))
+                except subprocess.TimeoutExpired as exc:
+                    raise RuntimeError("FFmpeg process did not exit before cancellation deadline") from exc
             if cancelled or self.cancel_event.is_set():
                 raise RenderCancelled("render cancellation requested")
             result = ManagedRunResult(returncode, stdout_tail.value(), stderr_tail.value())
@@ -198,7 +218,13 @@ class ManagedFFmpegRunner:
             process_group_id = self._process_group_id
             self._cancel_sent = True
         if process is not None and not already_sent:
-            self._terminate_process(process, process_group_id=process_group_id)
+            try:
+                self._terminate_process(process, process_group_id=process_group_id)
+            finally:
+                # A separately-created process group may inherit the managed
+                # pipes. Closing this runner's descriptors prevents cancel
+                # from waiting for an unrelated child to close them.
+                self._close_process_pipes(process)
 
     def current_pid(self) -> int | None:
         with self._lock:
@@ -210,6 +236,11 @@ class ManagedFFmpegRunner:
         pid = int(process.pid)
         self._safe_log(f"cancel requested; terminating PID tree rooted at {pid}")
         terminate_process_tree(pid, process=process, process_group_id=process_group_id or self._process_group_id, on_log=self._safe_log)
+
+    @staticmethod
+    def _close_process_pipes(process: subprocess.Popen[Any]) -> None:
+        _close_stream(getattr(process, "stdout", None))
+        _close_stream(getattr(process, "stderr", None))
 
     def _safe_log(self, message: str) -> None:
         error = self._invoke_nonfatal("on_log", self.on_log, message)

@@ -98,5 +98,35 @@ python -m video_vault bgm-credits
 ## 測試
 
 ```powershell
-pytest
+pytest -q
+python scripts/check_encoding.py
+git diff --check
 ```
+
+前端測試與 production build：
+
+```powershell
+cd web
+npm ci
+npm test
+npm run build
+```
+
+## 支援環境與健檢
+
+- Windows 10/11 是主要支援平台；Linux 可用於 CI 與無頭測試。
+- Python 需符合 `pyproject.toml` 的 `requires-python`，目前為 `>=3.11`。
+- FFmpeg 與 FFprobe 必須可由 `config.yaml` 的 `ffmpeg_path` / `ffprobe_path` 執行。
+- Node.js 與 npm 只在開發 React WebUI 時需要；classic UI 與後端不依賴 Node.js。
+
+先執行唯讀環境健檢：
+
+```powershell
+python -m video_vault doctor
+python -m video_vault doctor --json
+python -m video_vault doctor --dev
+```
+
+文字輸出使用 `[OK]`、`[WARN]`、`[FAIL]`；JSON 輸出不含 API key 或環境變數內容。必要檢查失敗時 doctor 返回 exit code 1。健檢不會初始化資料庫、建立素材庫目錄，也不會寫入原始素材。
+
+Release 前請依照 [docs/release-checklist.md](docs/release-checklist.md) 執行完整驗證。
