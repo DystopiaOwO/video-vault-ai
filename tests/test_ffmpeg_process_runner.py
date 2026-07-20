@@ -139,10 +139,18 @@ def test_posix_stubborn_child_requires_sigkill_fallback(tmp_path: Path):
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group semantics")
 def test_independent_process_group_survives_runner_cancel(tmp_path: Path):
     helper_pid_file = tmp_path / "independent-helper.pid"
+    helper_session_file = tmp_path / "independent-helper.session"
     signal_file = tmp_path / "independent-helper.signal"
+    helper_code = (
+        "import os,pathlib,signal,time; "
+        f"signal.signal(signal.SIGTERM, lambda *_: pathlib.Path(r'{signal_file}').write_text('SIGTERM')); "
+        f"signal.signal(signal.SIGHUP, lambda *_: pathlib.Path(r'{signal_file}').write_text('SIGHUP')); "
+        f"pathlib.Path(r'{helper_pid_file}').write_text(str(os.getpid())); pathlib.Path(r'{helper_session_file}').write_text(str(os.getsid(0))); "
+        "time.sleep(30)"
+    )
     code = (
-        "import pathlib,signal,subprocess,sys,time; "
-        f"p=subprocess.Popen([sys.executable,'-c',\"import pathlib,signal,time; signal.signal(signal.SIGTERM, lambda *_: pathlib.Path(r'{signal_file}').write_text('SIGTERM')); signal.signal(signal.SIGHUP, lambda *_: pathlib.Path(r'{signal_file}').write_text('SIGHUP')); time.sleep(30)\"], start_new_session=True); pathlib.Path(r'{helper_pid_file}').write_text(str(p.pid)); "
+        "import subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable,'-c',\"{helper_code}\"], start_new_session=True); "
         "time.sleep(30)"
     )
     runner = ManagedFFmpegRunner()
@@ -160,6 +168,7 @@ def test_independent_process_group_survives_runner_cancel(tmp_path: Path):
     while not helper_pid_file.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     helper_pid = int(helper_pid_file.read_text(encoding="utf-8"))
+    assert int(helper_session_file.read_text(encoding="utf-8")) == helper_pid
     runner.request_cancel()
     thread.join(timeout=8)
     assert not thread.is_alive()

@@ -19,6 +19,8 @@
 - 原因：`test_independent_process_group_survives_runner_cancel` 在取消後立即檢查 helper PID，發生程序狀態轉換競態。
 - 測試 helper 改為忽略 SIGTERM/SIGHUP。
 - 新增有 deadline 的 `_wait_for_pid_running()`，POSIX 會排除 zombie state。
+- independent helper 會在 signal handler 安裝並寫出自己的 session ID 後才通知測試 ready，避免在 process group 尚未完成握手時取消。
+- 測試會確認 helper session ID 等於 helper PID，且取消後沒有收到 runner 的 SIGTERM/SIGHUP。
 - cleanup 對已消失的 PID 使用 `ProcessLookupError` 保護。
 - 沒有修改正式 process runner，也沒有改成全域終止 FFmpeg。
 
