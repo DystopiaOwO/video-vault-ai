@@ -21,9 +21,10 @@ def validate_bgm_track(track: Mapping[str, Any], ffprobe_path: str = "ffprobe") 
     if not source.is_file():
         raise BgmPipelineError(f"BGM source does not exist: {source}")
     gain = _finite(track.get("gain_db", 0.0), "BGM gain_db")
+    start = _nonnegative(track.get("start_seconds", 0.0), "BGM start_seconds")
     fade_in = _nonnegative(track.get("fade_in_seconds", 0.0), "BGM fade_in_seconds")
     fade_out = _nonnegative(track.get("fade_out_seconds", 0.0), "BGM fade_out_seconds")
-    del gain, fade_in, fade_out
+    del gain, start, fade_in, fade_out
     try:
         probe = _probe_audio(ffprobe_path, source)
     except Exception as exc:
@@ -43,6 +44,7 @@ def bgm_fingerprint(track: Mapping[str, Any]) -> dict[str, Any]:
         "source_mtime_ns": stat.st_mtime_ns if stat else None,
         "source_sha256": _sha256(source),
         "gain_db": _finite(track.get("gain_db", 0.0), "BGM gain_db"),
+        "start_seconds": _finite(track.get("start_seconds", 0.0), "BGM start_seconds"),
         "loop": bool(track.get("loop", True)),
         "fade_in_seconds": _nonnegative(track.get("fade_in_seconds", 0.0), "BGM fade_in_seconds"),
         "fade_out_seconds": _nonnegative(track.get("fade_out_seconds", 0.0), "BGM fade_out_seconds"),
@@ -73,6 +75,8 @@ def build_bgm_mix_command(
     track: Mapping[str, Any],
     timeline_duration: float,
     profile: Mapping[str, Any],
+    *,
+    normalization: Mapping[str, Any] | None = None,
 ) -> list[str]:
     source = Path(str(track.get("source_path") or "")).expanduser().resolve()
     command = [
@@ -91,13 +95,22 @@ def build_bgm_mix_command(
     ]
     if bool(track.get("loop", True)):
         command += ["-stream_loop", "-1"]
+    start_seconds = max(0.0, _finite(track.get("start_seconds", 0.0), "BGM start_seconds"))
+    if start_seconds:
+        command += ["-ss", f"{start_seconds:.6f}"]
     command += ["-i", str(source)]
     bgm_filter = build_bgm_filter(track, timeline_duration)
     graph = (
         f"[1:a]{bgm_filter}[bgm];"
         "[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
-        f"aresample={int(profile['audio_sample_rate'])},aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
+        f"aresample={int(profile['audio_sample_rate'])},aformat=sample_fmts=fltp:channel_layouts=stereo"
     )
+    norm = dict(normalization or {})
+    if bool(norm.get("enabled", False)):
+        target = _finite(norm.get("target_lufs", -14.0), "normalization target_lufs")
+        peak = _finite(norm.get("true_peak_db", -1.0), "normalization true_peak_db")
+        graph += f",loudnorm=I={target:.3f}:TP={peak:.3f}:LRA=11"
+    graph += "[aout]"
     command += [
         "-filter_complex",
         graph,

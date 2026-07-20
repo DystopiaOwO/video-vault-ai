@@ -5,8 +5,10 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping
 
+from .audio_state import AUDIO_ROLES as PROJECT_AUDIO_ROLES
 
-AUDIO_ROLES = {"keep_original", "lower_original", "mute"}
+
+AUDIO_ROLES = {"keep_original", "lower_original", "mute", "keep", "lower", "bgm_only"}
 
 
 def build_atempo_chain(speed: float) -> list[float]:
@@ -32,29 +34,54 @@ def atempo_filter(speed: float) -> str:
 
 def normalize_audio_role(role: str | None) -> str:
     value = str(role or "keep_original")
-    if value not in AUDIO_ROLES:
-        raise ValueError(f"unsupported audio role: {value}")
-    return value
+    if value in {"keep_original", "lower_original"}:
+        return value
+    if value in PROJECT_AUDIO_ROLES:
+        return value
+    raise ValueError(f"unsupported audio role: {value}")
 
 
 def audio_gain_db(role: str, settings: Mapping[str, Any] | None) -> float:
-    normalize_audio_role(role)
-    audio = dict((settings or {}).get("audio") or {})
-    field = "lower_original_gain_db" if role == "lower_original" else "original_gain_db"
-    return 0.0 if role == "mute" else float(audio.get(field, 0.0))
-
-
-def build_audio_filter(role: str, speed: float, settings: Mapping[str, Any] | None, *, start: float, end: float) -> str:
     role = normalize_audio_role(role)
+    audio = dict((settings or {}).get("audio") or {})
+    original = dict(audio.get("original_audio") or {})
+    if role in {"mute", "bgm_only"}:
+        return 0.0
+    if role in {"lower_original", "lower"}:
+        return float(original.get("lower_volume_db", audio.get("lower_original_gain_db", -8.0)))
+    return float(original.get("default_volume_db", audio.get("original_gain_db", 0.0)))
+
+
+def build_audio_filter(
+    role: str,
+    speed: float,
+    settings: Mapping[str, Any] | None,
+    *,
+    start: float,
+    end: float,
+    audio_settings: Mapping[str, Any] | None = None,
+) -> str:
+    role = normalize_audio_role(role)
+    segment_audio = dict(audio_settings or {})
     filters = [f"atrim=start={start:.6f}:end={end:.6f}", "asetpts=PTS-STARTPTS"]
     tempo = atempo_filter(speed)
     if tempo:
         filters.append(tempo)
     filters.extend(["aresample=48000", "aformat=sample_fmts=fltp:channel_layouts=stereo"])
-    if role == "mute":
+    effective_gain = segment_audio.get("volume_db")
+    if effective_gain is None:
+        effective_gain = audio_gain_db(role, settings)
+    if role in {"mute", "bgm_only"}:
         filters.append("volume=0")
     else:
-        filters.append(f"volume={10 ** (audio_gain_db(role, settings) / 20):.8f}")
+        filters.append(f"volume={10 ** (float(effective_gain) / 20):.8f}")
+    timeline_duration = max(0.0, (float(end) - float(start)) / float(speed))
+    fade_in = max(0.0, float(segment_audio.get("fade_in_seconds", 0.0) or 0.0))
+    fade_out = max(0.0, float(segment_audio.get("fade_out_seconds", 0.0) or 0.0))
+    if fade_in > 0:
+        filters.append(f"afade=t=in:st=0:d={min(fade_in, timeline_duration):.6f}")
+    if fade_out > 0 and timeline_duration > 0:
+        filters.append(f"afade=t=out:st={max(0.0, timeline_duration - fade_out):.6f}:d={min(fade_out, timeline_duration):.6f}")
     filters.append("asetpts=PTS-STARTPTS")
     return ",".join(filters)
 

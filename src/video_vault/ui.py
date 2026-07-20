@@ -15,11 +15,14 @@ import threading
 import time
 
 from .analyzer.vision_pipeline import analyze_video_frames
+from .audio_state import audio_state_for_api, update_audio_state
+from .audio_preview import AudioPreviewError, audio_preview_file_path, render_project_audio_preview
+from .bgm_pipeline import BgmPipelineError, validate_bgm_track
 from .bgm import import_bgm, list_bgm
 from .color import render_color_preview
 from .color_consistency import ColorReferenceError, analyze_project_color, color_state_for_api, preview_file_path, reference_file_path, render_project_color_previews, set_color_reference, update_color_state
 from .color_pipeline import ColorPipelineError
-from .database import add_frame, add_project_bgm, connect, frames as db_frames, init_db, project as db_project, project_videos, set_project_videos, set_video_status, update_video_summary, upsert_video, videos
+from .database import add_frame, add_project_bgm, bgm_tracks as db_bgm_tracks, connect, frames as db_frames, init_db, project as db_project, project_bgm_tracks, project_videos, set_project_videos, set_video_status, update_video_summary, upsert_video, videos
 from .ffmpeg_tools import extract_frames, frame_timestamp, metadata
 from .hyperframes import export_hyperframes_project, render_fast_draft
 from .naming import rename_after_perception
@@ -264,6 +267,12 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     self._file(path)
                 except (FileNotFoundError, ValueError):
                     self.send_error(404)
+            elif parsed.path == "/api/project/audio-preview-file":
+                try:
+                    path = audio_preview_file_path(cfg, int(query.get("project_id", ["0"])[0] or 0), query.get("file", [""])[0])
+                    self._file(path)
+                except (FileNotFoundError, ValueError):
+                    self.send_error(404)
             elif parsed.path == "/api/project/color-reference-file":
                 try:
                     path = reference_file_path(cfg, int(query.get("project_id", ["0"])[0] or 0), query.get("file", [""])[0])
@@ -406,6 +415,37 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif path == "/api/project/segments":
                 project_id = int(data.get("project_id", 0))
                 self._json({"ok": True, "path": str(save_segment_review(cfg, db, project_id, data.get("segments", [])))})
+            elif path == "/api/project/audio-settings":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    patch = data.get("patch") if isinstance(data.get("patch"), dict) else data.get("state", {})
+                    selected = (patch.get("bgm") or {}).get("bgm_id") if isinstance(patch, dict) and isinstance(patch.get("bgm"), dict) else None
+                    if selected is not None:
+                        selected_id = int(selected)
+                        track = next((dict(row) for row in db_bgm_tracks(db) if int(row["id"]) == selected_id), None)
+                        if not track:
+                            raise ValueError("找不到指定 BGM")
+                        add_project_bgm(db, project_id, selected_id)
+                        validate_bgm_track({"source_path": track.get("file_path")}, str(cfg.get("ffprobe_path") or "ffprobe"))
+                    state = update_audio_state(cfg, db, project_id, patch if isinstance(patch, dict) else {})
+                    self._json({"ok": True, "state": audio_state_for_api(cfg, project_id, db)})
+                except BgmPipelineError as exc:
+                    self._json({"ok": False, "code": "invalid_bgm", "error": str(exc)})
+                except Exception as exc:
+                    self._json({"ok": False, "error": f"音訊設定儲存失敗：{exc}"})
+            elif path == "/api/project/audio-preview":
+                try:
+                    result = render_project_audio_preview(
+                        cfg,
+                        db,
+                        int(data.get("project_id", 0)),
+                        segment_id=str(data.get("segment_id") or "") or None,
+                        force=bool(data.get("force")),
+                    )
+                    result["url"] = f"/api/project/audio-preview-file?project_id={int(data.get('project_id', 0))}&file={result['file']}"
+                    self._json(result)
+                except AudioPreviewError as exc:
+                    self._json({"ok": False, "error": str(exc)})
             elif path == "/api/project/bgm":
                 add_project_bgm(db, int(data.get("project_id", 0)), int(data.get("bgm_id", 0)))
                 mark_project_needs_review(cfg, db, int(data.get("project_id", 0)))

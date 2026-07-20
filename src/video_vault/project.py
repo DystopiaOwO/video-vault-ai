@@ -144,11 +144,18 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
     plan = _read_json(folder / "project_plan.json")
     ok, reason = can_project_render(cfg, db, project_id)
     from .color_consistency import color_state_for_api, load_project_color_state
+    from .audio_state import audio_state_for_api
+
+    public_bgm = []
+    for bgm_row in project_bgm_tracks(db, project_id):
+        bgm_item = dict(bgm_row)
+        bgm_item.pop("file_path", None)
+        public_bgm.append(bgm_item)
 
     return {
         "project": dict(row),
         "clips": sync_project_files(cfg, db, project_id),
-        "bgm": [dict(row) for row in project_bgm_tracks(db, project_id)],
+        "bgm": public_bgm,
         "plan": plan,
         "workflow": project_workflow(cfg, db, project_id, plan),
         "segments": project_segments(cfg, project_id, plan),
@@ -158,6 +165,7 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
         "script": (folder / "project_script.md").read_text(encoding="utf-8") if (folder / "project_script.md").exists() else "",
         "folder": str(folder),
         "color": color_state_for_api(cfg, project_id, load_project_color_state(cfg, project_id)),
+        "audio": audio_state_for_api(cfg, project_id, db),
     }
 
 

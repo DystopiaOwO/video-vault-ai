@@ -9,13 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from .database import project, project_bgm_tracks
+from .audio_state import audio_state_path, load_audio_state, normalize_audio_role
 from .color_consistency import effective_color_settings, has_color_state, load_project_color_state
 from .project import project_dir, project_segments
 from .render_profiles import get_render_profile
 from .render_settings import load_render_settings
 
 
-ALLOWED_AUDIO_ROLES = {"keep_original", "lower_original", "mute"}
+ALLOWED_AUDIO_ROLES = {"keep_original", "lower_original", "mute", "keep", "lower", "bgm_only"}
 
 
 def build_render_manifest(cfg: dict, db: Path, project_id: int, profile_id: str | None = None) -> dict[str, Any]:
@@ -28,6 +29,10 @@ def build_render_manifest(cfg: dict, db: Path, project_id: int, profile_id: str 
         raise ValueError(f"project not found: {project_id}")
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     settings = load_render_settings(cfg, project_id)
+    audio_file_exists = audio_state_path(cfg, project_id).is_file()
+    audio_state = load_audio_state(cfg, project_id)
+    if audio_file_exists:
+        settings = {**settings, "audio": audio_state}
     color_state = load_project_color_state(cfg, project_id) if has_color_state(cfg, project_id) else None
     if color_state is not None:
         settings = {
@@ -45,10 +50,10 @@ def build_render_manifest(cfg: dict, db: Path, project_id: int, profile_id: str 
     reviewed_segments = project_segments(cfg, project_id, plan)
     included_segments = [segment for segment in _ordered_segments(reviewed_segments) if _included(segment)]
     segments = [
-        _manifest_segment(row, index, segment, effective_color_settings(color_state, str(segment.get("segment_id"))) if color_state is not None else None)
+        _manifest_segment(row, index, segment, effective_color_settings(color_state, str(segment.get("segment_id"))) if color_state is not None else None, audio_state=audio_state if audio_file_exists else None)
         for index, segment in enumerate(included_segments, 1)
     ]
-    bgm = _manifest_bgm(db, project_id, settings)
+    bgm = _manifest_bgm(db, project_id, settings, audio_state if audio_file_exists else None)
     manifest: dict[str, Any] = {
         "schema_version": "2.0",
         "project_id": int(project_id),
@@ -150,7 +155,8 @@ def validate_render_manifest(manifest: dict[str, Any], check_files: bool = False
             errors.append(f"{segment_id}: source_duration_seconds does not match source range")
         if timeline_duration is not None and source_duration is not None and speed is not None and speed > 0 and abs(timeline_duration - (source_duration / speed)) > 0.001:
             errors.append(f"{segment_id}: timeline_duration_seconds does not match source duration and speed")
-        role = segment.get("audio_role")
+        audio = segment.get("audio") if isinstance(segment.get("audio"), dict) else {}
+        role = audio.get("role", segment.get("audio_role"))
         if role not in ALLOWED_AUDIO_ROLES:
             errors.append(f"{segment_id}: invalid audio_role {role!r}")
         if timeline_duration is not None:
@@ -200,10 +206,29 @@ def _included(segment: dict[str, Any]) -> bool:
     return bool(value)
 
 
-def _manifest_segment(project_row: Any, order: int, segment: dict[str, Any], color_settings: dict[str, Any] | None = None) -> dict[str, Any]:
+def _manifest_segment(
+    project_row: Any,
+    order: int,
+    segment: dict[str, Any],
+    color_settings: dict[str, Any] | None = None,
+    *,
+    audio_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     source_in = round(float(segment.get("start_seconds") or 0), 3)
     source_out = round(float(segment.get("end_seconds") or 0), 3)
     speed = round(float(segment.get("speed") or 1.0), 6)
+    configured = dict((audio_state or {}).get("segments", {}).get(str(segment.get("segment_id")), {}) or {})
+    role = normalize_audio_role(configured.get("role") or segment.get("audio_role") or (audio_state or {}).get("original_audio", {}).get("default_role", "lower"))
+    original_audio = dict((audio_state or {}).get("original_audio") or {})
+    default_volume = original_audio.get("lower_volume_db", -8.0) if role == "lower" else original_audio.get("default_volume_db", 0.0)
+    audio = {
+        "role": role,
+        "volume_db": float(configured.get("volume_db", default_volume if role not in {"mute", "bgm_only"} else 0.0)),
+        "fade_in_seconds": float(configured.get("fade_in_seconds", 0.1)),
+        "fade_out_seconds": float(configured.get("fade_out_seconds", 0.1)),
+        "locked": bool(configured.get("locked", False)),
+    }
+    legacy_role = {"keep": "keep_original", "lower": "lower_original", "mute": "mute", "bgm_only": "mute"}.get(role, role)
     result = {
         "segment_id": str(segment.get("segment_id") or ""),
         "order": order,
@@ -215,24 +240,38 @@ def _manifest_segment(project_row: Any, order: int, segment: dict[str, Any], col
         "source_duration_seconds": round(source_out - source_in, 6),
         "speed": speed,
         "timeline_duration_seconds": round((source_out - source_in) / speed, 6) if speed > 0 else 0.0,
-        "audio_role": str(segment.get("audio_role") or "lower_original"),
+        "audio_role": legacy_role,
         "scene_role": str(segment.get("scene_role") or ""),
         "story_position": str(segment.get("story_position") or ""),
         "user_notes": str(segment.get("user_notes") or ""),
         "title": str(segment.get("title") or ""),
         "suggested_use": str(segment.get("suggested_use") or ""),
     }
+    if audio_state is not None:
+        result["audio"] = audio
     if color_settings is not None:
         result["color"] = color_settings
     return result
 
 
-def _manifest_bgm(db: Path, project_id: int, settings: dict[str, Any]) -> list[dict[str, Any]]:
+def _manifest_bgm(db: Path, project_id: int, settings: dict[str, Any], audio_state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     overrides = {int(item.get("track_id")): item for item in settings.get("bgm", []) if isinstance(item, dict) and item.get("track_id") is not None}
     result = []
     for row in project_bgm_tracks(db, project_id):
         item = dict(row)
-        override = overrides.get(int(item["id"]), {})
+        if audio_state is not None:
+            bgm_state = dict(audio_state.get("bgm") or {})
+            selected_id = bgm_state.get("bgm_id")
+            if not bgm_state.get("enabled") or selected_id is None or int(item["id"]) != int(selected_id):
+                continue
+            override = {
+                "gain_db": bgm_state.get("volume_db", -18.0),
+                "loop": bgm_state.get("loop", True),
+                "fade_in_seconds": bgm_state.get("fade_in_seconds", 1.5),
+                "fade_out_seconds": bgm_state.get("fade_out_seconds", 2.0),
+            }
+        else:
+            override = overrides.get(int(item["id"]), {})
         result.append({
             "track_id": int(item["id"]),
             "title": str(item.get("title") or ""),
@@ -241,6 +280,7 @@ def _manifest_bgm(db: Path, project_id: int, settings: dict[str, Any]) -> list[d
             "license_name": str(item.get("license_name") or ""),
             "attribution_text": str(item.get("attribution_text") or ""),
             "gain_db": float(override.get("gain_db", settings.get("audio", {}).get("bgm_gain_db", -18.0))),
+            "start_seconds": float(override.get("start_seconds", 0.0)),
             "loop": bool(override.get("loop", True)),
             "fade_in_seconds": float(override.get("fade_in_seconds", 1.0)),
             "fade_out_seconds": float(override.get("fade_out_seconds", 2.0)),
