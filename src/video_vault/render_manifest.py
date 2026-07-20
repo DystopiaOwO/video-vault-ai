@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .database import project, project_bgm_tracks
+from .color_consistency import effective_color_settings, has_color_state, load_project_color_state
 from .project import project_dir, project_segments
 from .render_profiles import get_render_profile
 from .render_settings import load_render_settings
@@ -27,13 +28,26 @@ def build_render_manifest(cfg: dict, db: Path, project_id: int, profile_id: str 
         raise ValueError(f"project not found: {project_id}")
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     settings = load_render_settings(cfg, project_id)
+    color_state = load_project_color_state(cfg, project_id) if has_color_state(cfg, project_id) else None
+    if color_state is not None:
+        settings = {
+            **settings,
+            "color": effective_color_settings(color_state),
+            "color_consistency": {
+                "schema_version": color_state.get("schema_version", 1),
+                "reference_id": (color_state.get("reference") or {}).get("id", ""),
+            },
+        }
     if profile_id is not None:
         settings = {**settings, "profile_id": profile_id}
     profile = get_render_profile(str(settings["profile_id"]))
 
     reviewed_segments = project_segments(cfg, project_id, plan)
     included_segments = [segment for segment in _ordered_segments(reviewed_segments) if _included(segment)]
-    segments = [_manifest_segment(row, index, segment) for index, segment in enumerate(included_segments, 1)]
+    segments = [
+        _manifest_segment(row, index, segment, effective_color_settings(color_state, str(segment.get("segment_id"))) if color_state is not None else None)
+        for index, segment in enumerate(included_segments, 1)
+    ]
     bgm = _manifest_bgm(db, project_id, settings)
     manifest: dict[str, Any] = {
         "schema_version": "2.0",
@@ -149,9 +163,23 @@ def validate_render_manifest(manifest: dict[str, Any], check_files: bool = False
         missing = [key for key in ("source_url", "license_name", "attribution_text") if not str(track.get(key) or "").strip()]
         if missing:
             warnings.append(f"BGM {track.get('title', 'untitled')} license incomplete: {', '.join(missing)}")
-    color = (manifest.get("settings") or {}).get("color") or {}
-    if color.get("mode") == "dji_lut" and not str(color.get("lut_path") or "").strip():
-        errors.append("color mode dji_lut requires color.lut_path")
+    color_values = [(manifest.get("settings") or {}).get("color") or {}]
+    color_values.extend(segment.get("color") or {} for segment in segments if isinstance(segment, dict))
+    for color in color_values:
+        mode = str(color.get("mode") or "none")
+        if mode not in {"none", "safe_restore", "warm_food", "manual", "dji_lut", "dji_dlog", "dji_dlog_m"}:
+            errors.append(f"unsupported color mode: {mode}")
+        if mode in {"dji_lut", "dji_dlog", "dji_dlog_m"} and not str(color.get("lut_path") or "").strip():
+            errors.append(f"color mode {mode} requires color.lut_path")
+        if mode in {"dji_lut", "dji_dlog", "dji_dlog_m"} and str(color.get("lut_path") or "").strip():
+            lut_path = Path(str(color["lut_path"])).expanduser().resolve()
+            if not lut_path.is_file():
+                errors.append(f"color LUT file does not exist: {lut_path}")
+        for field, lower, upper in (("exposure", -1.5, 1.0), ("temperature", -30.0, 30.0), ("tint", -20.0, 20.0), ("contrast", 0.85, 1.15), ("saturation", 0.8, 1.2), ("gamma", 0.85, 1.15), ("highlights", -1.0, 1.0), ("shadows", -1.0, 1.0)):
+            if field in color:
+                number = _number(color.get(field), f"color {field}", errors)
+                if number is not None and not lower <= number <= upper:
+                    errors.append(f"color {field} must be between {lower} and {upper}")
     return {"valid": not errors, "errors": errors, "warnings": warnings}
 
 
@@ -172,11 +200,11 @@ def _included(segment: dict[str, Any]) -> bool:
     return bool(value)
 
 
-def _manifest_segment(project_row: Any, order: int, segment: dict[str, Any]) -> dict[str, Any]:
+def _manifest_segment(project_row: Any, order: int, segment: dict[str, Any], color_settings: dict[str, Any] | None = None) -> dict[str, Any]:
     source_in = round(float(segment.get("start_seconds") or 0), 3)
     source_out = round(float(segment.get("end_seconds") or 0), 3)
     speed = round(float(segment.get("speed") or 1.0), 6)
-    return {
+    result = {
         "segment_id": str(segment.get("segment_id") or ""),
         "order": order,
         "clip_id": str(segment.get("clip_id") or ""),
@@ -194,6 +222,9 @@ def _manifest_segment(project_row: Any, order: int, segment: dict[str, Any]) -> 
         "title": str(segment.get("title") or ""),
         "suggested_use": str(segment.get("suggested_use") or ""),
     }
+    if color_settings is not None:
+        result["color"] = color_settings
+    return result
 
 
 def _manifest_bgm(db: Path, project_id: int, settings: dict[str, Any]) -> list[dict[str, Any]]:

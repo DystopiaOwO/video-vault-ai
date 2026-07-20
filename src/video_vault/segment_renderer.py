@@ -136,10 +136,11 @@ def build_segment_ffmpeg_command(
     speed = float(segment["speed"])
     duration = end - start
     timeline = duration / speed
-    color = build_color_filter(dict(settings.get("color") or {}))
-    video_filters = [f"trim=start={start:.6f}:end={end:.6f}", "setpts=PTS-STARTPTS", f"setpts=PTS/{speed:g}", f"scale={profile['width']}:{profile['height']}:force_original_aspect_ratio=decrease", f"pad={profile['width']}:{profile['height']}:(ow-iw)/2:(oh-ih)/2", f"fps={profile['fps']}", f"format={profile['pixel_format']}"]
+    color = build_color_filter(dict(segment.get("color") or settings.get("color") or {}))
+    video_filters = [f"trim=start={start:.6f}:end={end:.6f}", "setpts=PTS-STARTPTS", f"setpts=PTS/{speed:g}"]
     if color:
         video_filters.append(color)
+    video_filters.extend([f"scale={profile['width']}:{profile['height']}:force_original_aspect_ratio=decrease", f"pad={profile['width']}:{profile['height']}:(ow-iw)/2:(oh-ih)/2", f"fps={profile['fps']}", f"format={profile['pixel_format']}"])
     graph = [f"[0:v]{','.join(video_filters)}[vout]"]
     args = [str(cfg.get("ffmpeg_path") or "ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(segment["source_file"])]
     if probe.has_audio:

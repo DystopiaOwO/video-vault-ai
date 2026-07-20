@@ -161,6 +161,108 @@ input, select {
   margin-bottom: 12px;
 }
 
+.color-toolbar {
+  margin-bottom: 12px;
+}
+
+.color-grid, .adjustment-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.color-grid label, .adjustment-grid label {
+  display: grid;
+  gap: 5px;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.color-grid select, .color-grid input, .adjustment-grid input {
+  width: 100%;
+}
+
+.reference-thumbnail {
+  display: block;
+  width: min(100%, 320px);
+  max-height: 180px;
+  object-fit: contain;
+  background: #0f172a;
+  border-radius: 6px;
+  margin-top: 8px;
+}
+
+.toggle {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  color: #334155;
+}
+
+.suggested-box, .color-segments, .preview-grid {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #edf0f3;
+}
+
+.suggested-box span, .preview-item, .color-segment-row {
+  color: #64748b;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.color-segment-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.color-segment-row span {
+  flex: 1 1 240px;
+  color: #334155;
+}
+
+.preview-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.preview-item span {
+  flex: 1 1 220px;
+}
+
+.preview-videos {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+
+.preview-videos video {
+  display: block;
+  width: 100%;
+  max-height: 220px;
+  background: #0f172a;
+  border-radius: 6px;
+}
+
+.preview-videos small, .color-segment-row small {
+  display: block;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+.color-segment-row details {
+  flex: 1 1 100%;
+}
+
 .render-job-panel {
   background: white;
   border: 1px solid #d8dee6;

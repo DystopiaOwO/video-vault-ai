@@ -5,8 +5,13 @@ import json
 import sqlite3
 import subprocess
 
+from .color_pipeline import build_color_filter
 
-def color_filter(mode: str, cfg: dict, source: Path | None = None) -> str:
+
+def color_filter(mode: str, cfg: dict, source: Path | None = None, *, color_settings: dict | None = None) -> str:
+    if color_settings is not None:
+        built = build_color_filter(color_settings)
+        return f"{built + ',' if built else ''}scale=-2:1080,format=yuv420p"
     mode = mode or "safe_restore"
     if mode == "none":
         return "scale=-2:1080,format=yuv420p"
@@ -21,7 +26,16 @@ def color_filter(mode: str, cfg: dict, source: Path | None = None) -> str:
     return "eq=contrast=0.98:saturation=0.96:gamma=0.92:brightness=-0.035,scale=-2:1080,format=yuv420p"
 
 
-def render_color_preview(source: Path, out: Path, cfg: dict, mode: str = "safe_restore", seconds: int = 20) -> Path:
+def render_color_preview(
+    source: Path,
+    out: Path,
+    cfg: dict,
+    mode: str = "safe_restore",
+    seconds: int = 20,
+    *,
+    color_settings: dict | None = None,
+    start_seconds: float | None = None,
+) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         cfg["ffmpeg_path"],
@@ -32,10 +46,14 @@ def render_color_preview(source: Path, out: Path, cfg: dict, mode: str = "safe_r
         "-t",
         str(seconds),
         *video_decode_args(cfg),
+    ]
+    if start_seconds is not None:
+        cmd.extend(["-ss", f"{max(0.0, float(start_seconds)):.3f}"])
+    cmd.extend([
         "-i",
         str(source),
         "-vf",
-        color_filter(mode, cfg, source),
+        color_filter(mode, cfg, source, color_settings=color_settings),
         *video_encode_args(cfg),
         "-pix_fmt",
         "yuv420p",
@@ -44,7 +62,7 @@ def render_color_preview(source: Path, out: Path, cfg: dict, mode: str = "safe_r
         "-movflags",
         "+faststart",
         str(out),
-    ]
+    ])
     run_ffmpeg(cmd, cfg)
     return out
 

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from video_vault.database import add_analysis, init_db, upsert_video
+from video_vault.color_consistency import default_color_state, save_project_color_state
 from video_vault.project import build_project_plan, create_project, project_detail, save_segment_review
 from video_vault.render_manifest import build_render_manifest, compile_render_manifest, manifest_hash, validate_render_manifest
 
@@ -131,3 +132,25 @@ def test_schema_file_is_json_and_declares_manifest_fields():
     schema = json.loads(Path(__file__).parents[1].joinpath("schemas", "render_manifest.schema.json").read_text(encoding="utf-8"))
     assert schema["properties"]["schema_version"]["const"] == "2.0"
     assert "segments" in schema["required"]
+
+
+def test_render_manifest_contains_effective_segment_color(tmp_path):
+    cfg, db, project_id = _project(tmp_path, count=1)
+    detail = project_detail(cfg, db, project_id)
+    segment_id = detail["segments"][0]["segment_id"]
+    state = default_color_state()
+    state["applied"].update({"mode": "manual", "exposure": 0.2})
+    state["segments"][segment_id] = {"enabled": True, "locked": True, "excluded": False, "applied": {"mode": "manual", "exposure": -0.3}}
+    save_project_color_state(cfg, db, project_id, state, mark_review=False)
+    manifest = build_render_manifest(cfg, db, project_id)
+    assert manifest["segments"][0]["color"]["mode"] == "manual"
+    assert manifest["segments"][0]["color"]["exposure"] == -0.3
+
+
+def test_manifest_validation_rejects_missing_lut_file(tmp_path):
+    cfg, db, project_id = _project(tmp_path, count=1)
+    manifest = compile_render_manifest(cfg, db, project_id)
+    manifest["settings"]["color"] = {"mode": "dji_lut", "lut_path": str(tmp_path / "missing.cube")}
+    result = validate_render_manifest(manifest)
+    assert not result["valid"]
+    assert any("color LUT file does not exist" in error for error in result["errors"])

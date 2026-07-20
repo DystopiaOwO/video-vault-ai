@@ -139,11 +139,17 @@ def test_posix_stubborn_child_requires_sigkill_fallback(tmp_path: Path):
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group semantics")
 def test_independent_process_group_survives_runner_cancel(tmp_path: Path):
     helper_pid_file = tmp_path / "independent-helper.pid"
-    code = (
-        "import pathlib,subprocess,sys,time; "
-        f"p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'], start_new_session=True); pathlib.Path(r'{helper_pid_file}').write_text(str(p.pid)); "
+    helper_session_file = tmp_path / "independent-helper.session"
+    signal_file = tmp_path / "independent-helper.signal"
+    helper_code = (
+        "import os,pathlib,signal,time; "
+        f"signal.signal(signal.SIGTERM, lambda *_: pathlib.Path(r'{signal_file}').write_text('SIGTERM')); "
+        f"signal.signal(signal.SIGHUP, lambda *_: pathlib.Path(r'{signal_file}').write_text('SIGHUP')); "
+        f"pathlib.Path(r'{helper_pid_file}').write_text(str(os.getpid())); pathlib.Path(r'{helper_session_file}').write_text(str(os.getsid(0))); "
         "time.sleep(30)"
     )
+    helper_process = subprocess.Popen([sys.executable, "-c", helper_code], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    code = "import time; time.sleep(30)"
     runner = ManagedFFmpegRunner()
     result = {}
 
@@ -153,18 +159,28 @@ def test_independent_process_group_survives_runner_cancel(tmp_path: Path):
         except Exception as exc:  # noqa: BLE001 - cancellation type is asserted below.
             result["error"] = exc
 
-    thread = threading.Thread(target=run)
-    thread.start()
-    deadline = time.monotonic() + 5
-    while not helper_pid_file.exists() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    helper_pid = int(helper_pid_file.read_text(encoding="utf-8"))
-    runner.request_cancel()
-    thread.join(timeout=8)
-    assert not thread.is_alive()
-    assert isinstance(result.get("error"), RenderCancelled)
-    assert _pid_exists(helper_pid)
-    os.kill(helper_pid, signal.SIGKILL)
+    try:
+        deadline = time.monotonic() + 5
+        while not helper_pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        helper_pid = int(helper_pid_file.read_text(encoding="utf-8"))
+        assert int(helper_session_file.read_text(encoding="utf-8")) == helper_pid
+        thread = threading.Thread(target=run)
+        thread.start()
+        deadline = time.monotonic() + 5
+        while runner.current_pid() is None and thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert runner.current_pid() is not None
+        runner.request_cancel()
+        thread.join(timeout=8)
+        assert not thread.is_alive()
+        assert isinstance(result.get("error"), RenderCancelled)
+        assert _wait_for_pid_running(helper_pid, timeout=1.0)
+        assert not signal_file.exists(), "independent process group received runner termination signal"
+    finally:
+        if helper_process.poll() is None:
+            helper_process.kill()
+        helper_process.wait(timeout=2)
 
 
 def _pid_exists(pid: int) -> bool:
@@ -178,3 +194,20 @@ def _pid_exists(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _wait_for_pid_running(pid: int, timeout: float) -> bool:
+    """Wait briefly for a live, non-zombie process after cancellation."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _pid_exists(pid):
+            if os.name != "nt":
+                try:
+                    state = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[2]
+                    if state == "Z":
+                        return False
+                except (FileNotFoundError, OSError, IndexError):
+                    continue
+            return True
+        time.sleep(0.02)
+    return False

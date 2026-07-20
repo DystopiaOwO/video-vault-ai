@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 from video_vault.segment_cache import build_segment_cache_key, cache_key_payload, cache_paths
 
@@ -40,7 +41,22 @@ def test_cache_key_is_deterministic_and_tracks_source_and_settings(tmp_path: Pat
         assert build_segment_cache_key(manifest, changed) != first
     changed_manifest = {**manifest, "settings": {**manifest["settings"], "encoder": "auto"}}
     assert build_segment_cache_key(changed_manifest, segment) != first
+    changed_color = {**manifest, "settings": {**manifest["settings"], "color": {**manifest["settings"]["color"], "highlights": 0.2}}}
+    assert build_segment_cache_key(changed_color, segment) != first
     lut.write_bytes(b"lut-b")
+    assert build_segment_cache_key(manifest, segment) != first
+
+
+def test_cache_key_tracks_source_content_even_when_size_and_mtime_match(tmp_path: Path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source-a")
+    manifest, segment = _inputs(source)
+    first = build_segment_cache_key(manifest, segment)
+    stat = source.stat()
+    source.write_bytes(b"source-b")
+    os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert source.stat().st_size == stat.st_size
+    assert source.stat().st_mtime_ns == stat.st_mtime_ns
     assert build_segment_cache_key(manifest, segment) != first
 
 

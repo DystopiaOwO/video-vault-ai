@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-SEGMENT_RENDERER_CONTRACT_VERSION = 1
+SEGMENT_RENDERER_CONTRACT_VERSION = 3
 
 
 def cache_key_payload(manifest: Mapping[str, Any], segment: Mapping[str, Any]) -> dict[str, Any]:
@@ -16,7 +16,7 @@ def cache_key_payload(manifest: Mapping[str, Any], segment: Mapping[str, Any]) -
     stat = source.stat() if source.exists() else None
     profile = dict(manifest.get("profile") or {})
     settings = dict(manifest.get("settings") or {})
-    color = dict(settings.get("color") or {})
+    color = dict(segment.get("color") or settings.get("color") or {})
     lut = Path(str(color.get("lut_path"))).expanduser().resolve() if color.get("lut_path") else None
     lut_stat = lut.stat() if lut and lut.exists() else None
     return {
@@ -24,6 +24,7 @@ def cache_key_payload(manifest: Mapping[str, Any], segment: Mapping[str, Any]) -
         "source_file": str(source),
         "source_size": stat.st_size if stat else None,
         "source_mtime_ns": stat.st_mtime_ns if stat else None,
+        "source_sha256": _sha256_file(source) if source.is_file() else None,
         "segment_id": str(segment.get("segment_id") or ""),
         "source_in_seconds": float(segment.get("source_in_seconds") or 0),
         "source_out_seconds": float(segment.get("source_out_seconds") or 0),
@@ -33,6 +34,8 @@ def cache_key_payload(manifest: Mapping[str, Any], segment: Mapping[str, Any]) -
         "encoder": settings.get("encoder", "auto"),
         "audio": dict(settings.get("audio") or {}),
         "color_mode": color.get("mode", "none"),
+        "color_settings": {key: color.get(key) for key in ("mode", "lut_kind", "exposure", "temperature", "tint", "contrast", "highlights", "shadows", "saturation", "gamma", "enabled")},
+        "color_reference_id": str(segment.get("color_reference_id") or ""),
         "lut_path": str(lut) if lut else None,
         "lut_size": lut_stat.st_size if lut_stat else None,
         "lut_mtime_ns": lut_stat.st_mtime_ns if lut_stat else None,
