@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-SEGMENT_RENDERER_CONTRACT_VERSION = 3
+SEGMENT_RENDERER_CONTRACT_VERSION = 4
 
 
 def cache_key_payload(manifest: Mapping[str, Any], segment: Mapping[str, Any]) -> dict[str, Any]:
@@ -29,10 +29,16 @@ def cache_key_payload(manifest: Mapping[str, Any], segment: Mapping[str, Any]) -
         "source_in_seconds": float(segment.get("source_in_seconds") or 0),
         "source_out_seconds": float(segment.get("source_out_seconds") or 0),
         "speed": float(segment.get("speed") or 0),
-        "audio_role": str(segment.get("audio_role") or ""),
+        "segment_audio": {
+            key: (segment.get("audio") or {}).get(key, segment.get("audio_role") if key == "role" else None)
+            for key in ("role", "volume_db", "fade_in_seconds", "fade_out_seconds")
+        },
         "profile": {key: profile.get(key) for key in ("profile_id", "width", "height", "fps", "video_codec", "pixel_format", "audio_codec", "audio_sample_rate", "audio_channels")},
         "encoder": settings.get("encoder", "auto"),
-        "audio": dict(settings.get("audio") or {}),
+        "audio_codec": profile.get("audio_codec"),
+        "audio_sample_rate": profile.get("audio_sample_rate"),
+        "audio_channels": profile.get("audio_channels"),
+        "segment_audio_pipeline_version": 2,
         "color_mode": color.get("mode", "none"),
         "color_settings": {key: color.get(key) for key in ("mode", "lut_kind", "exposure", "temperature", "tint", "contrast", "highlights", "shadows", "saturation", "gamma", "enabled")},
         "color_reference_id": str(segment.get("color_reference_id") or ""),

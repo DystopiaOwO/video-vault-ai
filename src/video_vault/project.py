@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from copy import deepcopy
 from pathlib import Path
 import json
 import re
@@ -148,15 +149,21 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
 
     public_bgm = []
     for bgm_row in project_bgm_tracks(db, project_id):
-        bgm_item = dict(bgm_row)
-        bgm_item.pop("file_path", None)
-        public_bgm.append(bgm_item)
+        bgm_data = dict(bgm_row)
+        public_bgm.append({
+            key: bgm_data.get(key)
+            for key in (
+                "id", "title", "artist", "source_url", "license_name", "license_url",
+                "attribution_required", "attribution_text", "mood", "duration_seconds",
+            )
+        })
 
+    public_plan = _public_plan_bgm(plan)
     return {
         "project": dict(row),
         "clips": sync_project_files(cfg, db, project_id),
         "bgm": public_bgm,
-        "plan": plan,
+        "plan": public_plan,
         "workflow": project_workflow(cfg, db, project_id, plan),
         "segments": project_segments(cfg, project_id, plan),
         "review": _read_json(folder / "review_status.json"),
@@ -185,6 +192,36 @@ def project_workflow(cfg: dict, db: Path, project_id: int, plan: dict | None = N
         _stage("render", "正式輸出", any(outputs.glob("**/*.mp4")) if outputs.exists() else False, [outputs]),
     ]
     return {"style": "openmontage_skeleton", "current": next((s["id"] for s in stages if s["status"] != "done"), "done"), "stages": stages}
+
+
+def _public_plan_bgm(plan: dict) -> dict:
+    """Remove internal paths from BGM-only fields while preserving clip data."""
+    result = deepcopy(plan)
+    result["bgm"] = [_public_bgm_row(item) for item in result.get("bgm", []) if isinstance(item, dict)]
+    recommendations = []
+    for item in result.get("bgm_recommendations", []) or []:
+        if not isinstance(item, dict):
+            continue
+        public_item = dict(item)
+        if isinstance(public_item.get("track"), dict):
+            public_item["track"] = _public_bgm_row(public_item["track"])
+        recommendations.append(public_item)
+    result["bgm_recommendations"] = recommendations
+    for group in result.get("groups", []) or []:
+        if isinstance(group, dict) and isinstance(group.get("bgm"), dict):
+            group["bgm"] = _public_bgm_row(group["bgm"])
+    return result
+
+
+def _public_bgm_row(row: dict) -> dict:
+    return {
+        key: row.get(key)
+        for key in (
+            "id", "track_id", "title", "artist", "source_url", "license_name", "license_url",
+            "attribution_required", "attribution_text", "mood", "duration_seconds",
+        )
+        if key in row
+    }
 
 
 def project_segments(cfg: dict, project_id: int, plan: dict) -> list[dict]:

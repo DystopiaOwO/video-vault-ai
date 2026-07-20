@@ -213,8 +213,8 @@ export const api = {
     json<{ ok: boolean }>("/api/project/bgm", post({ project_id: projectId, bgm_id: bgmId })),
   audioSettings: (projectId: number, patch: Partial<AudioState>) =>
     json<{ ok: boolean; state?: AudioState; error?: string }>("/api/project/audio-settings", post({ project_id: projectId, patch })),
-  audioPreview: (projectId: number, segmentId = "", force = false) =>
-    json<{ ok: boolean; file?: string; url?: string; cache_hit?: boolean; duration_seconds?: number; error?: string }>("/api/project/audio-preview", post({ project_id: projectId, segment_id: segmentId, force })),
+  audioPreview: (projectId: number, options: { segmentId?: string; timelineStartSeconds?: number; durationSeconds?: number; patch?: Partial<AudioState>; force?: boolean } = {}) =>
+    json<{ ok: boolean; file?: string; url?: string; cache_hit?: boolean; duration_seconds?: number; timeline_start_seconds?: number; error?: string }>("/api/project/audio-preview", post({ project_id: projectId, segment_id: options.segmentId || null, timeline_start_seconds: options.timelineStartSeconds ?? 0, duration_seconds: options.durationSeconds ?? 12, patch: options.patch, force: options.force ?? false })),
   approve: (projectId: number, notes: string) =>
     json<{ ok: boolean }>("/api/project/approve", post({ project_id: projectId, notes })),
   reject: (projectId: number, notes: string) =>

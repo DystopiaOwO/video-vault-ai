@@ -7,6 +7,8 @@ from pathlib import Path
 import subprocess
 from typing import Any, Callable, Sequence
 
+from .audio_pipeline import build_project_audio_filter
+
 
 class TimelineAssemblyError(RuntimeError):
     pass
@@ -50,6 +52,8 @@ def build_timeline_command(
     *,
     include_audio: bool = True,
     duration_seconds: float | None = None,
+    normalization: dict[str, Any] | None = None,
+    profile: dict[str, Any] | None = None,
 ) -> list[str]:
     command = [
         str(ffmpeg_path),
@@ -67,10 +71,14 @@ def build_timeline_command(
         "-map",
         "0:v:0",
     ]
-    if include_audio:
+    if include_audio and not (normalization and normalization.get("enabled")):
         command += ["-map", "0:a:0"]
     command += ["-c:v", "copy"]
-    if include_audio:
+    if include_audio and normalization and normalization.get("enabled"):
+        if not profile:
+            raise TimelineAssemblyError("audio normalization requires a render profile")
+        command += ["-filter_complex", build_project_audio_filter(profile, normalization), "-map", "[aout]", "-c:a", str(profile["audio_codec"]), "-ar", str(profile["audio_sample_rate"]), "-ac", str(profile["audio_channels"])]
+    elif include_audio:
         command += ["-c:a", "copy"]
     else:
         command += ["-an"]

@@ -425,12 +425,15 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                         track = next((dict(row) for row in db_bgm_tracks(db) if int(row["id"]) == selected_id), None)
                         if not track:
                             raise ValueError("找不到指定 BGM")
-                        add_project_bgm(db, project_id, selected_id)
                         validate_bgm_track({"source_path": track.get("file_path")}, str(cfg.get("ffprobe_path") or "ffprobe"))
+                        add_project_bgm(db, project_id, selected_id)
                     state = update_audio_state(cfg, db, project_id, patch if isinstance(patch, dict) else {})
                     self._json({"ok": True, "state": audio_state_for_api(cfg, project_id, db)})
                 except BgmPipelineError as exc:
-                    self._json({"ok": False, "code": "invalid_bgm", "error": str(exc)})
+                    self._json({"ok": False, "code": "bgm_file_missing", "error": "所選 BGM 檔案不存在或無法讀取，請重新匯入或選擇其他音樂。"})
+                except ValueError as exc:
+                    message = "找不到指定 BGM，請重新選擇。" if "找不到指定 BGM" in str(exc) else "音訊設定格式無效。"
+                    self._json({"ok": False, "code": "bgm_not_found" if "找不到指定 BGM" in str(exc) else "invalid_audio_settings", "error": message})
                 except Exception as exc:
                     self._json({"ok": False, "error": f"音訊設定儲存失敗：{exc}"})
             elif path == "/api/project/audio-preview":
@@ -440,12 +443,19 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                         db,
                         int(data.get("project_id", 0)),
                         segment_id=str(data.get("segment_id") or "") or None,
+                        timeline_start_seconds=float(data.get("timeline_start_seconds") or 0),
+                        duration_seconds=float(data.get("duration_seconds") or 12),
+                        audio_patch=data.get("patch") if isinstance(data.get("patch"), dict) else None,
                         force=bool(data.get("force")),
                     )
                     result["url"] = f"/api/project/audio-preview-file?project_id={int(data.get('project_id', 0))}&file={result['file']}"
                     self._json(result)
                 except AudioPreviewError as exc:
-                    self._json({"ok": False, "error": str(exc)})
+                    message = str(exc)
+                    if "BGM" in message or "bgm" in message.lower():
+                        self._json({"ok": False, "code": "bgm_file_missing", "error": "所選 BGM 檔案不存在或無法讀取，請重新匯入或選擇其他音樂。"})
+                    else:
+                        self._json({"ok": False, "code": "audio_preview_failed", "error": "音訊預覽無法產生，請檢查素材與音訊設定。"})
             elif path == "/api/project/bgm":
                 add_project_bgm(db, int(data.get("project_id", 0)), int(data.get("bgm_id", 0)))
                 mark_project_needs_review(cfg, db, int(data.get("project_id", 0)))

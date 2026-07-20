@@ -161,7 +161,14 @@ def render_project(
         _execution_check(execution)
         _execution_begin_ffmpeg(execution, "assembling", 75, 20, expected, "正在組合時間軸與混音")
         if track is None:
-            command = build_timeline_command(ffmpeg_path, concat_path, partial, duration_seconds=expected)
+            command = build_timeline_command(
+                ffmpeg_path,
+                concat_path,
+                partial,
+                duration_seconds=expected,
+                normalization=((manifest.get("settings") or {}).get("audio") or {}).get("normalization"),
+                profile=manifest["profile"],
+            )
         else:
             command = build_bgm_mix_command(
                 ffmpeg_path,

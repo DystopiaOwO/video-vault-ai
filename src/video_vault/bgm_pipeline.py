@@ -10,6 +10,7 @@ import subprocess
 from typing import Any, Mapping
 
 from .media_probe import MediaProbe
+from .audio_pipeline import build_project_audio_filter
 
 
 class BgmPipelineError(ValueError):
@@ -19,7 +20,7 @@ class BgmPipelineError(ValueError):
 def validate_bgm_track(track: Mapping[str, Any], ffprobe_path: str = "ffprobe") -> MediaProbe:
     source = Path(str(track.get("source_path") or "")).expanduser().resolve()
     if not source.is_file():
-        raise BgmPipelineError(f"BGM source does not exist: {source}")
+        raise BgmPipelineError("BGM source does not exist")
     gain = _finite(track.get("gain_db", 0.0), "BGM gain_db")
     start = _nonnegative(track.get("start_seconds", 0.0), "BGM start_seconds")
     fade_in = _nonnegative(track.get("fade_in_seconds", 0.0), "BGM fade_in_seconds")
@@ -28,9 +29,9 @@ def validate_bgm_track(track: Mapping[str, Any], ffprobe_path: str = "ffprobe") 
     try:
         probe = _probe_audio(ffprobe_path, source)
     except Exception as exc:
-        raise BgmPipelineError(f"BGM ffprobe failed: {exc}") from exc
+        raise BgmPipelineError("BGM ffprobe failed") from exc
     if not probe.has_audio:
-        raise BgmPipelineError(f"BGM has no audio stream: {source}")
+        raise BgmPipelineError("BGM has no audio stream")
     return probe
 
 
@@ -100,17 +101,7 @@ def build_bgm_mix_command(
         command += ["-ss", f"{start_seconds:.6f}"]
     command += ["-i", str(source)]
     bgm_filter = build_bgm_filter(track, timeline_duration)
-    graph = (
-        f"[1:a]{bgm_filter}[bgm];"
-        "[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
-        f"aresample={int(profile['audio_sample_rate'])},aformat=sample_fmts=fltp:channel_layouts=stereo"
-    )
-    norm = dict(normalization or {})
-    if bool(norm.get("enabled", False)):
-        target = _finite(norm.get("target_lufs", -14.0), "normalization target_lufs")
-        peak = _finite(norm.get("true_peak_db", -1.0), "normalization true_peak_db")
-        graph += f",loudnorm=I={target:.3f}:TP={peak:.3f}:LRA=11"
-    graph += "[aout]"
+    graph = f"[1:a]{bgm_filter}[bgm];" + build_project_audio_filter(profile, normalization, bgm_label="bgm")
     command += [
         "-filter_complex",
         graph,

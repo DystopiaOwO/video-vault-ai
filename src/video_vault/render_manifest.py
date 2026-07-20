@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from .database import project, project_bgm_tracks
-from .audio_state import audio_state_path, load_audio_state, normalize_audio_role
+from .audio_state import effective_project_bgm, has_audio_state, load_audio_state, normalize_audio_role, normalize_audio_state
+from .bgm_pipeline import BgmPipelineError, validate_bgm_track
 from .color_consistency import effective_color_settings, has_color_state, load_project_color_state
 from .project import project_dir, project_segments
 from .render_profiles import get_render_profile
@@ -19,7 +20,14 @@ from .render_settings import load_render_settings
 ALLOWED_AUDIO_ROLES = {"keep_original", "lower_original", "mute", "keep", "lower", "bgm_only"}
 
 
-def build_render_manifest(cfg: dict, db: Path, project_id: int, profile_id: str | None = None) -> dict[str, Any]:
+def build_render_manifest(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    profile_id: str | None = None,
+    *,
+    audio_state_override: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     folder = project_dir(cfg, project_id)
     plan_path = folder / "project_plan.json"
     if not plan_path.exists():
@@ -29,10 +37,11 @@ def build_render_manifest(cfg: dict, db: Path, project_id: int, profile_id: str 
         raise ValueError(f"project not found: {project_id}")
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     settings = load_render_settings(cfg, project_id)
-    audio_file_exists = audio_state_path(cfg, project_id).is_file()
-    audio_state = load_audio_state(cfg, project_id)
-    if audio_file_exists:
-        settings = {**settings, "audio": audio_state}
+    audio_file_exists = audio_state_override is not None or has_audio_state(cfg, project_id)
+    audio_state = normalize_audio_state(audio_state_override) if audio_state_override is not None else load_audio_state(cfg, project_id)
+    active_audio_state = audio_state if audio_state_file_is_enabled(audio_state, audio_file_exists) else None
+    if active_audio_state is not None:
+        settings = {**settings, "audio": active_audio_state}
     color_state = load_project_color_state(cfg, project_id) if has_color_state(cfg, project_id) else None
     if color_state is not None:
         settings = {
@@ -50,10 +59,12 @@ def build_render_manifest(cfg: dict, db: Path, project_id: int, profile_id: str 
     reviewed_segments = project_segments(cfg, project_id, plan)
     included_segments = [segment for segment in _ordered_segments(reviewed_segments) if _included(segment)]
     segments = [
-        _manifest_segment(row, index, segment, effective_color_settings(color_state, str(segment.get("segment_id"))) if color_state is not None else None, audio_state=audio_state if audio_file_exists else None)
+        _manifest_segment(row, index, segment, effective_color_settings(color_state, str(segment.get("segment_id"))) if color_state is not None else None, audio_state=active_audio_state)
         for index, segment in enumerate(included_segments, 1)
     ]
-    bgm = _manifest_bgm(db, project_id, settings, audio_state if audio_file_exists else None)
+    # Keep the disabled-file marker here so legacy BGM handling can avoid
+    # silently reusing the track selected by the disabled new workflow.
+    bgm = _manifest_bgm(cfg, db, project_id, settings, audio_state if audio_file_exists else None)
     manifest: dict[str, Any] = {
         "schema_version": "2.0",
         "project_id": int(project_id),
@@ -159,6 +170,8 @@ def validate_render_manifest(manifest: dict[str, Any], check_files: bool = False
         role = audio.get("role", segment.get("audio_role"))
         if role not in ALLOWED_AUDIO_ROLES:
             errors.append(f"{segment_id}: invalid audio_role {role!r}")
+        if role == "bgm_only" and not manifest.get("bgm"):
+            errors.append(f"{segment_id}: bgm_only requires a selected BGM")
         if timeline_duration is not None:
             duration += timeline_duration
 
@@ -218,7 +231,10 @@ def _manifest_segment(
     source_out = round(float(segment.get("end_seconds") or 0), 3)
     speed = round(float(segment.get("speed") or 1.0), 6)
     configured = dict((audio_state or {}).get("segments", {}).get(str(segment.get("segment_id")), {}) or {})
-    role = normalize_audio_role(configured.get("role") or segment.get("audio_role") or (audio_state or {}).get("original_audio", {}).get("default_role", "lower"))
+    role_source = configured.get("role") or ((audio_state or {}).get("original_audio") or {}).get("default_role")
+    if not role_source:
+        role_source = segment.get("audio_role") or "lower"
+    role = normalize_audio_role(role_source)
     original_audio = dict((audio_state or {}).get("original_audio") or {})
     default_volume = original_audio.get("lower_volume_db", -8.0) if role == "lower" else original_audio.get("default_volume_db", 0.0)
     audio = {
@@ -254,22 +270,44 @@ def _manifest_segment(
     return result
 
 
-def _manifest_bgm(db: Path, project_id: int, settings: dict[str, Any], audio_state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def _manifest_bgm(cfg: dict, db: Path, project_id: int, settings: dict[str, Any], audio_state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     overrides = {int(item.get("track_id")): item for item in settings.get("bgm", []) if isinstance(item, dict) and item.get("track_id") is not None}
+    rows = [dict(row) for row in project_bgm_tracks(db, project_id)]
     result = []
-    for row in project_bgm_tracks(db, project_id):
+    selected_id = None
+    disabled_selected_id = None
+    if audio_state is not None:
+        bgm_state = effective_project_bgm(audio_state)
+        selected_id = int(bgm_state["bgm_id"]) if bgm_state is not None else None
+        if not audio_state.get("enabled", True):
+            raw_bgm_id = (audio_state.get("bgm") or {}).get("bgm_id")
+            disabled_selected_id = int(raw_bgm_id) if raw_bgm_id is not None else None
+        if selected_id is not None:
+            selected = next((row for row in rows if int(row["id"]) == selected_id), None)
+            if selected is None:
+                raise BgmPipelineError("selected BGM is not attached to this project")
+            try:
+                validate_bgm_track({"source_path": selected.get("file_path")}, str(cfg.get("ffprobe_path") or "ffprobe"))
+            except BgmPipelineError as exc:
+                raise BgmPipelineError("selected BGM file is missing or unreadable") from exc
+    for row in rows:
         item = dict(row)
         if audio_state is not None:
-            bgm_state = dict(audio_state.get("bgm") or {})
-            selected_id = bgm_state.get("bgm_id")
-            if not bgm_state.get("enabled") or selected_id is None or int(item["id"]) != int(selected_id):
-                continue
-            override = {
-                "gain_db": bgm_state.get("volume_db", -18.0),
-                "loop": bgm_state.get("loop", True),
-                "fade_in_seconds": bgm_state.get("fade_in_seconds", 1.5),
-                "fade_out_seconds": bgm_state.get("fade_out_seconds", 2.0),
-            }
+            if audio_state.get("enabled", True):
+                bgm_state = dict(audio_state.get("bgm") or {})
+                if selected_id is None or int(item["id"]) != selected_id:
+                    continue
+                override = {
+                    "gain_db": bgm_state.get("volume_db", -18.0),
+                    "start_seconds": bgm_state.get("start_seconds", 0.0),
+                    "loop": bgm_state.get("loop", True),
+                    "fade_in_seconds": bgm_state.get("fade_in_seconds", 1.5),
+                    "fade_out_seconds": bgm_state.get("fade_out_seconds", 2.0),
+                }
+            else:
+                if disabled_selected_id is not None and int(item["id"]) == disabled_selected_id:
+                    continue
+                override = overrides.get(int(item["id"]), {})
         else:
             override = overrides.get(int(item["id"]), {})
         result.append({
@@ -286,6 +324,10 @@ def _manifest_bgm(db: Path, project_id: int, settings: dict[str, Any], audio_sta
             "fade_out_seconds": float(override.get("fade_out_seconds", 2.0)),
         })
     return result
+
+
+def audio_state_file_is_enabled(state: dict[str, Any], file_exists: bool) -> bool:
+    return bool(file_exists and state.get("enabled", True))
 
 
 def _number(value: Any, field: str, errors: list[str]) -> float | None:

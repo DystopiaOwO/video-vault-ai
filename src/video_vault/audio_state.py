@@ -24,6 +24,10 @@ def audio_state_path(cfg: dict, project_id: int) -> Path:
     return project_dir(cfg, project_id) / "audio_settings.json"
 
 
+def has_audio_state(cfg: dict, project_id: int) -> bool:
+    return audio_state_path(cfg, project_id).is_file()
+
+
 def default_audio_state() -> dict[str, Any]:
     return {
         "schema_version": AUDIO_STATE_VERSION,
@@ -51,6 +55,52 @@ def load_audio_state(cfg: dict, project_id: int) -> dict[str, Any]:
         return normalize_audio_state(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError, TypeError):
         return default_audio_state()
+
+
+def effective_project_audio_state(cfg: dict, project_id: int) -> dict[str, Any] | None:
+    """Return the new project audio state only when its workflow is enabled.
+
+    ``None`` means legacy behavior.  It is deliberately different from a
+    mute state: disabling this workflow must not silence the original media.
+    """
+    if not has_audio_state(cfg, project_id):
+        return None
+    state = load_audio_state(cfg, project_id)
+    return state if state.get("enabled", True) else None
+
+
+def effective_segment_audio_settings(
+    cfg: dict,
+    project_id: int,
+    segment: Mapping[str, Any],
+    *,
+    state: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    active = dict(state) if state is not None else effective_project_audio_state(cfg, project_id)
+    if active is None:
+        return {"role": str(segment.get("audio_role") or "lower_original"), "legacy": True}
+    configured = dict((active.get("segments") or {}).get(str(segment.get("segment_id")), {}) or {})
+    original = dict(active.get("original_audio") or {})
+    role_source = configured.get("role") or original.get("default_role") or segment.get("audio_role") or "lower"
+    role = normalize_audio_role(role_source)
+    default_volume = original.get("lower_volume_db", -8.0) if role == "lower" else original.get("default_volume_db", 0.0)
+    return {
+        "role": role,
+        "volume_db": float(configured.get("volume_db", default_volume if role not in {"mute", "bgm_only"} else 0.0)),
+        "fade_in_seconds": float(configured.get("fade_in_seconds", 0.1)),
+        "fade_out_seconds": float(configured.get("fade_out_seconds", 0.1)),
+        "locked": bool(configured.get("locked", False)),
+        "legacy": False,
+    }
+
+
+def effective_project_bgm(state: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    bgm = dict(state.get("bgm") or {})
+    if not bgm.get("enabled") or bgm.get("bgm_id") is None:
+        return None
+    return bgm
 
 
 def save_audio_state(cfg: dict, db: Path, project_id: int, state: Mapping[str, Any], *, mark_review: bool = True) -> Path:
@@ -92,6 +142,8 @@ def audio_state_for_api(cfg: dict, project_id: int, db: Path | None = None) -> d
                     "artist": str(track.get("artist") or ""),
                     "source_url": str(track.get("source_url") or ""),
                     "license_name": str(track.get("license_name") or ""),
+                    "license_url": str(track.get("license_url") or ""),
+                    "attribution_required": bool(track.get("attribution_required")),
                     "attribution_text": str(track.get("attribution_text") or ""),
                     "duration_seconds": track.get("duration_seconds"),
                 }
@@ -225,6 +277,7 @@ def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[st
 
 __all__ = [
     "AUDIO_ROLES", "AUDIO_STATE_VERSION", "LEGACY_AUDIO_ROLE_MAP", "audio_state_for_api", "audio_state_path",
+    "effective_project_audio_state", "effective_project_bgm", "effective_segment_audio_settings", "has_audio_state",
     "default_audio_state", "editable_audio_patch", "load_audio_state", "normalize_audio_role",
     "normalize_audio_state", "save_audio_state", "update_audio_state",
 ]

@@ -66,3 +66,25 @@ def test_cache_paths_use_hash_and_partial_mp4_suffix(tmp_path: Path):
     assert paths["partial"].name == "abc123.partial.mp4"
     assert paths["metadata"].name == "abc123.json"
     assert "segment_id" not in paths["output"].name
+
+
+def test_bgm_and_normalization_do_not_invalidate_segment_cache(tmp_path: Path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    manifest, segment = _inputs(source)
+    segment["audio"] = {"role": "keep", "volume_db": 0, "fade_in_seconds": 0.1, "fade_out_seconds": 0.2}
+    first = build_segment_cache_key(manifest, segment)
+    changed = {**manifest, "settings": {**manifest["settings"], "audio": {"bgm": {"track_id": 99}, "normalization": {"enabled": True}}}}
+    assert build_segment_cache_key(changed, segment) == first
+
+
+def test_segment_audio_change_only_invalidates_that_segment(tmp_path: Path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    manifest, first_segment = _inputs(source)
+    second_segment = dict(first_segment, segment_id="clip_002", source_in_seconds=3, source_out_seconds=5)
+    first_key = build_segment_cache_key(manifest, first_segment)
+    second_key = build_segment_cache_key(manifest, second_segment)
+    changed = dict(first_segment, audio={"role": "keep", "volume_db": -6, "fade_in_seconds": 0.2, "fade_out_seconds": 0.3})
+    assert build_segment_cache_key(manifest, changed) != first_key
+    assert build_segment_cache_key(manifest, second_segment) == second_key

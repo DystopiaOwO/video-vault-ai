@@ -90,4 +90,24 @@ def build_silence_filter(duration: float) -> str:
     return f"anullsrc=r=48000:cl=stereo:d={max(0.0, float(duration)):.6f}"
 
 
-__all__ = ["AUDIO_ROLES", "audio_gain_db", "atempo_filter", "build_atempo_chain", "build_audio_filter", "build_silence_filter", "normalize_audio_role"]
+def build_project_audio_filter(
+    profile: Mapping[str, Any],
+    normalization: Mapping[str, Any] | None = None,
+    *,
+    bgm_label: str | None = None,
+) -> str:
+    """Build the shared final project-audio filter used by preview and final render."""
+    if bgm_label:
+        graph = f"[0:a][{bgm_label}]amix=inputs=2:duration=first:dropout_transition=0:normalize=0"
+    else:
+        graph = "[0:a]anull"
+    graph += f",aresample={int(profile['audio_sample_rate'])},aformat=sample_fmts=fltp:channel_layouts=stereo"
+    norm = dict(normalization or {})
+    if bool(norm.get("enabled", False)):
+        target = float(norm.get("target_lufs", -14.0))
+        peak = float(norm.get("true_peak_db", -1.0))
+        graph += f",loudnorm=I={target:.3f}:TP={peak:.3f}:LRA=11"
+    return graph + "[aout]"
+
+
+__all__ = ["AUDIO_ROLES", "audio_gain_db", "atempo_filter", "build_atempo_chain", "build_audio_filter", "build_project_audio_filter", "build_silence_filter", "normalize_audio_role"]

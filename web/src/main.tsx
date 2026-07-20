@@ -319,6 +319,7 @@ function AudioMixingPanel({ detail, bgmTracks, setMessage, refreshProject }: { d
   };
   const [state, setState] = useState<AudioState>(detail.audio || fallback);
   const [previewUrl, setPreviewUrl] = useState("");
+  const [previewInfo, setPreviewInfo] = useState<{ cacheHit: boolean; duration: number; start: number; segmentId?: string } | null>(null);
   const [busy, setBusy] = useState("");
   useEffect(() => setState(detail.audio || fallback), [detail.project.id, detail.audio]);
   const patchState = (patch: Partial<AudioState>) => setState((current) => ({ ...current, ...patch }));
@@ -332,12 +333,17 @@ function AudioMixingPanel({ detail, bgmTracks, setMessage, refreshProject }: { d
     setMessage("音訊設定已儲存，專案已回到待審。");
     await refreshProject();
   }
-  async function preview() {
+  async function preview(segmentId = "") {
     setBusy("preview");
-    const result = await api.audioPreview(detail.project.id);
+    const result = await api.audioPreview(detail.project.id, {
+      segmentId,
+      durationSeconds: 12,
+      patch: { enabled: state.enabled, bgm: state.bgm, original_audio: state.original_audio, normalization: state.normalization, segments: state.segments },
+    });
     setBusy("");
     if (!result.ok) { setMessage(`音訊預覽失敗：${result.error || "未知錯誤"}`); return; }
     setPreviewUrl(result.url || "");
+    setPreviewInfo({ cacheHit: Boolean(result.cache_hit), duration: Number(result.duration_seconds || 0), start: Number(result.timeline_start_seconds || 0), segmentId: segmentId || undefined });
     setMessage(result.cache_hit ? "音訊預覽已從快取載入。" : "音訊預覽完成。保存後仍需重新核准才能正式輸出。");
   }
   return <div className="grid">
@@ -356,13 +362,16 @@ function AudioMixingPanel({ detail, bgmTracks, setMessage, refreshProject }: { d
         <label>降低原音 dB<input type="number" min={-60} max={12} step={1} value={state.original_audio.lower_volume_db} onChange={(e) => patchState({ original_audio: { ...state.original_audio, lower_volume_db: Number(e.target.value) } })} /></label>
         <label className="toggle"><input type="checkbox" checked={state.normalization.enabled} onChange={(e) => patchState({ normalization: { ...state.normalization, enabled: e.target.checked } })} /> 音量正規化</label>
         <label>目標 LUFS<input type="number" min={-40} max={0} step={1} value={state.normalization.target_lufs} onChange={(e) => patchState({ normalization: { ...state.normalization, target_lufs: Number(e.target.value) } })} /></label>
+        <label>True Peak dB<input type="number" min={-20} max={0} step={0.1} value={state.normalization.true_peak_db} onChange={(e) => patchState({ normalization: { ...state.normalization, true_peak_db: Number(e.target.value) } })} /></label>
       </div>
-      <div className="row"><button className="good" disabled={busy === "save"} onClick={save}>{busy === "save" ? "儲存中…" : "儲存音訊設定"}</button><button disabled={busy === "preview"} onClick={preview}>{busy === "preview" ? "預覽產生中…" : "產生音訊預覽"}</button></div>
-      {previewUrl && <audio controls src={previewUrl} />}
-      {state.bgm.track && <p className="muted">目前 BGM：{state.bgm.track.title}｜{state.bgm.track.attribution_text || state.bgm.track.artist || "未填署名"}</p>}
+      <div className="row"><button className="good" disabled={busy === "save"} onClick={save}>{busy === "save" ? "儲存中…" : "儲存音訊設定"}</button><button disabled={busy === "preview"} onClick={() => preview()}>{busy === "preview" ? "預覽產生中…" : "產生 12 秒預覽"}</button></div>
+      {previewInfo && <p className="muted">預覽範圍 {previewInfo.start.toFixed(1)}s，長度 {previewInfo.duration.toFixed(1)}s，{previewInfo.cacheHit ? "命中快取" : "新產生"}</p>}
+      {previewUrl && <video controls width="100%" src={previewUrl} />}
+      {state.bgm.track && <p className="muted">目前 BGM：{state.bgm.track.title}｜作者：{state.bgm.track.artist || "未知"}｜{state.bgm.track.duration_seconds ? `${state.bgm.track.duration_seconds}s` : "長度未知"}｜授權：{state.bgm.track.license_name || "未填"}｜{state.bgm.track.attribution_text || "未填署名"}</p>}
+      {state.enabled && (!state.bgm.enabled || !state.bgm.bgm_id) && (state.original_audio.default_role === "bgm_only" || Object.values(state.segments).some((item) => item.role === "bgm_only")) && <div className="notice">有片段設定為只留 BGM，但目前沒有有效 BGM；儲存後的 Manifest／預覽會阻擋，請先選擇可讀取的音樂。</div>}
     </Card>
     <Card title="片段原音角色">
-      {detail.segments.map((segment) => { const item = state.segments[segment.segment_id] || { role: (segment.audio_role === "keep_original" ? "keep" : segment.audio_role === "mute" ? "mute" : "lower") as AudioSegmentSettings["role"], volume_db: 0, fade_in_seconds: .1, fade_out_seconds: .1, locked: false }; return <div className="audio-segment" key={segment.segment_id}><b>{segment.title || segment.segment_id}</b><select value={item.role} onChange={(e) => updateSegment(segment.segment_id, { role: e.target.value as AudioSegmentSettings["role"] })}><option value="keep">保留</option><option value="lower">降低</option><option value="mute">靜音</option><option value="bgm_only">只留 BGM</option></select><input aria-label="片段音量" type="number" min={-60} max={12} step={1} value={item.volume_db} onChange={(e) => updateSegment(segment.segment_id, { volume_db: Number(e.target.value) })} /><span>dB</span></div>; })}
+      {detail.segments.map((segment) => { const item = state.segments[segment.segment_id] || { role: (segment.audio_role === "keep_original" ? "keep" : segment.audio_role === "mute" ? "mute" : "lower") as AudioSegmentSettings["role"], volume_db: 0, fade_in_seconds: .1, fade_out_seconds: .1, locked: false }; return <div className="audio-segment" key={segment.segment_id}><b>{segment.title || segment.segment_id}</b><select value={item.role} onChange={(e) => updateSegment(segment.segment_id, { role: e.target.value as AudioSegmentSettings["role"] })}><option value="keep">保留</option><option value="lower">降低</option><option value="mute">靜音</option><option value="bgm_only">只留 BGM</option></select><input aria-label="片段音量" type="number" min={-60} max={12} step={1} value={item.volume_db} onChange={(e) => updateSegment(segment.segment_id, { volume_db: Number(e.target.value) })} /><input aria-label="淡入秒數" type="number" min={0} step={.1} value={item.fade_in_seconds} onChange={(e) => updateSegment(segment.segment_id, { fade_in_seconds: Number(e.target.value) })} /><input aria-label="淡出秒數" type="number" min={0} step={.1} value={item.fade_out_seconds} onChange={(e) => updateSegment(segment.segment_id, { fade_out_seconds: Number(e.target.value) })} /><label className="toggle"><input type="checkbox" checked={item.locked} onChange={(e) => updateSegment(segment.segment_id, { locked: e.target.checked })} />鎖定</label><button onClick={() => updateSegment(segment.segment_id, { role: state.original_audio.default_role, volume_db: 0, fade_in_seconds: .1, fade_out_seconds: .1 })}>套用預設</button><button disabled={busy === "preview"} onClick={() => preview(segment.segment_id)}>預覽</button><span>dB｜淡入｜淡出</span></div>; })}
       {!detail.segments.length && <p>尚未有可調整的片段。</p>}
     </Card>
   </div>;

@@ -39,7 +39,17 @@ def import_bgm(cfg: dict, db: Path, source: Path, info: dict) -> int:
 
 
 def list_bgm(db: Path) -> list[dict]:
-    return [dict(row) for row in bgm_tracks(db)]
+    return [_public_bgm(dict(row)) for row in bgm_tracks(db)]
+
+
+def _public_bgm(row: dict) -> dict:
+    return {
+        key: row.get(key)
+        for key in (
+            "id", "title", "artist", "source_url", "license_name", "license_url",
+            "attribution_required", "attribution_text", "mood", "duration_seconds",
+        )
+    }
 
 
 ONLINE_BGM = {
@@ -100,7 +110,10 @@ def download_online_bgm(cfg: dict, db: Path, key: str = "default") -> dict | Non
                 "mood": key,
             },
         )
-        return next(track for track in list_bgm(db) if int(track["id"]) == track_id)
+        # This helper is also used by the internal recommendation pipeline;
+        # keep its local path available internally.  Public callers use
+        # list_bgm() or project_detail(), both of which return the DTO.
+        return next(dict(track) for track in bgm_tracks(db) if int(track["id"]) == track_id)
     except Exception:
         return None
 
