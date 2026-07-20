@@ -143,7 +143,7 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
     folder = project_dir(cfg, project_id)
     plan = _read_json(folder / "project_plan.json")
     ok, reason = can_project_render(cfg, db, project_id)
-    from .color_consistency import load_project_color_state
+    from .color_consistency import color_state_for_api, load_project_color_state
 
     return {
         "project": dict(row),
@@ -157,7 +157,7 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
         "render_gate_reason": reason,
         "script": (folder / "project_script.md").read_text(encoding="utf-8") if (folder / "project_script.md").exists() else "",
         "folder": str(folder),
-        "color": load_project_color_state(cfg, project_id),
+        "color": color_state_for_api(cfg, project_id, load_project_color_state(cfg, project_id)),
     }
 
 

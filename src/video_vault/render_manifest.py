@@ -171,7 +171,11 @@ def validate_render_manifest(manifest: dict[str, Any], check_files: bool = False
             errors.append(f"unsupported color mode: {mode}")
         if mode in {"dji_lut", "dji_dlog", "dji_dlog_m"} and not str(color.get("lut_path") or "").strip():
             errors.append(f"color mode {mode} requires color.lut_path")
-        for field, lower, upper in (("exposure", -1.5, 1.0), ("temperature", -30.0, 30.0), ("tint", -20.0, 20.0), ("contrast", 0.85, 1.15), ("saturation", 0.8, 1.2), ("gamma", 0.85, 1.15)):
+        if mode in {"dji_lut", "dji_dlog", "dji_dlog_m"} and str(color.get("lut_path") or "").strip():
+            lut_path = Path(str(color["lut_path"])).expanduser().resolve()
+            if not lut_path.is_file():
+                errors.append(f"color LUT file does not exist: {lut_path}")
+        for field, lower, upper in (("exposure", -1.5, 1.0), ("temperature", -30.0, 30.0), ("tint", -20.0, 20.0), ("contrast", 0.85, 1.15), ("saturation", 0.8, 1.2), ("gamma", 0.85, 1.15), ("highlights", -1.0, 1.0), ("shadows", -1.0, 1.0)):
             if field in color:
                 number = _number(color.get(field), f"color {field}", errors)
                 if number is not None and not lower <= number <= upper:

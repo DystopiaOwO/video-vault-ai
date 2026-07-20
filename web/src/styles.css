@@ -184,6 +184,16 @@ input, select {
   width: 100%;
 }
 
+.reference-thumbnail {
+  display: block;
+  width: min(100%, 320px);
+  max-height: 180px;
+  object-fit: contain;
+  background: #0f172a;
+  border-radius: 6px;
+  margin-top: 8px;
+}
+
 .toggle {
   display: inline-flex;
   gap: 6px;
@@ -226,6 +236,31 @@ input, select {
 
 .preview-item span {
   flex: 1 1 220px;
+}
+
+.preview-videos {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+
+.preview-videos video {
+  display: block;
+  width: 100%;
+  max-height: 220px;
+  background: #0f172a;
+  border-radius: 6px;
+}
+
+.preview-videos small, .color-segment-row small {
+  display: block;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+.color-segment-row details {
+  flex: 1 1 100%;
 }
 
 .render-job-panel {

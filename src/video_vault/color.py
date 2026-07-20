@@ -34,6 +34,7 @@ def render_color_preview(
     seconds: int = 20,
     *,
     color_settings: dict | None = None,
+    start_seconds: float | None = None,
 ) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -45,6 +46,10 @@ def render_color_preview(
         "-t",
         str(seconds),
         *video_decode_args(cfg),
+    ]
+    if start_seconds is not None:
+        cmd.extend(["-ss", f"{max(0.0, float(start_seconds)):.3f}"])
+    cmd.extend([
         "-i",
         str(source),
         "-vf",
@@ -57,7 +62,7 @@ def render_color_preview(
         "-movflags",
         "+faststart",
         str(out),
-    ]
+    ])
     run_ffmpeg(cmd, cfg)
     return out
 

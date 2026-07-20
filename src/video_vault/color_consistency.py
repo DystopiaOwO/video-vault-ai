@@ -9,13 +9,14 @@ import json
 import math
 from pathlib import Path
 import sqlite3
+import subprocess
 from typing import Any, Mapping
 
 from .project import mark_project_needs_review, project_dir
 from .render_settings import load_render_settings
 
 
-COLOR_STATE_VERSION = 1
+COLOR_STATE_VERSION = 2
 ADJUSTMENT_DEFAULTS: dict[str, float] = {
     "exposure": 0.0,
     "temperature": 0.0,
@@ -23,6 +24,8 @@ ADJUSTMENT_DEFAULTS: dict[str, float] = {
     "contrast": 1.0,
     "saturation": 1.0,
     "gamma": 1.0,
+    "highlights": 0.0,
+    "shadows": 0.0,
 }
 ADJUSTMENT_LIMITS: dict[str, tuple[float, float]] = {
     "exposure": (-1.5, 1.0),
@@ -31,13 +34,30 @@ ADJUSTMENT_LIMITS: dict[str, tuple[float, float]] = {
     "contrast": (0.85, 1.15),
     "saturation": (0.8, 1.2),
     "gamma": (0.85, 1.15),
+    "highlights": (-1.0, 1.0),
+    "shadows": (-1.0, 1.0),
 }
 COLOR_MODES = frozenset({"none", "safe_restore", "warm_food", "manual", "dji_lut", "dji_dlog", "dji_dlog_m"})
 LUT_MODES = frozenset({"dji_lut", "dji_dlog", "dji_dlog_m"})
 
 
+class ColorReferenceError(ValueError):
+    """A reference frame cannot be created or safely used."""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
+
+
 def color_state_path(cfg: dict, project_id: int) -> Path:
     return project_dir(cfg, project_id) / "color_consistency.json"
+
+
+def color_dir(cfg: dict, project_id: int) -> Path:
+    path = project_dir(cfg, project_id) / "color"
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "reference_frames").mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def default_color_state() -> dict[str, Any]:
@@ -87,10 +107,11 @@ def normalize_color_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
         item["enabled"] = _as_bool(item.get("enabled", True))
         item["locked"] = _as_bool(item.get("locked", False))
         item["excluded"] = _as_bool(item.get("excluded", False))
-        if isinstance(item.get("suggested"), Mapping):
-            item["suggested"] = _normalize_adjustment_set(item["suggested"], result["suggested"])
-        if isinstance(item.get("applied"), Mapping):
-            item["applied"] = _normalize_adjustment_set(item["applied"], result["applied"])
+        item["reference_candidate"] = _as_bool(item.get("reference_candidate", False))
+        item["confidence"] = _finite_confidence(item.get("confidence", 0.0))
+        item["warnings"] = [str(warning) for warning in item.get("warnings", []) or []]
+        item["suggested"] = _normalize_adjustment_set(item.get("suggested"), result["suggested"])
+        item["applied"] = _normalize_adjustment_set(item.get("applied"), result["applied"])
         segments[str(segment_id)] = item
     result["segments"] = segments
     return result
@@ -116,7 +137,7 @@ def effective_color_settings(state: Mapping[str, Any], segment_id: str | None = 
         override = normalized["segments"].get(str(segment_id), {})
         if override.get("excluded") or not override.get("enabled", True):
             result["mode"] = "none"
-        elif isinstance(override.get("applied"), Mapping) and not override.get("locked", False):
+        elif isinstance(override.get("applied"), Mapping):
             result.update(override["applied"])
     return result
 
@@ -125,9 +146,14 @@ def analyze_project_color(cfg: dict, db: Path, project_id: int, *, force: bool =
     existing = load_project_color_state(cfg, project_id)
     if existing.get("analysis") and not force:
         return existing
-    references = _reference_candidates(db, project_id)
+    references = _reference_candidates(db, project_id, cfg)
+    excluded_ids = {str(key) for key, value in existing.get("segments", {}).items() if value.get("excluded")}
+    references = [item for item in references if not _is_excluded_reference(item, excluded_ids)]
     selected = _keep_or_select_reference(existing, references)
-    stats = _reference_luma(cfg, selected) if selected else {"average": 128.0, "highlight_ratio": 0.0, "sampled_frames": 0}
+    if selected:
+        selected = ensure_reference_frame(cfg, db, project_id, selected)
+        references = [selected if item.get("id") == selected.get("id") else item for item in references]
+    stats = _reference_luma(cfg, selected) if selected else _empty_color_stats()
     suggested = _suggested_adjustments(cfg, project_id, stats, existing)
     settings = load_render_settings(cfg, project_id)
     configured = dict(settings.get("color") or {})
@@ -138,6 +164,8 @@ def analyze_project_color(cfg: dict, db: Path, project_id: int, *, force: bool =
         mode = str(cfg.get("color", {}).get("default_mode") or "dji_dlog_m")
     suggested.update({"mode": mode, "lut_path": str(configured.get("lut_path") or ""), "lut_kind": str(configured.get("lut_kind") or mode)})
     applied = existing["applied"] if existing.get("analysis") else deepcopy(suggested)
+    segment_states = _analyze_segments(cfg, db, project_id, existing, selected, stats, applied)
+    analysis_warnings = _lut_warnings(suggested)
     state = normalize_color_state({
         **existing,
         "reference": selected or {},
@@ -149,9 +177,12 @@ def analyze_project_color(cfg: dict, db: Path, project_id: int, *, force: bool =
             "basis_text": _basis_text(selected, stats),
             "source_count": len(_project_source_ids(db, project_id)),
             "analyzed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "warnings": analysis_warnings,
+            "statistics": stats,
         },
         "suggested": suggested,
         "applied": applied,
+        "segments": segment_states,
     })
     save_project_color_state(cfg, db, project_id, state)
     return state
@@ -162,10 +193,12 @@ def set_color_reference(cfg: dict, db: Path, project_id: int, reference_id: str)
     selected = next((item for item in state["references"] if str(item.get("id")) == str(reference_id)), None)
     if not selected:
         raise ValueError(f"找不到色彩基準畫面：{reference_id}")
+    selected = ensure_reference_frame(cfg, db, project_id, selected)
     stats = _reference_luma(cfg, selected)
     suggested = _suggested_adjustments(cfg, project_id, stats, state)
     suggested.update({"mode": state["suggested"].get("mode", "none"), "lut_path": state["suggested"].get("lut_path", ""), "lut_kind": state["suggested"].get("lut_kind", "")})
-    state = normalize_color_state({**state, "reference": selected, "analysis": {**state.get("analysis", {}), "reference": selected, "luma": stats, "basis_text": _basis_text(selected, stats)}, "suggested": suggested})
+    references = [selected if str(item.get("id")) == str(selected.get("id")) else item for item in state.get("references", [])]
+    state = normalize_color_state({**state, "reference": selected, "references": references, "analysis": {**state.get("analysis", {}), "reference": selected, "luma": stats, "basis_text": _basis_text(selected, stats)}, "suggested": suggested})
     save_project_color_state(cfg, db, project_id, state)
     return state
 
@@ -173,6 +206,13 @@ def set_color_reference(cfg: dict, db: Path, project_id: int, reference_id: str)
 def update_color_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str, Any]) -> dict[str, Any]:
     current = load_project_color_state(cfg, project_id)
     updated = _merge(current, dict(patch))
+    for segment_id, value in (dict(patch.get("segments") or {}) if isinstance(patch, Mapping) else {}).items():
+        old = current.get("segments", {}).get(str(segment_id), {})
+        if old.get("locked"):
+            preserved = dict(value) if isinstance(value, Mapping) else {}
+            preserved["suggested"] = old.get("suggested", {})
+            preserved["applied"] = old.get("applied", {})
+            updated.setdefault("segments", {})[str(segment_id)] = {**old, **preserved, "locked": True}
     state = normalize_color_state(updated)
     save_project_color_state(cfg, db, project_id, state)
     return state
@@ -185,16 +225,18 @@ def preview_cache_key(source: Path, state: Mapping[str, Any], settings: Mapping[
         "source": str(path),
         "size": stat.st_size if stat else None,
         "mtime_ns": stat.st_mtime_ns if stat else None,
-        "state": normalize_color_state(state),
-        "settings": dict(settings or {}),
+        "pipeline_version": COLOR_STATE_VERSION,
+        "settings": dict(settings or normalize_color_state(state).get("applied", {})),
+        "lut": _lut_cache_fingerprint(settings or normalize_color_state(state).get("applied", {})),
         "kind": kind,
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def render_project_color_previews(cfg: dict, db: Path, project_id: int, *, force: bool = False, seconds: int = 20) -> dict[str, Any]:
+def render_project_color_previews(cfg: dict, db: Path, project_id: int, *, force: bool = False, seconds: int = 4) -> dict[str, Any]:
     from .color import render_color_preview
     from .database import project_videos
+    from .project import project_segments
 
     state = load_project_color_state(cfg, project_id)
     if not state.get("analysis"):
@@ -202,20 +244,80 @@ def render_project_color_previews(cfg: dict, db: Path, project_id: int, *, force
     out_dir = project_dir(cfg, project_id) / "output" / "color_previews"
     out_dir.mkdir(parents=True, exist_ok=True)
     previews = []
+    plan_path = project_dir(cfg, project_id) / "project_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.exists() else {}
+    segments = [row for row in project_segments(cfg, project_id, plan) if _as_bool(row.get("include", True))]
+    segment_by_video = {}
+    for row in segments:
+        segment_by_video.setdefault(int(row.get("video_id") or 0), []).append(row)
     for video in project_videos(db, project_id):
         source = Path(str(video["current_path"])).expanduser().resolve()
-        key = preview_cache_key(source, state, kind="before-after")
-        before = out_dir / f"video_{video['id']}_before_{key[:12]}.mp4"
-        after = out_dir / f"video_{video['id']}_after_{key[:12]}.mp4"
-        metadata_path = out_dir / f"video_{video['id']}_{key[:12]}.json"
-        cached = before.is_file() and after.is_file() and metadata_path.is_file()
-        if force or not cached:
-            render_color_preview(source, before, cfg, color_settings={"mode": "none"}, seconds=seconds)
-            render_color_preview(source, after, cfg, color_settings=effective_color_settings(state), seconds=seconds)
-            metadata_path.write_text(json.dumps({"cache_key": key, "source": str(source), "reference": state.get("reference", {}), "applied": state.get("applied", {}), "before": str(before), "after": str(after)}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            cached = False
-        previews.append({"video_id": int(video["id"]), "source_file": str(source), "before": str(before), "after": str(after), "cache_key": key, "cache_hit": cached})
-    return {"ok": True, "state": state, "previews": previews, "files": [item["after"] for item in previews]}
+        video_segments = segment_by_video.get(int(video["id"]), [])
+        if not video_segments:
+            video_segments = [{"segment_id": f"video:{video['id']}", "video_id": int(video["id"]), "start_seconds": float((state.get("reference") or {}).get("timestamp_seconds") or 0), "end_seconds": float((state.get("reference") or {}).get("timestamp_seconds") or 0) + seconds}]
+        for segment in video_segments:
+            segment_id = str(segment.get("segment_id") or f"video:{video['id']}")
+            effective = effective_color_settings(state, segment_id)
+            start = max(0.0, float(segment.get("start_seconds") or 0))
+            end = max(start + 0.1, float(segment.get("end_seconds") or start + seconds))
+            duration = min(float(seconds), max(0.1, end - start))
+            key = preview_cache_key(source, state, {"segment_id": segment_id, "start": start, "end": end, "effective": effective}, kind="before-after")
+            stem = _safe_token(segment_id)
+            before = out_dir / f"{stem}_before_{key[:12]}.mp4"
+            after = out_dir / f"{stem}_after_{key[:12]}.mp4"
+            metadata_path = out_dir / f"{stem}_{key[:12]}.json"
+            cached = before.is_file() and after.is_file() and metadata_path.is_file()
+            if force or not cached:
+                _render_preview_pair(render_color_preview, source, before, after, cfg, effective, start, duration)
+                metadata_path.write_text(json.dumps({"cache_key": key, "segment_id": segment_id, "source": str(source), "start_seconds": start, "duration_seconds": duration, "reference": state.get("reference", {}), "effective": effective, "before": before.name, "after": after.name}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                cached = False
+            previews.append({"video_id": int(video["id"]), "segment_id": segment_id, "before": before.name, "after": after.name, "cache_key": key, "cache_hit": cached, "start_seconds": start, "duration_seconds": duration})
+    return {"ok": True, "state": state, "previews": [_preview_urls(cfg, project_id, item) for item in previews], "files": [_preview_url(project_id, item["after"]) for item in previews]}
+
+
+def ensure_reference_frame(cfg: dict, db: Path, project_id: int, reference: Mapping[str, Any]) -> dict[str, Any]:
+    source = Path(str(reference.get("source_file") or "")).expanduser().resolve()
+    if not source.is_file():
+        raise ColorReferenceError("source_missing", f"原始素材不存在：{source}")
+    timestamp = _finite_number(reference.get("timestamp_seconds"), -1.0)
+    if timestamp < 0:
+        raise ColorReferenceError("invalid_timestamp", "Reference timestamp 無效")
+    duration = _probe_duration(cfg, source)
+    if duration is not None and timestamp > duration + 0.001:
+        raise ColorReferenceError("timestamp_out_of_range", f"Reference timestamp {timestamp:.3f} 超過素材長度 {duration:.3f}")
+    output_dir = color_dir(cfg, project_id) / "reference_frames"
+    filename = f"reference_{_safe_token(str(reference.get('id') or 'frame'))}_{round(timestamp * 1000)}.jpg"
+    frame_path = output_dir / filename
+    if not frame_path.exists():
+        cmd = [str(cfg.get("ffmpeg_path") or "ffmpeg"), "-hide_banner", "-loglevel", "error", "-ss", f"{timestamp:.3f}", "-i", str(source), "-frames:v", "1", "-q:v", "2", "-y", str(frame_path)]
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", check=False)
+        if result.returncode != 0 or not frame_path.is_file() or frame_path.stat().st_size <= 0:
+            frame_path.unlink(missing_ok=True)
+            raise ColorReferenceError("frame_extract_failed", f"無法擷取 Reference frame：{result.stderr[-500:]}")
+    enriched = {**dict(reference), "frame_path": str(frame_path), "frame_name": frame_path.name, "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    reference_path = color_dir(cfg, project_id) / "reference.json"
+    temp = reference_path.with_name(".reference.json.tmp")
+    temp.write_text(json.dumps(enriched, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temp.replace(reference_path)
+    return enriched
+
+
+def color_state_for_api(cfg: dict, project_id: int, state: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    result = normalize_color_state(state or load_project_color_state(cfg, project_id))
+    if result.get("reference"):
+        result["reference"] = _reference_url(result["reference"], project_id)
+    result["references"] = [_reference_url(item, project_id) for item in result.get("references", [])]
+    if isinstance(result.get("analysis"), Mapping) and isinstance(result["analysis"].get("reference"), Mapping):
+        result["analysis"] = {**result["analysis"], "reference": _reference_url(result["analysis"]["reference"], project_id)}
+    return result
+
+
+def preview_file_path(cfg: dict, project_id: int, token: str) -> Path:
+    return _safe_project_media_path(project_dir(cfg, project_id) / "output" / "color_previews", token)
+
+
+def reference_file_path(cfg: dict, project_id: int, token: str) -> Path:
+    return _safe_project_media_path(color_dir(cfg, project_id) / "reference_frames", token)
 
 
 def _normalize_adjustment_set(value: Any, fallback: Mapping[str, Any]) -> dict[str, Any]:
@@ -249,8 +351,19 @@ def _suggested_adjustments(cfg: dict, project_id: int, stats: Mapping[str, Any],
     return _normalize_adjustment_set(result, ADJUSTMENT_DEFAULTS)
 
 
-def _reference_candidates(db: Path, project_id: int) -> list[dict[str, Any]]:
+def _reference_candidates(db: Path, project_id: int, cfg: dict | None = None) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
+    project_segment_ids: dict[tuple[int, int], str] = {}
+    if cfg is not None:
+        try:
+            from .project import project_dir, project_segments
+            plan_path = project_dir(cfg, project_id) / "project_plan.json"
+            plan = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.exists() else {}
+            for segment in project_segments(cfg, project_id, plan):
+                key = (int(segment.get("video_id") or 0), round(float(segment.get("start_seconds") or 0) * 1000))
+                project_segment_ids[key] = str(segment.get("segment_id") or "")
+        except (OSError, ValueError, TypeError):
+            project_segment_ids = {}
     try:
         with sqlite3.connect(db) as con:
             con.row_factory = sqlite3.Row
@@ -260,7 +373,8 @@ def _reference_candidates(db: Path, project_id: int) -> list[dict[str, Any]]:
                 video = video_map.get(int(row["video_id"]), {})
                 start = float(row["start_seconds"] or 0)
                 end = float(row["end_seconds"] or start)
-                result.append({"id": f"segment:{row['video_id']}:{round(start * 1000)}", "type": "segment", "video_id": int(row["video_id"]), "source_file": str(video.get("current_path") or ""), "timestamp_seconds": round((start + end) / 2, 3), "start_seconds": start, "end_seconds": end, "label": str(row["title"] or row["reason"] or ""), "score": float(row["score"] or 0)})
+                reference_id = project_segment_ids.get((int(row["video_id"]), round(start * 1000))) or f"segment:{row['video_id']}:{round(start * 1000)}"
+                result.append({"id": f"segment:{row['video_id']}:{round(start * 1000)}", "segment_id": reference_id, "type": "segment", "video_id": int(row["video_id"]), "source_file": str(video.get("current_path") or ""), "timestamp_seconds": round((start + end) / 2, 3), "start_seconds": start, "end_seconds": end, "label": str(row["title"] or row["reason"] or ""), "score": float(row["score"] or 0)})
             for row in con.execute("select video_id, timestamp_seconds, vision_summary, score_usefulness from frames where video_id in (select video_id from project_videos where project_id=?)", (project_id,)):
                 video = video_map.get(int(row["video_id"]), {})
                 timestamp = float(row["timestamp_seconds"] or 0)
@@ -275,16 +389,28 @@ def _keep_or_select_reference(state: Mapping[str, Any], references: list[dict[st
     return next((item for item in references if item["id"] == current), references[0] if references else {})
 
 
+def _is_excluded_reference(item: Mapping[str, Any], excluded_ids: set[str]) -> bool:
+    if str(item.get("id") or "") in excluded_ids or str(item.get("segment_id") or "") in excluded_ids:
+        return True
+    if item.get("type") != "segment":
+        return False
+    video_id = str(item.get("video_id") or "")
+    start = _finite_number(item.get("start_seconds"), -1)
+    return any(key.startswith(f"{video_id}:") and abs(_finite_number(key.rsplit(":", 1)[-1], -2) / 1000 - start) <= 0.001 for key in excluded_ids)
+
+
 def _reference_luma(cfg: dict, reference: Mapping[str, Any]) -> dict[str, Any]:
-    try:
-        from .color import _brightness_stats_at, _brightness_stats
-        source = Path(str(reference.get("source_file") or ""))
-        if source.is_file():
-            timestamp = float(reference.get("timestamp_seconds") or 0)
-            return _brightness_stats_at(source, cfg, timestamp)
-    except Exception:
-        pass
-    return {"average": 128.0, "highlight_ratio": 0.0, "sampled_frames": 0}
+    from .color import _brightness_stats_at
+    source = Path(str(reference.get("source_file") or "")).expanduser().resolve()
+    if not source.is_file():
+        raise ColorReferenceError("source_missing", f"原始素材不存在：{source}")
+    timestamp = _finite_number(reference.get("timestamp_seconds"), -1.0)
+    if timestamp < 0:
+        raise ColorReferenceError("invalid_timestamp", "Reference timestamp 無效")
+    duration = _probe_duration(cfg, source)
+    if duration is not None and timestamp > duration + 0.001:
+        raise ColorReferenceError("timestamp_out_of_range", f"Reference timestamp {timestamp:.3f} 超過素材長度 {duration:.3f}")
+    return _merge_color_stats(_brightness_stats_at(source, cfg, timestamp), source, cfg, timestamp)
 
 
 def _confidence(stats: Mapping[str, Any], has_reference: bool) -> str:
@@ -293,6 +419,226 @@ def _confidence(stats: Mapping[str, Any], has_reference: bool) -> str:
     if int(stats.get("sampled_frames") or 0) and float(stats.get("highlight_ratio") or 0) < 0.3:
         return "medium"
     return "low"
+
+
+def _empty_color_stats() -> dict[str, Any]:
+    return {"average": 128.0, "highlight_ratio": 0.0, "shadow_ratio": 0.0, "sampled_frames": 0, "sampled_pixel_count": 0, "sampled_frame_count": 0, "saturation_tendency": 0.0, "white_balance_tendency": "unknown"}
+
+
+def _finite_number(value: Any, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def _finite_confidence(value: Any) -> float:
+    return round(min(1.0, max(0.0, _finite_number(value, 0.0))), 3)
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return min(upper, max(lower, value))
+
+
+def _probe_duration(cfg: dict, source: Path) -> float | None:
+    try:
+        cmd = [str(cfg.get("ffprobe_path") or "ffprobe"), "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(source)]
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", check=False)
+        value = float((result.stdout or "").strip())
+        return value if math.isfinite(value) and value >= 0 else None
+    except (OSError, ValueError):
+        return None
+
+
+def _safe_token(value: str) -> str:
+    token = "".join(char if char.isalnum() or char in "-_" else "_" for char in str(value))
+    return token.strip("._")[:100] or "preview"
+
+
+def _render_preview_pair(render_preview, source: Path, before: Path, after: Path, cfg: dict, effective: Mapping[str, Any], start: float, duration: float) -> None:
+    try:
+        render_preview(source, before, cfg, color_settings={"mode": "none"}, seconds=duration, start_seconds=start)
+        render_preview(source, after, cfg, color_settings=dict(effective), seconds=duration, start_seconds=start)
+    except Exception:
+        before.unlink(missing_ok=True)
+        after.unlink(missing_ok=True)
+        raise
+
+
+def _preview_url(project_id: int, token: str) -> str:
+    from urllib.parse import quote
+    return f"/api/project/color-preview-file?project_id={int(project_id)}&file={quote(str(token), safe='') }"
+
+
+def _preview_urls(cfg: dict, project_id: int, item: Mapping[str, Any]) -> dict[str, Any]:
+    return {**dict(item), "before_url": _preview_url(project_id, str(item["before"])), "after_url": _preview_url(project_id, str(item["after"]))}
+
+
+def _reference_url(reference: Mapping[str, Any], project_id: int) -> dict[str, Any]:
+    result = dict(reference)
+    result.pop("frame_path", None)
+    source_file = result.pop("source_file", None)
+    if source_file:
+        result["source_name"] = Path(str(source_file)).name
+    if result.get("frame_name"):
+        from urllib.parse import quote
+        result["frame_url"] = f"/api/project/color-reference-file?project_id={int(project_id)}&file={quote(str(result['frame_name']), safe='')}"
+    return result
+
+
+def _safe_project_media_path(root: Path, token: str) -> Path:
+    name = str(token or "")
+    candidate = Path(name)
+    if not name or candidate.name != name or candidate.is_absolute() or ".." in candidate.parts:
+        raise FileNotFoundError("media token 無效")
+    root = root.resolve()
+    resolved = (root / name).resolve()
+    if root not in resolved.parents or not resolved.is_file():
+        raise FileNotFoundError("找不到指定預覽檔")
+    return resolved
+
+
+def _lut_warnings(settings: Mapping[str, Any]) -> list[str]:
+    mode = str(settings.get("mode") or "none")
+    path = Path(str(settings.get("lut_path") or "")).expanduser()
+    if mode in LUT_MODES and not path.is_file():
+        return [f"LUT 檔案不存在：{path.resolve()}"]
+    return []
+
+
+def _lut_cache_fingerprint(settings: Mapping[str, Any]) -> dict[str, Any] | None:
+    lut_value = str(settings.get("lut_path") or "").strip()
+    if not lut_value:
+        return None
+    lut = Path(lut_value).expanduser().resolve()
+    try:
+        stat = lut.stat()
+    except OSError:
+        return {"path": str(lut), "size": None, "mtime_ns": None, "sha256": None}
+    digest = hashlib.sha256()
+    try:
+        with lut.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError:
+        return {"path": str(lut), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "sha256": None}
+    return {"path": str(lut), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "sha256": digest.hexdigest()}
+
+
+def _analyze_segments(cfg: dict, db: Path, project_id: int, existing: Mapping[str, Any], reference: Mapping[str, Any], reference_stats: Mapping[str, Any], project_applied: Mapping[str, Any]) -> dict[str, Any]:
+    from .project import project_dir, project_segments
+
+    plan_path = project_dir(cfg, project_id) / "project_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.exists() else {}
+    old_segments = dict(existing.get("segments") or {})
+    result: dict[str, Any] = {}
+    ref_luma = float(reference_stats.get("average") or 128)
+    for segment in project_segments(cfg, project_id, plan):
+        segment_id = str(segment.get("segment_id") or "")
+        if not segment_id:
+            continue
+        old = dict(old_segments.get(segment_id) or {})
+        if old.get("locked"):
+            result[segment_id] = {**old, "locked": True}
+            continue
+        candidate = {"source_file": segment.get("source_file", ""), "timestamp_seconds": (float(segment.get("start_seconds") or 0) + float(segment.get("end_seconds") or 0)) / 2}
+        try:
+            stats = _reference_luma(cfg, candidate)
+            confidence = _numeric_confidence(stats, reference_stats, bool(reference))
+            suggested = _suggested_adjustments(cfg, project_id, stats, existing)
+            suggested["highlights"] = _clamp((float(reference_stats.get("highlight_ratio") or 0) - float(stats.get("highlight_ratio") or 0)) * 2, -1, 1)
+            suggested["shadows"] = _clamp((ref_luma - float(stats.get("average") or 128)) / 128, -1, 1)
+            warnings = _stats_warnings(stats)
+        except ColorReferenceError as exc:
+            stats = _empty_color_stats()
+            confidence = 0.0
+            suggested = deepcopy(project_applied)
+            warnings = [str(exc)]
+        applied = old.get("applied") if old else (suggested if confidence >= 0.55 else deepcopy(project_applied))
+        result[segment_id] = {
+            "enabled": _as_bool(old.get("enabled", True)),
+            "locked": False,
+            "excluded": _as_bool(old.get("excluded", False)),
+            "reference_candidate": not _as_bool(old.get("excluded", False)),
+            "suggested": suggested,
+            "applied": applied,
+            "confidence": confidence,
+            "warnings": warnings,
+        }
+    return result
+
+
+def _numeric_confidence(stats: Mapping[str, Any], reference: Mapping[str, Any], has_reference: bool) -> float:
+    if not has_reference:
+        return 0.0
+    average_delta = abs(float(stats.get("average") or 128) - float(reference.get("average") or 128)) / 128
+    clipping = float(stats.get("highlight_ratio") or 0) + float(stats.get("shadow_ratio") or 0)
+    return round(max(0.0, min(1.0, 0.9 - average_delta - clipping)), 3)
+
+
+def _stats_warnings(stats: Mapping[str, Any]) -> list[str]:
+    warnings = []
+    if float(stats.get("highlight_ratio") or 0) > 0.2:
+        warnings.append("高光裁切偏高，建議不要過度拉亮")
+    if float(stats.get("shadow_ratio") or 0) > 0.2:
+        warnings.append("陰影裁切偏高，暗部細節可能不足")
+    if float(stats.get("saturation_tendency") or 0) > 0.9:
+        warnings.append("高飽和像素比例偏高")
+    return warnings
+
+
+def _merge_color_stats(stats: Mapping[str, Any], source: Path, cfg: dict, timestamp: float) -> dict[str, Any]:
+    rgb = _rgb_stats(source, cfg, timestamp)
+    result = {**dict(stats), **rgb}
+    result.setdefault("luminance_percentile", {"p10": result.get("average", 128), "p50": result.get("average", 128), "p90": result.get("average", 128)})
+    result.setdefault("luminance_range", [result.get("average", 128), result.get("average", 128)])
+    result.setdefault("shadow_ratio", 0.0)
+    result.setdefault("saturation_tendency", 0.0)
+    result.setdefault("sampled_pixel_count", 0)
+    result.setdefault("sampled_frame_count", result.get("sampled_frames", 0))
+    return result
+
+
+def _rgb_stats(source: Path, cfg: dict, timestamp: float) -> dict[str, Any]:
+    cmd = [str(cfg.get("ffmpeg_path") or "ffmpeg"), "-hide_banner", "-loglevel", "error", "-ss", f"{max(0, timestamp):.3f}", "-i", str(source), "-vf", "scale=160:-1,format=rgb24", "-frames:v", "1", "-f", "rawvideo", "-"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, check=False)
+        data = proc.stdout
+        pixels = [data[index:index + 3] for index in range(0, len(data) - 2, 3)]
+        usable = []
+        for red, green, blue in pixels:
+            values = [red, green, blue]
+            luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+            chroma = (max(values) - min(values)) / max(max(values), 1)
+            if 8 <= luminance <= 247 and chroma <= 0.98:
+                usable.append((luminance, red, green, blue, chroma))
+        if not usable:
+            return {"rgb_mean": {"r": 0, "g": 0, "b": 0}, "sampled_pixel_count": 0, "saturation_tendency": 0.0, "white_balance_tendency": "unknown"}
+        luminances = sorted(item[0] for item in usable)
+        r_mean = sum(item[1] for item in usable) / len(usable)
+        g_mean = sum(item[2] for item in usable) / len(usable)
+        b_mean = sum(item[3] for item in usable) / len(usable)
+        return {"rgb_mean": {"r": round(r_mean, 2), "g": round(g_mean, 2), "b": round(b_mean, 2)}, "luminance_percentile": {"p10": round(_percentile(luminances, 0.1), 2), "p50": round(_percentile(luminances, 0.5), 2), "p90": round(_percentile(luminances, 0.9), 2)}, "luminance_range": [round(luminances[0], 2), round(luminances[-1], 2)], "saturation_tendency": round(sum(item[4] for item in usable) / len(usable), 4), "white_balance_tendency": _white_balance_tendency(r_mean, g_mean, b_mean), "sampled_pixel_count": len(usable), "sampled_frame_count": 1}
+    except (OSError, ValueError):
+        return {"rgb_mean": {"r": 0, "g": 0, "b": 0}, "sampled_pixel_count": 0, "saturation_tendency": 0.0, "white_balance_tendency": "unknown"}
+
+
+def _percentile(values: list[float], fraction: float) -> float:
+    if not values:
+        return 0.0
+    index = min(len(values) - 1, max(0, int(round((len(values) - 1) * fraction))))
+    return values[index]
+
+
+def _white_balance_tendency(red: float, green: float, blue: float) -> str:
+    if red > blue * 1.08:
+        return "偏暖"
+    if blue > red * 1.08:
+        return "偏冷"
+    if green > (red + blue) / 2 * 1.08:
+        return "偏綠"
+    return "中性"
 
 
 def _basis_text(reference: Mapping[str, Any] | None, stats: Mapping[str, Any]) -> str:
@@ -325,8 +671,9 @@ def _as_bool(value: Any) -> bool:
 
 
 __all__ = [
-    "ADJUSTMENT_DEFAULTS", "ADJUSTMENT_LIMITS", "COLOR_MODES", "COLOR_STATE_VERSION", "LUT_MODES",
+    "ADJUSTMENT_DEFAULTS", "ADJUSTMENT_LIMITS", "COLOR_MODES", "COLOR_STATE_VERSION", "ColorReferenceError", "LUT_MODES",
     "analyze_project_color", "color_state_path", "default_color_state", "effective_color_settings",
-    "has_color_state", "load_project_color_state", "normalize_color_state", "preview_cache_key",
+    "color_dir", "color_state_for_api", "ensure_reference_frame", "has_color_state", "load_project_color_state", "normalize_color_state", "preview_cache_key",
+    "preview_file_path", "reference_file_path",
     "render_project_color_previews", "save_project_color_state", "set_color_reference", "update_color_state",
 ]

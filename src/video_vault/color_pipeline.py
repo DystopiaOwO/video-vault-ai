@@ -24,31 +24,31 @@ def build_color_filter(settings: Mapping[str, Any] | None, *, lut_already_applie
         return ""
     if lut_already_applied:
         raise ColorPipelineError("LUT must not be applied more than once")
-    parts: list[str] = []
+    lut_parts: list[str] = []
     if mode in LUT_MODES:
         lut = Path(str(data.get("lut_path") or "")).expanduser().resolve()
         if not lut.is_file():
             raise ColorPipelineError(f"LUT file does not exist: {lut}")
-        parts.append(build_lut3d_filter(lut))
+        lut_parts.append(build_lut3d_filter(lut))
 
-    values = {
-        "exposure": _number(data.get("exposure"), 0.0),
-        "contrast": _number(data.get("contrast"), 1.0),
-        "saturation": _number(data.get("saturation"), 1.0),
-        "gamma": _number(data.get("gamma"), 1.0),
-    }
+    values = {key: _number(data.get(key), default) for key, default in (("exposure", 0.0), ("contrast", 1.0), ("saturation", 1.0), ("gamma", 1.0), ("highlights", 0.0), ("shadows", 0.0))}
     if mode == "safe_restore":
         values.update(exposure=-0.08, contrast=0.98, saturation=0.96, gamma=0.94)
     elif mode == "warm_food":
         values.update(contrast=1.06, saturation=1.12, gamma=0.98, exposure=-0.05)
-    parts.append(_eq_filter(values))
+    adjustment_filters = _adjustment_filters(values)
 
     temperature = _number(data.get("temperature"), 0.0)
     tint = _number(data.get("tint"), 0.0)
     if temperature or tint:
         warm = _clamp(temperature / 30.0 * 0.15, -0.15, 0.15)
         green = _clamp(tint / 20.0 * 0.1, -0.1, 0.1)
-        parts.append(f"colorbalance=rs={warm:.6f}:gs={green:.6f}:bs={-warm:.6f}")
+        white_balance = f"colorbalance=rs={warm:.6f}:gs={green:.6f}:bs={-warm:.6f}"
+        exposure_filters = [item for item in adjustment_filters if item.startswith("eq=brightness=")]
+        adjustment_filters = [item for item in adjustment_filters if item not in exposure_filters]
+        parts = [*lut_parts, *exposure_filters, white_balance, *adjustment_filters]
+    else:
+        parts = [*lut_parts, *adjustment_filters]
     return ",".join(part for part in parts if part)
 
 
@@ -64,13 +64,36 @@ def _clamp(value: float, lower: float, upper: float) -> float:
     return min(upper, max(lower, value))
 
 
-def _eq_filter(values: Mapping[str, float]) -> str:
+def _adjustment_filters(values: Mapping[str, float]) -> list[str]:
     exposure = _clamp(float(values["exposure"]), -1.5, 1.0)
     contrast = _clamp(float(values["contrast"]), 0.85, 1.15)
     saturation = _clamp(float(values["saturation"]), 0.8, 1.2)
     gamma = _clamp(float(values["gamma"]), 0.85, 1.15)
     brightness = _clamp(exposure * 0.12, -0.2, 0.2)
-    return f"eq=contrast={contrast:.6f}:saturation={saturation:.6f}:gamma={gamma:.6f}:brightness={brightness:.6f}"
+    filters: list[str] = []
+    if exposure:
+        filters.append(f"eq=brightness={brightness:.6f}")
+    if contrast != 1.0 or gamma != 1.0:
+        filters.append(f"eq=contrast={contrast:.6f}:gamma={gamma:.6f}")
+    highlights = _clamp(float(values.get("highlights", 0.0)), -1.0, 1.0)
+    shadows = _clamp(float(values.get("shadows", 0.0)), -1.0, 1.0)
+    if highlights or shadows:
+        filters.append(f"curves=all='0/{_curve_low(shadows):.4f} 0.5/{_curve_midpoint(shadows, highlights):.4f} 1/{_curve_high(highlights):.4f}'")
+    if saturation != 1.0:
+        filters.append(f"eq=saturation={saturation:.6f}")
+    return filters
+
+
+def _curve_low(shadows: float) -> float:
+    return _clamp(shadows * 0.12, 0.0, 1.0)
+
+
+def _curve_high(highlights: float) -> float:
+    return _clamp(1.0 - highlights * 0.12, 0.0, 1.0)
+
+
+def _curve_midpoint(shadows: float, highlights: float) -> float:
+    return _clamp(0.5 + shadows * 0.08 - highlights * 0.08, 0.0, 1.0)
 
 
 def color_filter(settings: Mapping[str, Any] | None, *, lut_already_applied: bool = False) -> str:

@@ -92,18 +92,32 @@ export type ColorAdjustment = {
   contrast: number;
   saturation: number;
   gamma: number;
+  highlights: number;
+  shadows: number;
 };
 
 export type ColorReference = {
   id: string;
   type: string;
   video_id: number;
-  source_file: string;
+  source_name?: string;
   timestamp_seconds: number;
   start_seconds?: number;
   end_seconds?: number;
   label: string;
   score: number;
+  frame_url?: string;
+};
+
+export type ColorSegmentState = {
+  enabled: boolean;
+  locked: boolean;
+  excluded: boolean;
+  reference_candidate?: boolean;
+  suggested?: ColorAdjustment;
+  applied?: ColorAdjustment;
+  confidence?: number;
+  warnings?: string[];
 };
 
 export type ColorState = {
@@ -111,10 +125,10 @@ export type ColorState = {
   enabled: boolean;
   reference: ColorReference | Record<string, never>;
   references: ColorReference[];
-  analysis: { luma?: { average?: number; highlight_ratio?: number; sampled_frames?: number }; confidence?: string; basis_text?: string };
+  analysis: { luma?: { average?: number; highlight_ratio?: number; sampled_frames?: number }; confidence?: string; basis_text?: string; warnings?: string[]; statistics?: Record<string, unknown> };
   suggested: ColorAdjustment;
   applied: ColorAdjustment;
-  segments: Record<string, { enabled: boolean; locked: boolean; excluded: boolean; applied?: ColorAdjustment }>;
+  segments: Record<string, ColorSegmentState>;
 };
 
 export type BgmRecommendation = {
@@ -163,9 +177,9 @@ export const api = {
   colorReference: (projectId: number, referenceId: string) =>
     json<{ ok: boolean; state?: ColorState; error?: string }>("/api/project/color-reference", post({ project_id: projectId, reference_id: referenceId })),
   colorPreview: (projectId: number, mode = "") =>
-    json<{ ok: boolean; message?: string; previews?: Array<{ video_id: number; before: string; after: string; cache_hit: boolean }>; error?: string }>("/api/project/color-job", post({ project_id: projectId, mode })),
+    json<{ ok: boolean; message?: string; previews?: Array<{ video_id: number; segment_id: string; before_url: string; after_url: string; cache_hit: boolean }>; error?: string }>("/api/project/color-job", post({ project_id: projectId, mode })),
   colorPreviewDirect: (projectId: number, force = false) =>
-    json<{ ok: boolean; previews?: Array<{ video_id: number; before: string; after: string; cache_hit: boolean }>; error?: string }>("/api/project/color-preview", post({ project_id: projectId, force })),
+    json<{ ok: boolean; previews?: Array<{ video_id: number; segment_id: string; before_url: string; after_url: string; cache_hit: boolean; confidence?: number; warnings?: string[] }>; error?: string }>("/api/project/color-preview", post({ project_id: projectId, force })),
   buildPlan: (projectId: number) =>
     json<{ ok: boolean }>("/api/project/build-plan", post({ project_id: projectId })),
   assignBgm: (projectId: number, bgmId: number) =>

@@ -17,7 +17,8 @@ import time
 from .analyzer.vision_pipeline import analyze_video_frames
 from .bgm import import_bgm, list_bgm
 from .color import render_color_preview
-from .color_consistency import analyze_project_color, render_project_color_previews, set_color_reference, update_color_state
+from .color_consistency import ColorReferenceError, analyze_project_color, color_state_for_api, preview_file_path, reference_file_path, render_project_color_previews, set_color_reference, update_color_state
+from .color_pipeline import ColorPipelineError
 from .database import add_frame, add_project_bgm, connect, frames as db_frames, init_db, project as db_project, project_videos, set_project_videos, set_video_status, update_video_summary, upsert_video, videos
 from .ffmpeg_tools import extract_frames, frame_timestamp, metadata
 from .hyperframes import export_hyperframes_project, render_fast_draft
@@ -257,6 +258,18 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 project_id = int(query.get("project_id", ["0"])[0] or 0)
                 result = render_api.list(project_id or None)
                 self._json(result)
+            elif parsed.path == "/api/project/color-preview-file":
+                try:
+                    path = preview_file_path(cfg, int(query.get("project_id", ["0"])[0] or 0), query.get("file", [""])[0])
+                    self._file(path)
+                except (FileNotFoundError, ValueError):
+                    self.send_error(404)
+            elif parsed.path == "/api/project/color-reference-file":
+                try:
+                    path = reference_file_path(cfg, int(query.get("project_id", ["0"])[0] or 0), query.get("file", [""])[0])
+                    self._file(path)
+                except (FileNotFoundError, ValueError):
+                    self.send_error(404)
             elif _web_dist().exists() and _static_file(parsed.path):
                 self._file(_static_file(parsed.path))
             else:
@@ -400,6 +413,8 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif path == "/api/project/color-preview":
                 try:
                     self._json(color_preview_project(cfg, db, int(data.get("project_id", 0)), data.get("mode") or cfg.get("color", {}).get("default_mode", "safe_restore"), force=bool(data.get("force"))))
+                except ColorPipelineError as exc:
+                    self._json({"ok": False, "code": "missing_lut" if "LUT file does not exist" in str(exc) else "color_pipeline_error", "error": str(exc)})
                 except Exception as exc:
                     self._json({"ok": False, "error": f"調色預覽失敗：{exc}"})
             elif path == "/api/project/color-job":
@@ -409,7 +424,9 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif path == "/api/project/color-analyze":
                 try:
                     state = analyze_project_color(cfg, db, int(data.get("project_id", 0)), force=bool(data.get("force")))
-                    self._json({"ok": True, "state": state})
+                    self._json({"ok": True, "state": color_state_for_api(cfg, int(data.get("project_id", 0)), state)})
+                except ColorReferenceError as exc:
+                    self._json({"ok": False, "code": exc.code, "error": str(exc), "warnings": [str(exc)]})
                 except Exception as exc:
                     self._json({"ok": False, "error": f"色彩分析失敗：{exc}"})
             elif path == "/api/project/color-settings":
@@ -417,13 +434,15 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     project_id = int(data.get("project_id", 0))
                     patch = data.get("state") if isinstance(data.get("state"), dict) else data.get("patch", {})
                     state = update_color_state(cfg, db, project_id, patch if isinstance(patch, dict) else {})
-                    self._json({"ok": True, "state": state})
+                    self._json({"ok": True, "state": color_state_for_api(cfg, int(data.get("project_id", 0)), state)})
                 except Exception as exc:
                     self._json({"ok": False, "error": f"色彩設定儲存失敗：{exc}"})
             elif path == "/api/project/color-reference":
                 try:
                     state = set_color_reference(cfg, db, int(data.get("project_id", 0)), str(data.get("reference_id", "")))
-                    self._json({"ok": True, "state": state})
+                    self._json({"ok": True, "state": color_state_for_api(cfg, int(data.get("project_id", 0)), state)})
+                except ColorReferenceError as exc:
+                    self._json({"ok": False, "code": exc.code, "error": str(exc)})
                 except Exception as exc:
                     self._json({"ok": False, "error": f"色彩基準更新失敗：{exc}"})
             elif path == "/api/project/opencut-export":
@@ -810,7 +829,7 @@ def _color_job(cfg: dict, db: Path, project_id: int, mode: str) -> None:
         if _job_stopped(project_id, "color"):
             return
         files = result.get("files", [])
-        _set_job(project_id, "color", status="done", message=f"調色預覽完成：{len(files)} 支", files=files, previews=result.get("previews", []), state=result.get("state", {}), done=1, total=1, percent=100)
+        _set_job(project_id, "color", status="done", message=f"調色預覽完成：{len(files)} 支", files=files, previews=result.get("previews", []), state=color_state_for_api(cfg, project_id, result.get("state", {})), done=1, total=1, percent=100)
     except Exception as exc:
         if _job_stopped(project_id, "color"):
             return
@@ -1453,7 +1472,7 @@ def update_clip_summary(cfg: dict, db: Path, project_id: int, video_id: int, sum
 
 def color_preview_project(cfg: dict, db: Path, project_id: int, mode: str, *, force: bool = False) -> dict:
     result = render_project_color_previews(cfg, db, project_id, force=force)
-    return {**result, "mode": mode}
+    return {**result, "state": color_state_for_api(cfg, project_id, result.get("state", {})), "mode": mode}
 
 
 def analyze_ui_video(cfg: dict, db: Path, video: dict, progress=None) -> None:

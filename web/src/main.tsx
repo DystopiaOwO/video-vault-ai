@@ -1,7 +1,7 @@
 import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { ChangeEvent, ReactNode } from "react";
-import { api, BgmTrack, ColorAdjustment, ColorState, Job, Project, ProjectDetail, Segment } from "./api";
+import { api, BgmTrack, ColorAdjustment, ColorSegmentState, ColorState, Job, Project, ProjectDetail, Segment } from "./api";
 import { RenderJobPanel } from "./components/render/RenderJobPanel";
 import { ProjectDataLoadOptions, ProjectDataLoader } from "./projectDataLoader";
 import "./styles.css";
@@ -354,7 +354,7 @@ function ClipSummary({ projectId, clip, setMessage, refreshProject }: { projectI
 
 function ColorConsistencyPanel({ detail, setMessage, refreshProject }: { detail: ProjectDetail; setMessage: (value: string) => void; refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]> }) {
   const [state, setState] = useState<ColorState>(() => detail.color || emptyColorState());
-  const [previews, setPreviews] = useState<Array<{ video_id: number; before: string; after: string; cache_hit: boolean }>>([]);
+  const [previews, setPreviews] = useState<Array<{ video_id: number; segment_id: string; before_url: string; after_url: string; cache_hit: boolean }>>([]);
   const [busy, setBusy] = useState("");
   useEffect(() => setState(detail.color || emptyColorState()), [detail.project.id, detail.color]);
 
@@ -365,56 +365,78 @@ function ColorConsistencyPanel({ detail, setMessage, refreshProject }: { detail:
   async function analyze(force = false) {
     setBusy("analyze");
     setMessage(force ? "正在重跑色彩分析..." : "正在分析核心畫面色彩...");
-    const result = await api.colorAnalyze(detail.project.id, force);
-    setBusy("");
-    if (!result.ok || !result.state) {
-      setMessage(`色彩分析失敗：${result.error || "未知錯誤"}`);
-      return;
+    try {
+      const result = await api.colorAnalyze(detail.project.id, force);
+      if (!result.ok || !result.state) {
+        setMessage(`色彩分析失敗：${result.error || "未知錯誤"}`);
+        return;
+      }
+      setState(result.state);
+      setMessage("色彩分析完成，請確認建議值後再儲存實際套用值。");
+      await refreshProject({ forceFresh: true });
+    } catch (error) {
+      setMessage(`色彩分析失敗：${error instanceof Error ? error.message : "網路或服務錯誤"}`);
+    } finally {
+      setBusy("");
     }
-    setState(result.state);
-    setMessage("色彩分析完成，請確認建議值後再儲存實際套用值。");
-    await refreshProject({ forceFresh: true });
   }
 
   async function save() {
     setBusy("save");
-    const result = await api.colorSettings(detail.project.id, state);
-    setBusy("");
-    if (!result.ok || !result.state) {
-      setMessage(`色彩設定儲存失敗：${result.error || "未知錯誤"}`);
-      return;
+    try {
+      const result = await api.colorSettings(detail.project.id, state);
+      if (!result.ok || !result.state) {
+        setMessage(`色彩設定儲存失敗：${result.error || "未知錯誤"}`);
+        return;
+      }
+      setState(result.state);
+      setMessage("色彩設定已儲存，專案已回到待審。");
+      await refreshProject({ forceFresh: true });
+    } catch (error) {
+      setMessage(`色彩設定儲存失敗：${error instanceof Error ? error.message : "網路或服務錯誤"}`);
+    } finally {
+      setBusy("");
     }
-    setState(result.state);
-    setMessage("色彩設定已儲存，專案已回到待審。");
-    await refreshProject({ forceFresh: true });
   }
 
   async function changeReference(referenceId: string) {
     if (!referenceId) return;
     setBusy("reference");
-    const result = await api.colorReference(detail.project.id, referenceId);
-    setBusy("");
-    if (!result.ok || !result.state) {
-      setMessage(`色彩基準更新失敗：${result.error || "未知錯誤"}`);
-      return;
+    try {
+      const result = await api.colorReference(detail.project.id, referenceId);
+      if (!result.ok || !result.state) {
+        setMessage(`色彩基準更新失敗：${result.error || "未知錯誤"}`);
+        return;
+      }
+      setState(result.state);
+      setMessage("色彩基準已更新，請重新確認建議值。");
+      await refreshProject({ forceFresh: true });
+    } catch (error) {
+      setMessage(`色彩基準更新失敗：${error instanceof Error ? error.message : "網路或服務錯誤"}`);
+    } finally {
+      setBusy("");
     }
-    setState(result.state);
-    setMessage("色彩基準已更新，請重新確認建議值。");
-    await refreshProject({ forceFresh: true });
   }
 
-  async function preview() {
+  async function preview(force = false) {
     setBusy("preview");
-    setMessage("正在產生 Before / After 調色預覽...");
-    const result = await api.colorPreviewDirect(detail.project.id, true);
-    setBusy("");
-    if (!result.ok) {
-      setMessage(`調色預覽失敗：${result.error || "未知錯誤"}`);
-      return;
+    setMessage(force ? "正在強制重新產生 Before / After 調色預覽..." : "正在產生 Before / After 調色預覽...");
+    try {
+      const result = await api.colorPreviewDirect(detail.project.id, force);
+      if (!result.ok) {
+        setPreviews([]);
+        setMessage(`調色預覽失敗：${result.error || "未知錯誤"}`);
+        return;
+      }
+      setPreviews(result.previews || []);
+      setMessage("Before / After 調色預覽已完成。");
+      await refreshProject({ forceFresh: true });
+    } catch (error) {
+      setPreviews([]);
+      setMessage(`調色預覽失敗：${error instanceof Error ? error.message : "網路或服務錯誤"}`);
+    } finally {
+      setBusy("");
     }
-    setPreviews(result.previews || []);
-    setMessage("Before / After 調色預覽已完成。");
-    await refreshProject({ forceFresh: true });
   }
 
   function updateApplied(field: keyof ColorAdjustment, value: string | number) {
@@ -426,12 +448,33 @@ function ColorConsistencyPanel({ detail, setMessage, refreshProject }: { detail:
     setState({ ...state, segments: { ...state.segments, [segmentId]: { ...current, ...patch } } });
   }
 
+  function segmentState(segmentId: string): ColorSegmentState {
+    return state.segments[segmentId] || { enabled: true, locked: false, excluded: false, suggested: state.suggested, applied: state.applied, confidence: 0, warnings: [] };
+  }
+
+  function applySegmentSuggestion(segmentId: string) {
+    const current = segmentState(segmentId);
+    setState({ ...state, segments: { ...state.segments, [segmentId]: { ...current, applied: { ...(current.suggested || state.suggested) } } } });
+  }
+
+  function resetSegment(segmentId: string) {
+    const current = segmentState(segmentId);
+    setState({ ...state, segments: { ...state.segments, [segmentId]: { ...current, applied: { ...state.applied } } } });
+  }
+
+  function updateSegmentApplied(segmentId: string, field: keyof ColorAdjustment, value: string | number) {
+    const current = segmentState(segmentId);
+    const appliedValues = { ...(current.applied || state.applied), [field]: Number(value) };
+    setState({ ...state, segments: { ...state.segments, [segmentId]: { ...current, applied: appliedValues } } });
+  }
+
   return (
     <Card title="色彩一致性與調色預覽">
       <div className="color-toolbar row">
         <button onClick={() => analyze(false)} disabled={Boolean(busy)}>分析核心畫面</button>
         <button onClick={() => analyze(true)} disabled={Boolean(busy)}>重跑色彩分析</button>
-        <button onClick={preview} disabled={Boolean(busy)}>產生 Before / After 預覽</button>
+        <button onClick={() => void preview(false)} disabled={Boolean(busy)}>產生 Before / After 預覽</button>
+        <button onClick={() => void preview(true)} disabled={Boolean(busy)}>強制重新產生</button>
         <button className="good" onClick={save} disabled={busy !== ""}>儲存實際套用值</button>
         {busy && <span className="muted">{busy === "preview" ? "正在輸出預覽..." : "處理中..."}</span>}
       </div>
@@ -444,7 +487,9 @@ function ColorConsistencyPanel({ detail, setMessage, refreshProject }: { detail:
             {state.references.map((reference) => <option key={reference.id} value={reference.id}>{reference.type === "segment" ? "片段" : "畫格"}｜{reference.label || "未命名"}｜{reference.score.toFixed(2)}</option>)}
           </select>
           <p className="muted">{state.analysis.basis_text || "先執行色彩分析，系統會從內容感知結果挑選核心畫面。"}</p>
+          {typeof state.reference === "object" && "frame_url" in state.reference && state.reference.frame_url ? <img className="reference-thumbnail" src={state.reference.frame_url} alt="色彩基準畫面" /> : null}
           {state.analysis.luma && <p className="muted">平均亮度 {Number(state.analysis.luma.average || 0).toFixed(1)}｜高光比例 {(Number(state.analysis.luma.highlight_ratio || 0) * 100).toFixed(1)}%｜信心 {state.analysis.confidence || "未分析"}</p>}
+          {state.analysis.warnings?.length ? <p className="job-error">{state.analysis.warnings.join("｜")}</p> : null}
         </div>
         <div>
           <label>技術 LUT</label>
@@ -460,7 +505,7 @@ function ColorConsistencyPanel({ detail, setMessage, refreshProject }: { detail:
         </div>
       </div>
       <div className="adjustment-grid">
-        {(["exposure", "temperature", "tint", "contrast", "saturation", "gamma"] as const).map((field) => (
+        {(["exposure", "temperature", "tint", "contrast", "highlights", "shadows", "saturation", "gamma"] as const).map((field) => (
           <label key={field}>{adjustmentLabel(field)}<input type="number" step="0.01" value={applied[field]} onChange={(e) => updateApplied(field, e.target.value)} /></label>
         ))}
       </div>
@@ -468,8 +513,8 @@ function ColorConsistencyPanel({ detail, setMessage, refreshProject }: { detail:
         <b>系統建議值（唯讀）</b>
         <span>曝光 {suggested.exposure}｜色溫 {suggested.temperature}｜色調 {suggested.tint}｜對比 {suggested.contrast}｜飽和 {suggested.saturation}｜Gamma {suggested.gamma}</span>
       </div>
-      {detail.segments.length > 0 && <div className="color-segments"><b>片段覆寫</b>{detail.segments.map((segment) => { const item = state.segments[segment.segment_id] || { enabled: true, locked: false, excluded: false }; return <div className="color-segment-row" key={segment.segment_id}><span>{segment.clip_id}｜{segment.title}</span><label><input type="checkbox" checked={item.enabled} onChange={(e) => updateSegment(segment.segment_id, { enabled: e.target.checked })} /> 啟用</label><label><input type="checkbox" checked={item.locked} onChange={(e) => updateSegment(segment.segment_id, { locked: e.target.checked })} /> Lock</label><label><input type="checkbox" checked={item.excluded} onChange={(e) => updateSegment(segment.segment_id, { excluded: e.target.checked })} /> Exclude</label></div>; })}</div>}
-      {previews.length > 0 && <div className="preview-grid"><b>最近一次預覽</b>{previews.map((previewItem) => <div className="preview-item" key={previewItem.video_id}><span>素材 #{previewItem.video_id} {previewItem.cache_hit ? "（快取）" : "（重新產生）"}</span><a href={previewItem.before} target="_blank" rel="noreferrer">Before</a><a href={previewItem.after} target="_blank" rel="noreferrer">After</a></div>)}</div>}
+      {detail.segments.length > 0 && <div className="color-segments"><b>片段覆寫</b>{detail.segments.map((segment) => { const item = segmentState(segment.segment_id); const inactive = item.excluded || !item.enabled; return <div className="color-segment-row" key={segment.segment_id}><span><b>{segment.clip_id}</b>｜{segment.title}<small>信心 {Number(item.confidence || 0).toFixed(2)}{item.warnings?.length ? `｜${item.warnings.join("、")}` : ""}{inactive ? "｜目前不套用片段色彩" : ""}</small></span><label><input type="checkbox" checked={item.enabled} onChange={(e) => updateSegment(segment.segment_id, { enabled: e.target.checked })} /> 啟用</label><label><input type="checkbox" checked={item.locked} onChange={(e) => updateSegment(segment.segment_id, { locked: e.target.checked })} /> Lock</label><label><input type="checkbox" checked={item.excluded} onChange={(e) => updateSegment(segment.segment_id, { excluded: e.target.checked })} /> Exclude</label><button disabled={inactive} onClick={() => applySegmentSuggestion(segment.segment_id)}>套用建議</button><button disabled={inactive} onClick={() => resetSegment(segment.segment_id)}>重設為專案</button><details><summary>片段色彩值</summary><div className="adjustment-grid">{(["exposure", "temperature", "tint", "contrast", "highlights", "shadows", "saturation", "gamma"] as const).map((field) => <label key={field}>{adjustmentLabel(field)}<input disabled={inactive} type="number" step="0.01" value={item.applied?.[field] ?? state.applied[field]} onChange={(e) => updateSegmentApplied(segment.segment_id, field, e.target.value)} /></label>)}</div></details></div>; })}</div>}
+      {previews.length > 0 && <div className="preview-grid"><b>最近一次預覽</b>{previews.map((previewItem) => <div className="preview-item" key={`${previewItem.video_id}-${previewItem.segment_id}`}><span>素材 #{previewItem.video_id}｜{previewItem.segment_id} {previewItem.cache_hit ? "（快取）" : "（重新產生）"}</span><div className="preview-videos"><div><small>Before</small><video controls preload="metadata" src={previewItem.before_url} /></div><div><small>After</small><video controls preload="metadata" src={previewItem.after_url} /></div></div></div>)}</div>}
     </Card>
   );
 }
@@ -481,14 +526,14 @@ function emptyColorState(): ColorState {
     reference: {},
     references: [],
     analysis: {},
-    suggested: { mode: "none", lut_path: "", lut_kind: "", exposure: 0, temperature: 0, tint: 0, contrast: 1, saturation: 1, gamma: 1 },
-    applied: { mode: "none", lut_path: "", lut_kind: "", exposure: 0, temperature: 0, tint: 0, contrast: 1, saturation: 1, gamma: 1 },
+    suggested: { mode: "none", lut_path: "", lut_kind: "", exposure: 0, temperature: 0, tint: 0, contrast: 1, saturation: 1, gamma: 1, highlights: 0, shadows: 0 },
+    applied: { mode: "none", lut_path: "", lut_kind: "", exposure: 0, temperature: 0, tint: 0, contrast: 1, saturation: 1, gamma: 1, highlights: 0, shadows: 0 },
     segments: {},
   };
 }
 
 function adjustmentLabel(field: keyof ColorAdjustment) {
-  return ({ exposure: "曝光", temperature: "白平衡色溫", tint: "白平衡色調", contrast: "對比", saturation: "飽和度", gamma: "Gamma" } as Record<string, string>)[field] || field;
+  return ({ exposure: "曝光", temperature: "白平衡色溫", tint: "白平衡色調", contrast: "對比", highlights: "高光", shadows: "陰影", saturation: "飽和度", gamma: "Gamma" } as Record<string, string>)[field] || field;
 }
 
 function Workflow({ detail }: { detail: ProjectDetail }) {

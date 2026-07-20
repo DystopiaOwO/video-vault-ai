@@ -25,6 +25,8 @@ def default_render_settings() -> dict[str, Any]:
             "contrast": 1.0,
             "saturation": 1.0,
             "gamma": 1.0,
+            "highlights": 0.0,
+            "shadows": 0.0,
         },
         "audio": {
             "original_gain_db": 0.0,
@@ -71,7 +73,7 @@ def _normalize(settings: dict[str, Any]) -> dict[str, Any]:
     color["mode"] = str(color.get("mode") or "none")
     color["lut_path"] = str(color.get("lut_path") or "")
     color["lut_kind"] = str(color.get("lut_kind") or "")
-    for key in ("exposure", "temperature", "tint", "contrast", "saturation", "gamma"):
+    for key in ("exposure", "temperature", "tint", "contrast", "saturation", "gamma", "highlights", "shadows"):
         color[key] = _finite_float(color.get(key), key)
 
     audio = result["audio"]

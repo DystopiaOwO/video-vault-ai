@@ -44,3 +44,15 @@ def test_lut_is_not_applied_twice(tmp_path: Path):
     lut.write_text("LUT_3D_SIZE 2\n", encoding="utf-8")
     with pytest.raises(ColorPipelineError, match="more than once"):
         build_color_filter({"mode": "dji_lut", "lut_path": str(lut)}, lut_already_applied=True)
+
+
+def test_color_filter_order_is_lut_exposure_white_balance_contrast_saturation(tmp_path: Path):
+    lut = tmp_path / "identity.cube"
+    lut.write_text("LUT_3D_SIZE 2\n", encoding="utf-8")
+    result = build_color_filter({"mode": "dji_dlog_m", "lut_path": str(lut), "exposure": 0.4, "temperature": 10, "contrast": 1.05, "saturation": 1.08})
+    assert result.index("lut3d=") < result.index("eq=brightness=") < result.index("colorbalance=") < result.index("eq=contrast=") < result.index("eq=saturation=")
+
+
+def test_highlights_and_shadows_keep_curve_endpoints_in_range():
+    result = build_color_filter({"mode": "manual", "highlights": 0.4, "shadows": 0.3})
+    assert "curves=all='0/0.0360 0.5/0.4920 1/0.9520'" in result
