@@ -375,17 +375,32 @@ def _suggested_adjustments(cfg: dict, project_id: int, stats: Mapping[str, Any],
 
 def _reference_candidates(db: Path, project_id: int, cfg: dict | None = None) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
-    project_segment_ids: dict[tuple[int, int], str] = {}
+    project_intervals: list[dict[str, Any]] = []
     if cfg is not None:
         try:
             from .project import project_dir, project_segments
             plan_path = project_dir(cfg, project_id) / "project_plan.json"
             plan = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.exists() else {}
+            color_state = load_project_color_state(cfg, project_id)
+            overrides = color_state.get("segments", {})
             for segment in project_segments(cfg, project_id, plan):
-                key = (int(segment.get("video_id") or 0), round(float(segment.get("start_seconds") or 0) * 1000))
-                project_segment_ids[key] = str(segment.get("segment_id") or "")
+                segment_id = str(segment.get("segment_id") or "")
+                if not segment_id:
+                    continue
+                override = overrides.get(segment_id, {})
+                start = float(segment.get("start_seconds") or 0)
+                end = max(start, float(segment.get("end_seconds") or start))
+                project_intervals.append({
+                    "video_id": int(segment.get("video_id") or 0),
+                    "segment_id": segment_id,
+                    "start_seconds": start,
+                    "end_seconds": end,
+                    "enabled": _as_bool(segment.get("include", True)) and _as_bool(override.get("enabled", True)),
+                    "excluded": _as_bool(override.get("excluded", False)),
+                    "manual_order": int(segment.get("manual_order") or 999999),
+                })
         except (OSError, ValueError, TypeError):
-            project_segment_ids = {}
+            project_intervals = []
     try:
         with sqlite3.connect(db) as con:
             con.row_factory = sqlite3.Row
@@ -395,15 +410,40 @@ def _reference_candidates(db: Path, project_id: int, cfg: dict | None = None) ->
                 video = video_map.get(int(row["video_id"]), {})
                 start = float(row["start_seconds"] or 0)
                 end = float(row["end_seconds"] or start)
-                reference_id = project_segment_ids.get((int(row["video_id"]), round(start * 1000))) or f"segment:{row['video_id']}:{round(start * 1000)}"
+                mapped = _map_project_interval(project_intervals, int(row["video_id"]), start)
+                if mapped and (not mapped["enabled"] or mapped["excluded"]):
+                    continue
+                reference_id = str(mapped["segment_id"]) if mapped else f"segment:{row['video_id']}:{round(start * 1000)}"
                 result.append({"id": f"segment:{row['video_id']}:{round(start * 1000)}", "segment_id": reference_id, "type": "segment", "video_id": int(row["video_id"]), "source_file": str(video.get("current_path") or ""), "timestamp_seconds": round((start + end) / 2, 3), "start_seconds": start, "end_seconds": end, "label": str(row["title"] or row["reason"] or ""), "score": float(row["score"] or 0)})
             for row in con.execute("select video_id, timestamp_seconds, vision_summary, score_usefulness from frames where video_id in (select video_id from project_videos where project_id=?)", (project_id,)):
                 video = video_map.get(int(row["video_id"]), {})
                 timestamp = float(row["timestamp_seconds"] or 0)
-                result.append({"id": f"frame:{row['video_id']}:{round(timestamp * 1000)}", "type": "frame", "video_id": int(row["video_id"]), "source_file": str(video.get("current_path") or ""), "timestamp_seconds": timestamp, "label": str(row["vision_summary"] or ""), "score": float(row["score_usefulness"] or 0)})
+                mapped = _map_project_interval(project_intervals, int(row["video_id"]), timestamp)
+                if mapped and (not mapped["enabled"] or mapped["excluded"]):
+                    continue
+                candidate = {"id": f"frame:{row['video_id']}:{round(timestamp * 1000)}", "type": "frame", "video_id": int(row["video_id"]), "source_file": str(video.get("current_path") or ""), "timestamp_seconds": timestamp, "label": str(row["vision_summary"] or ""), "score": float(row["score_usefulness"] or 0)}
+                if mapped:
+                    candidate["segment_id"] = str(mapped["segment_id"])
+                result.append(candidate)
     except sqlite3.Error:
         return []
-    return sorted(result, key=lambda item: (-float(item.get("score") or 0), int(item.get("video_id") or 0), float(item.get("timestamp_seconds") or 0)))
+    return sorted(result, key=lambda item: (-float(item.get("score") or 0), int(item.get("video_id") or 0), float(item.get("timestamp_seconds") or 0), str(item.get("id") or "")))
+
+
+def _map_project_interval(intervals: list[Mapping[str, Any]], video_id: int, timestamp: float) -> Mapping[str, Any] | None:
+    matches = [
+        interval for interval in intervals
+        if int(interval.get("video_id") or 0) == video_id
+        and float(interval.get("start_seconds") or 0) <= timestamp <= float(interval.get("end_seconds") or 0)
+    ]
+    return min(
+        matches,
+        key=lambda interval: (
+            float(interval.get("end_seconds") or 0) - float(interval.get("start_seconds") or 0),
+            int(interval.get("manual_order") or 999999),
+            str(interval.get("segment_id") or ""),
+        ),
+    ) if matches else None
 
 
 def _keep_or_select_reference(state: Mapping[str, Any], references: list[dict[str, Any]]) -> dict[str, Any]:

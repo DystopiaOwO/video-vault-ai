@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from video_vault.color_consistency import (
+    _reference_candidates,
     analyze_project_color,
     ColorReferenceError,
     color_state_for_api,
@@ -33,6 +34,29 @@ def _project(tmp_path: Path):
     video_id = upsert_video(db, {"original_path": str(source), "current_path": str(source), "filename": source.name, "category": "travel"})
     project_id = create_project(db, "travel", [video_id], category="travel", content_type="travel_diary")
     return cfg, db, project_id, source, video_id
+
+
+def _write_project_plan(cfg, project_id, segments):
+    plan = {"groups": [{"label": "test", "activity": "test", "segments": segments}]}
+    (project_dir(cfg, project_id) / "project_plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+
+def _insert_reference_rows(db, video_id, segments, frames):
+    with connect(db) as con:
+        for start, end, title, score in segments:
+            con.execute(
+                "insert into segments(video_id, start_seconds, end_seconds, title, score) values(?, ?, ?, ?, ?)",
+                (video_id, start, end, title, score),
+            )
+        for index, (timestamp, score) in enumerate(frames):
+            con.execute(
+                "insert into frames(video_id, timestamp_seconds, frame_path, score_usefulness) values(?, ?, ?, ?)",
+                (video_id, timestamp, f"frame-{index}.jpg", score),
+            )
+
+
+def _frame_candidates(cfg, db, project_id):
+    return [item for item in _reference_candidates(db, project_id, cfg) if item["type"] == "frame"]
 
 
 def test_color_state_keeps_suggested_and_applied_separate_and_clamps():
@@ -118,6 +142,83 @@ def test_excluded_segment_is_not_selected_as_reference(tmp_path, monkeypatch):
     result = analyze_project_color(cfg, db, project_id, force=True)
     assert result["reference"] == {}
     assert result["segments"]["clip_001_00000000"]["excluded"] is True
+
+
+def test_frame_in_excluded_project_segment_is_not_a_reference_candidate(tmp_path, monkeypatch):
+    cfg, db, project_id, _, video_id = _project(tmp_path)
+    segments = [
+        {"clip_id": "excluded", "video_id": video_id, "start_seconds": 0, "end_seconds": 10, "title": "excluded"},
+        {"clip_id": "normal", "video_id": video_id, "start_seconds": 20, "end_seconds": 30, "title": "normal"},
+    ]
+    _write_project_plan(cfg, project_id, segments)
+    _insert_reference_rows(db, video_id, [(0, 10, "excluded", 0.2), (20, 30, "normal", 0.1)], [(5, 1.0), (25, 0.4)])
+    state = default_color_state()
+    state["segments"]["excluded_00000000"] = {"enabled": True, "excluded": True}
+    save_project_color_state(cfg, db, project_id, state, mark_review=False)
+    monkeypatch.setattr("video_vault.color_consistency._reference_luma", lambda cfg, reference: {"average": 128, "highlight_ratio": 0, "sampled_frames": 1})
+    monkeypatch.setattr("video_vault.color_consistency.ensure_reference_frame", lambda cfg, db, project_id, reference: dict(reference))
+
+    candidates = _frame_candidates(cfg, db, project_id)
+    assert [item["id"] for item in candidates] == [f"frame:{video_id}:25000"]
+    assert analyze_project_color(cfg, db, project_id, force=True)["reference"]["timestamp_seconds"] == 25
+
+
+def test_frame_in_disabled_project_segment_is_not_a_reference_candidate(tmp_path):
+    cfg, db, project_id, _, video_id = _project(tmp_path)
+    segment = {"clip_id": "disabled", "video_id": video_id, "start_seconds": 0, "end_seconds": 10, "title": "disabled"}
+    _write_project_plan(cfg, project_id, [segment])
+    _insert_reference_rows(db, video_id, [(0, 10, "disabled", 0.2)], [(5, 1.0)])
+    state = default_color_state()
+    state["segments"]["disabled_00000000"] = {"enabled": False, "excluded": False}
+    save_project_color_state(cfg, db, project_id, state, mark_review=False)
+
+    assert _frame_candidates(cfg, db, project_id) == []
+    assert analyze_project_color(cfg, db, project_id, force=True)["reference"] == {}
+
+
+def test_frame_outside_excluded_project_segment_remains_a_reference_candidate(tmp_path, monkeypatch):
+    cfg, db, project_id, _, video_id = _project(tmp_path)
+    segments = [
+        {"clip_id": "excluded", "video_id": video_id, "start_seconds": 0, "end_seconds": 1, "title": "excluded"},
+        {"clip_id": "included", "video_id": video_id, "start_seconds": 2, "end_seconds": 3, "title": "included"},
+    ]
+    _write_project_plan(cfg, project_id, segments)
+    _insert_reference_rows(db, video_id, [(0, 1, "excluded", 0.2), (2, 3, "included", 0.1)], [(2.5, 1.0)])
+    state = default_color_state()
+    state["segments"]["excluded_00000000"] = {"enabled": True, "excluded": True}
+    save_project_color_state(cfg, db, project_id, state, mark_review=False)
+    monkeypatch.setattr("video_vault.color_consistency._reference_luma", lambda cfg, reference: {"average": 128, "highlight_ratio": 0, "sampled_frames": 1})
+    monkeypatch.setattr("video_vault.color_consistency.ensure_reference_frame", lambda cfg, db, project_id, reference: dict(reference))
+
+    candidates = _frame_candidates(cfg, db, project_id)
+    assert [item["id"] for item in candidates] == [f"frame:{video_id}:2500"]
+    assert candidates[0]["segment_id"] == "included_00002000"
+    result = analyze_project_color(cfg, db, project_id, force=True)
+    assert result["reference"]["id"] == f"frame:{video_id}:2500"
+
+
+def test_overlapping_project_segments_map_frames_by_shortest_interval_and_stable_tiebreak(tmp_path):
+    cfg, db, project_id, _, video_id = _project(tmp_path)
+    segments = [
+        {"clip_id": "wide", "video_id": video_id, "start_seconds": 0, "end_seconds": 10, "title": "wide"},
+        {"clip_id": "narrow", "video_id": video_id, "start_seconds": 4, "end_seconds": 6, "title": "narrow"},
+        {"clip_id": "tie_first", "video_id": video_id, "start_seconds": 12, "end_seconds": 14, "title": "tie first"},
+        {"clip_id": "tie_second", "video_id": video_id, "start_seconds": 12, "end_seconds": 14, "title": "tie second"},
+    ]
+    _write_project_plan(cfg, project_id, segments)
+    rows = [(0, 10, "wide", 0.1), (4, 6, "narrow", 0.1), (12, 14, "tie first", 0.1), (12, 14, "tie second", 0.1)]
+    _insert_reference_rows(db, video_id, list(reversed(rows)), [(5, 1.0), (13, 0.9)])
+
+    first_mapping = {item["id"]: item.get("segment_id") for item in _frame_candidates(cfg, db, project_id)}
+    with connect(db) as con:
+        con.execute("delete from segments where video_id=?", (video_id,))
+    _insert_reference_rows(db, video_id, rows, [])
+    second_mapping = {item["id"]: item.get("segment_id") for item in _frame_candidates(cfg, db, project_id)}
+
+    assert first_mapping == second_mapping == {
+        f"frame:{video_id}:5000": "narrow_00004000",
+        f"frame:{video_id}:13000": "tie_first_00012000",
+    }
 
 
 def test_force_analysis_preserves_locked_segment(tmp_path, monkeypatch):
