@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import subprocess
+from unittest.mock import Mock
 
 import pytest
 
@@ -16,6 +17,8 @@ from video_vault.color_consistency import (
     preview_cache_key,
     render_project_color_previews,
     save_project_color_state,
+    set_color_reference,
+    update_color_state,
 )
 from video_vault.database import connect, init_db, upsert_video
 from video_vault.project import create_project, project_dir
@@ -142,6 +145,177 @@ def test_reference_frame_is_extracted_and_api_has_thumbnail_url(tmp_path):
     assert state["reference"]["source_name"] == source.name
 
 
+def test_sanitized_api_state_round_trip_keeps_internal_reference_paths(tmp_path):
+    cfg, db, project_id, source, _ = _project(tmp_path)
+    frame_path = tmp_path / "reference.jpg"
+    frame_path.write_bytes(b"frame")
+    reference = {
+        "id": "frame:internal",
+        "source_file": str(source),
+        "frame_path": str(frame_path),
+        "frame_name": frame_path.name,
+        "timestamp_seconds": 0.2,
+        "type": "frame",
+    }
+    save_project_color_state(
+        cfg,
+        db,
+        project_id,
+        {
+            **default_color_state(),
+            "reference": reference,
+            "references": [reference],
+            "analysis": {"reference": reference},
+        },
+        mark_review=False,
+    )
+
+    api_state = color_state_for_api(cfg, project_id)
+    for item in [api_state["reference"], api_state["references"][0], api_state["analysis"]["reference"]]:
+        assert "source_file" not in item
+        assert "frame_path" not in item
+    assert api_state["reference"]["source_name"] == source.name
+    assert api_state["reference"]["frame_url"].startswith("/api/project/color-reference-file?")
+
+    round_tripped = update_color_state(cfg, db, project_id, api_state)
+    assert round_tripped["reference"]["source_file"] == str(source)
+    assert round_tripped["reference"]["frame_path"] == str(frame_path)
+    assert round_tripped["references"][0]["source_file"] == str(source)
+    assert round_tripped["references"][0]["frame_path"] == str(frame_path)
+    assert round_tripped["analysis"]["reference"]["source_file"] == str(source)
+    assert round_tripped["analysis"]["reference"]["frame_path"] == str(frame_path)
+
+
+def test_locked_segment_can_be_unlocked_and_edit_applied_settings(tmp_path):
+    cfg, db, project_id, _, _ = _project(tmp_path)
+    locked = {
+        "enabled": True,
+        "locked": True,
+        "excluded": False,
+        "suggested": {"mode": "manual", "exposure": 0.2},
+        "applied": {"mode": "manual", "exposure": -0.4},
+    }
+    save_project_color_state(cfg, db, project_id, {**default_color_state(), "segments": {"seg-1": locked}}, mark_review=False)
+
+    updated = update_color_state(
+        cfg,
+        db,
+        project_id,
+        {"segments": {"seg-1": {"locked": False, "applied": {"mode": "manual", "exposure": 0.7}}}},
+    )
+    assert updated["segments"]["seg-1"]["locked"] is False
+    assert updated["segments"]["seg-1"]["applied"]["exposure"] == 0.7
+
+
+def test_force_analysis_preserves_locked_and_updates_unlocked_after_unlock(tmp_path, monkeypatch):
+    cfg, db, project_id, _, video_id = _project(tmp_path)
+    folder = project_dir(cfg, project_id)
+    plan = {
+        "groups": [
+            {
+                "label": "旅程",
+                "activity": "風景",
+                "segments": [
+                    {"clip_id": "clip_locked", "video_id": video_id, "start_seconds": 0, "end_seconds": 1, "title": "鎖定", "score": 0.9},
+                    {"clip_id": "clip_editable", "video_id": video_id, "start_seconds": 1, "end_seconds": 2, "title": "可編輯", "score": 0.8},
+                ],
+            }
+        ]
+    }
+    (folder / "project_plan.json").write_text(json.dumps(plan), encoding="utf-8")
+    locked_id = "clip_locked_00000000"
+    editable_id = "clip_editable_00001000"
+    locked = {"enabled": True, "locked": True, "excluded": False, "suggested": {"exposure": 0.2}, "applied": {"mode": "manual", "exposure": -0.45}}
+    editable = {"enabled": True, "locked": False, "excluded": False, "suggested": {"exposure": 0.2}, "applied": {"mode": "manual", "exposure": 0.2}}
+    save_project_color_state(cfg, db, project_id, {**default_color_state(), "analysis": {"old": True}, "segments": {locked_id: locked, editable_id: editable}}, mark_review=False)
+    monkeypatch.setattr("video_vault.color_consistency._reference_luma", lambda cfg, reference: {"average": 190, "highlight_ratio": 0.2, "sampled_frames": 1})
+    monkeypatch.setattr("video_vault.color_consistency.ensure_reference_frame", lambda cfg, db, project_id, reference: dict(reference, frame_name="reference.jpg"))
+
+    after_force = analyze_project_color(cfg, db, project_id, force=True)
+    assert after_force["segments"][locked_id]["applied"]["exposure"] == -0.45
+    assert after_force["segments"][locked_id]["suggested"]["exposure"] == 0.2
+    assert after_force["segments"][editable_id]["suggested"]["exposure"] == -0.5
+
+    unlocked = update_color_state(cfg, db, project_id, {"segments": {locked_id: {"locked": False}}})
+    assert unlocked["segments"][locked_id]["locked"] is False
+    after_unlock = analyze_project_color(cfg, db, project_id, force=True)
+    assert after_unlock["segments"][locked_id]["locked"] is False
+    assert after_unlock["segments"][locked_id]["suggested"]["exposure"] == -0.5
+
+
+def test_excluded_segment_analysis_does_not_call_reference_luma(tmp_path, monkeypatch):
+    cfg, db, project_id, _, video_id = _project(tmp_path)
+    folder = project_dir(cfg, project_id)
+    plan = {"groups": [{"label": "旅程", "activity": "風景", "segments": [{"clip_id": "clip_001", "video_id": video_id, "start_seconds": 0, "end_seconds": 1, "title": "排除", "score": 0.99}]}]}
+    (folder / "project_plan.json").write_text(json.dumps(plan), encoding="utf-8")
+    segment_id = "clip_001_00000000"
+    state = default_color_state()
+    state["segments"][segment_id] = {"enabled": True, "locked": False, "excluded": True}
+    save_project_color_state(cfg, db, project_id, {**state, "analysis": {"old": True}}, mark_review=False)
+    reference_luma = Mock(side_effect=AssertionError("excluded segment must not be analyzed"))
+    monkeypatch.setattr("video_vault.color_consistency._reference_luma", reference_luma)
+
+    result = analyze_project_color(cfg, db, project_id, force=True)
+    assert result["reference"] == {}
+    assert result["segments"][segment_id]["excluded"] is True
+    reference_luma.assert_not_called()
+
+
+def test_switching_reference_recalculates_unlocked_and_preserves_locked_excluded(tmp_path, monkeypatch):
+    cfg, db, project_id, source, _ = _project(tmp_path)
+    folder = project_dir(cfg, project_id)
+    frame_a = tmp_path / "reference-a.jpg"
+    frame_b = tmp_path / "reference-b.jpg"
+    frame_a.write_bytes(b"a")
+    frame_b.write_bytes(b"b")
+    reference_a = {"id": "frame:a", "source_file": str(source), "frame_path": str(frame_a), "frame_name": frame_a.name, "timestamp_seconds": 0.1, "type": "frame", "label": "A"}
+    reference_b = {"id": "frame:b", "source_file": str(source), "frame_path": str(frame_b), "frame_name": frame_b.name, "timestamp_seconds": 0.2, "type": "frame", "label": "B"}
+    (folder / "project_plan.json").write_text(
+        json.dumps(
+            {
+                "groups": [
+                    {
+                        "label": "旅程",
+                        "activity": "風景",
+                        "segments": [
+                            {"clip_id": "locked", "video_id": 1, "start_seconds": 0, "end_seconds": 1, "title": "鎖定"},
+                            {"clip_id": "excluded", "video_id": 1, "start_seconds": 1, "end_seconds": 2, "title": "排除"},
+                            {"clip_id": "unlocked", "video_id": 1, "start_seconds": 2, "end_seconds": 3, "title": "未鎖定"},
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    locked = {"enabled": True, "locked": True, "excluded": False, "suggested": {"exposure": 0.2}, "applied": {"mode": "manual", "exposure": -0.4}}
+    excluded = {"enabled": True, "locked": False, "excluded": True, "suggested": {"exposure": 0.3}, "applied": {"mode": "manual", "exposure": -0.2}}
+    unlocked = {"enabled": True, "locked": False, "excluded": False, "suggested": {"exposure": 0.2}, "applied": {"mode": "manual", "exposure": 0.2}}
+    segment_states = {"locked_00000000": locked, "excluded_00001000": excluded, "unlocked_00002000": unlocked}
+    save_project_color_state(
+        cfg,
+        db,
+        project_id,
+        {**default_color_state(), "reference": reference_a, "references": [reference_a, reference_b], "suggested": {"exposure": 0.2}, "segments": segment_states},
+        mark_review=False,
+    )
+    monkeypatch.setattr("video_vault.color_consistency.ensure_reference_frame", lambda cfg, db, project_id, reference: dict(reference))
+    monkeypatch.setattr(
+        "video_vault.color_consistency._reference_luma",
+        lambda cfg, reference: {"average": 190, "highlight_ratio": 0.2, "sampled_frames": 1},
+    )
+
+    result = set_color_reference(cfg, db, project_id, "frame:b")
+    assert result["reference"]["id"] == "frame:b"
+    assert result["segments"]["unlocked_00002000"]["suggested"]["exposure"] == -0.5
+    assert result["segments"]["locked_00000000"]["locked"] is True
+    assert result["segments"]["locked_00000000"]["suggested"]["exposure"] == 0.2
+    assert result["segments"]["locked_00000000"]["applied"]["exposure"] == -0.4
+    assert result["segments"]["excluded_00001000"]["excluded"] is True
+    assert result["segments"]["excluded_00001000"]["suggested"]["exposure"] == 0.3
+    assert result["segments"]["excluded_00001000"]["applied"]["exposure"] == -0.2
+
+
 def test_reference_frame_rejects_missing_source(tmp_path):
     cfg, db, project_id, _, _ = _project(tmp_path)
     with pytest.raises(ColorReferenceError, match="原始素材不存在"):
@@ -204,6 +378,35 @@ def test_preview_cache_key_changes_when_lut_contents_change(tmp_path):
     lut.write_bytes(b"lut-a")
     state = default_color_state()
     settings = {"mode": "dji_lut", "lut_path": str(lut), "exposure": 0}
-    first = preview_cache_key(source, state, settings)
+    first = preview_cache_key(source, state, {"effective_settings": settings})
     lut.write_bytes(b"lut-b")
-    assert preview_cache_key(source, state, settings) != first
+    assert preview_cache_key(source, state, {"effective_settings": settings}) != first
+
+
+def test_project_preview_cache_misses_after_same_path_lut_replacement(tmp_path, monkeypatch):
+    cfg, db, project_id, source, _ = _project(tmp_path)
+    lut = tmp_path / "look.cube"
+    lut.write_bytes(b"lut-a")
+    state = default_color_state()
+    state["applied"].update({"mode": "dji_lut", "lut_path": str(lut), "lut_kind": "cube"})
+    save_project_color_state(cfg, db, project_id, {**state, "analysis": {"basis_text": "test"}}, mark_review=False)
+    calls = []
+
+    def fake_preview(source_path, output, cfg, *args, **kwargs):
+        calls.append((str(output), kwargs.get("color_settings")))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"preview")
+        return output
+
+    monkeypatch.setattr("video_vault.color.render_color_preview", fake_preview)
+    first = render_project_color_previews(cfg, db, project_id)
+    second = render_project_color_previews(cfg, db, project_id)
+    assert len(calls) == 2
+    assert first["previews"][0]["cache_hit"] is False
+    assert second["previews"][0]["cache_hit"] is True
+
+    lut.write_bytes(b"lut-b")
+    third = render_project_color_previews(cfg, db, project_id)
+    assert len(calls) == 4
+    assert third["previews"][0]["cache_hit"] is False
+    assert third["previews"][0]["cache_key"] != second["previews"][0]["cache_key"]

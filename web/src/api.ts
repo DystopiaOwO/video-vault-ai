@@ -120,6 +120,8 @@ export type ColorSegmentState = {
   warnings?: string[];
 };
 
+export type ColorSegmentPatch = Pick<ColorSegmentState, "enabled" | "locked" | "excluded" | "applied">;
+
 export type ColorState = {
   schema_version: number;
   enabled: boolean;
@@ -129,6 +131,13 @@ export type ColorState = {
   suggested: ColorAdjustment;
   applied: ColorAdjustment;
   segments: Record<string, ColorSegmentState>;
+};
+
+export type ColorStatePatch = {
+  schema_version: number;
+  enabled: boolean;
+  applied: ColorAdjustment;
+  segments: Record<string, ColorSegmentPatch>;
 };
 
 export type BgmRecommendation = {
@@ -172,7 +181,7 @@ export const api = {
     json<{ ok: boolean }>("/api/project/clip-summary", post({ project_id: projectId, video_id: videoId, summary })),
   colorAnalyze: (projectId: number, force = false) =>
     json<{ ok: boolean; state?: ColorState; error?: string }>("/api/project/color-analyze", post({ project_id: projectId, force })),
-  colorSettings: (projectId: number, state: ColorState) =>
+  colorSettings: (projectId: number, state: ColorStatePatch) =>
     json<{ ok: boolean; state?: ColorState; error?: string }>("/api/project/color-settings", post({ project_id: projectId, state })),
   colorReference: (projectId: number, referenceId: string) =>
     json<{ ok: boolean; state?: ColorState; error?: string }>("/api/project/color-reference", post({ project_id: projectId, reference_id: referenceId })),

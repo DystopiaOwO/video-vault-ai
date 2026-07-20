@@ -39,6 +39,9 @@ ADJUSTMENT_LIMITS: dict[str, tuple[float, float]] = {
 }
 COLOR_MODES = frozenset({"none", "safe_restore", "warm_food", "manual", "dji_lut", "dji_dlog", "dji_dlog_m"})
 LUT_MODES = frozenset({"dji_lut", "dji_dlog", "dji_dlog_m"})
+_USER_EDITABLE_COLOR_FIELDS = frozenset({"enabled", "applied", "segments"})
+_USER_EDITABLE_SEGMENT_FIELDS = frozenset({"enabled", "locked", "excluded", "applied"})
+_EXCLUDED_SEGMENT_WARNING = "此段已排除色彩分析"
 
 
 class ColorReferenceError(ValueError):
@@ -198,21 +201,31 @@ def set_color_reference(cfg: dict, db: Path, project_id: int, reference_id: str)
     suggested = _suggested_adjustments(cfg, project_id, stats, state)
     suggested.update({"mode": state["suggested"].get("mode", "none"), "lut_path": state["suggested"].get("lut_path", ""), "lut_kind": state["suggested"].get("lut_kind", "")})
     references = [selected if str(item.get("id")) == str(selected.get("id")) else item for item in state.get("references", [])]
-    state = normalize_color_state({**state, "reference": selected, "references": references, "analysis": {**state.get("analysis", {}), "reference": selected, "luma": stats, "basis_text": _basis_text(selected, stats)}, "suggested": suggested})
+    segment_states = _analyze_segments(cfg, db, project_id, state, selected, stats, state["applied"], preserve_manual_segments=True)
+    state = normalize_color_state({
+        **state,
+        "reference": selected,
+        "references": references,
+        "analysis": {
+            **state.get("analysis", {}),
+            "reference": selected,
+            "luma": stats,
+            "confidence": _confidence(stats, True),
+            "basis_text": _basis_text(selected, stats),
+            "warnings": _lut_warnings(suggested),
+            "statistics": stats,
+            "analyzed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        },
+        "suggested": suggested,
+        "segments": segment_states,
+    })
     save_project_color_state(cfg, db, project_id, state)
     return state
 
 
 def update_color_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str, Any]) -> dict[str, Any]:
     current = load_project_color_state(cfg, project_id)
-    updated = _merge(current, dict(patch))
-    for segment_id, value in (dict(patch.get("segments") or {}) if isinstance(patch, Mapping) else {}).items():
-        old = current.get("segments", {}).get(str(segment_id), {})
-        if old.get("locked"):
-            preserved = dict(value) if isinstance(value, Mapping) else {}
-            preserved["suggested"] = old.get("suggested", {})
-            preserved["applied"] = old.get("applied", {})
-            updated.setdefault("segments", {})[str(segment_id)] = {**old, **preserved, "locked": True}
+    updated = _merge(current, _user_editable_color_patch(patch))
     state = normalize_color_state(updated)
     save_project_color_state(cfg, db, project_id, state)
     return state
@@ -220,14 +233,23 @@ def update_color_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str,
 
 def preview_cache_key(source: Path, state: Mapping[str, Any], settings: Mapping[str, Any] | None = None, kind: str = "after") -> str:
     path = source.expanduser().resolve()
-    stat = path.stat() if path.exists() else None
+    normalized = normalize_color_state(state)
+    requested = dict(settings or {})
+    segment_id = requested.get("segment_id")
+    start = requested.get("start", requested.get("start_seconds"))
+    duration = requested.get("duration", requested.get("duration_seconds"))
+    effective = requested.get("effective_settings", requested.get("effective"))
+    if not isinstance(effective, Mapping):
+        metadata_fields = {"segment_id", "start", "start_seconds", "duration", "duration_seconds", "effective", "effective_settings"}
+        effective = requested if requested and not (set(requested) & metadata_fields) else effective_color_settings(normalized, str(segment_id) if segment_id is not None else None)
     payload = {
-        "source": str(path),
-        "size": stat.st_size if stat else None,
-        "mtime_ns": stat.st_mtime_ns if stat else None,
+        "segment_id": str(segment_id) if segment_id is not None else None,
+        "start_seconds": _cache_number(start),
+        "duration_seconds": _cache_number(duration),
+        "effective_settings": dict(effective),
+        "effective_lut_fingerprint": _lut_cache_fingerprint(effective),
+        "source_fingerprint": _source_cache_fingerprint(path),
         "pipeline_version": COLOR_STATE_VERSION,
-        "settings": dict(settings or normalize_color_state(state).get("applied", {})),
-        "lut": _lut_cache_fingerprint(settings or normalize_color_state(state).get("applied", {})),
         "kind": kind,
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -261,7 +283,7 @@ def render_project_color_previews(cfg: dict, db: Path, project_id: int, *, force
             start = max(0.0, float(segment.get("start_seconds") or 0))
             end = max(start + 0.1, float(segment.get("end_seconds") or start + seconds))
             duration = min(float(seconds), max(0.1, end - start))
-            key = preview_cache_key(source, state, {"segment_id": segment_id, "start": start, "end": end, "effective": effective}, kind="before-after")
+            key = preview_cache_key(source, state, {"segment_id": segment_id, "start": start, "duration": duration, "effective_settings": effective}, kind="before-after")
             stem = _safe_token(segment_id)
             before = out_dir / f"{stem}_before_{key[:12]}.mp4"
             after = out_dir / f"{stem}_after_{key[:12]}.mp4"
@@ -269,7 +291,7 @@ def render_project_color_previews(cfg: dict, db: Path, project_id: int, *, force
             cached = before.is_file() and after.is_file() and metadata_path.is_file()
             if force or not cached:
                 _render_preview_pair(render_color_preview, source, before, after, cfg, effective, start, duration)
-                metadata_path.write_text(json.dumps({"cache_key": key, "segment_id": segment_id, "source": str(source), "start_seconds": start, "duration_seconds": duration, "reference": state.get("reference", {}), "effective": effective, "before": before.name, "after": after.name}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                metadata_path.write_text(json.dumps({"cache_key": key, "segment_id": segment_id, "source": str(source), "source_fingerprint": _source_cache_fingerprint(source), "start_seconds": start, "duration_seconds": duration, "pipeline_version": COLOR_STATE_VERSION, "reference": state.get("reference", {}), "effective": effective, "effective_lut_fingerprint": _lut_cache_fingerprint(effective), "before": before.name, "after": after.name}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 cached = False
             previews.append({"video_id": int(video["id"]), "segment_id": segment_id, "before": before.name, "after": after.name, "cache_key": key, "cache_hit": cached, "start_seconds": start, "duration_seconds": duration})
     return {"ok": True, "state": state, "previews": [_preview_urls(cfg, project_id, item) for item in previews], "files": [_preview_url(project_id, item["after"]) for item in previews]}
@@ -526,7 +548,24 @@ def _lut_cache_fingerprint(settings: Mapping[str, Any]) -> dict[str, Any] | None
     return {"path": str(lut), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "sha256": digest.hexdigest()}
 
 
-def _analyze_segments(cfg: dict, db: Path, project_id: int, existing: Mapping[str, Any], reference: Mapping[str, Any], reference_stats: Mapping[str, Any], project_applied: Mapping[str, Any]) -> dict[str, Any]:
+def _source_cache_fingerprint(source: Path) -> dict[str, Any]:
+    try:
+        stat = source.stat()
+    except OSError:
+        return {"path": str(source), "size": None, "mtime_ns": None}
+    return {"path": str(source), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def _cache_number(value: Any) -> float | int | None:
+    if value is None:
+        return None
+    number = _finite_number(value, math.nan)
+    if not math.isfinite(number):
+        return None
+    return int(number) if number.is_integer() else number
+
+
+def _analyze_segments(cfg: dict, db: Path, project_id: int, existing: Mapping[str, Any], reference: Mapping[str, Any], reference_stats: Mapping[str, Any], project_applied: Mapping[str, Any], *, preserve_manual_segments: bool = False) -> dict[str, Any]:
     from .project import project_dir, project_segments
 
     plan_path = project_dir(cfg, project_id) / "project_plan.json"
@@ -534,15 +573,29 @@ def _analyze_segments(cfg: dict, db: Path, project_id: int, existing: Mapping[st
     old_segments = dict(existing.get("segments") or {})
     result: dict[str, Any] = {}
     ref_luma = float(reference_stats.get("average") or 128)
-    for segment in project_segments(cfg, project_id, plan):
+    segments = project_segments(cfg, project_id, plan)
+    planned_ids = {str(segment.get("segment_id") or "") for segment in segments}
+    if preserve_manual_segments:
+        segments.extend({**dict(reference), "segment_id": segment_id, "_fallback_reference": True} for segment_id in old_segments if segment_id not in planned_ids)
+    for segment in segments:
         segment_id = str(segment.get("segment_id") or "")
         if not segment_id:
             continue
         old = dict(old_segments.get(segment_id) or {})
-        if old.get("locked"):
-            result[segment_id] = {**old, "locked": True}
+        if preserve_manual_segments and _as_bool(old.get("locked", False)):
+            result[segment_id] = deepcopy(old)
             continue
-        candidate = {"source_file": segment.get("source_file", ""), "timestamp_seconds": (float(segment.get("start_seconds") or 0) + float(segment.get("end_seconds") or 0)) / 2}
+        excluded = _as_bool(old.get("excluded", False))
+        if excluded:
+            result[segment_id] = _excluded_segment_state(old, project_applied)
+            continue
+        if segment.get("_fallback_reference"):
+            candidate = dict(reference)
+        else:
+            candidate = {
+                "source_file": str(segment.get("source_file") or _project_video_source(db, segment.get("video_id")) or reference.get("source_file") or ""),
+                "timestamp_seconds": (float(segment.get("start_seconds") or 0) + float(segment.get("end_seconds") or 0)) / 2,
+            }
         try:
             stats = _reference_luma(cfg, candidate)
             confidence = _numeric_confidence(stats, reference_stats, bool(reference))
@@ -555,18 +608,48 @@ def _analyze_segments(cfg: dict, db: Path, project_id: int, existing: Mapping[st
             confidence = 0.0
             suggested = deepcopy(project_applied)
             warnings = [str(exc)]
-        applied = old.get("applied") if old else (suggested if confidence >= 0.55 else deepcopy(project_applied))
+        locked = _as_bool(old.get("locked", False))
+        if locked:
+            suggested = deepcopy(old.get("suggested") if isinstance(old.get("suggested"), Mapping) else suggested)
+            applied = deepcopy(old.get("applied") if isinstance(old.get("applied"), Mapping) else project_applied)
+        else:
+            applied = deepcopy(old.get("applied") if isinstance(old.get("applied"), Mapping) else (suggested if confidence >= 0.55 else project_applied))
         result[segment_id] = {
             "enabled": _as_bool(old.get("enabled", True)),
-            "locked": False,
-            "excluded": _as_bool(old.get("excluded", False)),
-            "reference_candidate": not _as_bool(old.get("excluded", False)),
+            "locked": locked,
+            "excluded": False,
+            "reference_candidate": True,
             "suggested": suggested,
             "applied": applied,
             "confidence": confidence,
             "warnings": warnings,
         }
     return result
+
+
+def _excluded_segment_state(old: Mapping[str, Any], project_applied: Mapping[str, Any]) -> dict[str, Any]:
+    result = deepcopy(dict(old))
+    result["enabled"] = _as_bool(old.get("enabled", True))
+    result["locked"] = _as_bool(old.get("locked", False))
+    result["excluded"] = True
+    result["reference_candidate"] = False
+    result["suggested"] = deepcopy(old.get("suggested") if isinstance(old.get("suggested"), Mapping) else project_applied)
+    result["applied"] = deepcopy(old.get("applied") if isinstance(old.get("applied"), Mapping) else project_applied)
+    warnings = [str(warning) for warning in old.get("warnings", []) or []]
+    if _EXCLUDED_SEGMENT_WARNING not in warnings:
+        warnings.append(_EXCLUDED_SEGMENT_WARNING)
+    result["warnings"] = warnings
+    result["confidence"] = 0.0
+    return result
+
+
+def _project_video_source(db: Path, video_id: Any) -> str:
+    try:
+        with sqlite3.connect(db) as con:
+            row = con.execute("select current_path from videos where id=?", (int(video_id),)).fetchone()
+        return str(row[0]) if row and row[0] else ""
+    except (sqlite3.Error, TypeError, ValueError):
+        return ""
 
 
 def _numeric_confidence(stats: Mapping[str, Any], reference: Mapping[str, Any], has_reference: bool) -> float:
@@ -661,6 +744,42 @@ def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
             result[key] = _merge(dict(result[key]), dict(value))
         else:
             result[key] = value
+    return result
+
+
+def _user_editable_color_patch(patch: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(patch, Mapping):
+        return {}
+    result: dict[str, Any] = {}
+    for key in _USER_EDITABLE_COLOR_FIELDS:
+        if key not in patch:
+            continue
+        value = patch[key]
+        if key in {"suggested", "applied"}:
+            if isinstance(value, Mapping):
+                result[key] = deepcopy(dict(value))
+        elif key == "segments":
+            if not isinstance(value, Mapping):
+                continue
+            segments: dict[str, Any] = {}
+            for segment_id, segment_patch in value.items():
+                if not isinstance(segment_patch, Mapping):
+                    continue
+                editable: dict[str, Any] = {}
+                for field in _USER_EDITABLE_SEGMENT_FIELDS:
+                    if field not in segment_patch:
+                        continue
+                    field_value = segment_patch[field]
+                    if field in {"suggested", "applied"}:
+                        if isinstance(field_value, Mapping):
+                            editable[field] = deepcopy(dict(field_value))
+                    else:
+                        editable[field] = deepcopy(field_value)
+                if editable:
+                    segments[str(segment_id)] = editable
+            result[key] = segments
+        else:
+            result[key] = deepcopy(value)
     return result
 
 

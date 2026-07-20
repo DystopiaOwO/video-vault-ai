@@ -1,7 +1,7 @@
 import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { ChangeEvent, ReactNode } from "react";
-import { api, BgmTrack, ColorAdjustment, ColorSegmentState, ColorState, Job, Project, ProjectDetail, Segment } from "./api";
+import { api, BgmTrack, ColorAdjustment, ColorSegmentState, ColorState, ColorStatePatch, Job, Project, ProjectDetail, Segment } from "./api";
 import { RenderJobPanel } from "./components/render/RenderJobPanel";
 import { ProjectDataLoadOptions, ProjectDataLoader } from "./projectDataLoader";
 import "./styles.css";
@@ -384,7 +384,7 @@ function ColorConsistencyPanel({ detail, setMessage, refreshProject }: { detail:
   async function save() {
     setBusy("save");
     try {
-      const result = await api.colorSettings(detail.project.id, state);
+      const result = await api.colorSettings(detail.project.id, toColorStatePatch(state));
       if (!result.ok || !result.state) {
         setMessage(`色彩設定儲存失敗：${result.error || "未知錯誤"}`);
         return;
@@ -513,7 +513,7 @@ function ColorConsistencyPanel({ detail, setMessage, refreshProject }: { detail:
         <b>系統建議值（唯讀）</b>
         <span>曝光 {suggested.exposure}｜色溫 {suggested.temperature}｜色調 {suggested.tint}｜對比 {suggested.contrast}｜飽和 {suggested.saturation}｜Gamma {suggested.gamma}</span>
       </div>
-      {detail.segments.length > 0 && <div className="color-segments"><b>片段覆寫</b>{detail.segments.map((segment) => { const item = segmentState(segment.segment_id); const inactive = item.excluded || !item.enabled; return <div className="color-segment-row" key={segment.segment_id}><span><b>{segment.clip_id}</b>｜{segment.title}<small>信心 {Number(item.confidence || 0).toFixed(2)}{item.warnings?.length ? `｜${item.warnings.join("、")}` : ""}{inactive ? "｜目前不套用片段色彩" : ""}</small></span><label><input type="checkbox" checked={item.enabled} onChange={(e) => updateSegment(segment.segment_id, { enabled: e.target.checked })} /> 啟用</label><label><input type="checkbox" checked={item.locked} onChange={(e) => updateSegment(segment.segment_id, { locked: e.target.checked })} /> Lock</label><label><input type="checkbox" checked={item.excluded} onChange={(e) => updateSegment(segment.segment_id, { excluded: e.target.checked })} /> Exclude</label><button disabled={inactive} onClick={() => applySegmentSuggestion(segment.segment_id)}>套用建議</button><button disabled={inactive} onClick={() => resetSegment(segment.segment_id)}>重設為專案</button><details><summary>片段色彩值</summary><div className="adjustment-grid">{(["exposure", "temperature", "tint", "contrast", "highlights", "shadows", "saturation", "gamma"] as const).map((field) => <label key={field}>{adjustmentLabel(field)}<input disabled={inactive} type="number" step="0.01" value={item.applied?.[field] ?? state.applied[field]} onChange={(e) => updateSegmentApplied(segment.segment_id, field, e.target.value)} /></label>)}</div></details></div>; })}</div>}
+      {detail.segments.length > 0 && <div className="color-segments"><b>片段覆寫</b>{detail.segments.map((segment) => { const item = segmentState(segment.segment_id); const appliedDisabled = item.excluded || !item.enabled; return <div className="color-segment-row" key={segment.segment_id}><span><b>{segment.clip_id}</b>｜{segment.title}<small>信心 {Number(item.confidence || 0).toFixed(2)}{item.warnings?.length ? `｜${item.warnings.join("、")}` : ""}{appliedDisabled ? "｜目前不套用片段色彩" : ""}</small></span><label><input type="checkbox" checked={item.enabled} onChange={(e) => updateSegment(segment.segment_id, { enabled: e.target.checked })} /> 啟用</label><label><input type="checkbox" checked={item.locked} onChange={(e) => updateSegment(segment.segment_id, { locked: e.target.checked })} /> Lock</label><label><input type="checkbox" checked={item.excluded} onChange={(e) => updateSegment(segment.segment_id, { excluded: e.target.checked })} /> Exclude</label><button disabled={appliedDisabled} onClick={() => applySegmentSuggestion(segment.segment_id)}>套用建議</button><button disabled={appliedDisabled} onClick={() => resetSegment(segment.segment_id)}>重設為專案</button><details><summary>片段色彩值</summary><div className="adjustment-grid">{(["exposure", "temperature", "tint", "contrast", "highlights", "shadows", "saturation", "gamma"] as const).map((field) => <label key={field}>{adjustmentLabel(field)}<input disabled={appliedDisabled} type="number" step="0.01" value={item.applied?.[field] ?? state.applied[field]} onChange={(e) => updateSegmentApplied(segment.segment_id, field, e.target.value)} /></label>)}</div></details></div>; })}</div>}
       {previews.length > 0 && <div className="preview-grid"><b>最近一次預覽</b>{previews.map((previewItem) => <div className="preview-item" key={`${previewItem.video_id}-${previewItem.segment_id}`}><span>素材 #{previewItem.video_id}｜{previewItem.segment_id} {previewItem.cache_hit ? "（快取）" : "（重新產生）"}</span><div className="preview-videos"><div><small>Before</small><video controls preload="metadata" src={previewItem.before_url} /></div><div><small>After</small><video controls preload="metadata" src={previewItem.after_url} /></div></div></div>)}</div>}
     </Card>
   );
@@ -521,7 +521,7 @@ function ColorConsistencyPanel({ detail, setMessage, refreshProject }: { detail:
 
 function emptyColorState(): ColorState {
   return {
-    schema_version: 1,
+    schema_version: 2,
     enabled: true,
     reference: {},
     references: [],
@@ -529,6 +529,20 @@ function emptyColorState(): ColorState {
     suggested: { mode: "none", lut_path: "", lut_kind: "", exposure: 0, temperature: 0, tint: 0, contrast: 1, saturation: 1, gamma: 1, highlights: 0, shadows: 0 },
     applied: { mode: "none", lut_path: "", lut_kind: "", exposure: 0, temperature: 0, tint: 0, contrast: 1, saturation: 1, gamma: 1, highlights: 0, shadows: 0 },
     segments: {},
+  };
+}
+
+function toColorStatePatch(state: ColorState): ColorStatePatch {
+  return {
+    schema_version: state.schema_version,
+    enabled: state.enabled,
+    applied: { ...state.applied },
+    segments: Object.fromEntries(Object.entries(state.segments).map(([segmentId, segment]) => [segmentId, {
+      enabled: segment.enabled,
+      locked: segment.locked,
+      excluded: segment.excluded,
+      ...(segment.applied ? { applied: { ...segment.applied } } : {})
+    }]))
   };
 }
 
