@@ -148,11 +148,8 @@ def test_independent_process_group_survives_runner_cancel(tmp_path: Path):
         f"pathlib.Path(r'{helper_pid_file}').write_text(str(os.getpid())); pathlib.Path(r'{helper_session_file}').write_text(str(os.getsid(0))); "
         "time.sleep(30)"
     )
-    code = (
-        "import subprocess,sys,time; "
-        f"subprocess.Popen([sys.executable,'-c',\"{helper_code}\"], start_new_session=True); "
-        "time.sleep(30)"
-    )
+    helper_process = subprocess.Popen([sys.executable, "-c", helper_code], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    code = "import time; time.sleep(30)"
     runner = ManagedFFmpegRunner()
     result = {}
 
@@ -162,23 +159,28 @@ def test_independent_process_group_survives_runner_cancel(tmp_path: Path):
         except Exception as exc:  # noqa: BLE001 - cancellation type is asserted below.
             result["error"] = exc
 
-    thread = threading.Thread(target=run)
-    thread.start()
-    deadline = time.monotonic() + 5
-    while not helper_pid_file.exists() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    helper_pid = int(helper_pid_file.read_text(encoding="utf-8"))
-    assert int(helper_session_file.read_text(encoding="utf-8")) == helper_pid
-    runner.request_cancel()
-    thread.join(timeout=8)
-    assert not thread.is_alive()
-    assert isinstance(result.get("error"), RenderCancelled)
-    assert _wait_for_pid_running(helper_pid, timeout=1.0)
-    assert not signal_file.exists(), "independent process group received runner termination signal"
     try:
-        os.kill(helper_pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+        deadline = time.monotonic() + 5
+        while not helper_pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        helper_pid = int(helper_pid_file.read_text(encoding="utf-8"))
+        assert int(helper_session_file.read_text(encoding="utf-8")) == helper_pid
+        thread = threading.Thread(target=run)
+        thread.start()
+        deadline = time.monotonic() + 5
+        while runner.current_pid() is None and thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert runner.current_pid() is not None
+        runner.request_cancel()
+        thread.join(timeout=8)
+        assert not thread.is_alive()
+        assert isinstance(result.get("error"), RenderCancelled)
+        assert _wait_for_pid_running(helper_pid, timeout=1.0)
+        assert not signal_file.exists(), "independent process group received runner termination signal"
+    finally:
+        if helper_process.poll() is None:
+            helper_process.kill()
+        helper_process.wait(timeout=2)
 
 
 def _pid_exists(pid: int) -> bool:
