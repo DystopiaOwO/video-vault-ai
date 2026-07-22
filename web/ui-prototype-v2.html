@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="zh-Hant" data-prototype="v2">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Video Vault AI — Interactive UI Prototype</title>
+  <link rel="stylesheet" href="./ui-prototype-v2.css" />
+  <script src="./ui-prototype-v2.js" defer></script>
+</head>
+<body>
+  <div class="prototype-banner" role="status">
+    <strong>互動原型 V2</strong>
+    <span>示範資料，不會呼叫正式 API 或修改專案。</span>
+  </div>
+
+  <main class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-lockup">
+        <span class="brand-mark" aria-hidden="true">V</span>
+        <span><strong>Video Vault AI</strong><small>本機影片工作台</small></span>
+      </div>
+
+      <nav class="workspace-nav" aria-label="工作區">
+        <button class="nav-button active" type="button" data-workspace-target="dashboard"><span>D</span>儀表板</button>
+        <button class="nav-button" type="button" data-workspace-target="storyboard"><span>S</span>分鏡審核</button>
+        <button class="nav-button" type="button" data-workspace-target="tuning"><span>T</span>調色與音訊</button>
+        <button class="nav-button" type="button" data-workspace-target="output"><span>O</span>核准與輸出</button>
+      </nav>
+
+      <section class="sidebar-section" aria-labelledby="project-title">
+        <p class="sidebar-label" id="project-title">目前專案</p>
+        <button class="project-card active" type="button">
+          <span class="project-dot"></span>
+          <span><strong>福岡旅行日記</strong><small>待審核 · 8 支素材</small></span>
+        </button>
+      </section>
+
+      <div class="sidebar-summary">
+        <span>本機模式</span>
+        <strong>所有素材留在電腦內</strong>
+      </div>
+    </aside>
+
+    <section class="app-main">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">PROJECT WORKSPACE</p>
+          <strong>福岡旅行日記</strong>
+        </div>
+        <div class="topbar-status"><span class="status-dot"></span>待審核</div>
+      </header>
+
+      <div class="content-shell">
+        <nav class="workflow-stepper" aria-label="工作流程">
+          <button type="button" class="workflow-step done" data-workspace-target="dashboard"><span>1</span>匯入素材</button>
+          <i></i>
+          <button type="button" class="workflow-step done" data-workspace-target="dashboard"><span>2</span>內容感知</button>
+          <i></i>
+          <button type="button" class="workflow-step current" data-workspace-target="storyboard"><span>3</span>分鏡審核</button>
+          <i></i>
+          <button type="button" class="workflow-step" data-workspace-target="tuning"><span>4</span>調色與音訊</button>
+          <i></i>
+          <button type="button" class="workflow-step" data-workspace-target="output"><span>5</span>核准輸出</button>
+        </nav>
+
+        <section class="workspace active" data-workspace="dashboard">
+          <div class="page-heading">
+            <div><p class="eyebrow">OVERVIEW</p><h1>專案總覽</h1><p>只顯示目前真正影響下一步的資訊。</p></div>
+            <button class="primary-button" type="button" data-workspace-target="storyboard">進入分鏡審核</button>
+          </div>
+
+          <div class="metric-grid">
+            <article class="metric-card"><span>素材</span><strong>8</strong><small>全部完成內容感知</small></article>
+            <article class="metric-card"><span>使用片段</span><strong data-included-total>5</strong><small>共 6 個候選片段</small></article>
+            <article class="metric-card"><span>預估片長</span><strong>01:42</strong><small>目前分鏡版本</small></article>
+            <article class="metric-card warning"><span>待處理</span><strong data-pending-total>2</strong><small>1 個剪點、1 個音訊提醒</small></article>
+          </div>
+
+          <div class="dashboard-grid">
+            <article class="panel span-two">
+              <div class="panel-heading"><div><p class="eyebrow">NEXT ACTION</p><h2>先完成兩個待處理項目</h2></div><span class="badge warning">需要確認</span></div>
+              <div class="task-list">
+                <button type="button" data-workspace-target="storyboard"><span class="task-icon">S</span><span><strong>確認「博多車站抵達」剪點</strong><small>目前片段尾端保留了 1.2 秒晃動畫面</small></span><b>前往</b></button>
+                <button type="button" data-workspace-target="tuning"><span class="task-icon">A</span><span><strong>確認拉麵店片段原音</strong><small>人聲與店內 BGM 可能重疊</small></span><b>前往</b></button>
+              </div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-heading"><div><p class="eyebrow">PROJECT STATUS</p><h2>目前狀態</h2></div></div>
+              <dl class="status-list">
+                <div><dt>內容感知</dt><dd class="success-text">已完成</dd></div>
+                <div><dt>分鏡</dt><dd>待確認</dd></div>
+                <div><dt>調色</dt><dd>尚未儲存</dd></div>
+                <div><dt>核准</dt><dd>未核准</dd></div>
+              </dl>
+            </article>
+
+            <article class="panel span-two">
+              <div class="panel-heading"><div><p class="eyebrow">STORYBOARD</p><h2>分鏡摘要</h2></div><button class="text-button" type="button" data-workspace-target="storyboard">查看全部</button></div>
+              <div class="thumbnail-strip">
+                <div class="mini-shot shot-one"><span>01</span></div>
+                <div class="mini-shot shot-two"><span>02</span></div>
+                <div class="mini-shot shot-three"><span>03</span></div>
+                <div class="mini-shot shot-four"><span>04</span></div>
+                <div class="mini-shot shot-five"><span>05</span></div>
+              </div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-heading"><div><p class="eyebrow">RENDER JOBS</p><h2>最近任務</h2></div></div>
+              <div class="job-list">
+                <div><span class="job-state success">完成</span><span><strong>12 秒音訊預覽</strong><small>剛剛</small></span></div>
+                <div><span class="job-state neutral">快取</span><span><strong>分鏡片段預覽</strong><small>8 分鐘前</small></span></div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="workspace" data-workspace="storyboard" hidden>
+          <div class="page-heading compact-heading">
+            <div><p class="eyebrow">STORYBOARD-FIRST REVIEW</p><h1>分鏡審核</h1><p>快速掃描片段；一次只在右側編輯一個片段。</p></div>
+            <div class="heading-actions"><span class="unsaved-indicator" hidden data-unsaved>有未儲存變更</span><button class="secondary-button" type="button" data-save-storyboard>儲存分鏡</button><button class="primary-button" type="button">產生短預覽</button></div>
+          </div>
+
+          <div class="storyboard-layout">
+            <div class="storyboard-list-column">
+              <section class="story-group">
+                <header><div><p>第 1 組</p><h2>抵達與移動</h2></div><span>3 個片段 · 00:31</span></header>
+                <div class="segment-list">
+                  <button class="segment-row selected" type="button" data-segment-id="station" data-title="博多車站抵達" data-source="DJI_20260709_091211.MP4" data-range="00:03.2 – 00:09.8" data-duration="6.6 秒" data-role="建立場景" data-score="0.92" data-audio="降低原音" data-color="使用專案設定" data-notes="保留列車進站後的第一個穩定畫面。" data-included="true" data-locked="false">
+                    <span class="drag-handle" aria-hidden="true">⋮⋮</span><span class="segment-thumb shot-one"><b>01</b></span><span class="segment-main"><strong>博多車站抵達</strong><small>00:03.2 – 00:09.8 · 成片 6.6 秒</small><span><i>建立場景</i><i>AI 0.92</i><i class="state-chip success">已納入</i></span></span><span class="row-action">編輯</span>
+                  </button>
+                  <button class="segment-row" type="button" data-segment-id="walk" data-title="車站地下街步行" data-source="DJI_20260709_091842.MP4" data-range="00:14.0 – 00:22.4" data-duration="8.4 秒" data-role="移動過場" data-score="0.84" data-audio="靜音" data-color="使用專案設定" data-notes="節奏稍快，可考慮 1.1 倍速。" data-included="true" data-locked="true">
+                    <span class="drag-handle" aria-hidden="true">⋮⋮</span><span class="segment-thumb shot-two"><b>02</b></span><span class="segment-main"><strong>車站地下街步行</strong><small>00:14.0 – 00:22.4 · 成片 8.4 秒</small><span><i>移動過場</i><i>AI 0.84</i><i class="state-chip">已鎖定</i></span></span><span class="row-action">編輯</span>
+                  </button>
+                  <button class="segment-row excluded" type="button" data-segment-id="blur" data-title="路口晃動畫面" data-source="DJI_20260709_092051.MP4" data-range="00:01.0 – 00:05.2" data-duration="4.2 秒" data-role="備用畫面" data-score="0.48" data-audio="靜音" data-color="停用" data-notes="目前排除，畫面有明顯晃動。" data-included="false" data-locked="false">
+                    <span class="drag-handle" aria-hidden="true">⋮⋮</span><span class="segment-thumb shot-three"><b>03</b></span><span class="segment-main"><strong>路口晃動畫面</strong><small>00:01.0 – 00:05.2 · 成片 4.2 秒</small><span><i>備用畫面</i><i>AI 0.48</i><i class="state-chip muted">已排除</i></span></span><span class="row-action">編輯</span>
+                  </button>
+                </div>
+              </section>
+
+              <section class="story-group">
+                <header><div><p>第 2 組</p><h2>午餐與街景</h2></div><span>3 個片段 · 00:42</span></header>
+                <div class="segment-list">
+                  <button class="segment-row" type="button" data-segment-id="ramen" data-title="拉麵上桌" data-source="DJI_20260709_123522.MP4" data-range="00:07.5 – 00:16.1" data-duration="8.6 秒" data-role="主畫面" data-score="0.96" data-audio="保留原音" data-color="片段自訂" data-notes="保留碗放下的聲音，BGM 在此段降低。" data-included="true" data-locked="false">
+                    <span class="drag-handle" aria-hidden="true">⋮⋮</span><span class="segment-thumb shot-four"><b>04</b></span><span class="segment-main"><strong>拉麵上桌</strong><small>00:07.5 – 00:16.1 · 成片 8.6 秒</small><span><i>主畫面</i><i>AI 0.96</i><i class="state-chip warning">音訊待確認</i></span></span><span class="row-action">編輯</span>
+                  </button>
+                  <button class="segment-row" type="button" data-segment-id="street" data-title="天神午後街景與長檔名測試" data-source="DJI_20260709_143811_SUPER_LONG_FILENAME_FOR_LAYOUT_TEST.MP4" data-range="00:11.3 – 00:20.0" data-duration="8.7 秒" data-role="環境建立" data-score="0.88" data-audio="降低原音" data-color="使用專案設定" data-notes="作為午餐後轉場。" data-included="true" data-locked="false">
+                    <span class="drag-handle" aria-hidden="true">⋮⋮</span><span class="segment-thumb shot-five"><b>05</b></span><span class="segment-main"><strong>天神午後街景與長檔名測試</strong><small>00:11.3 – 00:20.0 · 成片 8.7 秒</small><span><i>環境建立</i><i>AI 0.88</i><i class="state-chip success">已納入</i></span></span><span class="row-action">編輯</span>
+                  </button>
+                  <button class="segment-row" type="button" data-segment-id="coffee" data-title="咖啡店窗邊" data-source="DJI_20260709_151322.MP4" data-range="00:04.0 – 00:13.5" data-duration="9.5 秒" data-role="收尾候選" data-score="0.81" data-audio="降低原音" data-color="使用專案設定" data-notes="可作為下午段落收尾。" data-included="true" data-locked="false">
+                    <span class="drag-handle" aria-hidden="true">⋮⋮</span><span class="segment-thumb shot-six"><b>06</b></span><span class="segment-main"><strong>咖啡店窗邊</strong><small>00:04.0 – 00:13.5 · 成片 9.5 秒</small><span><i>收尾候選</i><i>AI 0.81</i><i class="state-chip success">已納入</i></span></span><span class="row-action">編輯</span>
+                  </button>
+                </div>
+              </section>
+            </div>
+
+            <aside class="inspector" aria-live="polite">
+              <div class="inspector-preview shot-one" data-inspector-preview><span>代表畫格</span></div>
+              <div class="inspector-heading"><div><p class="eyebrow">SELECTED SEGMENT</p><h2 data-inspector-title>博多車站抵達</h2><small data-inspector-source>DJI_20260709_091211.MP4</small></div><span class="badge">AI <b data-inspector-score>0.92</b></span></div>
+
+              <div class="control-row two-columns"><label>起點<input value="00:03.2" data-start-input /></label><label>終點<input value="00:09.8" data-end-input /></label></div>
+              <div class="control-row two-columns"><label>成片長度<input value="6.6 秒" readonly data-duration-input /></label><label>速度<select><option>1.00×</option><option>1.10×</option><option>1.25×</option></select></label></div>
+              <label>故事角色<select data-role-select><option>建立場景</option><option>移動過場</option><option>主畫面</option><option>環境建立</option><option>收尾候選</option></select></label>
+              <label>分鏡備註<textarea rows="4" data-notes-input>保留列車進站後的第一個穩定畫面。</textarea></label>
+
+              <div class="switch-list">
+                <label><span><strong>納入成片</strong><small>排除後不會進入正式輸出</small></span><input type="checkbox" checked data-included-toggle /></label>
+                <label><span><strong>鎖定片段</strong><small>重新產生故事時保留</small></span><input type="checkbox" data-locked-toggle /></label>
+              </div>
+
+              <div class="summary-box"><div><span>原音</span><strong data-audio-summary>降低原音</strong></div><div><span>調色</span><strong data-color-summary>使用專案設定</strong></div></div>
+              <div class="inspector-actions"><button class="secondary-button" type="button">預覽此片段</button><button class="secondary-button" type="button">預覽前後銜接</button><button class="primary-button" type="button" data-apply-segment>套用片段設定</button></div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="workspace" data-workspace="tuning" hidden>
+          <div class="page-heading compact-heading">
+            <div><p class="eyebrow">CONSISTENCY TUNING</p><h1>調色與音訊</h1><p>選擇片段、比較畫面，再調整必要設定。</p></div>
+            <div class="heading-actions"><button class="secondary-button" type="button">強制重新產生</button><button class="primary-button" type="button" data-save-tuning>儲存設定</button></div>
+          </div>
+
+          <div class="tuning-layout">
+            <aside class="tuning-segments">
+              <header><h2>片段</h2><span>5 個使用中</span></header>
+              <button class="tuning-row active" type="button"><span class="tiny-thumb shot-one"></span><span><strong>博多車站抵達</strong><small>專案調色 · 降低原音</small></span></button>
+              <button class="tuning-row" type="button"><span class="tiny-thumb shot-two"></span><span><strong>地下街步行</strong><small>專案調色 · 靜音</small></span></button>
+              <button class="tuning-row warning" type="button"><span class="tiny-thumb shot-four"></span><span><strong>拉麵上桌</strong><small>片段自訂 · 音訊待確認</small></span></button>
+              <button class="tuning-row" type="button"><span class="tiny-thumb shot-five"></span><span><strong>天神午後街景</strong><small>專案調色 · 降低原音</small></span></button>
+            </aside>
+
+            <section class="preview-stage">
+              <div class="preview-toolbar" role="tablist" aria-label="預覽模式">
+                <button type="button" class="active" data-preview-mode="before">Before</button>
+                <button type="button" data-preview-mode="after">After</button>
+                <button type="button" data-preview-mode="segment">片段預覽</button>
+              </div>
+              <div class="large-preview before" data-large-preview><span data-preview-label>Before · 原始 D-Log 畫面</span><button type="button" aria-label="播放預覽">▶</button></div>
+              <div class="transport"><span>00:03.2</span><div><i></i></div><span>00:09.8</span></div>
+              <div class="preview-note"><span class="status-dot"></span><span>Reference：博多車站月台 · DJI D-Log M 還原</span></div>
+            </section>
+
+            <aside class="settings-panel">
+              <div class="settings-tabs"><button class="active" type="button" data-settings-tab="color">調色</button><button type="button" data-settings-tab="audio">音訊</button></div>
+              <div data-settings-panel="color">
+                <label>技術 LUT<select><option>DJI D-Log M</option><option>不套用</option></select></label>
+                <label>曝光<div class="range-field"><input type="range" min="-2" max="2" step="0.1" value="0.2" /><output>+0.2</output></div></label>
+                <label>色溫<div class="range-field"><input type="range" min="-100" max="100" value="6" /><output>+6</output></div></label>
+                <label>對比<div class="range-field"><input type="range" min="0" max="2" step="0.05" value="1.05" /><output>1.05</output></div></label>
+                <label>飽和度<div class="range-field"><input type="range" min="0" max="2" step="0.05" value="1.08" /><output>1.08</output></div></label>
+                <div class="settings-callout"><strong>系統建議</strong><p>目前畫面略暗，可增加 0.2 EV；色溫微幅偏冷。</p><button class="text-button" type="button">套用建議值</button></div>
+              </div>
+              <div data-settings-panel="audio" hidden>
+                <label>片段原音<select><option>降低原音</option><option>保留原音</option><option>靜音</option><option>只留 BGM</option></select></label>
+                <label>原音音量<div class="range-field"><input type="range" min="-30" max="6" value="-8" /><output>-8 dB</output></div></label>
+                <label>BGM 音量<div class="range-field"><input type="range" min="-30" max="0" value="-18" /><output>-18 dB</output></div></label>
+                <label>淡入秒數<input type="number" value="0.2" step="0.1" /></label>
+                <label>淡出秒數<input type="number" value="0.2" step="0.1" /></label>
+                <div class="settings-callout warning-callout"><strong>需要確認</strong><p>此片段偵測到清楚的人聲，建議播放短預覽後再決定。</p></div>
+              </div>
+              <button class="primary-button full-width" type="button">產生 5 秒預覽</button>
+            </aside>
+          </div>
+        </section>
+
+        <section class="workspace" data-workspace="output" hidden>
+          <div class="page-heading">
+            <div><p class="eyebrow">APPROVAL GATE</p><h1>核准與輸出</h1><p>確認內容、設定與警告後，才開放正式輸出。</p></div>
+          </div>
+
+          <div class="output-layout">
+            <article class="panel approval-panel">
+              <div class="approval-hero pending" data-approval-hero><span>!</span><div><p class="eyebrow">CURRENT STATUS</p><h2 data-approval-title>尚未核准</h2><p data-approval-copy>仍有 2 個待確認項目；正式輸出目前鎖定。</p></div></div>
+              <div class="check-list">
+                <label><input type="checkbox" checked disabled /><span><strong>原始素材保持不變</strong><small>所有編輯皆為非破壞式設定</small></span></label>
+                <label><input type="checkbox" checked disabled /><span><strong>分鏡已有使用片段</strong><small data-output-included>5 個片段將進入輸出</small></span></label>
+                <label><input type="checkbox" data-gate-check /><span><strong>我已確認剪點與片段順序</strong><small>包含排除片段與鎖定片段</small></span></label>
+                <label><input type="checkbox" data-gate-check /><span><strong>我已播放調色與音訊短預覽</strong><small>確認曝光、BGM 與原音平衡</small></span></label>
+              </div>
+              <label>核准備註<textarea rows="4" placeholder="選填，例如：保留咖啡店環境音，正式輸出 4K。"></textarea></label>
+              <div class="approval-actions"><button class="danger-button" type="button">退回修改</button><button class="primary-button" type="button" disabled data-approve-button>核准目前版本</button></div>
+            </article>
+
+            <aside class="panel render-panel">
+              <p class="eyebrow">FORMAL RENDER</p><h2>正式輸出</h2>
+              <dl class="render-summary"><div><dt>格式</dt><dd>MP4 · H.264</dd></div><div><dt>解析度</dt><dd>4K UHD</dd></div><div><dt>預估長度</dt><dd>01:42</dd></div><div><dt>預估大小</dt><dd>約 680 MB</dd></div></dl>
+              <button class="primary-button full-width" type="button" disabled data-render-button>開始正式輸出</button>
+              <p class="render-help" data-render-help>需先勾選兩項確認並核准目前版本。</p>
+            </aside>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" role="status" aria-live="polite" hidden data-toast></div>
+</body>
+</html>
