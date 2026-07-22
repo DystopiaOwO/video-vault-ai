@@ -66,6 +66,9 @@ def build_render_manifest(
     profile = get_render_profile(str(settings["profile_id"]))
 
     reviewed_segments = project_segments(cfg, project_id, plan)
+    from .storyboard import load_storyboard
+
+    storyboard_state = load_storyboard(cfg, project_id) or {}
     included_segments = [segment for segment in _ordered_segments(reviewed_segments) if _included(segment)]
     segments = [
         _manifest_segment(
@@ -89,6 +92,7 @@ def build_render_manifest(
         "plan_id": str(plan.get("plan_id") or ""),
         "profile": profile,
         "settings": settings,
+        "storyboard": storyboard_state,
         "segments": segments,
         "bgm": bgm,
         "expected_duration_seconds": round(sum(float(item["timeline_duration_seconds"]) for item in segments), 6),

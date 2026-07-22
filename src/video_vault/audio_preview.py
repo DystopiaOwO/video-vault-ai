@@ -34,8 +34,10 @@ def render_project_audio_preview(
     duration_seconds: float = 12.0,
     audio_patch: dict[str, Any] | None = None,
     force: bool = False,
+    output_dir: Path | None = None,
 ) -> dict[str, Any]:
-    if not 3.0 <= float(duration_seconds) <= 30.0:
+    minimum_duration = 0.1 if output_dir is not None else 3.0
+    if not minimum_duration <= float(duration_seconds) <= 30.0:
         raise AudioPreviewError("預覽長度必須介於 3 到 30 秒")
     if float(timeline_start_seconds) < 0:
         raise AudioPreviewError("預覽起始時間不可為負數")
@@ -83,7 +85,7 @@ def render_project_audio_preview(
         "normalization": ((manifest.get("settings") or {}).get("audio") or {}).get("normalization", {}),
     }
     cache_key = hashlib.sha256(json.dumps(cache_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-    folder = project_dir(cfg, project_id) / "output" / "audio_previews"
+    folder = Path(output_dir) if output_dir is not None else project_dir(cfg, project_id) / "output" / "audio_previews"
     folder.mkdir(parents=True, exist_ok=True)
     output = folder / f"{cache_key}.mp4"
     metadata = output.with_suffix(".json")
