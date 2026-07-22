@@ -4,6 +4,14 @@ from video_vault import ui
 from video_vault.ui import JOBS, JOBS_LOCK, _kill_video_vault_processes, _set_job, _static_file, _web_dist, cancel_legacy_job, project_jobs, stop_project_jobs
 
 
+def test_audio_ui_exposes_force_preview_and_reset_override_controls():
+    source = (Path(__file__).parents[1] / "web" / "src" / "main.tsx").read_text(encoding="utf-8")
+    assert "強制重新產生" in source
+    assert "強制重跑" in source
+    assert "resetSegment" in source
+    assert "使用專案預設" in source
+
+
 def test_static_file_serving_stays_inside_web_dist():
     dist = _web_dist()
     assert _static_file("/index.html") == dist / "index.html" if (dist / "index.html").exists() else True

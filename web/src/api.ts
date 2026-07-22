@@ -30,6 +30,25 @@ export type BgmTrack = {
   duration_seconds?: number;
 };
 
+export type AudioSegmentSettings = {
+  role: "keep" | "lower" | "mute" | "bgm_only";
+  volume_db: number;
+  fade_in_seconds: number;
+  fade_out_seconds: number;
+  locked: boolean;
+};
+
+export type AudioSegmentOverride = Partial<AudioSegmentSettings>;
+
+export type AudioState = {
+  schema_version: number;
+  enabled: boolean;
+  bgm: { bgm_id: number | null; enabled: boolean; volume_db: number; start_seconds: number; loop: boolean; fade_in_seconds: number; fade_out_seconds: number; track?: BgmTrack };
+  original_audio: { default_role: AudioSegmentSettings["role"]; default_volume_db: number; lower_volume_db: number; fade_in_seconds?: number; fade_out_seconds?: number };
+  normalization: { enabled: boolean; target_lufs: number; true_peak_db: number };
+  segments: Record<string, AudioSegmentOverride | null>;
+};
+
 export type Segment = {
   segment_id: string;
   clip_id: string;
@@ -80,6 +99,7 @@ export type ProjectDetail = {
   can_render: boolean;
   render_gate_reason: string;
   color: ColorState;
+  audio: AudioState;
 };
 
 export type ColorAdjustment = {
@@ -193,6 +213,10 @@ export const api = {
     json<{ ok: boolean }>("/api/project/build-plan", post({ project_id: projectId })),
   assignBgm: (projectId: number, bgmId: number) =>
     json<{ ok: boolean }>("/api/project/bgm", post({ project_id: projectId, bgm_id: bgmId })),
+  audioSettings: (projectId: number, patch: Partial<AudioState>) =>
+    json<{ ok: boolean; state?: AudioState; error?: string }>("/api/project/audio-settings", post({ project_id: projectId, patch })),
+  audioPreview: (projectId: number, options: { segmentId?: string; timelineStartSeconds?: number; durationSeconds?: number; patch?: Partial<AudioState>; force?: boolean } = {}) =>
+    json<{ ok: boolean; file?: string; url?: string; cache_hit?: boolean; duration_seconds?: number; timeline_start_seconds?: number; error?: string }>("/api/project/audio-preview", post({ project_id: projectId, segment_id: options.segmentId || null, timeline_start_seconds: options.timelineStartSeconds ?? 0, duration_seconds: options.durationSeconds ?? 12, patch: options.patch, force: options.force ?? false })),
   approve: (projectId: number, notes: string) =>
     json<{ ok: boolean }>("/api/project/approve", post({ project_id: projectId, notes })),
   reject: (projectId: number, notes: string) =>

@@ -10,6 +10,7 @@ import subprocess
 from typing import Any, Mapping
 
 from .media_probe import MediaProbe
+from .audio_pipeline import build_project_audio_filter
 
 
 class BgmPipelineError(ValueError):
@@ -19,17 +20,18 @@ class BgmPipelineError(ValueError):
 def validate_bgm_track(track: Mapping[str, Any], ffprobe_path: str = "ffprobe") -> MediaProbe:
     source = Path(str(track.get("source_path") or "")).expanduser().resolve()
     if not source.is_file():
-        raise BgmPipelineError(f"BGM source does not exist: {source}")
+        raise BgmPipelineError("BGM source does not exist")
     gain = _finite(track.get("gain_db", 0.0), "BGM gain_db")
+    start = _nonnegative(track.get("start_seconds", 0.0), "BGM start_seconds")
     fade_in = _nonnegative(track.get("fade_in_seconds", 0.0), "BGM fade_in_seconds")
     fade_out = _nonnegative(track.get("fade_out_seconds", 0.0), "BGM fade_out_seconds")
-    del gain, fade_in, fade_out
+    del gain, start, fade_in, fade_out
     try:
         probe = _probe_audio(ffprobe_path, source)
     except Exception as exc:
-        raise BgmPipelineError(f"BGM ffprobe failed: {exc}") from exc
+        raise BgmPipelineError("BGM ffprobe failed") from exc
     if not probe.has_audio:
-        raise BgmPipelineError(f"BGM has no audio stream: {source}")
+        raise BgmPipelineError("BGM has no audio stream")
     return probe
 
 
@@ -43,25 +45,36 @@ def bgm_fingerprint(track: Mapping[str, Any]) -> dict[str, Any]:
         "source_mtime_ns": stat.st_mtime_ns if stat else None,
         "source_sha256": _sha256(source),
         "gain_db": _finite(track.get("gain_db", 0.0), "BGM gain_db"),
+        "start_seconds": _finite(track.get("start_seconds", 0.0), "BGM start_seconds"),
         "loop": bool(track.get("loop", True)),
         "fade_in_seconds": _nonnegative(track.get("fade_in_seconds", 0.0), "BGM fade_in_seconds"),
         "fade_out_seconds": _nonnegative(track.get("fade_out_seconds", 0.0), "BGM fade_out_seconds"),
     }
 
 
-def build_bgm_filter(track: Mapping[str, Any], timeline_duration: float) -> str:
+def build_bgm_filter(
+    track: Mapping[str, Any],
+    timeline_duration: float,
+    *,
+    timeline_offset_seconds: float = 0.0,
+    project_duration_seconds: float | None = None,
+) -> str:
     duration = _positive(timeline_duration, "timeline duration")
     gain_db = _finite(track.get("gain_db", 0.0), "BGM gain_db")
-    fade_in = min(_nonnegative(track.get("fade_in_seconds", 0.0), "BGM fade_in_seconds"), duration)
-    fade_out = min(_nonnegative(track.get("fade_out_seconds", 0.0), "BGM fade_out_seconds"), duration)
+    offset = _nonnegative(timeline_offset_seconds, "timeline offset")
+    project_duration = _positive(project_duration_seconds or duration, "project duration")
+    fade_in = _nonnegative(track.get("fade_in_seconds", 0.0), "BGM fade_in_seconds")
+    fade_out = _nonnegative(track.get("fade_out_seconds", 0.0), "BGM fade_out_seconds")
     filters = ["aresample=48000", "aformat=sample_fmts=fltp:channel_layouts=stereo"]
     filters.append(f"volume={10 ** (gain_db / 20):.8f}")
-    if fade_in > 0:
-        filters.append(f"afade=t=in:st=0:d={fade_in:.6f}")
+    if fade_in > 0 and offset < fade_in:
+        filters.append(f"afade=t=in:st=0:d={min(fade_in - offset, duration):.6f}")
     if not bool(track.get("loop", True)):
         filters.append("apad")
-    if fade_out > 0:
-        filters.append(f"afade=t=out:st={max(0.0, duration - fade_out):.6f}:d={fade_out:.6f}")
+    fade_out_start = project_duration - fade_out - offset
+    if fade_out > 0 and fade_out_start < duration:
+        local_start = max(0.0, fade_out_start)
+        filters.append(f"afade=t=out:st={local_start:.6f}:d={min(fade_out, duration - local_start):.6f}")
     filters.extend([f"atrim=duration={duration:.6f}", "asetpts=PTS-STARTPTS"])
     return ",".join(filters)
 
@@ -73,6 +86,10 @@ def build_bgm_mix_command(
     track: Mapping[str, Any],
     timeline_duration: float,
     profile: Mapping[str, Any],
+    *,
+    normalization: Mapping[str, Any] | None = None,
+    timeline_offset_seconds: float = 0.0,
+    project_duration_seconds: float | None = None,
 ) -> list[str]:
     source = Path(str(track.get("source_path") or "")).expanduser().resolve()
     command = [
@@ -91,13 +108,18 @@ def build_bgm_mix_command(
     ]
     if bool(track.get("loop", True)):
         command += ["-stream_loop", "-1"]
+    timeline_offset = _nonnegative(timeline_offset_seconds, "timeline offset")
+    start_seconds = max(0.0, _finite(track.get("start_seconds", 0.0), "BGM start_seconds")) + timeline_offset
+    if start_seconds:
+        command += ["-ss", f"{start_seconds:.6f}"]
     command += ["-i", str(source)]
-    bgm_filter = build_bgm_filter(track, timeline_duration)
-    graph = (
-        f"[1:a]{bgm_filter}[bgm];"
-        "[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
-        f"aresample={int(profile['audio_sample_rate'])},aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
+    bgm_filter = build_bgm_filter(
+        track,
+        timeline_duration,
+        timeline_offset_seconds=timeline_offset,
+        project_duration_seconds=project_duration_seconds,
     )
+    graph = f"[1:a]{bgm_filter}[bgm];" + build_project_audio_filter(profile, normalization, bgm_label="bgm")
     command += [
         "-filter_complex",
         graph,

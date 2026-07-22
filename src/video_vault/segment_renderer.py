@@ -59,7 +59,8 @@ def render_segment(
     settings = dict(manifest.get("settings") or {})
     requested = str(settings.get("encoder") or "auto")
     encoder = map_encoder(requested)
-    normalize_audio_role(segment.get("audio_role"))
+    audio = _effective_segment_audio(manifest, segment)
+    normalize_audio_role(audio["role"])
     start = float(segment.get("source_in_seconds"))
     end = float(segment.get("source_out_seconds"))
     speed = float(segment.get("speed"))
@@ -137,6 +138,8 @@ def build_segment_ffmpeg_command(
     duration = end - start
     timeline = duration / speed
     color = build_color_filter(dict(segment.get("color") or settings.get("color") or {}))
+    audio = _effective_segment_audio(manifest, segment)
+    normalize_audio_role(audio["role"])
     video_filters = [f"trim=start={start:.6f}:end={end:.6f}", "setpts=PTS-STARTPTS", f"setpts=PTS/{speed:g}"]
     if color:
         video_filters.append(color)
@@ -144,8 +147,8 @@ def build_segment_ffmpeg_command(
     graph = [f"[0:v]{','.join(video_filters)}[vout]"]
     args = [str(cfg.get("ffmpeg_path") or "ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(segment["source_file"])]
     if probe.has_audio:
-        audio = build_audio_filter(str(segment.get("audio_role") or "keep_original"), speed, settings, start=start, end=end)
-        graph.append(f"[0:a]{audio}[aout]")
+        audio_filter = build_audio_filter(audio["role"], speed, settings, start=start, end=end, audio_settings=audio)
+        graph.append(f"[0:a]{audio_filter}[aout]")
     else:
         args.extend(["-f", "lavfi", "-t", f"{timeline:.6f}", "-i", build_silence_filter(timeline)])
         graph.append(f"[1:a]atrim=duration={timeline:.6f},asetpts=PTS-STARTPTS[aout]")
@@ -158,6 +161,17 @@ def build_segment_ffmpeg_command(
         "-movflags", "+faststart", "-f", "mp4", str(output),
     ])
     return args
+
+
+def _effective_segment_audio(manifest: Mapping[str, Any], segment: Mapping[str, Any]) -> dict[str, Any]:
+    configured = segment.get("audio")
+    if isinstance(configured, Mapping):
+        result = dict(configured)
+    else:
+        result = {"role": segment.get("audio_role") or "keep_original"}
+    if not result.get("role"):
+        result["role"] = ((manifest.get("settings") or {}).get("audio") or {}).get("original_audio", {}).get("default_role", "lower")
+    return result
 
 
 def validate_segment_output(output_path: str | Path, profile: Mapping[str, Any], expected_duration_seconds: float, ffprobe_path: str = "ffprobe") -> SegmentQCResult:

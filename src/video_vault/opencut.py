@@ -8,6 +8,7 @@ import subprocess
 import urllib.request
 
 from .color import color_filter, run_ffmpeg, video_encode_args
+from .database import project_bgm_tracks
 from .project import assert_project_approved, build_project_plan, project_detail, project_dir
 
 OPENCUT_URL = "http://127.0.0.1:3000/projects"
@@ -58,13 +59,17 @@ def export_opencut_handoff(cfg: dict, db: Path, project_id: int, render_clips: b
     lut = Path(cfg.get("color", {}).get("dji_lut_path", ""))
     if lut.is_file():
         shutil.copy2(lut, assets / lut.name)
-    for track in detail.get("bgm", []):
+    # The WebUI detail intentionally omits local paths; handoff artifacts are
+    # local project files, so resolve BGM sources from the database here.
+    handoff_bgm = [dict(row) for row in project_bgm_tracks(db, project_id)]
+    for track in handoff_bgm:
         src = Path(track.get("file_path", ""))
         if src.exists():
             shutil.copy2(src, assets / src.name)
 
     segments = _segments(detail, max_segments)
-    (out / "opencut_handoff.json").write_text(json.dumps({"project": detail["project"], "clips": detail["clips"], "bgm": detail.get("bgm", []), "bgm_recommendations": plan.get("bgm_recommendations", []), "title_cards": plan.get("title_cards", []), "segments": segments}, ensure_ascii=False, indent=2), encoding="utf-8")
+    handoff = {"project": detail["project"], "clips": detail["clips"], "bgm": handoff_bgm, "bgm_recommendations": plan.get("bgm_recommendations", []), "title_cards": plan.get("title_cards", []), "segments": segments}
+    (out / "opencut_handoff.json").write_text(json.dumps(handoff, ensure_ascii=False, indent=2), encoding="utf-8")
     _write_csv(out / "recommended_segments.csv", segments)
     (out / "README.md").write_text(_readme(detail, segments, render_clips), encoding="utf-8")
 
@@ -77,7 +82,8 @@ def export_opencut_handoff(cfg: dict, db: Path, project_id: int, render_clips: b
         for stale in clips_dir.glob("*.mp4"):
             if stale.name not in targets:
                 stale.unlink(missing_ok=True)
-        (out / "opencut_handoff.json").write_text(json.dumps({"project": detail["project"], "clips": detail["clips"], "bgm": detail.get("bgm", []), "bgm_recommendations": plan.get("bgm_recommendations", []), "title_cards": plan.get("title_cards", []), "segments": segments}, ensure_ascii=False, indent=2), encoding="utf-8")
+        handoff["segments"] = segments
+        (out / "opencut_handoff.json").write_text(json.dumps(handoff, ensure_ascii=False, indent=2), encoding="utf-8")
         _write_csv(out / "recommended_segments.csv", segments)
     return out
 

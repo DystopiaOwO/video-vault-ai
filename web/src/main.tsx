@@ -1,7 +1,7 @@
 import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { ChangeEvent, ReactNode } from "react";
-import { api, BgmTrack, ColorAdjustment, ColorSegmentState, ColorState, ColorStatePatch, Job, Project, ProjectDetail, Segment } from "./api";
+import { api, AudioSegmentOverride, AudioSegmentSettings, AudioState, BgmTrack, ColorAdjustment, ColorSegmentState, ColorState, ColorStatePatch, Job, Project, ProjectDetail, Segment } from "./api";
 import { RenderJobPanel } from "./components/render/RenderJobPanel";
 import { ProjectDataLoadOptions, ProjectDataLoader } from "./projectDataLoader";
 import "./styles.css";
@@ -174,7 +174,6 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   review: (action: "approve" | "reject") => void;
   revise: () => void;
 }) {
-  const [selectedBgm, setSelectedBgm] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const refreshCurrentProject = (options: ProjectDataLoadOptions = {}) => refreshProject(detail.project.id, options);
   return (
@@ -228,29 +227,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
         </Card>
         <ColorConsistencyPanel detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} />
       </div>
-      <div className="grid">
-        <Card title="BGM">
-          <div className="row">
-            <select value={selectedBgm} onChange={(e) => setSelectedBgm(e.target.value)}>
-              <option value="">選擇 BGM</option>
-              {bgmTracks.map((track) => <option key={track.id} value={track.id}>{track.title}</option>)}
-            </select>
-            <button disabled={!selectedBgm} onClick={assignBgm}>加入本專案</button>
-          </div>
-          {detail.bgm.length ? detail.bgm.map((b) => <div className="item" key={b.id}>{b.title}<span>{b.attribution_text || b.artist}</span></div>) : "未指定 BGM"}
-          {detail.plan.bgm_recommendations?.length ? (
-            <div className="recommendations">
-              <b>依內容推薦</b>
-              {detail.plan.bgm_recommendations.map((item) => (
-                <div className="item" key={`${item.group}-${item.track.id}`}>
-                  {item.group} → {item.track.title}
-                  <span>{item.activity} | {item.mood.join(", ")}</span>
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </Card>
-      </div>
+      <AudioMixingPanel detail={detail} bgmTracks={bgmTracks} setMessage={setMessage} refreshProject={refreshCurrentProject} />
       <SegmentTable detail={detail} />
       <Card title="故事整理">
         <pre>{detail.script || "尚未產生故事整理。"}</pre>
@@ -329,15 +306,90 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
     await refreshCurrentProject();
   }
 
-  async function assignBgm() {
-    const bgmId = Number(selectedBgm);
-    if (!bgmId) return;
-    setMessage("正在加入 BGM...");
-    await api.assignBgm(detail.project.id, bgmId);
-    setSelectedBgm("");
-    setMessage("BGM 已加入本專案，專案已回到待審。");
-    await refreshCurrentProject();
+}
+
+function AudioMixingPanel({ detail, bgmTracks, setMessage, refreshProject }: { detail: ProjectDetail; bgmTracks: BgmTrack[]; setMessage: (value: string) => void; refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]> }) {
+  const fallback: AudioState = {
+    schema_version: 1,
+    enabled: true,
+    bgm: { bgm_id: null, enabled: false, volume_db: -18, start_seconds: 0, loop: true, fade_in_seconds: 1.5, fade_out_seconds: 2 },
+    original_audio: { default_role: "lower", default_volume_db: 0, lower_volume_db: -8, fade_in_seconds: .1, fade_out_seconds: .1 },
+    normalization: { enabled: true, target_lufs: -14, true_peak_db: -1 },
+    segments: {}
+  };
+  const [state, setState] = useState<AudioState>(detail.audio || fallback);
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [previewInfo, setPreviewInfo] = useState<{ cacheHit: boolean; duration: number; start: number; segmentId?: string } | null>(null);
+  const [busy, setBusy] = useState("");
+  useEffect(() => setState(detail.audio || fallback), [detail.project.id, detail.audio]);
+  const patchState = (patch: Partial<AudioState>) => setState((current) => ({ ...current, ...patch }));
+  const updateSegment = (segmentId: string, patch: AudioSegmentOverride) => setState((current) => ({ ...current, segments: { ...current.segments, [segmentId]: { ...(current.segments[segmentId] || {}), ...patch } } }));
+  const resetSegment = (segmentId: string) => setState((current) => ({ ...current, segments: { ...current.segments, [segmentId]: null } }));
+  const effectiveSegment = (segment: Segment): AudioSegmentSettings => {
+    const configured = state.segments[segment.segment_id];
+    const override = configured && typeof configured === "object" ? configured : {};
+    const role = override.role || state.original_audio.default_role || (segment.audio_role === "keep_original" ? "keep" : segment.audio_role === "mute" ? "mute" : "lower");
+    const defaultVolume = role === "lower" ? state.original_audio.lower_volume_db : state.original_audio.default_volume_db;
+    return {
+      role,
+      volume_db: override.volume_db ?? (role === "mute" || role === "bgm_only" ? 0 : defaultVolume),
+      fade_in_seconds: override.fade_in_seconds ?? (state.original_audio.fade_in_seconds ?? .1),
+      fade_out_seconds: override.fade_out_seconds ?? (state.original_audio.fade_out_seconds ?? .1),
+      locked: Boolean(override.locked),
+    };
+  };
+  async function save() {
+    setBusy("save");
+    const result = await api.audioSettings(detail.project.id, { enabled: state.enabled, bgm: state.bgm, original_audio: state.original_audio, normalization: state.normalization, segments: state.segments });
+    setBusy("");
+    if (!result.ok) { setMessage(`音訊設定儲存失敗：${result.error || "未知錯誤"}`); return; }
+    if (result.state) setState(result.state);
+    setMessage("音訊設定已儲存，專案已回到待審。");
+    await refreshProject();
   }
+  async function preview(segmentId = "", force = false) {
+    setBusy("preview");
+    const result = await api.audioPreview(detail.project.id, {
+      segmentId,
+      durationSeconds: 12,
+      patch: { enabled: state.enabled, bgm: state.bgm, original_audio: state.original_audio, normalization: state.normalization, segments: state.segments },
+      force,
+    });
+    setBusy("");
+    if (!result.ok) { setMessage(`音訊預覽失敗：${result.error || "未知錯誤"}`); return; }
+    setPreviewUrl(result.url || "");
+    setPreviewInfo({ cacheHit: Boolean(result.cache_hit), duration: Number(result.duration_seconds || 0), start: Number(result.timeline_start_seconds || 0), segmentId: segmentId || undefined });
+    setMessage(force ? "音訊預覽已強制重新產生。保存後仍需重新核准才能正式輸出。" : result.cache_hit ? "音訊預覽已從快取載入。" : "音訊預覽完成。保存後仍需重新核准才能正式輸出。");
+  }
+  return <div className="grid">
+    <Card title="音訊混音與 BGM">
+      <label className="toggle"><input type="checkbox" checked={state.enabled} onChange={(e) => patchState({ enabled: e.target.checked })} /> 啟用專案音訊設定</label>
+      <div className="audio-grid">
+        <label>BGM<select value={state.bgm.bgm_id ?? ""} onChange={(e) => patchState({ bgm: { ...state.bgm, bgm_id: e.target.value ? Number(e.target.value) : null, enabled: Boolean(e.target.value) } })}><option value="">不使用</option>{bgmTracks.map((track) => <option key={track.id} value={track.id}>{track.title}</option>)}</select></label>
+        <label>音量 dB<input type="number" min={-60} max={12} step={1} value={state.bgm.volume_db} onChange={(e) => patchState({ bgm: { ...state.bgm, volume_db: Number(e.target.value) } })} /></label>
+        <label>起始秒數<input type="number" min={0} step={0.1} value={state.bgm.start_seconds} onChange={(e) => patchState({ bgm: { ...state.bgm, start_seconds: Number(e.target.value) } })} /></label>
+        <label>淡入秒數<input type="number" min={0} step={0.1} value={state.bgm.fade_in_seconds} onChange={(e) => patchState({ bgm: { ...state.bgm, fade_in_seconds: Number(e.target.value) } })} /></label>
+        <label>淡出秒數<input type="number" min={0} step={0.1} value={state.bgm.fade_out_seconds} onChange={(e) => patchState({ bgm: { ...state.bgm, fade_out_seconds: Number(e.target.value) } })} /></label>
+        <label className="toggle"><input type="checkbox" checked={state.bgm.loop} onChange={(e) => patchState({ bgm: { ...state.bgm, loop: e.target.checked } })} /> BGM 循環</label>
+      </div>
+      <div className="audio-grid">
+        <label>原音預設角色<select value={state.original_audio.default_role} onChange={(e) => patchState({ original_audio: { ...state.original_audio, default_role: e.target.value as AudioSegmentSettings["role"] } })}><option value="keep">保留原音</option><option value="lower">降低原音</option><option value="mute">靜音</option><option value="bgm_only">只留 BGM</option></select></label>
+        <label>降低原音 dB<input type="number" min={-60} max={12} step={1} value={state.original_audio.lower_volume_db} onChange={(e) => patchState({ original_audio: { ...state.original_audio, lower_volume_db: Number(e.target.value) } })} /></label>
+        <label className="toggle"><input type="checkbox" checked={state.normalization.enabled} onChange={(e) => patchState({ normalization: { ...state.normalization, enabled: e.target.checked } })} /> 音量正規化</label>
+        <label>目標 LUFS<input type="number" min={-40} max={0} step={1} value={state.normalization.target_lufs} onChange={(e) => patchState({ normalization: { ...state.normalization, target_lufs: Number(e.target.value) } })} /></label>
+        <label>True Peak dB<input type="number" min={-20} max={0} step={0.1} value={state.normalization.true_peak_db} onChange={(e) => patchState({ normalization: { ...state.normalization, true_peak_db: Number(e.target.value) } })} /></label>
+      </div>
+      <div className="row"><button className="good" disabled={busy === "save"} onClick={save}>{busy === "save" ? "儲存中…" : "儲存音訊設定"}</button><button disabled={Boolean(busy)} onClick={() => preview()}>{busy === "preview" ? "預覽產生中…" : "產生 12 秒預覽"}</button><button disabled={Boolean(busy)} onClick={() => preview("", true)}>強制重新產生</button></div>
+      {previewInfo && <p className="muted">預覽範圍 {previewInfo.start.toFixed(1)}s，長度 {previewInfo.duration.toFixed(1)}s，{previewInfo.cacheHit ? "命中快取" : "新產生"}</p>}
+      {previewUrl && <video controls width="100%" src={previewUrl} />}
+      {state.bgm.track && <p className="muted">目前 BGM：{state.bgm.track.title}｜作者：{state.bgm.track.artist || "未知"}｜{state.bgm.track.duration_seconds ? `${state.bgm.track.duration_seconds}s` : "長度未知"}｜授權：{state.bgm.track.license_name || "未填"}｜{state.bgm.track.attribution_text || "未填署名"}</p>}
+      {state.enabled && (!state.bgm.enabled || !state.bgm.bgm_id) && (state.original_audio.default_role === "bgm_only" || Object.values(state.segments).some((item) => item?.role === "bgm_only")) && <div className="notice">有片段設定為只留 BGM，但目前沒有有效 BGM；儲存後的 Manifest／預覽會阻擋，請先選擇可讀取的音樂。</div>}
+    </Card>
+    <Card title="片段原音角色">
+      {detail.segments.map((segment) => { const item = effectiveSegment(segment); const customized = Boolean(state.segments[segment.segment_id]); return <div className="audio-segment" key={segment.segment_id}><b>{segment.title || segment.segment_id}</b><span className="muted">{customized ? "自訂設定" : "使用專案預設"}</span><select value={item.role} onChange={(e) => updateSegment(segment.segment_id, { role: e.target.value as AudioSegmentSettings["role"] })}><option value="keep">保留</option><option value="lower">降低</option><option value="mute">靜音</option><option value="bgm_only">只留 BGM</option></select><input aria-label="片段音量" type="number" min={-60} max={12} step={1} value={item.volume_db} onChange={(e) => updateSegment(segment.segment_id, { volume_db: Number(e.target.value) })} /><input aria-label="淡入秒數" type="number" min={0} step={.1} value={item.fade_in_seconds} onChange={(e) => updateSegment(segment.segment_id, { fade_in_seconds: Number(e.target.value) })} /><input aria-label="淡出秒數" type="number" min={0} step={.1} value={item.fade_out_seconds} onChange={(e) => updateSegment(segment.segment_id, { fade_out_seconds: Number(e.target.value) })} /><label className="toggle"><input type="checkbox" checked={item.locked} onChange={(e) => updateSegment(segment.segment_id, { locked: e.target.checked })} />鎖定</label><button onClick={() => resetSegment(segment.segment_id)}>套用專案預設</button><button disabled={Boolean(busy)} onClick={() => preview(segment.segment_id)}>預覽</button><button disabled={Boolean(busy)} onClick={() => preview(segment.segment_id, true)}>強制重跑</button><span>dB｜淡入｜淡出</span></div>; })}
+      {!detail.segments.length && <p>尚未有可調整的片段。</p>}
+    </Card>
+  </div>;
 }
 
 function ClipSummary({ projectId, clip, setMessage, refreshProject }: { projectId: number; clip: { video_id: number; visual_summary: string }; setMessage: (value: string) => void; refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]> }) {
