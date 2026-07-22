@@ -38,13 +38,15 @@ export type AudioSegmentSettings = {
   locked: boolean;
 };
 
+export type AudioSegmentOverride = Partial<AudioSegmentSettings>;
+
 export type AudioState = {
   schema_version: number;
   enabled: boolean;
   bgm: { bgm_id: number | null; enabled: boolean; volume_db: number; start_seconds: number; loop: boolean; fade_in_seconds: number; fade_out_seconds: number; track?: BgmTrack };
-  original_audio: { default_role: AudioSegmentSettings["role"]; default_volume_db: number; lower_volume_db: number };
+  original_audio: { default_role: AudioSegmentSettings["role"]; default_volume_db: number; lower_volume_db: number; fade_in_seconds?: number; fade_out_seconds?: number };
   normalization: { enabled: boolean; target_lufs: number; true_peak_db: number };
-  segments: Record<string, AudioSegmentSettings>;
+  segments: Record<string, AudioSegmentOverride | null>;
 };
 
 export type Segment = {

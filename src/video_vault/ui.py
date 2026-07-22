@@ -426,7 +426,6 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                         if not track:
                             raise ValueError("找不到指定 BGM")
                         validate_bgm_track({"source_path": track.get("file_path")}, str(cfg.get("ffprobe_path") or "ffprobe"))
-                        add_project_bgm(db, project_id, selected_id)
                     state = update_audio_state(cfg, db, project_id, patch if isinstance(patch, dict) else {})
                     self._json({"ok": True, "state": audio_state_for_api(cfg, project_id, db)})
                 except BgmPipelineError as exc:

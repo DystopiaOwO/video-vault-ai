@@ -41,7 +41,13 @@ def default_audio_state() -> dict[str, Any]:
             "fade_in_seconds": 1.5,
             "fade_out_seconds": 2.0,
         },
-        "original_audio": {"default_role": "lower", "default_volume_db": 0.0, "lower_volume_db": -8.0},
+        "original_audio": {
+            "default_role": "lower",
+            "default_volume_db": 0.0,
+            "lower_volume_db": -8.0,
+            "fade_in_seconds": 0.1,
+            "fade_out_seconds": 0.1,
+        },
         "normalization": {"enabled": True, "target_lufs": -14.0, "true_peak_db": -1.0},
         "segments": {},
     }
@@ -87,8 +93,8 @@ def effective_segment_audio_settings(
     return {
         "role": role,
         "volume_db": float(configured.get("volume_db", default_volume if role not in {"mute", "bgm_only"} else 0.0)),
-        "fade_in_seconds": float(configured.get("fade_in_seconds", 0.1)),
-        "fade_out_seconds": float(configured.get("fade_out_seconds", 0.1)),
+        "fade_in_seconds": float(configured.get("fade_in_seconds", original.get("fade_in_seconds", 0.1))),
+        "fade_out_seconds": float(configured.get("fade_out_seconds", original.get("fade_out_seconds", 0.1))),
         "locked": bool(configured.get("locked", False)),
         "legacy": False,
     }
@@ -101,6 +107,53 @@ def effective_project_bgm(state: Mapping[str, Any] | None) -> dict[str, Any] | N
     if not bgm.get("enabled") or bgm.get("bgm_id") is None:
         return None
     return bgm
+
+
+def resolve_audio_state_bgm(db: Path, state: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Resolve a new audio state's selected BGM from the global library.
+
+    The new audio workflow intentionally does not consult ``project_bgm``.
+    That table remains the compatibility path for projects without an active
+    ``audio_settings.json`` workflow.
+    """
+    selected = effective_project_bgm(state)
+    if selected is None:
+        return None
+    from .database import bgm_tracks
+
+    bgm_id = int(selected["bgm_id"])
+    row = next((dict(item) for item in bgm_tracks(db) if int(item["id"]) == bgm_id), None)
+    if row is None:
+        raise ValueError("找不到指定 BGM")
+    return {
+        **row,
+        "track_id": bgm_id,
+        "source_path": str(row.get("file_path") or ""),
+        "gain_db": float(selected.get("volume_db", -18.0)),
+        "start_seconds": float(selected.get("start_seconds", 0.0)),
+        "loop": bool(selected.get("loop", True)),
+        "fade_in_seconds": float(selected.get("fade_in_seconds", 1.5)),
+        "fade_out_seconds": float(selected.get("fade_out_seconds", 2.0)),
+    }
+
+
+def resolve_legacy_project_bgm(db: Path, project_id: int, settings: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Return only the legacy project BGM rows and their legacy overrides."""
+    from .database import project_bgm_tracks
+
+    overrides = {
+        int(item.get("track_id")): item
+        for item in (settings or {}).get("bgm", [])
+        if isinstance(item, Mapping) and item.get("track_id") is not None
+    }
+    rows: list[dict[str, Any]] = []
+    for row in project_bgm_tracks(db, project_id):
+        item = dict(row)
+        item.update(overrides.get(int(item["id"]), {}))
+        item["track_id"] = int(item["id"])
+        item["source_path"] = str(item.get("file_path") or "")
+        rows.append(item)
+    return rows
 
 
 def save_audio_state(cfg: dict, db: Path, project_id: int, state: Mapping[str, Any], *, mark_review: bool = True) -> Path:
@@ -117,7 +170,7 @@ def save_audio_state(cfg: dict, db: Path, project_id: int, state: Mapping[str, A
 
 def update_audio_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str, Any]) -> dict[str, Any]:
     current = load_audio_state(cfg, project_id)
-    updated = _deep_merge(current, editable_audio_patch(patch))
+    updated = _apply_audio_patch(current, editable_audio_patch(patch))
     state = normalize_audio_state(updated)
     save_audio_state(cfg, db, project_id, state)
     return state
@@ -132,9 +185,10 @@ def audio_state_for_api(cfg: dict, project_id: int, db: Path | None = None) -> d
         for key in ("source_path", "file_path", "path"):
             bgm.pop(key, None)
         if db is not None and bgm.get("bgm_id") is not None:
-            from .database import project_bgm_tracks
-
-            track = next((dict(row) for row in project_bgm_tracks(db, project_id) if int(row["id"]) == int(bgm["bgm_id"])), None)
+            try:
+                track = resolve_audio_state_bgm(db, state)
+            except ValueError:
+                track = None
             if track:
                 bgm["track"] = {
                     "id": int(track["id"]),
@@ -169,9 +223,11 @@ def editable_audio_patch(patch: Mapping[str, Any] | None) -> dict[str, Any]:
     if isinstance(segments, Mapping):
         allowed = {"role", "volume_db", "fade_in_seconds", "fade_out_seconds", "locked"}
         result["segments"] = {
-            str(segment_id): {key: deepcopy(value[key]) for key in allowed if key in value}
+            str(segment_id): (
+                None if value is None else {key: deepcopy(value[key]) for key in allowed if key in value}
+            )
             for segment_id, value in segments.items()
-            if isinstance(value, Mapping)
+            if value is None or isinstance(value, Mapping)
         }
     return result
 
@@ -204,6 +260,8 @@ def normalize_audio_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
     original["default_role"] = normalize_audio_role(original.get("default_role", "lower"))
     original["default_volume_db"] = _clamped_number(original.get("default_volume_db", -8.0), -60.0, 12.0, "original_audio.default_volume_db")
     original["lower_volume_db"] = _clamped_number(original.get("lower_volume_db", -8.0), -60.0, 12.0, "original_audio.lower_volume_db")
+    original["fade_in_seconds"] = _number(original.get("fade_in_seconds", 0.1), 0.0, 60.0, "original_audio.fade_in_seconds")
+    original["fade_out_seconds"] = _number(original.get("fade_out_seconds", 0.1), 0.0, 60.0, "original_audio.fade_out_seconds")
     result["original_audio"] = original
 
     normalization = dict(result.get("normalization") or {})
@@ -217,11 +275,16 @@ def normalize_audio_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
         if not isinstance(value, Mapping):
             continue
         item = dict(value)
-        item["role"] = normalize_audio_role(item.get("role", result["original_audio"]["default_role"]))
-        item["volume_db"] = _clamped_number(item.get("volume_db", 0.0), -60.0, 12.0, f"segments.{segment_id}.volume_db")
-        item["fade_in_seconds"] = _number(item.get("fade_in_seconds", 0.1), 0.0, 60.0, f"segments.{segment_id}.fade_in_seconds")
-        item["fade_out_seconds"] = _number(item.get("fade_out_seconds", 0.1), 0.0, 60.0, f"segments.{segment_id}.fade_out_seconds")
-        item["locked"] = _as_bool(item.get("locked", False))
+        if "role" in item:
+            item["role"] = normalize_audio_role(item["role"])
+        if "volume_db" in item:
+            item["volume_db"] = _clamped_number(item["volume_db"], -60.0, 12.0, f"segments.{segment_id}.volume_db")
+        if "fade_in_seconds" in item:
+            item["fade_in_seconds"] = _number(item["fade_in_seconds"], 0.0, 60.0, f"segments.{segment_id}.fade_in_seconds")
+        if "fade_out_seconds" in item:
+            item["fade_out_seconds"] = _number(item["fade_out_seconds"], 0.0, 60.0, f"segments.{segment_id}.fade_out_seconds")
+        if "locked" in item:
+            item["locked"] = _as_bool(item["locked"])
         segments[str(segment_id)] = item
     result["segments"] = segments
     return result
@@ -275,9 +338,26 @@ def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[st
     return result
 
 
+def _apply_audio_patch(base: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
+    result = _deep_merge(base, patch)
+    segment_patch = patch.get("segments")
+    if isinstance(segment_patch, Mapping):
+        segments = deepcopy(dict(base.get("segments") or {}))
+        for segment_id, value in segment_patch.items():
+            key = str(segment_id)
+            if value is None:
+                segments.pop(key, None)
+            elif isinstance(value, Mapping):
+                existing = segments.get(key) if isinstance(segments.get(key), Mapping) else {}
+                segments[key] = _deep_merge(existing, value)
+        result["segments"] = segments
+    return result
+
+
 __all__ = [
     "AUDIO_ROLES", "AUDIO_STATE_VERSION", "LEGACY_AUDIO_ROLE_MAP", "audio_state_for_api", "audio_state_path",
     "effective_project_audio_state", "effective_project_bgm", "effective_segment_audio_settings", "has_audio_state",
+    "resolve_audio_state_bgm", "resolve_legacy_project_bgm",
     "default_audio_state", "editable_audio_patch", "load_audio_state", "normalize_audio_role",
-    "normalize_audio_state", "save_audio_state", "update_audio_state",
+    "normalize_audio_state", "save_audio_state", "update_audio_state", "_apply_audio_patch",
 ]

@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 
 from video_vault.database import add_analysis, add_bgm_track, add_project_bgm, connect, init_db, upsert_video
-from video_vault.project import build_project_plan, create_project, project_dir, set_review_status
+from video_vault.audio_state import default_audio_state, save_audio_state
+from video_vault.project import build_project_plan, create_project, project_detail, project_dir, save_segment_review, set_review_status
 from video_vault.project_renderer import render_project
 
 
@@ -127,3 +128,76 @@ def test_project_renderer_assembles_order_bgm_and_final_cache(tmp_path: Path):
     gain_low_project = _create_project(cfg, db, [red], bgm=bgm, gain_db=-18)
     gain_low_result = render_project(cfg, db, gain_low_project)
     assert _tone_amplitude(gain_zero_result.output_path, 0.3, 220) > _tone_amplitude(gain_low_result.output_path, 0.3, 220) * 1.5
+
+
+def _create_audio_role_project(cfg, db: Path, source: Path, role: str, *, speed: float = 1.0, bgm: Path | None = None) -> int:
+    project_id = _create_project(cfg, db, [source])
+    detail = project_detail(cfg, db, project_id)
+    segment = detail["segments"][0]
+    segment["speed"] = speed
+    save_segment_review(cfg, db, project_id, [segment])
+    state = default_audio_state()
+    state["normalization"]["enabled"] = False
+    state["original_audio"]["default_role"] = role
+    if bgm is not None:
+        track_id = add_bgm_track(db, {"title": "Global role BGM", "artist": "Test", "file_path": str(bgm), "source_url": "https://example.com/role-bgm", "license_name": "CC0", "attribution_text": "role BGM"})
+        state["bgm"].update({"bgm_id": track_id, "enabled": True, "loop": True, "volume_db": 0})
+    save_audio_state(cfg, db, project_id, state, mark_review=False)
+    set_review_status(cfg, db, project_id, "approved")
+    return project_id
+
+
+@pytest.mark.parametrize("role", ["keep", "lower", "mute"])
+def test_real_ffmpeg_original_audio_roles(tmp_path: Path, role: str):
+    library = tmp_path / f"roles-{role}"
+    library.mkdir()
+    cfg = {"library_root": str(library), "ffmpeg_path": FFMPEG, "ffprobe_path": FFPROBE}
+    db = library / "video_vault.sqlite3"
+    init_db(db)
+    source = tmp_path / f"role-{role}.mp4"
+    _make_color_source(source, "green", 30, 880)
+    project_id = _create_audio_role_project(cfg, db, source, role)
+    result = render_project(cfg, db, project_id)
+    probe = json.loads(subprocess.run([FFPROBE, "-v", "error", "-show_streams", "-of", "json", str(result.output_path)], capture_output=True, text=True, check=False).stdout)
+    audio = next(stream for stream in probe["streams"] if stream.get("codec_type") == "audio")
+    assert audio.get("sample_rate") == "48000"
+    assert int(audio.get("channels") or 0) == 2
+    amplitude = _tone_amplitude(result.output_path, 0.3, 880)
+    if role == "mute":
+        assert amplitude < 0.01
+    else:
+        assert amplitude > 0.01
+
+
+def test_real_ffmpeg_bgm_only_uses_unattached_global_track(tmp_path: Path):
+    library = tmp_path / "bgm-only"
+    library.mkdir()
+    cfg = {"library_root": str(library), "ffmpeg_path": FFMPEG, "ffprobe_path": FFPROBE}
+    db = library / "video_vault.sqlite3"
+    init_db(db)
+    source = tmp_path / "bgm-only-source.mp4"
+    bgm = tmp_path / "bgm-only.mp4"
+    _make_color_source(source, "green", 30, 880)
+    _make_bgm(bgm, duration=1.0)
+    project_id = _create_audio_role_project(cfg, db, source, "bgm_only", bgm=bgm)
+    result = render_project(cfg, db, project_id)
+    assert result.bgm_used
+    assert _tone_amplitude(result.output_path, 0.4, 220) > 0.01
+
+
+@pytest.mark.parametrize(("speed", "expected"), [(0.5, 3.0), (2.0, 0.75)])
+def test_real_ffmpeg_speed_keeps_audio_video_aligned(tmp_path: Path, speed: float, expected: float):
+    library = tmp_path / f"speed-{speed}"
+    library.mkdir()
+    cfg = {"library_root": str(library), "ffmpeg_path": FFMPEG, "ffprobe_path": FFPROBE}
+    db = library / "video_vault.sqlite3"
+    init_db(db)
+    source = tmp_path / f"speed-{speed}.mp4"
+    _make_color_source(source, "green", 30, 880)
+    project_id = _create_audio_role_project(cfg, db, source, "keep", speed=speed)
+    result = render_project(cfg, db, project_id)
+    probe = json.loads(subprocess.run([FFPROBE, "-v", "error", "-show_streams", "-of", "json", str(result.output_path)], capture_output=True, text=True, check=False).stdout)
+    streams = probe["streams"]
+    assert any(stream.get("codec_type") == "video" for stream in streams)
+    assert any(stream.get("codec_type") == "audio" for stream in streams)
+    assert result.duration_seconds == pytest.approx(expected, abs=0.15)

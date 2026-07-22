@@ -78,10 +78,21 @@ def build_audio_filter(
     timeline_duration = max(0.0, (float(end) - float(start)) / float(speed))
     fade_in = max(0.0, float(segment_audio.get("fade_in_seconds", 0.0) or 0.0))
     fade_out = max(0.0, float(segment_audio.get("fade_out_seconds", 0.0) or 0.0))
-    if fade_in > 0:
-        filters.append(f"afade=t=in:st=0:d={min(fade_in, timeline_duration):.6f}")
+    preview_slice = bool(segment_audio.get("_preview_slice", False))
+    timeline_offset = max(0.0, float(segment_audio.get("_timeline_offset_seconds", 0.0) or 0.0))
+    segment_timeline_duration = max(
+        timeline_duration,
+        float(segment_audio.get("_segment_timeline_duration_seconds", timeline_duration) or timeline_duration),
+    )
+    if fade_in > 0 and (not preview_slice or timeline_offset < fade_in):
+        remaining = fade_in - timeline_offset if preview_slice else fade_in
+        if remaining > 0:
+            filters.append(f"afade=t=in:st=0:d={min(remaining, timeline_duration):.6f}")
     if fade_out > 0 and timeline_duration > 0:
-        filters.append(f"afade=t=out:st={max(0.0, timeline_duration - fade_out):.6f}:d={min(fade_out, timeline_duration):.6f}")
+        fade_start = segment_timeline_duration - fade_out - timeline_offset if preview_slice else timeline_duration - fade_out
+        if fade_start < timeline_duration:
+            local_start = max(0.0, fade_start)
+            filters.append(f"afade=t=out:st={local_start:.6f}:d={min(fade_out, timeline_duration - local_start):.6f}")
     filters.append("asetpts=PTS-STARTPTS")
     return ",".join(filters)
 

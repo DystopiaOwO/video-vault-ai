@@ -33,6 +33,10 @@ def cache_key_payload(manifest: Mapping[str, Any], segment: Mapping[str, Any]) -
             key: (segment.get("audio") or {}).get(key, segment.get("audio_role") if key == "role" else None)
             for key in ("role", "volume_db", "fade_in_seconds", "fade_out_seconds")
         },
+        "preview_audio_envelope": {
+            key: (segment.get("audio") or {}).get(key)
+            for key in ("_preview_slice", "_timeline_offset_seconds", "_segment_timeline_duration_seconds")
+        },
         "profile": {key: profile.get(key) for key in ("profile_id", "width", "height", "fps", "video_codec", "pixel_format", "audio_codec", "audio_sample_rate", "audio_channels")},
         "encoder": settings.get("encoder", "auto"),
         "audio_codec": profile.get("audio_codec"),
