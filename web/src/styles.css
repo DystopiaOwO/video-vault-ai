@@ -398,6 +398,57 @@ input, select {
   box-sizing: border-box;
 }
 
+.storyboard-dirty {
+  display: block;
+  margin-top: 6px;
+  color: #b45309;
+}
+
+.storyboard-drop-wrapper {
+  position: relative;
+}
+
+.storyboard-drop-indicator {
+  min-height: 0;
+  height: 0;
+  overflow: hidden;
+  color: #2563eb;
+  border: 1px dashed transparent;
+  text-align: center;
+  font-size: 12px;
+  transition: min-height .12s ease, height .12s ease, padding .12s ease, border-color .12s ease;
+}
+
+.storyboard-drop-indicator.active {
+  min-height: 24px;
+  height: 24px;
+  padding: 3px;
+  border-color: #60a5fa;
+  background: #eff6ff;
+}
+
+.storyboard-timing {
+  align-items: end;
+}
+
+.storyboard-timing label,
+.storyboard-range-start {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.storyboard-timing input {
+  width: 92px;
+}
+
+.storyboard-preview-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
 .storyboard-preview-video {
   width: min(100%, 720px);
   max-height: 420px;

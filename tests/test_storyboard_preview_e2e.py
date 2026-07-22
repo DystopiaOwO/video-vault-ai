@@ -75,6 +75,43 @@ def test_transition_preview_contains_adjacent_segments(tmp_path: Path):
 
     result = render_storyboard_preview(cfg, db, project_id, mode="transition", segment_id=segment_ids[0])
 
-    assert result["duration_seconds"] == pytest.approx(5.0, abs=0.2)
+    assert [item["kind"] for item in result["previews"]] == ["outgoing"]
+    assert result["previews"][0]["duration_seconds"] == pytest.approx(4.0, abs=0.2)
     probe = subprocess.run([FFPROBE, "-v", "error", "-show_streams", "-of", "json", str(storyboard_preview_path(cfg, project_id, result["file"]))], capture_output=True, text=True, encoding="utf-8", check=False)
     assert {stream["codec_type"] for stream in json.loads(probe.stdout)["streams"]} >= {"video", "audio"}
+
+
+def test_transition_preview_returns_incoming_slice(tmp_path: Path):
+    cfg, db, project_id = _project(tmp_path)
+    state = json.loads((tmp_path / "08_projects" / f"project_{project_id}" / "storyboard.json").read_text(encoding="utf-8"))
+    segment_ids = list(state["segments"])
+
+    result = render_storyboard_preview(cfg, db, project_id, mode="transition", segment_id=segment_ids[-1])
+
+    assert [item["kind"] for item in result["previews"]] == ["incoming"]
+    assert result["previews"][0]["duration_seconds"] == pytest.approx(4.0, abs=0.2)
+
+
+def test_single_segment_transition_preview(tmp_path: Path):
+    cfg, db, project_id = _project(tmp_path)
+    state = json.loads((tmp_path / "08_projects" / f"project_{project_id}" / "storyboard.json").read_text(encoding="utf-8"))
+    segment_ids = list(state["segments"])
+    state["segments"][segment_ids[1]]["included"] = False
+    (tmp_path / "08_projects" / f"project_{project_id}" / "storyboard.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    result = render_storyboard_preview(cfg, db, project_id, mode="transition", segment_id=segment_ids[0])
+
+    assert [item["kind"] for item in result["previews"]] == ["outgoing"]
+    assert result["previews"][0]["duration_seconds"] <= 4.2
+
+
+def test_range_preview_honors_timeline_start_and_transient_state(tmp_path: Path):
+    cfg, db, project_id = _project(tmp_path)
+    state_path = tmp_path / "08_projects" / f"project_{project_id}" / "storyboard.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    before = state_path.read_text(encoding="utf-8")
+
+    result = render_storyboard_preview(cfg, db, project_id, mode="range", timeline_start_seconds=3, duration_seconds=5, storyboard_state=state)
+
+    assert result["timeline_start_seconds"] == pytest.approx(3, abs=0.01)
+    assert state_path.read_text(encoding="utf-8") == before

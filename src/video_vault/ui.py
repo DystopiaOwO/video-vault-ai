@@ -429,8 +429,11 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 save_revision_notes(cfg, project_id, data.get("notes", ""))
                 self._json({"ok": True, "plan": build_project_plan(cfg, db, project_id)})
             elif path == "/api/project/segments":
-                project_id = int(data.get("project_id", 0))
-                self._json({"ok": True, "path": str(save_segment_review(cfg, db, project_id, data.get("segments", [])))})
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    self._json({"ok": True, "path": str(save_segment_review(cfg, db, project_id, data.get("segments", [])))})
+                except (OSError, TypeError, ValueError) as exc:
+                    self._json({"ok": False, "code": "invalid_segment_review", "error": str(exc)})
             elif path == "/api/project/storyboard":
                 try:
                     project_id = int(data.get("project_id", 0))
@@ -462,9 +465,14 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                         mode=str(data.get("mode") or "range"),
                         segment_id=str(data.get("segment_id") or "") or None,
                         duration_seconds=float(data.get("duration_seconds") or 8),
+                        timeline_start_seconds=float(data.get("timeline_start_seconds") or 0),
+                        storyboard_state=data.get("storyboard_state") if isinstance(data.get("storyboard_state"), dict) else None,
                         force=bool(data.get("force")),
                     )
-                    result["url"] = f"/api/project/storyboard-preview-file?project_id={project_id}&file={result['file']}"
+                    for preview in result.get("previews", []):
+                        preview["url"] = f"/api/project/storyboard-preview-file?project_id={project_id}&file={preview['file']}"
+                    if result.get("file"):
+                        result["url"] = f"/api/project/storyboard-preview-file?project_id={project_id}&file={result['file']}"
                     self._json(result)
                 except (AudioPreviewError, StoryboardPreviewError, OSError, TypeError, ValueError) as exc:
                     self._json({"ok": False, "code": "storyboard_preview_failed", "error": str(exc)})

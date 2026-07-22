@@ -312,61 +312,148 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
 function StoryboardPanel({ detail, setMessage, refreshProject }: { detail: ProjectDetail; setMessage: (value: string) => void; refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]> }) {
   const emptyStoryboard: StoryboardState = { schema_version: 1, groups: [], segments: {} };
   const [state, setState] = useState<StoryboardState>(detail.storyboard || emptyStoryboard);
+  const [lastServerState, setLastServerState] = useState<StoryboardState>(detail.storyboard || emptyStoryboard);
+  const [isDirty, setIsDirty] = useState(false);
+  const [saveInProgress, setSaveInProgress] = useState(false);
   const [busy, setBusy] = useState("");
-  const [previewUrl, setPreviewUrl] = useState("");
   const [dragged, setDragged] = useState("");
+  const [dropTarget, setDropTarget] = useState<{ segmentId: string; position: "before" | "after" } | null>(null);
   const [newGroup, setNewGroup] = useState("");
-  useEffect(() => setState(detail.storyboard || emptyStoryboard), [detail.project.id, detail.storyboard]);
+  const [rangeStart, setRangeStart] = useState(0);
+  const [rangeDuration, setRangeDuration] = useState(8);
+  const [selectedSegmentId, setSelectedSegmentId] = useState("");
+  const [previewItems, setPreviewItems] = useState<Array<{ kind: string; url?: string; duration_seconds: number }>>([]);
+  const [segmentDrafts, setSegmentDrafts] = useState<Record<string, { start_seconds: number; end_seconds: number; speed: number }>>({});
+  const [loadedProjectId, setLoadedProjectId] = useState(detail.project.id);
+
+  useEffect(() => {
+    const incoming = detail.storyboard || emptyStoryboard;
+    setLastServerState(incoming);
+    if (loadedProjectId !== detail.project.id) {
+      setLoadedProjectId(detail.project.id);
+      setState(incoming);
+      setIsDirty(false);
+      setSaveInProgress(false);
+      setSelectedSegmentId("");
+      setPreviewItems([]);
+      return;
+    }
+    if (!isDirty && !saveInProgress) setState(incoming);
+  }, [detail.project.id, detail.storyboard, isDirty, saveInProgress]);
 
   const rowsByGroup = (groupId: string) => detail.segments
     .filter((row) => state.segments[row.segment_id]?.group_id === groupId)
     .sort((a, b) => (state.segments[a.segment_id]?.order || 0) - (state.segments[b.segment_id]?.order || 0));
 
+  function normalizeOrders(next: StoryboardState): StoryboardState {
+    const result = structuredClone(next);
+    result.groups = result.groups.map((group, index) => ({ ...group, order: index + 1 }));
+    result.groups.forEach((group) => rowsByGroupFromState(result, group.group_id).forEach((segmentId, index) => { result.segments[segmentId].order = index + 1; }));
+    return result;
+  }
+
+  function rowsByGroupFromState(current: StoryboardState, groupId: string): string[] {
+    return Object.entries(current.segments)
+      .filter(([, item]) => item.group_id === groupId)
+      .sort(([, a], [, b]) => a.order - b.order)
+      .map(([segmentId]) => segmentId);
+  }
+
+  function updateLocal(next: StoryboardState) {
+    setState(normalizeOrders(next));
+    setIsDirty(true);
+  }
+
   async function generate(force = false) {
+    if (isDirty) { setMessage("請先儲存未儲存的分鏡變更，再重新產生。"); return; }
     setBusy("generate");
     const result = await api.generateStoryboard(detail.project.id, force);
     setBusy("");
     if (!result.ok || !result.storyboard) { setMessage(`分鏡建立失敗：${result.error || "未知錯誤"}`); return; }
     setState(result.storyboard);
-    setMessage(force ? "分鏡已強制重新產生，人工排序與備註已保留。" : "分鏡已建立，請開始審核與排序。");
+    setLastServerState(result.storyboard);
+    setIsDirty(false);
+    setMessage(force ? "分鏡已重新產生，鎖定片段、人工排序、備註與自訂群組已保留。" : "分鏡已建立，請開始審核與排序。");
     await refreshProject();
   }
 
   async function save(next = state) {
+    const normalized = normalizeOrders(next);
+    setSaveInProgress(true);
     setBusy("save");
-    const result = await api.updateStoryboard(detail.project.id, next);
-    setBusy("");
-    if (!result.ok) { setMessage(`分鏡儲存失敗：${result.error || "未知錯誤"}`); return; }
-    setMessage("分鏡已儲存，專案已回到待審。重新核准後才能正式輸出。");
+    const result = await api.updateStoryboard(detail.project.id, normalized);
+    if (!result.ok) {
+      setSaveInProgress(false);
+      setBusy("");
+      setMessage(`分鏡儲存失敗：${result.error || "未知錯誤"}`);
+      return;
+    }
+    const saved = result.storyboard || normalized;
+    setState(saved);
+    setLastServerState(saved);
+    setIsDirty(false);
     await refreshProject();
+    setSaveInProgress(false);
+    setBusy("");
+    setMessage("分鏡已儲存，專案已回到待審。重新核准後才能正式輸出。");
   }
 
   function editSegment(segmentId: string, patch: Partial<StoryboardState["segments"][string]>) {
-    setState((current) => ({ ...current, segments: { ...current.segments, [segmentId]: { ...current.segments[segmentId], ...patch } } }));
+    const next = structuredClone(state);
+    next.segments[segmentId] = { ...next.segments[segmentId], ...patch };
+    updateLocal(next);
   }
 
-  function moveToGroup(segmentId: string, groupId: string) {
+  function reorder(dragId: string, targetId: string, position: "before" | "after") {
+    if (!dragId || !targetId || dragId === targetId) return;
     const next = structuredClone(state);
-    const entry = next.segments[segmentId];
-    if (!entry) return;
-    entry.group_id = groupId;
-    entry.order = Math.max(0, ...Object.values(next.segments).filter((item) => item.group_id === groupId).map((item) => item.order)) + 1;
-    setState(next);
+    const targetGroup = next.segments[targetId]?.group_id;
+    if (!targetGroup || !next.segments[dragId]) return;
+    for (const group of next.groups) {
+      const ids = rowsByGroupFromState(next, group.group_id).filter((id) => id !== dragId);
+      if (group.group_id !== targetGroup) continue;
+      const targetIndex = ids.indexOf(targetId);
+      ids.splice(Math.max(0, targetIndex + (position === "after" ? 1 : 0)), 0, dragId);
+      ids.forEach((id, index) => { next.segments[id].manual_group = next.segments[id].manual_group || next.segments[id].group_id !== group.group_id; next.segments[id].manual_order = true; next.segments[id].group_id = group.group_id; next.segments[id].order = index + 1; });
+    }
+    updateLocal(next);
+    setDragged("");
+    setDropTarget(null);
   }
 
   function dropOnGroup(groupId: string) {
     if (!dragged) return;
-    moveToGroup(dragged, groupId);
+    const next = structuredClone(state);
+    const ids = rowsByGroupFromState(next, groupId).filter((id) => id !== dragged);
+    ids.push(dragged);
+    ids.forEach((id, index) => { next.segments[id].manual_group = true; next.segments[id].manual_order = true; next.segments[id].group_id = groupId; next.segments[id].order = index + 1; });
+    updateLocal(next);
     setDragged("");
+    setDropTarget(null);
+  }
+
+  function moveVertical(segmentId: string, delta: number) {
+    const groupId = state.segments[segmentId]?.group_id;
+    if (!groupId) return;
+    const ids = rowsByGroupFromState(state, groupId);
+    const index = ids.indexOf(segmentId);
+    const target = index + delta;
+    if (index < 0 || target < 0 || target >= ids.length) return;
+    reorder(segmentId, ids[target], delta < 0 ? "before" : "after");
+  }
+
+  function moveToGroup(segmentId: string, groupId: string) {
+    const next = structuredClone(state);
+    const ids = rowsByGroupFromState(next, groupId).filter((id) => id !== segmentId);
+    ids.push(segmentId);
+    ids.forEach((id, index) => { next.segments[id].manual_group = true; next.segments[id].manual_order = true; next.segments[id].group_id = groupId; next.segments[id].order = index + 1; });
+    updateLocal(next);
   }
 
   function addGroup() {
     const title = newGroup.trim();
     if (!title) return;
-    const next = structuredClone(state);
-    const groupId = `custom_${Date.now()}`;
-    next.groups.push({ group_id: groupId, title, category: "custom", order: next.groups.length + 1 });
-    setState(next);
+    updateLocal({ ...state, groups: [...state.groups, { group_id: `custom_${Date.now()}`, title, category: "custom", order: state.groups.length + 1 }] });
     setNewGroup("");
   }
 
@@ -376,12 +463,16 @@ function StoryboardPanel({ detail, setMessage, refreshProject }: { detail: Proje
     if (index < 0 || target < 0 || target >= state.groups.length) return;
     const groups = [...state.groups];
     [groups[index], groups[target]] = [groups[target], groups[index]];
-    setState({ ...state, groups: groups.map((group, order) => ({ ...group, order: order + 1 })) });
+    updateLocal({ ...state, groups });
   }
 
   function deleteEmptyGroup(groupId: string) {
-    if (rowsByGroup(groupId).length) return;
-    setState({ ...state, groups: state.groups.filter((group) => group.group_id !== groupId).map((group, order) => ({ ...group, order: order + 1 })) });
+    if (rowsByGroupFromState(state, groupId).length) return;
+    updateLocal({ ...state, groups: state.groups.filter((group) => group.group_id !== groupId) });
+  }
+
+  function editGroup(groupId: string, title: string) {
+    updateLocal({ ...state, groups: state.groups.map((group) => group.group_id === groupId ? { ...group, title } : group) });
   }
 
   async function thumbnail(segment: Segment, ratio: number, force = false) {
@@ -389,44 +480,88 @@ function StoryboardPanel({ detail, setMessage, refreshProject }: { detail: Proje
     const result = await api.storyboardThumbnail(detail.project.id, segment.segment_id, ratio, force);
     if (!result.ok) { setMessage(`代表畫格產生失敗：${result.error || "未知錯誤"}`); return; }
     setState((current) => ({ ...current, segments: { ...current.segments, [segment.segment_id]: { ...current.segments[segment.segment_id], thumbnail_time_ratio: ratio, thumbnail_url: result.url } } }));
-    setMessage(result.cache_hit ? "代表畫格已從快取載入。" : "代表畫格已產生。");
+    setMessage(result.cache_hit ? "代表畫格已從快取載入。" : "代表畫格已產生。請儲存分鏡以保留位置。");
   }
 
   async function preview(mode: "segment" | "transition" | "range", segmentId?: string, force = false) {
     setBusy("preview");
-    const result = await api.storyboardPreview(detail.project.id, { mode, segmentId, durationSeconds: mode === "segment" ? 5 : 8, force });
+    const selected = segmentId || selectedSegmentId;
+    const start = mode === "range" ? (selected ? timelineStart(selected) : rangeStart) : 0;
+    const result = await api.storyboardPreview(detail.project.id, { mode, segmentId: selected, durationSeconds: mode === "segment" ? 5 : rangeDuration, timelineStartSeconds: start, storyboardState: isDirty ? state : undefined, force });
     setBusy("");
     if (!result.ok) { setMessage(`分鏡預覽失敗：${result.error || "未知錯誤"}`); return; }
-    setPreviewUrl(result.url || "");
+    setPreviewItems(result.previews?.map((item) => ({ kind: item.kind, url: item.url, duration_seconds: item.duration_seconds })) || (result.url ? [{ kind: mode, url: result.url, duration_seconds: Number(result.duration_seconds || 0) }] : []));
     setMessage(force ? "分鏡預覽已強制重新產生。" : result.cache_hit ? "分鏡預覽已從快取載入。" : "分鏡預覽已產生。");
+  }
+
+  function timelineStart(segmentId: string): number {
+    let total = 0;
+    for (const group of state.groups) {
+      for (const id of rowsByGroupFromState(state, group.group_id)) {
+        if (!state.segments[id].included) continue;
+        if (id === segmentId) return total;
+        const row = detail.segments.find((item) => item.segment_id === id);
+        if (row) total += Math.max(0, (row.end_seconds - row.start_seconds) / Math.max(0.01, row.speed || 1));
+      }
+    }
+    return total;
+  }
+
+  function timingDraft(segment: Segment) {
+    return segmentDrafts[segment.segment_id] || { start_seconds: segment.start_seconds, end_seconds: segment.end_seconds, speed: segment.speed || 1 };
+  }
+
+  function updateTiming(segment: Segment, patch: Partial<{ start_seconds: number; end_seconds: number; speed: number }>) {
+    setSegmentDrafts((current) => ({ ...current, [segment.segment_id]: { ...timingDraft(segment), ...patch } }));
+  }
+
+  async function saveTiming(segment: Segment) {
+    const draft = timingDraft(segment);
+    if (draft.start_seconds < 0 || draft.end_seconds <= draft.start_seconds || draft.speed < 0.25 || draft.speed > 4) {
+      setMessage("起點、終點或速度不符合規則。");
+      return;
+    }
+    setBusy(`timing:${segment.segment_id}`);
+    const result = await api.saveSegments(detail.project.id, detail.segments.map((row) => row.segment_id === segment.segment_id ? { ...row, ...draft } : row));
+    setBusy("");
+    setMessage(result.ok ? "片段時間與速度已儲存，Approval 已失效。" : `片段時間儲存失敗：${result.error || "未知錯誤"}`);
+    if (result.ok) await refreshProject({ forceFresh: true });
   }
 
   async function quickAudio(segmentId: string, role: AudioSegmentSettings["role"] | "default") {
     const segments = { ...detail.audio.segments, [segmentId]: role === "default" ? null : { ...(detail.audio.segments[segmentId] || {}), role } };
     const result = await api.audioSettings(detail.project.id, { segments });
     setMessage(result.ok ? "分鏡片段原音設定已更新，專案已回到待審。" : `原音設定失敗：${result.error || "未知錯誤"}`);
-    if (result.ok) await refreshProject();
+    if (result.ok) await refreshProject({ forceFresh: true });
   }
 
   async function quickColor(segmentId: string, enabled: boolean) {
     const current = detail.color.segments[segmentId] || { enabled: true, locked: false, excluded: false, applied: detail.color.applied };
     const result = await api.colorSettings(detail.project.id, { schema_version: detail.color.schema_version, enabled: detail.color.enabled, applied: detail.color.applied, segments: { [segmentId]: { enabled, locked: Boolean(current.locked), excluded: Boolean(current.excluded), applied: current.applied || detail.color.applied } } });
     setMessage(result.ok ? "分鏡片段調色設定已更新，專案已回到待審。" : `調色設定失敗：${result.error || "未知錯誤"}`);
-    if (result.ok) await refreshProject();
+    if (result.ok) await refreshProject({ forceFresh: true });
   }
 
-  if (!state.exists && !state.groups.length) return <Card title="分鏡審核"><p className="muted">先建立分鏡，系統會依內容感知與專案類型提出分組建議。</p><button className="good" disabled={busy === "generate"} onClick={() => generate()}>{busy === "generate" ? "建立中…" : "建立分鏡"}</button></Card>;
+  function effectiveAudio(segment: Segment) {
+    const override = detail.audio.segments[segment.segment_id];
+    const raw = override?.role || detail.audio.original_audio.default_role || segment.audio_role || "lower";
+    const label: Record<string, string> = { keep: "保留原音", keep_original: "保留原音", lower: "降低原音", lower_original: "降低原音", mute: "靜音", bgm_only: "只留 BGM" };
+    return override?.role ? (label[raw] || raw) : `使用專案預設（${label[raw] || raw}）`;
+  }
+
+  function effectiveColor(segment: Segment) {
+    const override = detail.color.segments[segment.segment_id];
+    const enabled = detail.color.enabled && (override?.enabled ?? true) && !override?.excluded;
+    return override ? (enabled ? "啟用" : "停用") : `使用專案預設（${enabled ? "啟用" : "停用"}）`;
+  }
+
+  if (!state.exists && !state.groups.length) return <Card title="分鏡審核"><p className="muted">先建立分鏡，系統會依內容感知與專案類型提出分組建議。</p><button className="good" disabled={busy === "generate"} onClick={() => void generate()}>{busy === "generate" ? "建立中…" : "建立分鏡"}</button></Card>;
   return <Card title="分鏡審核">
-    <div className="storyboard-toolbar">
-      <div><b>主要操作介面</b><span className="muted">拖曳片段可跨群組排序；鎖定只保護自動重建，不限制人工移動。</span></div>
-      <div className="row"><button disabled={Boolean(busy)} onClick={() => generate(true)}>重新產生分鏡</button><button disabled={Boolean(busy)} onClick={() => save()} className="good">{busy === "save" ? "儲存中…" : "儲存分鏡"}</button><button disabled={Boolean(busy)} onClick={() => preview("range")}>預覽目前選取範圍</button><button disabled={Boolean(busy)} onClick={() => preview("range", undefined, true)}>強制重新產生</button></div>
-    </div>
+    <div className="storyboard-toolbar"><div><b>主要操作介面</b><span className="muted">卡片可拖曳到指定卡片前後；↑／↓ 可用鍵盤調整。Lock 只保護自動重建，不限制人工編輯。</span>{isDirty && <strong className="storyboard-dirty">有未儲存變更</strong>}</div><div className="row"><button disabled={Boolean(busy) || isDirty} onClick={() => void generate(true)}>重新產生分鏡</button><button disabled={Boolean(busy) || saveInProgress || !isDirty} onClick={() => void save()} className="good">{saveInProgress ? "儲存中…" : "儲存分鏡"}</button><label>起始秒數<input className="storyboard-range-start" type="number" min={0} step={0.1} value={selectedSegmentId ? timelineStart(selectedSegmentId) : rangeStart} onChange={(event) => { setSelectedSegmentId(""); setRangeStart(Math.max(0, Number(event.target.value))); }} /></label><select value={rangeDuration} onChange={(event) => setRangeDuration(Number(event.target.value))}><option value={5}>5 秒</option><option value={8}>8 秒</option><option value={12}>12 秒</option></select><button disabled={Boolean(busy)} onClick={() => void preview("range")}>{selectedSegmentId ? "預覽目前分鏡範圍" : "預覽開頭 8 秒"}</button><button disabled={Boolean(busy)} onClick={() => void preview("range", undefined, true)}>強制重新產生</button></div></div>
     {state.summary && <div className="storyboard-summary"><b>共 {state.summary.total_segments} 個片段｜使用 {state.summary.included_segments} 個｜排除 {state.summary.excluded_segments} 個｜預估 {time(state.summary.estimated_duration_seconds)}</b>{state.groups.map((group) => { const item = state.summary?.groups.find((summary) => summary.group_id === group.group_id); return <span key={group.group_id}>{group.title} {item?.count || 0} 段｜{time(item?.duration_seconds || 0)}</span>; })}</div>}
     <div className="row storyboard-group-tools"><input value={newGroup} onChange={(event) => setNewGroup(event.target.value)} placeholder="新增分組名稱" /><button onClick={addGroup}>新增分組</button></div>
-    <div className="storyboard-groups">
-      {state.groups.map((group) => <section className="storyboard-group" key={group.group_id} onDragOver={(event) => event.preventDefault()} onDrop={() => dropOnGroup(group.group_id)}><div className="storyboard-group-heading"><input value={group.title} onChange={(event) => setState((current) => ({ ...current, groups: current.groups.map((item) => item.group_id === group.group_id ? { ...item, title: event.target.value } : item) }))} /><span className="muted">{group.category}</span><div className="row"><button aria-label="上移群組" onClick={() => moveGroup(group.group_id, -1)}>↑</button><button aria-label="下移群組" onClick={() => moveGroup(group.group_id, 1)}>↓</button>{!rowsByGroup(group.group_id).length && <button onClick={() => deleteEmptyGroup(group.group_id)}>刪除空群組</button>}</div></div>{rowsByGroup(group.group_id).map((segment) => { const item = state.segments[segment.segment_id]; const color = detail.color.segments[segment.segment_id]; const audioOverride = detail.audio.segments[segment.segment_id]; return <article className={`storyboard-card${item?.included ? "" : " excluded"}`} key={segment.segment_id} draggable onDragStart={() => setDragged(segment.segment_id)}><div className="storyboard-thumb">{item?.thumbnail_url ? <img src={item.thumbnail_url} alt={`${segment.title} 代表畫格`} /> : <span>尚未產生代表畫格</span>}</div><div className="storyboard-card-body"><div className="row"><b>{segment.title || segment.segment_id}</b><span className="muted">{segment.source_filename || segment.clip_id}</span></div><span className="muted">{time(segment.start_seconds)} ~ {time(segment.end_seconds)}｜成片 {time(Math.max(0, (segment.end_seconds - segment.start_seconds) / Math.max(.01, segment.speed || 1)))}</span><span>Scene Role：{segment.scene_role}｜故事位置：{segment.story_position || "未指定"}｜AI {Number(segment.score || 0).toFixed(2)}｜{segment.suggested_use}</span><span>原音：{audioOverride?.role || segment.audio_role}｜調色：{color?.enabled ? "啟用" : "未啟用"}｜{item?.included ? "納入" : "排除"}</span><div className="row"><label className="toggle"><input type="checkbox" checked={Boolean(item?.included)} onChange={(event) => editSegment(segment.segment_id, { included: event.target.checked })} />納入</label><label className="toggle"><input type="checkbox" checked={Boolean(item?.locked)} onChange={(event) => editSegment(segment.segment_id, { locked: event.target.checked })} />鎖定</label><select value={item?.group_id || group.group_id} onChange={(event) => moveToGroup(segment.segment_id, event.target.value)}>{state.groups.map((option) => <option key={option.group_id} value={option.group_id}>{option.title}</option>)}</select><select value={item?.thumbnail_time_ratio || .5} onChange={(event) => void thumbnail(segment, Number(event.target.value))}><option value="0.25">代表畫格 25%</option><option value="0.5">代表畫格 50%</option><option value="0.75">代表畫格 75%</option></select><select aria-label="快速原音" value={audioOverride?.role || "default"} onChange={(event) => void quickAudio(segment.segment_id, event.target.value as AudioSegmentSettings["role"] | "default")}><option value="default">套用專案預設</option><option value="keep">保留原音</option><option value="lower">降低原音</option><option value="mute">靜音</option><option value="bgm_only">只留 BGM</option></select><button onClick={() => void quickColor(segment.segment_id, !color?.enabled)}>調色 {color?.enabled ? "停用" : "啟用"}</button></div><textarea value={item?.notes || ""} onChange={(event) => editSegment(segment.segment_id, { notes: event.target.value })} placeholder="分鏡備註" /><div className="row"><button disabled={Boolean(busy)} onClick={() => void thumbnail(segment, item?.thumbnail_time_ratio || .5)}>代表畫格</button><button disabled={Boolean(busy)} onClick={() => void preview("segment", segment.segment_id)}>預覽此片段</button><button disabled={Boolean(busy)} onClick={() => void preview("transition", segment.segment_id)}>預覽前後銜接</button></div></div></article>; })}</section>)}
-    </div>
-    {previewUrl && <video className="storyboard-preview-video" controls src={previewUrl} />}
+    <div className="storyboard-groups">{state.groups.map((group) => <section className="storyboard-group" key={group.group_id} onDragOver={(event) => event.preventDefault()} onDrop={() => dropOnGroup(group.group_id)}><div className="storyboard-group-heading"><input value={group.title} onChange={(event) => editGroup(group.group_id, event.target.value)} /><span className="muted">{group.category}</span><div className="row"><button aria-label="上移群組" onClick={() => moveGroup(group.group_id, -1)}>↑</button><button aria-label="下移群組" onClick={() => moveGroup(group.group_id, 1)}>↓</button>{!rowsByGroup(group.group_id).length && <button onClick={() => deleteEmptyGroup(group.group_id)}>刪除空群組</button>}</div></div>{rowsByGroup(group.group_id).map((segment) => { const item = state.segments[segment.segment_id]; const draft = timingDraft(segment); return <div key={segment.segment_id} className="storyboard-drop-wrapper"><div className={`storyboard-drop-indicator${dropTarget?.segmentId === segment.segment_id && dropTarget.position === "before" ? " active" : ""}`}>放到此片段前</div><article className={`storyboard-card${item?.included ? "" : " excluded"}`} draggable onDragStart={(event) => { setDragged(segment.segment_id); event.dataTransfer.setData("text/plain", segment.segment_id); }} onDragOver={(event) => { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); setDropTarget({ segmentId: segment.segment_id, position: event.clientY < rect.top + rect.height / 2 ? "before" : "after" }); }} onDrop={(event) => { event.stopPropagation(); const target = dropTarget || { segmentId: segment.segment_id, position: "after" as const }; reorder(dragged || event.dataTransfer.getData("text/plain"), target.segmentId, target.position); }} onClick={() => setSelectedSegmentId(segment.segment_id)}><div className="storyboard-thumb">{item?.thumbnail_url ? <img src={item.thumbnail_url} alt={`${segment.title} 代表畫格`} /> : <span>尚未產生代表畫格</span>}</div><div className="storyboard-card-body"><div className="row"><b>{segment.title || segment.segment_id}</b><span className="muted">{segment.source_filename || segment.clip_id}</span></div><span className="muted">{time(segment.start_seconds)} ~ {time(segment.end_seconds)}｜成片 {time(Math.max(0, (segment.end_seconds - segment.start_seconds) / Math.max(.01, segment.speed || 1)))}</span><span>Scene Role：{segment.scene_role}｜故事位置：{segment.story_position || "未指定"}｜AI {Number(segment.score || 0).toFixed(2)}｜{segment.suggested_use}</span><span>原音：{effectiveAudio(segment)}｜調色：{effectiveColor(segment)}｜{item?.included ? "納入" : "排除"}</span><div className="row"><label className="toggle"><input type="checkbox" checked={Boolean(item?.included)} onChange={(event) => editSegment(segment.segment_id, { included: event.target.checked })} />納入</label><label className="toggle"><input type="checkbox" checked={Boolean(item?.locked)} onChange={(event) => editSegment(segment.segment_id, { locked: event.target.checked })} />鎖定</label><select value={item?.group_id || group.group_id} onChange={(event) => moveToGroup(segment.segment_id, event.target.value)}><option value={group.group_id}>{group.title}</option>{state.groups.filter((option) => option.group_id !== group.group_id).map((option) => <option key={option.group_id} value={option.group_id}>{option.title}</option>)}</select><select value={item?.thumbnail_time_ratio || .5} onChange={(event) => void thumbnail(segment, Number(event.target.value))}><option value="0.25">代表畫格 25%</option><option value="0.5">代表畫格 50%</option><option value="0.75">代表畫格 75%</option></select><select aria-label="快速原音" value={detail.audio.segments[segment.segment_id]?.role || "default"} onChange={(event) => void quickAudio(segment.segment_id, event.target.value as AudioSegmentSettings["role"] | "default")}><option value="default">套用專案預設</option><option value="keep">保留原音</option><option value="lower">降低原音</option><option value="mute">靜音</option><option value="bgm_only">只留 BGM</option></select><button onClick={() => void quickColor(segment.segment_id, !detail.color.segments[segment.segment_id]?.enabled)}>調色 {detail.color.segments[segment.segment_id]?.enabled ? "停用" : "啟用"}</button></div><div className="row storyboard-timing"><label>起點<input type="number" min={0} step={0.001} value={draft.start_seconds} onChange={(event) => updateTiming(segment, { start_seconds: Number(event.target.value) })} /></label><label>終點<input type="number" min={0} step={0.001} value={draft.end_seconds} onChange={(event) => updateTiming(segment, { end_seconds: Number(event.target.value) })} /></label><label>速度<input type="number" min={0.25} max={4} step={0.05} value={draft.speed} onChange={(event) => updateTiming(segment, { speed: Number(event.target.value) })} /></label><button disabled={busy === `timing:${segment.segment_id}`} onClick={() => void saveTiming(segment)}>{busy === `timing:${segment.segment_id}` ? "儲存中…" : "儲存剪點"}</button><button aria-label="上移片段" onClick={() => moveVertical(segment.segment_id, -1)}>↑</button><button aria-label="下移片段" onClick={() => moveVertical(segment.segment_id, 1)}>↓</button></div><textarea value={item?.notes || ""} onChange={(event) => editSegment(segment.segment_id, { notes: event.target.value })} placeholder="分鏡備註" /><div className="row"><button disabled={Boolean(busy)} onClick={() => void thumbnail(segment, item?.thumbnail_time_ratio || .5)}>代表畫格</button><button disabled={Boolean(busy)} onClick={() => void preview("segment", segment.segment_id)}>預覽此片段</button><button disabled={Boolean(busy)} onClick={() => void preview("transition", segment.segment_id)}>預覽前後銜接</button></div></div></article><div className={`storyboard-drop-indicator${dropTarget?.segmentId === segment.segment_id && dropTarget.position === "after" ? " active" : ""}`}>放到此片段後</div></div>; })}</section>)}</div>
+    {previewItems.length > 0 && <div className="storyboard-preview-list">{previewItems.map((item, index) => <div key={`${item.kind}-${index}`}><b>{item.kind === "incoming" ? "前段銜接" : item.kind === "outgoing" ? "後段銜接" : "分鏡預覽"}｜{Number(item.duration_seconds || 0).toFixed(1)} 秒</b>{item.url && <video className="storyboard-preview-video" controls src={item.url} />}</div>)}</div>}
   </Card>;
 }
 

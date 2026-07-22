@@ -82,6 +82,10 @@ def normalize_storyboard(state: Mapping[str, Any] | None) -> dict[str, Any]:
             "order": _positive_int(raw.get("order"), 1),
             "included": bool(raw.get("included", True)),
             "locked": bool(raw.get("locked", False)),
+            "manual_group": bool(raw.get("manual_group", False)),
+            "manual_order": bool(raw.get("manual_order", False)),
+            "auto_group_id": str(raw.get("auto_group_id") or ""),
+            "auto_order": _positive_int(raw.get("auto_order"), 1),
             "thumbnail_time_ratio": _ratio(raw.get("thumbnail_time_ratio", 0.5)),
             "notes": str(raw.get("notes") or ""),
         }
@@ -108,13 +112,27 @@ def generate_storyboard(cfg: dict, db: Path, project_id: int, *, force: bool = F
     segment_state: dict[str, dict[str, Any]] = {}
     group_ids = {item["group_id"] for item in merged_groups}
     counters: dict[str, int] = {}
+    suggested_positions: dict[str, int] = {}
     for row in rows:
         segment_id = str(row["segment_id"])
         suggested_group = _group_id_for_row(row, groups)
+        suggested_positions[suggested_group] = suggested_positions.get(suggested_group, 0) + 1
         previous = old_segments.get(segment_id)
         if isinstance(previous, Mapping):
             item = dict(previous)
-            if item.get("group_id") not in group_ids:
+            old_group = str(item.get("group_id") or "")
+            old_group_data = old_groups.get(old_group) or {}
+            keep_group = bool(
+                item.get("locked")
+                or item.get("manual_group")
+                or item.get("notes")
+                or old_group_data.get("category") == "custom"
+                or (item.get("auto_group_id") and old_group != item.get("auto_group_id"))
+            )
+            if force and not keep_group:
+                item["group_id"] = suggested_group
+                item["auto_group_id"] = suggested_group
+            elif old_group not in group_ids:
                 item["group_id"] = suggested_group
         else:
             item = {}
@@ -122,11 +140,24 @@ def generate_storyboard(cfg: dict, db: Path, project_id: int, *, force: bool = F
         if group_id not in group_ids:
             group_id = suggested_group
         counters[group_id] = counters.get(group_id, 0) + 1
+        keep_order = bool(
+            item.get("locked")
+            or item.get("manual_order")
+            or item.get("notes")
+            or (item.get("auto_order") and _positive_int(item.get("order"), 1) != _positive_int(item.get("auto_order"), 1))
+        )
+        if force and not keep_order:
+            item["order"] = suggested_positions[suggested_group]
+            item["auto_order"] = suggested_positions[suggested_group]
         segment_state[segment_id] = {
             "group_id": group_id,
             "order": _positive_int(item.get("order"), counters[group_id]),
             "included": bool(item.get("included", row.get("include", True))),
             "locked": bool(item.get("locked", False)),
+            "manual_group": bool(item.get("manual_group", False)),
+            "manual_order": bool(item.get("manual_order", False)),
+            "auto_group_id": str(item.get("auto_group_id") or suggested_group),
+            "auto_order": _positive_int(item.get("auto_order"), suggested_positions[suggested_group]),
             "thumbnail_time_ratio": _ratio(item.get("thumbnail_time_ratio", 0.5)),
             "notes": str(item.get("notes", row.get("user_notes", "")) or ""),
         }
@@ -208,6 +239,31 @@ def apply_storyboard_state(rows: list[dict[str, Any]], state: Mapping[str, Any])
     return result
 
 
+def storyboard_render_state(state: Mapping[str, Any], rows: list[Mapping[str, Any]] | None = None) -> dict[str, Any]:
+    """Project the storyboard to fields that can change formal output."""
+    groups = [
+        {"group_id": str(group.get("group_id") or ""), "order": _positive_int(group.get("order"), index)}
+        for index, group in enumerate(state.get("groups") or [], 1)
+        if isinstance(group, Mapping) and str(group.get("group_id") or "")
+    ]
+    configured = state.get("segments") or {}
+    segment_ids = [str(row.get("segment_id")) for row in rows or [] if str(row.get("segment_id") or "")]
+    if not segment_ids:
+        segment_ids = [str(key) for key in configured if str(key)]
+    segments = []
+    for segment_id in segment_ids:
+        item = configured.get(segment_id) if isinstance(configured, Mapping) else None
+        if not isinstance(item, Mapping):
+            continue
+        segments.append({
+            "segment_id": segment_id,
+            "group_id": str(item.get("group_id") or ""),
+            "order": _positive_int(item.get("order"), 1),
+            "included": bool(item.get("included", True)),
+        })
+    return {"groups": groups, "segments": segments}
+
+
 def validate_storyboard(state: Mapping[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
     errors: list[str] = []
     groups = list(state.get("groups") or [])
@@ -243,20 +299,32 @@ def validate_storyboard(state: Mapping[str, Any], rows: list[dict[str, Any]]) ->
 
 
 def storyboard_for_api(cfg: dict, db: Path, project_id: int) -> dict[str, Any]:
+    from .audio_state import effective_segment_audio_settings
+    from .color_consistency import effective_color_settings, has_color_state, load_project_color_state
+
     state = load_storyboard(cfg, project_id) or default_storyboard()
     rows = _raw_project_segments(cfg, db, project_id)
     result = json.loads(json.dumps(state, ensure_ascii=False))
+    color_state = load_project_color_state(cfg, project_id) if has_color_state(cfg, project_id) else None
+    effective_roles: dict[str, str] = {}
     for segment_id, item in result["segments"].items():
+        row = next((candidate for candidate in rows if str(candidate.get("segment_id")) == segment_id), {})
+        audio = effective_segment_audio_settings(cfg, project_id, row)
+        effective_roles[segment_id] = str(audio.get("role") or "lower_original")
+        item["effective_audio_role"] = effective_roles[segment_id]
+        item["effective_color_enabled"] = bool(
+            color_state is not None and effective_color_settings(color_state, segment_id).get("mode") != "none"
+        )
         thumbnail = thumbnail_path_for_state(cfg, db, project_id, segment_id, item.get("thumbnail_time_ratio", 0.5))
         if thumbnail and thumbnail.is_file():
             item["thumbnail_url"] = f"/api/project/storyboard-thumbnail-file?project_id={project_id}&file={thumbnail.name}"
-    result["summary"] = storyboard_summary(rows, state)
+    result["summary"] = storyboard_summary(rows, state, effective_roles=effective_roles)
     result["validation"] = validate_storyboard(state, rows)
     result["exists"] = storyboard_path(cfg, project_id).is_file()
     return result
 
 
-def storyboard_summary(rows: list[dict[str, Any]], state: Mapping[str, Any]) -> dict[str, Any]:
+def storyboard_summary(rows: list[dict[str, Any]], state: Mapping[str, Any], *, effective_roles: Mapping[str, str] | None = None) -> dict[str, Any]:
     configured = state.get("segments") or {}
     included_rows = [row for row in rows if bool((configured.get(str(row["segment_id"])) or {}).get("included", row.get("include", True)))]
     excluded_rows = [row for row in rows if row not in included_rows]
@@ -270,7 +338,7 @@ def storyboard_summary(rows: list[dict[str, Any]], state: Mapping[str, Any]) -> 
         group_summary[group_id]["duration_seconds"] += duration(row)
     roles: dict[str, int] = {}
     for row in included_rows:
-        role = str(row.get("audio_role") or "lower_original")
+        role = str((effective_roles or {}).get(str(row["segment_id"])) or row.get("audio_role") or "lower_original")
         roles[role] = roles.get(role, 0) + 1
     return {
         "total_segments": len(rows),
@@ -423,5 +491,5 @@ __all__ = [
     "STORYBOARD_SCHEMA_VERSION", "THUMBNAIL_CONTRACT_VERSION", "apply_storyboard_state", "default_storyboard",
     "ensure_storyboard", "generate_storyboard", "generate_thumbnail", "load_storyboard", "normalize_storyboard",
     "save_storyboard", "storyboard_for_api", "storyboard_path", "storyboard_preview_dir", "storyboard_summary",
-    "storyboard_thumbnail_path", "update_storyboard", "validate_storyboard",
+    "storyboard_render_state", "storyboard_thumbnail_path", "update_storyboard", "validate_storyboard",
 ]

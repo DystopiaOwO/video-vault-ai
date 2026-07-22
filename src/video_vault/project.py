@@ -272,7 +272,28 @@ def _stage(stage_id: str, label: str, done: bool, artifacts: list[Path]) -> dict
 
 def save_segment_review(cfg: dict, db: Path, project_id: int, rows: list[dict]) -> Path:
     allowed = {"segment_id", "include", "user_notes", "manual_order", "scene_role", "story_position", "audio_role", "speed", "start_seconds", "end_seconds"}
-    data = [_clean_segment_review({**row, "manual_order": index}, allowed) for index, row in enumerate(rows, 1) if row.get("segment_id")]
+    current = {str(row.get("segment_id")): row for row in project_segments(cfg, project_id, _read_json(project_dir(cfg, project_id) / "project_plan.json"), apply_storyboard=False)}
+    videos = {int(row["id"]): dict(row) for row in project_videos(db, project_id)}
+    data = []
+    for index, row in enumerate(rows, 1):
+        segment_id = str(row.get("segment_id") or "")
+        if not segment_id:
+            continue
+        source = current.get(segment_id)
+        if source is None:
+            raise ValueError(f"找不到片段：{segment_id}")
+        cleaned = _clean_segment_review({**row, "manual_order": index}, allowed)
+        start = float(cleaned.get("start_seconds", source.get("start_seconds") or 0))
+        end = float(cleaned.get("end_seconds", source.get("end_seconds") or 0))
+        speed = float(cleaned.get("speed", source.get("speed") or 1.0))
+        source_duration = float((videos.get(int(source.get("video_id") or 0)) or {}).get("duration_seconds") or 0)
+        if start < 0 or end <= start:
+            raise ValueError(f"片段 {segment_id} 的時間範圍無效")
+        if source_duration > 0 and end > source_duration + 0.001:
+            raise ValueError(f"片段 {segment_id} 的結束時間超過來源長度")
+        if not 0.25 <= speed <= 4.0:
+            raise ValueError(f"片段 {segment_id} 的速度必須介於 0.25 到 4.0")
+        data.append(cleaned)
     path = project_dir(cfg, project_id) / "feedback" / "segment_review.json"
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     append_decision(cfg, project_id, "segment_review", f"更新 {len(data)} 段片段審核", "segment_review", affected_segments=[row.get("segment_id", "") for row in data])

@@ -33,6 +33,7 @@ def render_project_audio_preview(
     timeline_start_seconds: float = 0.0,
     duration_seconds: float = 12.0,
     audio_patch: dict[str, Any] | None = None,
+    storyboard_state_override: dict[str, Any] | None = None,
     force: bool = False,
     output_dir: Path | None = None,
 ) -> dict[str, Any]:
@@ -43,7 +44,13 @@ def render_project_audio_preview(
         raise AudioPreviewError("預覽起始時間不可為負數")
     override = _transient_audio_state(cfg, project_id, audio_patch) if audio_patch is not None else None
     try:
-        manifest = build_render_manifest(cfg, db, project_id, audio_state_override=override)
+        manifest = build_render_manifest(
+            cfg,
+            db,
+            project_id,
+            audio_state_override=override,
+            storyboard_state_override=storyboard_state_override,
+        )
     except Exception as exc:
         raise AudioPreviewError(f"無法建立音訊預覽 Manifest：{exc}") from exc
     project_duration = float(manifest.get("expected_duration_seconds") or 0.0)

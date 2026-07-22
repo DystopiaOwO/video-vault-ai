@@ -75,7 +75,7 @@ export type Segment = {
 };
 
 export type StoryboardGroup = { group_id: string; title: string; category: string; order: number };
-export type StoryboardSegment = { group_id: string; order: number; included: boolean; locked: boolean; thumbnail_time_ratio: number; notes: string; thumbnail_url?: string };
+export type StoryboardSegment = { group_id: string; order: number; included: boolean; locked: boolean; manual_group?: boolean; manual_order?: boolean; thumbnail_time_ratio: number; notes: string; thumbnail_url?: string; effective_audio_role?: string; effective_color_enabled?: boolean };
 export type StoryboardState = {
   schema_version: number;
   groups: StoryboardGroup[];
@@ -243,7 +243,7 @@ export const api = {
   revise: (projectId: number, notes: string) =>
     json<{ ok: boolean }>("/api/project/revise", post({ project_id: projectId, notes })),
   saveSegments: (projectId: number, segments: Segment[]) =>
-    json<{ ok: boolean }>("/api/project/segments", post({ project_id: projectId, segments })),
+    json<{ ok: boolean; path?: string; error?: string }>("/api/project/segments", post({ project_id: projectId, segments })),
   storyboard: (projectId: number) => json<StoryboardState>(`/api/project/storyboard?project_id=${projectId}`),
   generateStoryboard: (projectId: number, force = false) =>
     json<{ ok: boolean; storyboard?: StoryboardState; error?: string }>("/api/project/storyboard/generate", post({ project_id: projectId, force })),
@@ -251,8 +251,8 @@ export const api = {
     json<{ ok: boolean; storyboard?: StoryboardState; error?: string }>("/api/project/storyboard", post({ project_id: projectId, state })),
   storyboardThumbnail: (projectId: number, segmentId: string, ratio = 0.5, force = false) =>
     json<{ ok: boolean; file?: string; url?: string; cache_hit?: boolean; error?: string }>("/api/project/storyboard/thumbnail", post({ project_id: projectId, segment_id: segmentId, ratio, force })),
-  storyboardPreview: (projectId: number, options: { mode: "segment" | "transition" | "range"; segmentId?: string; durationSeconds?: number; force?: boolean }) =>
-    json<{ ok: boolean; file?: string; url?: string; cache_hit?: boolean; duration_seconds?: number; timeline_start_seconds?: number; error?: string }>("/api/project/storyboard/preview", post({ project_id: projectId, mode: options.mode, segment_id: options.segmentId || null, duration_seconds: options.durationSeconds ?? 8, force: options.force ?? false })),
+  storyboardPreview: (projectId: number, options: { mode: "segment" | "transition" | "range"; segmentId?: string; durationSeconds?: number; timelineStartSeconds?: number; storyboardState?: StoryboardState; force?: boolean }) =>
+    json<{ ok: boolean; file?: string; url?: string; cache_hit?: boolean; duration_seconds?: number; timeline_start_seconds?: number; previews?: Array<{ kind: string; file: string; url?: string; duration_seconds: number; cache_hit?: boolean }>; error?: string }>("/api/project/storyboard/preview", post({ project_id: projectId, mode: options.mode, segment_id: options.segmentId || null, duration_seconds: options.durationSeconds ?? 8, timeline_start_seconds: options.timelineStartSeconds ?? 0, storyboard_state: options.storyboardState, force: options.force ?? false })),
   opencutExport: (projectId: number, renderClips = false) =>
     json<{ ok: boolean; folder?: string; output?: string; error?: string }>("/api/project/opencut-export", post({ project_id: projectId, render_clips: renderClips, max_segments: 20 })),
   hyperframesExport: (projectId: number, render = false) =>
