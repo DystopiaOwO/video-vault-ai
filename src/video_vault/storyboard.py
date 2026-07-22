@@ -197,7 +197,7 @@ def save_storyboard(cfg: dict, db: Path, project_id: int, state: Mapping[str, An
     return path
 
 
-def update_storyboard(cfg: dict, db: Path, project_id: int, patch: Mapping[str, Any]) -> dict[str, Any]:
+def update_storyboard(cfg: dict, db: Path, project_id: int, patch: Mapping[str, Any], *, return_result: bool = False) -> dict[str, Any]:
     current = load_storyboard(cfg, project_id) or generate_storyboard(cfg, db, project_id, force=False)
     incoming = patch.get("state") if isinstance(patch.get("state"), Mapping) else patch
     updated = normalize_storyboard({
@@ -208,7 +208,16 @@ def update_storyboard(cfg: dict, db: Path, project_id: int, patch: Mapping[str, 
     validation = validate_storyboard(updated, rows)
     if not validation["valid"]:
         raise ValueError("；".join(validation["errors"]))
-    save_storyboard(cfg, db, project_id, updated, mark_review=True)
+    before_render = storyboard_render_state(current, rows)
+    after_render = storyboard_render_state(updated, rows)
+    render_changed = before_render != after_render
+    save_storyboard(cfg, db, project_id, updated, mark_review=render_changed)
+    if return_result:
+        return {
+            "state": updated,
+            "render_changed": render_changed,
+            "approval_invalidated": render_changed,
+        }
     return updated
 
 

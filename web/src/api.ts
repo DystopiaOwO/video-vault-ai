@@ -176,7 +176,7 @@ export type ColorStatePatch = {
   schema_version: number;
   enabled: boolean;
   applied: ColorAdjustment;
-  segments: Record<string, ColorSegmentPatch>;
+  segments: Record<string, ColorSegmentPatch | null>;
 };
 
 export type BgmRecommendation = {
@@ -244,11 +244,13 @@ export const api = {
     json<{ ok: boolean }>("/api/project/revise", post({ project_id: projectId, notes })),
   saveSegments: (projectId: number, segments: Segment[]) =>
     json<{ ok: boolean; path?: string; error?: string }>("/api/project/segments", post({ project_id: projectId, segments })),
+  saveSegmentTiming: (projectId: number, segmentId: string, timing: { start_seconds: number; end_seconds: number; speed: number }) =>
+    json<{ ok: boolean; path?: string; error?: string }>("/api/project/segment-timing", post({ project_id: projectId, segment_id: segmentId, ...timing })),
   storyboard: (projectId: number) => json<StoryboardState>(`/api/project/storyboard?project_id=${projectId}`),
   generateStoryboard: (projectId: number, force = false) =>
     json<{ ok: boolean; storyboard?: StoryboardState; error?: string }>("/api/project/storyboard/generate", post({ project_id: projectId, force })),
   updateStoryboard: (projectId: number, state: StoryboardState) =>
-    json<{ ok: boolean; storyboard?: StoryboardState; error?: string }>("/api/project/storyboard", post({ project_id: projectId, state })),
+    json<{ ok: boolean; storyboard?: StoryboardState; render_changed?: boolean; approval_invalidated?: boolean; error?: string }>("/api/project/storyboard", post({ project_id: projectId, state })),
   storyboardThumbnail: (projectId: number, segmentId: string, ratio = 0.5, force = false) =>
     json<{ ok: boolean; file?: string; url?: string; cache_hit?: boolean; error?: string }>("/api/project/storyboard/thumbnail", post({ project_id: projectId, segment_id: segmentId, ratio, force })),
   storyboardPreview: (projectId: number, options: { mode: "segment" | "transition" | "range"; segmentId?: string; durationSeconds?: number; timelineStartSeconds?: number; storyboardState?: StoryboardState; force?: boolean }) =>

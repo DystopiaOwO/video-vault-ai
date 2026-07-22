@@ -1,7 +1,7 @@
 import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { ChangeEvent, ReactNode } from "react";
-import { api, AudioSegmentOverride, AudioSegmentSettings, AudioState, BgmTrack, ColorAdjustment, ColorSegmentState, ColorState, ColorStatePatch, Job, Project, ProjectDetail, Segment, StoryboardState } from "./api";
+import { api, AudioSegmentOverride, AudioSegmentSettings, AudioState, BgmTrack, ColorAdjustment, ColorSegmentPatch, ColorSegmentState, ColorState, ColorStatePatch, Job, Project, ProjectDetail, Segment, StoryboardState } from "./api";
 import { RenderJobPanel } from "./components/render/RenderJobPanel";
 import { ProjectDataLoadOptions, ProjectDataLoader } from "./projectDataLoader";
 import "./styles.css";
@@ -309,7 +309,49 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
 
 }
 
-function StoryboardPanel({ detail, setMessage, refreshProject }: { detail: ProjectDetail; setMessage: (value: string) => void; refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]> }) {
+export function normalizeStoryboardOrders(next: StoryboardState): StoryboardState {
+  const result = structuredClone(next);
+  result.groups = result.groups.slice().sort((a, b) => a.order - b.order).map((group, index) => ({ ...group, order: index + 1 }));
+  result.groups.forEach((group) => {
+    Object.entries(result.segments)
+      .filter(([, item]) => item.group_id === group.group_id)
+      .sort(([, a], [, b]) => a.order - b.order)
+      .forEach(([segmentId], index) => { result.segments[segmentId].order = index + 1; });
+  });
+  return result;
+}
+
+export function reorderStoryboardSegments(next: StoryboardState, dragId: string, targetId: string, position: "before" | "after"): StoryboardState {
+  if (!dragId || !targetId || dragId === targetId || !next.segments[dragId] || !next.segments[targetId]) return next;
+  const result = structuredClone(next);
+  const targetGroup = result.segments[targetId].group_id;
+  const sourceGroup = result.segments[dragId].group_id;
+  const ids = Object.entries(result.segments)
+    .filter(([segmentId, item]) => item.group_id === targetGroup && segmentId !== dragId)
+    .sort(([, a], [, b]) => a.order - b.order)
+    .map(([segmentId]) => segmentId);
+  const targetIndex = ids.indexOf(targetId);
+  ids.splice(Math.max(0, targetIndex + (position === "after" ? 1 : 0)), 0, dragId);
+  result.segments[dragId] = { ...result.segments[dragId], group_id: targetGroup, manual_group: Boolean(result.segments[dragId].manual_group || sourceGroup !== targetGroup), manual_order: true };
+  ids.forEach((segmentId, index) => { result.segments[segmentId].order = index + 1; result.segments[segmentId].manual_order = true; });
+  return normalizeStoryboardOrders(result);
+}
+
+export function effectiveSegmentColorEnabled(projectEnabled: boolean, override?: ColorSegmentState): boolean {
+  if (override?.excluded) return false;
+  if (override && "enabled" in override) return Boolean(override.enabled);
+  return projectEnabled;
+}
+
+export function colorTogglePatch(state: ColorState, segmentId: string): ColorSegmentPatch {
+  const current = state.segments[segmentId];
+  const enabled = effectiveSegmentColorEnabled(state.enabled, current);
+  return { enabled: !enabled, locked: Boolean(current?.locked), excluded: Boolean(current?.excluded), ...(current?.applied ? { applied: { ...current.applied } } : {}) };
+}
+
+export function colorResetPatch(): null { return null; }
+
+export function StoryboardPanel({ detail, setMessage, refreshProject }: { detail: ProjectDetail; setMessage: (value: string) => void; refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]> }) {
   const emptyStoryboard: StoryboardState = { schema_version: 1, groups: [], segments: {} };
   const [state, setState] = useState<StoryboardState>(detail.storyboard || emptyStoryboard);
   const [lastServerState, setLastServerState] = useState<StoryboardState>(detail.storyboard || emptyStoryboard);
@@ -345,12 +387,7 @@ function StoryboardPanel({ detail, setMessage, refreshProject }: { detail: Proje
     .filter((row) => state.segments[row.segment_id]?.group_id === groupId)
     .sort((a, b) => (state.segments[a.segment_id]?.order || 0) - (state.segments[b.segment_id]?.order || 0));
 
-  function normalizeOrders(next: StoryboardState): StoryboardState {
-    const result = structuredClone(next);
-    result.groups = result.groups.map((group, index) => ({ ...group, order: index + 1 }));
-    result.groups.forEach((group) => rowsByGroupFromState(result, group.group_id).forEach((segmentId, index) => { result.segments[segmentId].order = index + 1; }));
-    return result;
-  }
+  function normalizeOrders(next: StoryboardState): StoryboardState { return normalizeStoryboardOrders(next); }
 
   function rowsByGroupFromState(current: StoryboardState, groupId: string): string[] {
     return Object.entries(current.segments)
@@ -406,16 +443,7 @@ function StoryboardPanel({ detail, setMessage, refreshProject }: { detail: Proje
 
   function reorder(dragId: string, targetId: string, position: "before" | "after") {
     if (!dragId || !targetId || dragId === targetId) return;
-    const next = structuredClone(state);
-    const targetGroup = next.segments[targetId]?.group_id;
-    if (!targetGroup || !next.segments[dragId]) return;
-    for (const group of next.groups) {
-      const ids = rowsByGroupFromState(next, group.group_id).filter((id) => id !== dragId);
-      if (group.group_id !== targetGroup) continue;
-      const targetIndex = ids.indexOf(targetId);
-      ids.splice(Math.max(0, targetIndex + (position === "after" ? 1 : 0)), 0, dragId);
-      ids.forEach((id, index) => { next.segments[id].manual_group = next.segments[id].manual_group || next.segments[id].group_id !== group.group_id; next.segments[id].manual_order = true; next.segments[id].group_id = group.group_id; next.segments[id].order = index + 1; });
-    }
+    const next = reorderStoryboardSegments(state, dragId, targetId, position);
     updateLocal(next);
     setDragged("");
     setDropTarget(null);
@@ -522,7 +550,7 @@ function StoryboardPanel({ detail, setMessage, refreshProject }: { detail: Proje
       return;
     }
     setBusy(`timing:${segment.segment_id}`);
-    const result = await api.saveSegments(detail.project.id, detail.segments.map((row) => row.segment_id === segment.segment_id ? { ...row, ...draft } : row));
+    const result = await api.saveSegmentTiming(detail.project.id, segment.segment_id, draft);
     setBusy("");
     setMessage(result.ok ? "片段時間與速度已儲存，Approval 已失效。" : `片段時間儲存失敗：${result.error || "未知錯誤"}`);
     if (result.ok) await refreshProject({ forceFresh: true });
@@ -535,10 +563,16 @@ function StoryboardPanel({ detail, setMessage, refreshProject }: { detail: Proje
     if (result.ok) await refreshProject({ forceFresh: true });
   }
 
-  async function quickColor(segmentId: string, enabled: boolean) {
-    const current = detail.color.segments[segmentId] || { enabled: true, locked: false, excluded: false, applied: detail.color.applied };
-    const result = await api.colorSettings(detail.project.id, { schema_version: detail.color.schema_version, enabled: detail.color.enabled, applied: detail.color.applied, segments: { [segmentId]: { enabled, locked: Boolean(current.locked), excluded: Boolean(current.excluded), applied: current.applied || detail.color.applied } } });
+  async function quickColor(segmentId: string) {
+    const patch = colorTogglePatch(detail.color, segmentId);
+    const result = await api.colorSettings(detail.project.id, { schema_version: detail.color.schema_version, enabled: detail.color.enabled, applied: detail.color.applied, segments: { [segmentId]: patch } });
     setMessage(result.ok ? "分鏡片段調色設定已更新，專案已回到待審。" : `調色設定失敗：${result.error || "未知錯誤"}`);
+    if (result.ok) await refreshProject({ forceFresh: true });
+  }
+
+  async function resetColor(segmentId: string) {
+    const result = await api.colorSettings(detail.project.id, { schema_version: detail.color.schema_version, enabled: detail.color.enabled, applied: detail.color.applied, segments: { [segmentId]: colorResetPatch() } });
+    setMessage(result.ok ? "已恢復此片段的專案調色預設。" : `恢復調色預設失敗：${result.error || "未知錯誤"}`);
     if (result.ok) await refreshProject({ forceFresh: true });
   }
 
@@ -557,10 +591,56 @@ function StoryboardPanel({ detail, setMessage, refreshProject }: { detail: Proje
 
   if (!state.exists && !state.groups.length) return <Card title="分鏡審核"><p className="muted">先建立分鏡，系統會依內容感知與專案類型提出分組建議。</p><button className="good" disabled={busy === "generate"} onClick={() => void generate()}>{busy === "generate" ? "建立中…" : "建立分鏡"}</button></Card>;
   return <Card title="分鏡審核">
-    <div className="storyboard-toolbar"><div><b>主要操作介面</b><span className="muted">卡片可拖曳到指定卡片前後；↑／↓ 可用鍵盤調整。Lock 只保護自動重建，不限制人工編輯。</span>{isDirty && <strong className="storyboard-dirty">有未儲存變更</strong>}</div><div className="row"><button disabled={Boolean(busy) || isDirty} onClick={() => void generate(true)}>重新產生分鏡</button><button disabled={Boolean(busy) || saveInProgress || !isDirty} onClick={() => void save()} className="good">{saveInProgress ? "儲存中…" : "儲存分鏡"}</button><label>起始秒數<input className="storyboard-range-start" type="number" min={0} step={0.1} value={selectedSegmentId ? timelineStart(selectedSegmentId) : rangeStart} onChange={(event) => { setSelectedSegmentId(""); setRangeStart(Math.max(0, Number(event.target.value))); }} /></label><select value={rangeDuration} onChange={(event) => setRangeDuration(Number(event.target.value))}><option value={5}>5 秒</option><option value={8}>8 秒</option><option value={12}>12 秒</option></select><button disabled={Boolean(busy)} onClick={() => void preview("range")}>{selectedSegmentId ? "預覽目前分鏡範圍" : "預覽開頭 8 秒"}</button><button disabled={Boolean(busy)} onClick={() => void preview("range", undefined, true)}>強制重新產生</button></div></div>
+    <div className="storyboard-toolbar">
+      <div><b>主要操作介面</b><span className="muted">卡片可拖曳到指定卡片前後；↑／↓ 可用鍵盤調整。Lock 只保護自動重建，不限制人工編輯。</span>{isDirty && <strong className="storyboard-dirty">有未儲存變更</strong>}</div>
+      <div className="row">
+        <button disabled={Boolean(busy) || isDirty} onClick={() => void generate(true)}>重新產生分鏡</button>
+        <button disabled={Boolean(busy) || saveInProgress || !isDirty} onClick={() => void save()} className="good">{saveInProgress ? "儲存中…" : "儲存分鏡"}</button>
+        <label>起始秒數<input className="storyboard-range-start" type="number" min={0} step={0.1} value={selectedSegmentId ? timelineStart(selectedSegmentId) : rangeStart} onChange={(event) => { setSelectedSegmentId(""); setRangeStart(Math.max(0, Number(event.target.value))); }} /></label>
+        <select value={rangeDuration} onChange={(event) => setRangeDuration(Number(event.target.value))}><option value={5}>5 秒</option><option value={8}>8 秒</option><option value={12}>12 秒</option></select>
+        <button disabled={Boolean(busy)} onClick={() => void preview("range")}>{selectedSegmentId ? "預覽目前分鏡範圍" : `預覽開頭 ${rangeDuration} 秒`}</button>
+        <button disabled={Boolean(busy)} onClick={() => void preview("range", undefined, true)}>強制重新產生</button>
+      </div>
+    </div>
     {state.summary && <div className="storyboard-summary"><b>共 {state.summary.total_segments} 個片段｜使用 {state.summary.included_segments} 個｜排除 {state.summary.excluded_segments} 個｜預估 {time(state.summary.estimated_duration_seconds)}</b>{state.groups.map((group) => { const item = state.summary?.groups.find((summary) => summary.group_id === group.group_id); return <span key={group.group_id}>{group.title} {item?.count || 0} 段｜{time(item?.duration_seconds || 0)}</span>; })}</div>}
     <div className="row storyboard-group-tools"><input value={newGroup} onChange={(event) => setNewGroup(event.target.value)} placeholder="新增分組名稱" /><button onClick={addGroup}>新增分組</button></div>
-    <div className="storyboard-groups">{state.groups.map((group) => <section className="storyboard-group" key={group.group_id} onDragOver={(event) => event.preventDefault()} onDrop={() => dropOnGroup(group.group_id)}><div className="storyboard-group-heading"><input value={group.title} onChange={(event) => editGroup(group.group_id, event.target.value)} /><span className="muted">{group.category}</span><div className="row"><button aria-label="上移群組" onClick={() => moveGroup(group.group_id, -1)}>↑</button><button aria-label="下移群組" onClick={() => moveGroup(group.group_id, 1)}>↓</button>{!rowsByGroup(group.group_id).length && <button onClick={() => deleteEmptyGroup(group.group_id)}>刪除空群組</button>}</div></div>{rowsByGroup(group.group_id).map((segment) => { const item = state.segments[segment.segment_id]; const draft = timingDraft(segment); return <div key={segment.segment_id} className="storyboard-drop-wrapper"><div className={`storyboard-drop-indicator${dropTarget?.segmentId === segment.segment_id && dropTarget.position === "before" ? " active" : ""}`}>放到此片段前</div><article className={`storyboard-card${item?.included ? "" : " excluded"}`} draggable onDragStart={(event) => { setDragged(segment.segment_id); event.dataTransfer.setData("text/plain", segment.segment_id); }} onDragOver={(event) => { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); setDropTarget({ segmentId: segment.segment_id, position: event.clientY < rect.top + rect.height / 2 ? "before" : "after" }); }} onDrop={(event) => { event.stopPropagation(); const target = dropTarget || { segmentId: segment.segment_id, position: "after" as const }; reorder(dragged || event.dataTransfer.getData("text/plain"), target.segmentId, target.position); }} onClick={() => setSelectedSegmentId(segment.segment_id)}><div className="storyboard-thumb">{item?.thumbnail_url ? <img src={item.thumbnail_url} alt={`${segment.title} 代表畫格`} /> : <span>尚未產生代表畫格</span>}</div><div className="storyboard-card-body"><div className="row"><b>{segment.title || segment.segment_id}</b><span className="muted">{segment.source_filename || segment.clip_id}</span></div><span className="muted">{time(segment.start_seconds)} ~ {time(segment.end_seconds)}｜成片 {time(Math.max(0, (segment.end_seconds - segment.start_seconds) / Math.max(.01, segment.speed || 1)))}</span><span>Scene Role：{segment.scene_role}｜故事位置：{segment.story_position || "未指定"}｜AI {Number(segment.score || 0).toFixed(2)}｜{segment.suggested_use}</span><span>原音：{effectiveAudio(segment)}｜調色：{effectiveColor(segment)}｜{item?.included ? "納入" : "排除"}</span><div className="row"><label className="toggle"><input type="checkbox" checked={Boolean(item?.included)} onChange={(event) => editSegment(segment.segment_id, { included: event.target.checked })} />納入</label><label className="toggle"><input type="checkbox" checked={Boolean(item?.locked)} onChange={(event) => editSegment(segment.segment_id, { locked: event.target.checked })} />鎖定</label><select value={item?.group_id || group.group_id} onChange={(event) => moveToGroup(segment.segment_id, event.target.value)}><option value={group.group_id}>{group.title}</option>{state.groups.filter((option) => option.group_id !== group.group_id).map((option) => <option key={option.group_id} value={option.group_id}>{option.title}</option>)}</select><select value={item?.thumbnail_time_ratio || .5} onChange={(event) => void thumbnail(segment, Number(event.target.value))}><option value="0.25">代表畫格 25%</option><option value="0.5">代表畫格 50%</option><option value="0.75">代表畫格 75%</option></select><select aria-label="快速原音" value={detail.audio.segments[segment.segment_id]?.role || "default"} onChange={(event) => void quickAudio(segment.segment_id, event.target.value as AudioSegmentSettings["role"] | "default")}><option value="default">套用專案預設</option><option value="keep">保留原音</option><option value="lower">降低原音</option><option value="mute">靜音</option><option value="bgm_only">只留 BGM</option></select><button onClick={() => void quickColor(segment.segment_id, !detail.color.segments[segment.segment_id]?.enabled)}>調色 {detail.color.segments[segment.segment_id]?.enabled ? "停用" : "啟用"}</button></div><div className="row storyboard-timing"><label>起點<input type="number" min={0} step={0.001} value={draft.start_seconds} onChange={(event) => updateTiming(segment, { start_seconds: Number(event.target.value) })} /></label><label>終點<input type="number" min={0} step={0.001} value={draft.end_seconds} onChange={(event) => updateTiming(segment, { end_seconds: Number(event.target.value) })} /></label><label>速度<input type="number" min={0.25} max={4} step={0.05} value={draft.speed} onChange={(event) => updateTiming(segment, { speed: Number(event.target.value) })} /></label><button disabled={busy === `timing:${segment.segment_id}`} onClick={() => void saveTiming(segment)}>{busy === `timing:${segment.segment_id}` ? "儲存中…" : "儲存剪點"}</button><button aria-label="上移片段" onClick={() => moveVertical(segment.segment_id, -1)}>↑</button><button aria-label="下移片段" onClick={() => moveVertical(segment.segment_id, 1)}>↓</button></div><textarea value={item?.notes || ""} onChange={(event) => editSegment(segment.segment_id, { notes: event.target.value })} placeholder="分鏡備註" /><div className="row"><button disabled={Boolean(busy)} onClick={() => void thumbnail(segment, item?.thumbnail_time_ratio || .5)}>代表畫格</button><button disabled={Boolean(busy)} onClick={() => void preview("segment", segment.segment_id)}>預覽此片段</button><button disabled={Boolean(busy)} onClick={() => void preview("transition", segment.segment_id)}>預覽前後銜接</button></div></div></article><div className={`storyboard-drop-indicator${dropTarget?.segmentId === segment.segment_id && dropTarget.position === "after" ? " active" : ""}`}>放到此片段後</div></div>; })}</section>)}</div>
+    {isDirty && <div className="storyboard-summary muted">摘要會在儲存後更新。</div>}
+    <div className="storyboard-groups">
+      {state.groups.map((group) => <section className="storyboard-group" key={group.group_id} onDragOver={(event) => event.preventDefault()} onDrop={() => dropOnGroup(group.group_id)}>
+        <div className="storyboard-group-heading"><input value={group.title} onChange={(event) => editGroup(group.group_id, event.target.value)} /><span className="muted">{group.category}</span><div className="row"><button aria-label="上移群組" onClick={() => moveGroup(group.group_id, -1)}>↑</button><button aria-label="下移群組" onClick={() => moveGroup(group.group_id, 1)}>↓</button>{!rowsByGroup(group.group_id).length && <button onClick={() => deleteEmptyGroup(group.group_id)}>刪除空群組</button>}</div></div>
+        {rowsByGroup(group.group_id).map((segment) => {
+          const item = state.segments[segment.segment_id];
+          const draft = timingDraft(segment);
+          const colorOverride = detail.color.segments[segment.segment_id];
+          const colorEnabled = effectiveSegmentColorEnabled(detail.color.enabled, colorOverride);
+          return <div key={segment.segment_id} className="storyboard-drop-wrapper">
+            <div className={`storyboard-drop-indicator${dropTarget?.segmentId === segment.segment_id && dropTarget.position === "before" ? " active" : ""}`}>放到此片段前</div>
+            <article className={`storyboard-card${item?.included ? "" : " excluded"}`} draggable onDragStart={(event) => { setDragged(segment.segment_id); event.dataTransfer.setData("text/plain", segment.segment_id); }} onDragOver={(event) => { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); setDropTarget({ segmentId: segment.segment_id, position: event.clientY < rect.top + rect.height / 2 ? "before" : "after" }); }} onDrop={(event) => { event.stopPropagation(); const target = dropTarget || { segmentId: segment.segment_id, position: "after" as const }; reorder(dragged || event.dataTransfer.getData("text/plain"), target.segmentId, target.position); }} onClick={() => setSelectedSegmentId(segment.segment_id)}>
+              <div className="storyboard-thumb">{item?.thumbnail_url ? <img src={item.thumbnail_url} alt={`${segment.title} 代表畫格`} /> : <span>尚未產生代表畫格</span>}</div>
+              <div className="storyboard-card-body">
+                <div className="row"><b>{segment.title || segment.segment_id}</b><span className="muted">{segment.source_filename || segment.clip_id}</span></div>
+                <span className="muted">{time(segment.start_seconds)} ~ {time(segment.end_seconds)}｜成片 {time(Math.max(0, (segment.end_seconds - segment.start_seconds) / Math.max(.01, segment.speed || 1)))}</span>
+                <span>Scene Role：{segment.scene_role}｜故事位置：{segment.story_position || "未指定"}｜AI {Number(segment.score || 0).toFixed(2)}｜{segment.suggested_use}</span>
+                <span>原音：{effectiveAudio(segment)}｜調色：{colorEnabled ? "啟用" : "停用"}｜{item?.included ? "納入" : "排除"}</span>
+                <div className="row">
+                  <label className="toggle"><input type="checkbox" checked={Boolean(item?.included)} onChange={(event) => editSegment(segment.segment_id, { included: event.target.checked })} />納入</label>
+                  <label className="toggle"><input type="checkbox" checked={Boolean(item?.locked)} onChange={(event) => editSegment(segment.segment_id, { locked: event.target.checked })} />鎖定</label>
+                  <select value={item?.group_id || group.group_id} onChange={(event) => moveToGroup(segment.segment_id, event.target.value)}><option value={group.group_id}>{group.title}</option>{state.groups.filter((option) => option.group_id !== group.group_id).map((option) => <option key={option.group_id} value={option.group_id}>{option.title}</option>)}</select>
+                  <select value={item?.thumbnail_time_ratio || .5} onChange={(event) => void thumbnail(segment, Number(event.target.value))}><option value="0.25">代表畫格 25%</option><option value="0.5">代表畫格 50%</option><option value="0.75">代表畫格 75%</option></select>
+                  <select aria-label="快速原音" value={detail.audio.segments[segment.segment_id]?.role || "default"} onChange={(event) => void quickAudio(segment.segment_id, event.target.value as AudioSegmentSettings["role"] | "default")}><option value="default">套用專案預設</option><option value="keep">保留原音</option><option value="lower">降低原音</option><option value="mute">靜音</option><option value="bgm_only">只留 BGM</option></select>
+                  <button onClick={() => void quickColor(segment.segment_id)}>{colorEnabled ? "停用此片段調色" : "啟用此片段調色"}</button>
+                  {colorOverride && <button onClick={() => void resetColor(segment.segment_id)}>恢復專案預設</button>}
+                </div>
+                <div className="row storyboard-timing"><label>起點<input type="number" min={0} step={0.001} value={draft.start_seconds} onChange={(event) => updateTiming(segment, { start_seconds: Number(event.target.value) })} /></label><label>終點<input type="number" min={0} step={0.001} value={draft.end_seconds} onChange={(event) => updateTiming(segment, { end_seconds: Number(event.target.value) })} /></label><label>速度<input type="number" min={0.25} max={4} step={0.05} value={draft.speed} onChange={(event) => updateTiming(segment, { speed: Number(event.target.value) })} /></label><button disabled={busy === `timing:${segment.segment_id}`} onClick={() => void saveTiming(segment)}>{busy === `timing:${segment.segment_id}` ? "儲存中…" : "儲存剪點"}</button><button aria-label="上移片段" onClick={() => moveVertical(segment.segment_id, -1)}>↑</button><button aria-label="下移片段" onClick={() => moveVertical(segment.segment_id, 1)}>↓</button></div>
+                <textarea value={item?.notes || ""} onChange={(event) => editSegment(segment.segment_id, { notes: event.target.value })} placeholder="分鏡備註" />
+                <div className="row"><button disabled={Boolean(busy)} onClick={() => void thumbnail(segment, item?.thumbnail_time_ratio || .5)}>代表畫格</button><button disabled={Boolean(busy)} onClick={() => void preview("segment", segment.segment_id)}>預覽此片段</button><button disabled={Boolean(busy)} onClick={() => void preview("transition", segment.segment_id)}>預覽前後銜接</button></div>
+              </div>
+            </article>
+            <div className={`storyboard-drop-indicator${dropTarget?.segmentId === segment.segment_id && dropTarget.position === "after" ? " active" : ""}`}>放到此片段後</div>
+          </div>;
+        })}
+      </section>)}
+    </div>
     {previewItems.length > 0 && <div className="storyboard-preview-list">{previewItems.map((item, index) => <div key={`${item.kind}-${index}`}><b>{item.kind === "incoming" ? "前段銜接" : item.kind === "outgoing" ? "後段銜接" : "分鏡預覽"}｜{Number(item.duration_seconds || 0).toFixed(1)} 秒</b>{item.url && <video className="storyboard-preview-video" controls src={item.url} />}</div>)}</div>}
   </Card>;
 }

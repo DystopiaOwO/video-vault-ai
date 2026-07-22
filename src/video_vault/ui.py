@@ -29,7 +29,7 @@ from .naming import rename_after_perception
 from .opencut import OPENCUT_URL, export_opencut_handoff, opencut_status, start_opencut
 from .paths import db_path
 from .planner import draft_plan, perceive_output, review_text, revise_plan, set_plan_status, video_dir, write_plan_files
-from .project import build_project_plan, can_project_render, create_project, list_projects, mark_project_needs_review, project_detail, project_dir, save_revision_notes, save_segment_review, set_review_status, sync_project_files
+from .project import build_project_plan, can_project_render, create_project, list_projects, mark_project_needs_review, project_detail, project_dir, save_revision_notes, save_segment_review, set_review_status, sync_project_files, update_segment_timing
 from .render_job_api import RenderJobAPI
 from .render_job_manager import RenderJobManager
 from .renderer import render_approved
@@ -434,10 +434,26 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     self._json({"ok": True, "path": str(save_segment_review(cfg, db, project_id, data.get("segments", [])))})
                 except (OSError, TypeError, ValueError) as exc:
                     self._json({"ok": False, "code": "invalid_segment_review", "error": str(exc)})
+            elif path == "/api/project/segment-timing":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    output_path = update_segment_timing(
+                        cfg,
+                        db,
+                        project_id,
+                        str(data.get("segment_id") or ""),
+                        float(data.get("start_seconds")),
+                        float(data.get("end_seconds")),
+                        float(data.get("speed")),
+                    )
+                    self._json({"ok": True, "path": str(output_path)})
+                except (OSError, TypeError, ValueError) as exc:
+                    self._json({"ok": False, "code": "invalid_segment_timing", "error": str(exc)})
             elif path == "/api/project/storyboard":
                 try:
                     project_id = int(data.get("project_id", 0))
-                    self._json({"ok": True, "storyboard": update_storyboard(cfg, db, project_id, data.get("state", data))})
+                    result = update_storyboard(cfg, db, project_id, data.get("state", data), return_result=True)
+                    self._json({"ok": True, "storyboard": result["state"], "render_changed": result["render_changed"], "approval_invalidated": result["approval_invalidated"]})
                 except (TypeError, ValueError) as exc:
                     self._json({"ok": False, "code": "invalid_storyboard", "error": str(exc)})
             elif path == "/api/project/storyboard/generate":

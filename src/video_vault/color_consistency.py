@@ -133,15 +133,14 @@ def save_project_color_state(cfg: dict, db: Path, project_id: int, state: Mappin
 
 def effective_color_settings(state: Mapping[str, Any], segment_id: str | None = None) -> dict[str, Any]:
     normalized = normalize_color_state(state)
-    if not normalized["enabled"]:
-        return {**deepcopy(normalized["applied"]), "mode": "none"}
     result = deepcopy(normalized["applied"])
-    if segment_id:
-        override = normalized["segments"].get(str(segment_id), {})
-        if override.get("excluded") or not override.get("enabled", True):
-            result["mode"] = "none"
-        elif isinstance(override.get("applied"), Mapping):
-            result.update(override["applied"])
+    override = normalized["segments"].get(str(segment_id), {}) if segment_id else {}
+    if not normalized["enabled"] and not (segment_id and "enabled" in override and _as_bool(override.get("enabled"))):
+        return {**result, "mode": "none"}
+    if override.get("excluded") or not override.get("enabled", True):
+        result["mode"] = "none"
+    elif isinstance(override.get("applied"), Mapping):
+        result.update(override["applied"])
     return result
 
 
@@ -225,7 +224,18 @@ def set_color_reference(cfg: dict, db: Path, project_id: int, reference_id: str)
 
 def update_color_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str, Any]) -> dict[str, Any]:
     current = load_project_color_state(cfg, project_id)
-    updated = _merge(current, _user_editable_color_patch(patch))
+    editable_patch = _user_editable_color_patch(patch)
+    segment_patch = editable_patch.pop("segments", None)
+    updated = _merge(current, editable_patch)
+    if isinstance(segment_patch, Mapping):
+        segments = deepcopy(dict(current.get("segments") or {}))
+        for segment_id, value in segment_patch.items():
+            key = str(segment_id)
+            if value is None:
+                segments.pop(key, None)
+            elif isinstance(value, Mapping):
+                segments[key] = _merge(dict(segments.get(key) or {}), dict(value))
+        updated["segments"] = segments
     state = normalize_color_state(updated)
     save_project_color_state(cfg, db, project_id, state)
     return state
@@ -803,6 +813,9 @@ def _user_editable_color_patch(patch: Mapping[str, Any] | None) -> dict[str, Any
                 continue
             segments: dict[str, Any] = {}
             for segment_id, segment_patch in value.items():
+                if segment_patch is None:
+                    segments[str(segment_id)] = None
+                    continue
                 if not isinstance(segment_patch, Mapping):
                     continue
                 editable: dict[str, Any] = {}

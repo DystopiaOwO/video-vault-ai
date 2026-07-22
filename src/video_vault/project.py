@@ -4,6 +4,7 @@ from datetime import datetime
 from copy import deepcopy
 from pathlib import Path
 import json
+import math
 import re
 import shutil
 
@@ -297,6 +298,56 @@ def save_segment_review(cfg: dict, db: Path, project_id: int, rows: list[dict]) 
     path = project_dir(cfg, project_id) / "feedback" / "segment_review.json"
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     append_decision(cfg, project_id, "segment_review", f"更新 {len(data)} 段片段審核", "segment_review", affected_segments=[row.get("segment_id", "") for row in data])
+    mark_project_needs_review(cfg, db, project_id)
+    return path
+
+
+def update_segment_timing(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    segment_id: str,
+    start_seconds: float,
+    end_seconds: float,
+    speed: float,
+) -> Path:
+    """Patch only one segment's timing without copying storyboard metadata."""
+    segment_id = str(segment_id or "")
+    plan = _read_json(project_dir(cfg, project_id) / "project_plan.json")
+    raw_rows = project_segments(cfg, project_id, plan, apply_storyboard=False)
+    source = next((row for row in raw_rows if str(row.get("segment_id")) == segment_id), None)
+    if source is None:
+        raise ValueError(f"找不到片段：{segment_id}")
+    start = float(start_seconds)
+    end = float(end_seconds)
+    rate = float(speed)
+    if not all(math.isfinite(value) for value in (start, end, rate)):
+        raise ValueError("片段時間與速度必須是有限數值")
+    if start < 0 or end <= start:
+        raise ValueError(f"片段 {segment_id} 的時間範圍無效")
+    if not 0.25 <= rate <= 4.0:
+        raise ValueError(f"片段 {segment_id} 的速度必須介於 0.25 到 4.0")
+    videos = {int(row["id"]): dict(row) for row in project_videos(db, project_id)}
+    source_duration = float((videos.get(int(source.get("video_id") or 0)) or {}).get("duration_seconds") or 0)
+    if source_duration > 0 and end > source_duration + 0.001:
+        raise ValueError(f"片段 {segment_id} 的結束時間超過來源長度")
+
+    existing = _segment_review(cfg, project_id)
+    target_index = next((index for index, row in enumerate(existing) if str(row.get("segment_id")) == segment_id), None)
+    if target_index is None:
+        target = {"segment_id": segment_id}
+        existing.append(target)
+    else:
+        target = existing[target_index]
+    target["start_seconds"] = round(start, 3)
+    target["end_seconds"] = round(end, 3)
+    target["speed"] = round(rate, 6)
+    path = project_dir(cfg, project_id) / "feedback" / "segment_review.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.tmp")
+    temp.write_text(json.dumps(existing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temp.replace(path)
+    append_decision(cfg, project_id, "segment_timing", f"更新片段 {segment_id} 時間與速度", "segment_review", affected_segments=[segment_id])
     mark_project_needs_review(cfg, db, project_id)
     return path
 
