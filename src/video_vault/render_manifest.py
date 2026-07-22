@@ -36,6 +36,7 @@ def build_render_manifest(
     profile_id: str | None = None,
     *,
     audio_state_override: dict[str, Any] | None = None,
+    storyboard_state_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     folder = project_dir(cfg, project_id)
     plan_path = folder / "project_plan.json"
@@ -65,7 +66,11 @@ def build_render_manifest(
         settings = {**settings, "profile_id": profile_id}
     profile = get_render_profile(str(settings["profile_id"]))
 
-    reviewed_segments = project_segments(cfg, project_id, plan)
+    from .storyboard import apply_storyboard_state, load_storyboard, storyboard_render_state
+
+    raw_segments = project_segments(cfg, project_id, plan, apply_storyboard=False)
+    storyboard_state = storyboard_state_override if storyboard_state_override is not None else (load_storyboard(cfg, project_id) or {})
+    reviewed_segments = apply_storyboard_state(raw_segments, storyboard_state) if storyboard_state else raw_segments
     included_segments = [segment for segment in _ordered_segments(reviewed_segments) if _included(segment)]
     segments = [
         _manifest_segment(
@@ -89,6 +94,7 @@ def build_render_manifest(
         "plan_id": str(plan.get("plan_id") or ""),
         "profile": profile,
         "settings": settings,
+        "storyboard_render_state": storyboard_render_state(storyboard_state, raw_segments),
         "segments": segments,
         "bgm": bgm,
         "expected_duration_seconds": round(sum(float(item["timeline_duration_seconds"]) for item in segments), 6),

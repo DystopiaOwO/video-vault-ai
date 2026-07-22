@@ -90,6 +90,24 @@ def test_effective_color_settings_respects_enable_and_exclude():
     assert effective_color_settings(state, "seg-1")["mode"] == "none"
 
 
+def test_enabled_segment_override_can_opt_in_when_project_default_is_disabled():
+    state = default_color_state()
+    state["enabled"] = False
+    state["applied"]["mode"] = "manual"
+    state["segments"]["seg-1"] = {"enabled": True, "locked": False, "excluded": False}
+    assert effective_color_settings(state, "seg-1")["mode"] == "manual"
+
+
+def test_removing_segment_color_override_restores_project_default(tmp_path):
+    cfg, db, project_id, _, _ = _project(tmp_path)
+    state = default_color_state()
+    state["segments"]["seg-1"] = {"enabled": False, "locked": False, "excluded": False}
+    save_project_color_state(cfg, db, project_id, state, mark_review=False)
+    updated = update_color_state(cfg, db, project_id, {"segments": {"seg-1": None}})
+    assert "seg-1" not in updated["segments"]
+    assert effective_color_settings(updated, "seg-1")["mode"] == "none" if not updated["enabled"] else effective_color_settings(updated, "seg-1")["mode"] == updated["applied"]["mode"]
+
+
 def test_preview_cache_key_changes_when_applied_color_changes(tmp_path):
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source")

@@ -29,11 +29,13 @@ from .naming import rename_after_perception
 from .opencut import OPENCUT_URL, export_opencut_handoff, opencut_status, start_opencut
 from .paths import db_path
 from .planner import draft_plan, perceive_output, review_text, revise_plan, set_plan_status, video_dir, write_plan_files
-from .project import build_project_plan, can_project_render, create_project, list_projects, mark_project_needs_review, project_detail, project_dir, save_revision_notes, save_segment_review, set_review_status, sync_project_files
+from .project import build_project_plan, can_project_render, create_project, list_projects, mark_project_needs_review, project_detail, project_dir, save_revision_notes, save_segment_review, set_review_status, sync_project_files, update_segment_timing
 from .render_job_api import RenderJobAPI
 from .render_job_manager import RenderJobManager
 from .renderer import render_approved
 from .scanner import scan_inbox
+from .storyboard import generate_storyboard, generate_thumbnail, storyboard_for_api, storyboard_thumbnail_path, update_storyboard
+from .storyboard_preview import StoryboardPreviewError, render_storyboard_preview, storyboard_preview_path
 
 
 JOBS: dict[tuple[int, str], dict] = {}
@@ -248,6 +250,8 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json(list_projects(db))
             elif parsed.path == "/api/project":
                 self._json(project_detail(cfg, db, int(query.get("id", ["0"])[0])))
+            elif parsed.path == "/api/project/storyboard":
+                self._json(storyboard_for_api(cfg, db, int(query.get("project_id", ["0"])[0] or 0)))
             elif parsed.path == "/api/videos":
                 self._json(video_list(cfg, db))
             elif parsed.path == "/api/bgm":
@@ -270,6 +274,18 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif parsed.path == "/api/project/audio-preview-file":
                 try:
                     path = audio_preview_file_path(cfg, int(query.get("project_id", ["0"])[0] or 0), query.get("file", [""])[0])
+                    self._file(path)
+                except (FileNotFoundError, ValueError):
+                    self.send_error(404)
+            elif parsed.path == "/api/project/storyboard-thumbnail-file":
+                try:
+                    path = storyboard_thumbnail_path(cfg, int(query.get("project_id", ["0"])[0] or 0), query.get("file", [""])[0])
+                    self._file(path)
+                except (FileNotFoundError, ValueError):
+                    self.send_error(404)
+            elif parsed.path == "/api/project/storyboard-preview-file":
+                try:
+                    path = storyboard_preview_path(cfg, int(query.get("project_id", ["0"])[0] or 0), query.get("file", [""])[0])
                     self._file(path)
                 except (FileNotFoundError, ValueError):
                     self.send_error(404)
@@ -413,8 +429,69 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 save_revision_notes(cfg, project_id, data.get("notes", ""))
                 self._json({"ok": True, "plan": build_project_plan(cfg, db, project_id)})
             elif path == "/api/project/segments":
-                project_id = int(data.get("project_id", 0))
-                self._json({"ok": True, "path": str(save_segment_review(cfg, db, project_id, data.get("segments", [])))})
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    self._json({"ok": True, "path": str(save_segment_review(cfg, db, project_id, data.get("segments", [])))})
+                except (OSError, TypeError, ValueError) as exc:
+                    self._json({"ok": False, "code": "invalid_segment_review", "error": str(exc)})
+            elif path == "/api/project/segment-timing":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    output_path = update_segment_timing(
+                        cfg,
+                        db,
+                        project_id,
+                        str(data.get("segment_id") or ""),
+                        float(data.get("start_seconds")),
+                        float(data.get("end_seconds")),
+                        float(data.get("speed")),
+                    )
+                    self._json({"ok": True, "path": str(output_path)})
+                except (OSError, TypeError, ValueError) as exc:
+                    self._json({"ok": False, "code": "invalid_segment_timing", "error": str(exc)})
+            elif path == "/api/project/storyboard":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    result = update_storyboard(cfg, db, project_id, data.get("state", data), return_result=True)
+                    self._json({"ok": True, "storyboard": result["state"], "render_changed": result["render_changed"], "approval_invalidated": result["approval_invalidated"]})
+                except (TypeError, ValueError) as exc:
+                    self._json({"ok": False, "code": "invalid_storyboard", "error": str(exc)})
+            elif path == "/api/project/storyboard/generate":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    state = generate_storyboard(cfg, db, project_id, force=bool(data.get("force")))
+                    self._json({"ok": True, "storyboard": storyboard_for_api(cfg, db, project_id), "state": state})
+                except (OSError, TypeError, ValueError) as exc:
+                    self._json({"ok": False, "code": "storyboard_generation_failed", "error": str(exc)})
+            elif path == "/api/project/storyboard/thumbnail":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    result = generate_thumbnail(cfg, db, project_id, str(data.get("segment_id") or ""), float(data.get("ratio", 0.5)), force=bool(data.get("force")))
+                    result["url"] = f"/api/project/storyboard-thumbnail-file?project_id={project_id}&file={result['file']}"
+                    self._json({"ok": True, **result})
+                except (OSError, TypeError, ValueError, RuntimeError) as exc:
+                    self._json({"ok": False, "code": "thumbnail_failed", "error": str(exc)})
+            elif path == "/api/project/storyboard/preview":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    result = render_storyboard_preview(
+                        cfg,
+                        db,
+                        project_id,
+                        mode=str(data.get("mode") or "range"),
+                        segment_id=str(data.get("segment_id") or "") or None,
+                        duration_seconds=float(data.get("duration_seconds") or 8),
+                        timeline_start_seconds=float(data.get("timeline_start_seconds") or 0),
+                        storyboard_state=data.get("storyboard_state") if isinstance(data.get("storyboard_state"), dict) else None,
+                        force=bool(data.get("force")),
+                    )
+                    for preview in result.get("previews", []):
+                        preview["url"] = f"/api/project/storyboard-preview-file?project_id={project_id}&file={preview['file']}"
+                    if result.get("file"):
+                        result["url"] = f"/api/project/storyboard-preview-file?project_id={project_id}&file={result['file']}"
+                    self._json(result)
+                except (AudioPreviewError, StoryboardPreviewError, OSError, TypeError, ValueError) as exc:
+                    self._json({"ok": False, "code": "storyboard_preview_failed", "error": str(exc)})
             elif path == "/api/project/audio-settings":
                 try:
                     project_id = int(data.get("project_id", 0))

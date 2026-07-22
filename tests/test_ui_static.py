@@ -12,6 +12,15 @@ def test_audio_ui_exposes_force_preview_and_reset_override_controls():
     assert "使用專案預設" in source
 
 
+def test_storyboard_ui_exposes_review_first_controls():
+    source = (Path(__file__).parents[1] / "web" / "src" / "main.tsx").read_text(encoding="utf-8")
+    assert "分鏡審核" in source
+    assert "建立分鏡" in source
+    assert "預覽前後銜接" in source
+    assert "onDragStart" in source
+    assert "代表畫格 25%" in source
+
+
 def test_static_file_serving_stays_inside_web_dist():
     dist = _web_dist()
     assert _static_file("/index.html") == dist / "index.html" if (dist / "index.html").exists() else True

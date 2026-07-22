@@ -4,6 +4,7 @@ from datetime import datetime
 from copy import deepcopy
 from pathlib import Path
 import json
+import math
 import re
 import shutil
 
@@ -146,6 +147,7 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
     ok, reason = can_project_render(cfg, db, project_id)
     from .color_consistency import color_state_for_api, load_project_color_state
     from .audio_state import audio_state_for_api
+    from .storyboard import storyboard_for_api
 
     public_bgm = []
     for bgm_row in project_bgm_tracks(db, project_id):
@@ -159,13 +161,19 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
         })
 
     public_plan = _public_plan_bgm(plan)
+    public_segments = []
+    for segment in project_segments(cfg, project_id, plan):
+        public_segment = dict(segment)
+        source = public_segment.get("source_file", "")
+        public_segment["source_filename"] = Path(str(source)).name if source else ""
+        public_segments.append(public_segment)
     return {
         "project": dict(row),
         "clips": sync_project_files(cfg, db, project_id),
         "bgm": public_bgm,
         "plan": public_plan,
         "workflow": project_workflow(cfg, db, project_id, plan),
-        "segments": project_segments(cfg, project_id, plan),
+        "segments": public_segments,
         "review": _read_json(folder / "review_status.json"),
         "can_render": ok,
         "render_gate_reason": reason,
@@ -173,6 +181,7 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
         "folder": str(folder),
         "color": color_state_for_api(cfg, project_id, load_project_color_state(cfg, project_id)),
         "audio": audio_state_for_api(cfg, project_id, db),
+        "storyboard": storyboard_for_api(cfg, db, project_id),
     }
 
 
@@ -191,6 +200,8 @@ def project_workflow(cfg: dict, db: Path, project_id: int, plan: dict | None = N
         _stage("handoff", "剪輯交接", (outputs / "opencut_handoff").exists() or (outputs / "hyperframes").exists(), [outputs / "opencut_handoff", outputs / "hyperframes"]),
         _stage("render", "正式輸出", any(outputs.glob("**/*.mp4")) if outputs.exists() else False, [outputs]),
     ]
+    if (folder / "storyboard.json").exists():
+        stages.insert(3, _stage("storyboard", "分鏡審核", review.get("approved_by_user") is True, [folder / "storyboard.json", folder / "cache" / "storyboard"]))
     return {"style": "openmontage_skeleton", "current": next((s["id"] for s in stages if s["status"] != "done"), "done"), "stages": stages}
 
 
@@ -224,7 +235,7 @@ def _public_bgm_row(row: dict) -> dict:
     }
 
 
-def project_segments(cfg: dict, project_id: int, plan: dict) -> list[dict]:
+def project_segments(cfg: dict, project_id: int, plan: dict, *, apply_storyboard: bool = True) -> list[dict]:
     reviews = {row.get("segment_id"): row for row in _segment_review(cfg, project_id)}
     rows = []
     for group in plan.get("groups", []):
@@ -246,7 +257,14 @@ def project_segments(cfg: dict, project_id: int, plan: dict) -> list[dict]:
                     **reviews.get(segment_id, {}),
                 }
             )
-    return sorted(rows, key=lambda row: (int(row.get("manual_order") or 999999), int(row.get("group_order") or 999), row.get("clip_id", ""), float(row.get("start_seconds") or 0)))
+    ordered = sorted(rows, key=lambda row: (int(row.get("manual_order") or 999999), int(row.get("group_order") or 999), row.get("clip_id", ""), float(row.get("start_seconds") or 0)))
+    if apply_storyboard:
+        from .storyboard import apply_storyboard_state, load_storyboard
+
+        state = load_storyboard(cfg, project_id)
+        if state is not None:
+            return apply_storyboard_state(ordered, state)
+    return ordered
 
 
 def _stage(stage_id: str, label: str, done: bool, artifacts: list[Path]) -> dict:
@@ -255,10 +273,81 @@ def _stage(stage_id: str, label: str, done: bool, artifacts: list[Path]) -> dict
 
 def save_segment_review(cfg: dict, db: Path, project_id: int, rows: list[dict]) -> Path:
     allowed = {"segment_id", "include", "user_notes", "manual_order", "scene_role", "story_position", "audio_role", "speed", "start_seconds", "end_seconds"}
-    data = [_clean_segment_review({**row, "manual_order": index}, allowed) for index, row in enumerate(rows, 1) if row.get("segment_id")]
+    current = {str(row.get("segment_id")): row for row in project_segments(cfg, project_id, _read_json(project_dir(cfg, project_id) / "project_plan.json"), apply_storyboard=False)}
+    videos = {int(row["id"]): dict(row) for row in project_videos(db, project_id)}
+    data = []
+    for index, row in enumerate(rows, 1):
+        segment_id = str(row.get("segment_id") or "")
+        if not segment_id:
+            continue
+        source = current.get(segment_id)
+        if source is None:
+            raise ValueError(f"找不到片段：{segment_id}")
+        cleaned = _clean_segment_review({**row, "manual_order": index}, allowed)
+        start = float(cleaned.get("start_seconds", source.get("start_seconds") or 0))
+        end = float(cleaned.get("end_seconds", source.get("end_seconds") or 0))
+        speed = float(cleaned.get("speed", source.get("speed") or 1.0))
+        source_duration = float((videos.get(int(source.get("video_id") or 0)) or {}).get("duration_seconds") or 0)
+        if start < 0 or end <= start:
+            raise ValueError(f"片段 {segment_id} 的時間範圍無效")
+        if source_duration > 0 and end > source_duration + 0.001:
+            raise ValueError(f"片段 {segment_id} 的結束時間超過來源長度")
+        if not 0.25 <= speed <= 4.0:
+            raise ValueError(f"片段 {segment_id} 的速度必須介於 0.25 到 4.0")
+        data.append(cleaned)
     path = project_dir(cfg, project_id) / "feedback" / "segment_review.json"
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     append_decision(cfg, project_id, "segment_review", f"更新 {len(data)} 段片段審核", "segment_review", affected_segments=[row.get("segment_id", "") for row in data])
+    mark_project_needs_review(cfg, db, project_id)
+    return path
+
+
+def update_segment_timing(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    segment_id: str,
+    start_seconds: float,
+    end_seconds: float,
+    speed: float,
+) -> Path:
+    """Patch only one segment's timing without copying storyboard metadata."""
+    segment_id = str(segment_id or "")
+    plan = _read_json(project_dir(cfg, project_id) / "project_plan.json")
+    raw_rows = project_segments(cfg, project_id, plan, apply_storyboard=False)
+    source = next((row for row in raw_rows if str(row.get("segment_id")) == segment_id), None)
+    if source is None:
+        raise ValueError(f"找不到片段：{segment_id}")
+    start = float(start_seconds)
+    end = float(end_seconds)
+    rate = float(speed)
+    if not all(math.isfinite(value) for value in (start, end, rate)):
+        raise ValueError("片段時間與速度必須是有限數值")
+    if start < 0 or end <= start:
+        raise ValueError(f"片段 {segment_id} 的時間範圍無效")
+    if not 0.25 <= rate <= 4.0:
+        raise ValueError(f"片段 {segment_id} 的速度必須介於 0.25 到 4.0")
+    videos = {int(row["id"]): dict(row) for row in project_videos(db, project_id)}
+    source_duration = float((videos.get(int(source.get("video_id") or 0)) or {}).get("duration_seconds") or 0)
+    if source_duration > 0 and end > source_duration + 0.001:
+        raise ValueError(f"片段 {segment_id} 的結束時間超過來源長度")
+
+    existing = _segment_review(cfg, project_id)
+    target_index = next((index for index, row in enumerate(existing) if str(row.get("segment_id")) == segment_id), None)
+    if target_index is None:
+        target = {"segment_id": segment_id}
+        existing.append(target)
+    else:
+        target = existing[target_index]
+    target["start_seconds"] = round(start, 3)
+    target["end_seconds"] = round(end, 3)
+    target["speed"] = round(rate, 6)
+    path = project_dir(cfg, project_id) / "feedback" / "segment_review.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.tmp")
+    temp.write_text(json.dumps(existing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temp.replace(path)
+    append_decision(cfg, project_id, "segment_timing", f"更新片段 {segment_id} 時間與速度", "segment_review", affected_segments=[segment_id])
     mark_project_needs_review(cfg, db, project_id)
     return path
 
@@ -278,6 +367,9 @@ def set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes: 
     path = folder / "review_status.json"
     snapshot = {}
     if status == "approved":
+        from .storyboard import ensure_storyboard
+
+        ensure_storyboard(cfg, db, project_id)
         from .render_manifest import compile_render_manifest
 
         manifest = compile_render_manifest(cfg, db, project_id)
@@ -350,6 +442,18 @@ def can_project_render(cfg: dict, db: Path, project_id: int) -> tuple[bool, str]
     plan = _read_json(plan_path)
     if plan.get("status") != "approved":
         return False, f"project_plan.json 狀態是 {plan.get('status', 'unknown')}，不是 approved"
+    storyboard_file = folder / "storyboard.json"
+    if not storyboard_file.exists():
+        return False, "缺少 storyboard.json"
+    try:
+        from .storyboard import load_storyboard, validate_storyboard
+
+        storyboard = load_storyboard(cfg, project_id)
+        storyboard_validation = validate_storyboard(storyboard or {}, project_segments(cfg, project_id, plan, apply_storyboard=False))
+        if not storyboard_validation["valid"]:
+            return False, "Storyboard 無效：" + "; ".join(storyboard_validation["errors"])
+    except Exception as exc:
+        return False, f"Storyboard 無法建立：{exc}"
     approved_hash = review.get("approved_manifest_hash")
     if not approved_hash:
         return False, "review_status.json 缺少 approved_manifest_hash"
