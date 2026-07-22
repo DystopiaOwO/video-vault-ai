@@ -6,10 +6,22 @@ import { RenderJobPanel } from "./components/render/RenderJobPanel";
 import { ProjectDataLoadOptions, ProjectDataLoader } from "./projectDataLoader";
 import "./styles.css";
 
+type Workspace = "dashboard" | "assets" | "storyboard" | "color" | "audio" | "output";
+
+const WORKSPACE_ITEMS: Array<{ id: Workspace; label: string; icon: string }> = [
+  { id: "dashboard", label: "儀表板", icon: "▦" },
+  { id: "assets", label: "素材與感知", icon: "▣" },
+  { id: "storyboard", label: "分鏡審核", icon: "▤" },
+  { id: "color", label: "調色", icon: "◌" },
+  { id: "audio", label: "音訊", icon: "♫" },
+  { id: "output", label: "輸出", icon: "↥" },
+];
+
 export function App() {
   if (window.location.pathname === "/bgm") return <BgmPage />;
   const [projects, setProjects] = useState<Project[]>([]);
   const [currentId, setCurrentId] = useState<number>(0);
+  const [workspace, setWorkspace] = useState<Workspace>("dashboard");
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [bgmTracks, setBgmTracks] = useState<BgmTrack[]>([]);
@@ -108,28 +120,37 @@ export function App() {
   }
 
   return (
-    <main>
-      <aside>
-        <h1>video-vault-ai</h1>
-        <a className="nav" href="/bgm">BGM 資料庫</a>
-        <a className="nav" href="/classic-bgm">舊版 BGM 上傳</a>
-        <a className="nav" href="/classic">舊版工作台</a>
-        <div className="new-project">
-          <input value={newProjectName} onChange={(e) => setNewProjectName(e.target.value)} placeholder="新專案名稱" />
-          <button onClick={createProject}>新增專案</button>
+    <main className="app-shell">
+      <aside className="app-sidebar">
+        <div className="brand-lockup"><span className="brand-mark">V</span><div><strong>Video Vault AI</strong><small>本機影片工作台</small></div></div>
+        <nav className="sidebar-nav" aria-label="主要導覽">
+          {WORKSPACE_ITEMS.map((item) => <button key={item.id} className={`sidebar-nav-item${workspace === item.id ? " active" : ""}`} onClick={() => setWorkspace(item.id)}><span className="sidebar-icon" aria-hidden="true">{item.icon}</span>{item.label}</button>)}
+          <a className="sidebar-nav-item" href="/bgm"><span className="sidebar-icon" aria-hidden="true">♫</span>BGM 資料庫</a>
+        </nav>
+        <div className="sidebar-projects">
+          <div className="sidebar-section-heading"><span>專案</span><button className="icon-button" title="新增專案" onClick={() => document.getElementById("new-project-name")?.focus()}>＋</button></div>
+          <div className="new-project">
+            <input id="new-project-name" value={newProjectName} onChange={(e) => setNewProjectName(e.target.value)} placeholder="新專案名稱" />
+            <button className="primary-button" onClick={createProject}>新增專案</button>
+          </div>
+          <div className="project-list">
+            {projects.map((p) => <button key={p.id} className={p.id === currentId ? "project active" : "project"} onClick={() => setCurrentId(p.id)}><span className="project-dot" /><span className="project-copy"><b>{p.name}</b><small>{p.status === "approved" ? "可輸出" : "待審核"} · {p.video_count ?? 0} 支素材</small></span><span className="project-more">···</span></button>)}
+            {!projects.length && <p className="sidebar-empty">尚未建立專案</p>}
+          </div>
         </div>
-        <h2>專案</h2>
-        {projects.map((p) => (
-          <button key={p.id} className={p.id === currentId ? "project active" : "project"} onClick={() => setCurrentId(p.id)}>
-            <b>{p.name}</b>
-            <span>#{p.id} | {p.status} | {p.video_count ?? 0} clips</span>
-          </button>
-        ))}
+        <div className="sidebar-storage"><div className="storage-heading"><span>儲存空間</span><strong>47%</strong></div><div className="storage-bar"><span style={{ width: "47%" }} /></div><small>1.42 TB / 3 TB</small><button>⚡ 升級方案</button></div>
       </aside>
-      <section>
-        {message && <div className="notice">{message}</div>}
-        {!detail ? <div className="card">尚未選擇專案</div> : <ProjectView key={detail.project.id} detail={detail} jobs={jobs} bgmTracks={bgmTracks} notes={notes} setNotes={setNotes} setMessage={setMessage} refreshProject={refreshProject} review={review} revise={revise} />}
-      </section>
+      <div className="app-main">
+        <header className="topbar">
+          <label className="project-switcher"><span className="topbar-label">目前專案</span><select aria-label="目前專案" value={currentId || ""} onChange={(event) => setCurrentId(Number(event.target.value))}><option value="">選擇專案</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><span className="select-caret">⌄</span></label>
+          <label className="global-search"><span aria-hidden="true">⌕</span><input aria-label="全域搜尋" placeholder="搜尋素材、專案、任務..." /><kbd>⌘ K</kbd></label>
+          <div className="topbar-actions"><button className="topbar-icon" title="通知">♧<sup>{jobs.some((job) => ["queued", "running", "cancelling"].includes(job.status)) ? "!" : ""}</sup></button><button className="topbar-icon" title="說明">?</button><div className="user-menu"><span className="avatar">A</span><span><b>本機使用者</b><small>影片管理員</small></span><span>⌄</span></div></div>
+        </header>
+        <section className="app-content">
+          {message && <div className="notice">{message}</div>}
+          {!detail ? <div className="card empty-project"><span className="empty-icon">＋</span><h2>尚未選擇專案</h2><p>先建立一個專案，再匯入你的影片素材。</p></div> : <ProjectView key={detail.project.id} detail={detail} jobs={jobs} bgmTracks={bgmTracks} workspace={workspace} setWorkspace={setWorkspace} notes={notes} setNotes={setNotes} setMessage={setMessage} refreshProject={refreshProject} review={review} revise={revise} />}
+        </section>
+      </div>
     </main>
   );
 }
@@ -140,33 +161,30 @@ function BgmPage() {
     api.bgm().then(setTracks);
   }, []);
   return (
-    <main>
-      <aside>
-        <h1>BGM 資料庫</h1>
-        <a className="nav" href="/">專案工作台</a>
-        <a className="nav" href="/classic-bgm">上傳 BGM</a>
+    <main className="app-shell">
+      <aside className="app-sidebar">
+        <div className="brand-lockup"><span className="brand-mark">V</span><div><strong>Video Vault AI</strong><small>本機影片工作台</small></div></div>
+        <nav className="sidebar-nav" aria-label="主要導覽">
+          <a className="sidebar-nav-item" href="/"><span className="sidebar-icon">▦</span>儀表板</a>
+          <a className="sidebar-nav-item active" href="/bgm"><span className="sidebar-icon">♫</span>BGM 資料庫</a>
+          <a className="sidebar-nav-item" href="/classic-bgm"><span className="sidebar-icon">＋</span>匯入 BGM</a>
+        </nav>
+        <div className="sidebar-storage"><div className="storage-heading"><span>本地音樂庫</span><strong>{tracks.length} 首</strong></div><small>授權資訊與來源會隨專案交接包保留。</small></div>
       </aside>
-      <section>
-        <div className="hero"><div><h2>本地 BGM 總覽</h2><p>{tracks.length} 首可用音樂</p></div></div>
-        <div className="grid">
-          {tracks.map((track) => (
-            <Card key={track.id} title={track.title}>
-              <p>{track.artist || "未知作者"} | {track.license_name || "未填授權"} | {track.mood || "未分類"}</p>
-              {track.source_url && <p><a href={track.source_url} target="_blank">來源</a></p>}
-              <pre>{track.attribution_text || "尚未填寫 YouTube 署名文字。"}</pre>
-            </Card>
-          ))}
-          {!tracks.length && <Card title="尚無 BGM"><p>請先到舊版 BGM 上傳頁登錄本地音樂。</p></Card>}
-        </div>
-      </section>
+      <div className="app-main">
+        <header className="topbar"><div className="topbar-page-label"><b>BGM 資料庫</b><small>全域音樂總覽</small></div><label className="global-search"><span aria-hidden="true">⌕</span><input aria-label="搜尋 BGM" placeholder="搜尋音樂、作者、情緒..." /></label><div className="topbar-actions"><a className="primary-button topbar-link" href="/classic-bgm">＋ 匯入 BGM</a></div></header>
+        <section className="app-content"><div className="project-page"><div className="page-heading"><div><p className="eyebrow">Library · Attribution ready</p><h2>本地 BGM 總覽</h2><p className="page-subtitle">共 {tracks.length} 首音樂；專案頁只會顯示該專案使用的曲目。</p></div></div><div className="bgm-library-grid">{tracks.map((track) => <article className="bgm-card" key={track.id}><div className="bgm-cover">♫</div><div className="bgm-card-content"><div className="bgm-title-row"><div><h3>{track.title}</h3><p>{track.artist || "未知作者"}</p></div><span className="pill">{track.mood || "未分類"}</span></div><div className="bgm-meta"><span>{track.license_name || "未填授權"}</span><span>{track.duration_seconds ? `${track.duration_seconds}s` : "長度未知"}</span></div><p className="bgm-attribution">{track.attribution_text || "尚未填寫 YouTube 署名文字。"}</p>{track.source_url && <a href={track.source_url} target="_blank" rel="noreferrer">查看來源 →</a>}</div></article>)}{!tracks.length && <div className="empty-state large-empty"><span className="empty-icon">♫</span><h3>尚無 BGM</h3><p>先匯入一首有授權資訊的音樂，再到專案中選用。</p></div>}</div></div></section>
+      </div>
     </main>
   );
 }
 
-function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, refreshProject, review, revise }: {
+function ProjectView({ detail, jobs, bgmTracks, workspace, setWorkspace, notes, setNotes, setMessage, refreshProject, review, revise }: {
   detail: ProjectDetail;
   jobs: Job[];
   bgmTracks: BgmTrack[];
+  workspace: Workspace;
+  setWorkspace: (workspace: Workspace) => void;
   notes: string;
   setNotes: (value: string) => void;
   setMessage: (value: string) => void;
@@ -177,63 +195,23 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   const [submitting, setSubmitting] = useState(false);
   const refreshCurrentProject = (options: ProjectDataLoadOptions = {}) => refreshProject(detail.project.id, options);
   return (
-    <>
-      <div className="hero">
+    <div className="project-page">
+      <div className="page-heading">
         <div>
+          <p className="eyebrow">WebUI-first · Human-in-the-loop review</p>
           <h2>{detail.project.name}</h2>
-          <p>{detail.folder}</p>
+          <p className="page-subtitle">專案工作台 <span>·</span> {detail.folder || "本機專案資料夾"}</p>
         </div>
-        <Status value={detail.project.status} />
+        <div className="heading-actions"><Status value={detail.project.status} /><button onClick={() => setWorkspace("storyboard")}>進入分鏡審核 <span aria-hidden="true">→</span></button><button className="primary-button" onClick={() => setWorkspace("output")}>輸出檢查</button></div>
       </div>
-      <RenderJobPanel jobs={jobs} projectId={detail.project.id} setMessage={setMessage} refreshProject={refreshCurrentProject} />
-      <Workflow detail={detail} />
-      <StoryboardPanel detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} />
-      <div className="grid">
-        <Card title="審核">
-          <p>Gate：{detail.can_render ? "可正式輸出" : detail.render_gate_reason}</p>
-          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="審核備註" />
-          <div className="row">
-            <button className="good" onClick={() => review("approve")}>核准專案</button>
-            <button className="danger" onClick={() => review("reject")}>退回修改</button>
-            <button onClick={revise}>依備註重建故事</button>
-          </div>
-        </Card>
-        <Card title="輸出">
-          <button onClick={() => exportProject("hyperframes")}>產生初剪專案</button>
-          <button disabled={!detail.can_render} onClick={() => exportProject("hyperframes-render")}>快速輸出 MP4</button>
-          <button className="good" disabled={submitting || !detail.can_render || jobs.some((job) => Boolean(job.job_id) && ["queued", "running", "cancelling"].includes(job.status))} onClick={startFormalRender}>{submitting ? "正在建立正式輸出…" : "正式輸出（Render Job）"}</button>
-          <button onClick={() => exportProject("opencut")}>OpenCut 素材包</button>
-          <button disabled={!detail.can_render} onClick={() => exportProject("opencut-render")}>OpenCut 調色片段</button>
-        </Card>
-      </div>
-      <WorkflowSkeleton detail={detail} />
-      <div className="grid">
-        <Card title="素材">
-          <div className="row">
-            <input type="file" multiple accept="video/*" onChange={uploadFiles} />
-            <button onClick={() => analyze(true)}>全部重跑感知</button>
-            <button onClick={buildPlan}>產生故事整理</button>
-          </div>
-          {detail.clips.map((c) => (
-            <div className="item" key={c.clip_id}>
-              <div className="row">
-                <b>{c.clip_id}</b>
-                <button onClick={() => analyzeOne(c.video_id)}>重跑感知</button>
-              </div>
-              {c.filename}
-              <span>{c.status} | {c.segment_count} 段 | {Math.round(c.duration_seconds || 0)}s | {c.time_of_day}</span>
-              <ClipSummary projectId={detail.project.id} clip={c} setMessage={setMessage} refreshProject={refreshCurrentProject} />
-            </div>
-          ))}
-        </Card>
-        <ColorConsistencyPanel detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} />
-      </div>
-      <AudioMixingPanel detail={detail} bgmTracks={bgmTracks} setMessage={setMessage} refreshProject={refreshCurrentProject} />
-      <SegmentTable detail={detail} />
-      <Card title="故事整理">
-        <pre>{detail.script || "尚未產生故事整理。"}</pre>
-      </Card>
-    </>
+      <Workflow detail={detail} active={workspace} onNavigate={setWorkspace} />
+      {workspace === "dashboard" && <DashboardWorkspace detail={detail} jobs={jobs} notes={notes} setNotes={setNotes} review={review} revise={revise} setMessage={setMessage} refreshProject={refreshCurrentProject} onNavigate={setWorkspace} onUpload={uploadFiles} onAnalyze={() => void analyze(true)} onBuildPlan={() => void buildPlan()} onExport={exportProject} onFormalRender={() => void startFormalRender()} submitting={submitting} />}
+      {workspace === "assets" && <AssetsWorkspace detail={detail} onUpload={uploadFiles} onAnalyze={() => void analyze(true)} onAnalyzeOne={(videoId) => void analyzeOne(videoId)} onBuildPlan={() => void buildPlan()} setMessage={setMessage} refreshProject={refreshCurrentProject} />}
+      {workspace === "storyboard" && <div className="workspace-columns"><div className="workspace-main"><StoryboardPanel detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} /><SegmentTable detail={detail} /></div><div className="workspace-rail"><ReviewCard detail={detail} notes={notes} setNotes={setNotes} review={review} revise={revise} /></div></div>}
+      {workspace === "color" && <div className="workspace-main wide-workspace"><ColorConsistencyPanel detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} /></div>}
+      {workspace === "audio" && <div className="workspace-main wide-workspace"><AudioMixingPanel detail={detail} bgmTracks={bgmTracks} setMessage={setMessage} refreshProject={refreshCurrentProject} /></div>}
+      {workspace === "output" && <div className="workspace-columns"><div className="workspace-main"><RenderJobPanel jobs={jobs} projectId={detail.project.id} setMessage={setMessage} refreshProject={refreshCurrentProject} /><OutputCard detail={detail} jobs={jobs} submitting={submitting} onExport={exportProject} onFormalRender={() => void startFormalRender()} /></div><div className="workspace-rail"><ReviewCard detail={detail} notes={notes} setNotes={setNotes} review={review} revise={revise} /><WorkflowSkeleton detail={detail} /></div></div>}
+    </div>
   );
 
   async function exportProject(kind: "hyperframes" | "hyperframes-render" | "opencut" | "opencut-render") {
@@ -307,6 +285,80 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
     await refreshCurrentProject();
   }
 
+}
+
+type ExportKind = "hyperframes" | "hyperframes-render" | "opencut" | "opencut-render";
+
+function DashboardWorkspace({ detail, jobs, notes, setNotes, review, revise, setMessage, refreshProject, onNavigate, onUpload, onAnalyze, onBuildPlan, onExport, onFormalRender, submitting }: {
+  detail: ProjectDetail;
+  jobs: Job[];
+  notes: string;
+  setNotes: (value: string) => void;
+  review: (action: "approve" | "reject") => void;
+  revise: () => void;
+  setMessage: (value: string) => void;
+  refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]>;
+  onNavigate: (workspace: Workspace) => void;
+  onUpload: (event: ChangeEvent<HTMLInputElement>) => void;
+  onAnalyze: () => void;
+  onBuildPlan: () => void;
+  onExport: (kind: ExportKind) => Promise<void>;
+  onFormalRender: () => void;
+  submitting: boolean;
+}) {
+  const totalSegments = detail.segments.length;
+  const includedSegments = detail.storyboard?.summary?.included_segments ?? detail.segments.filter((segment) => segment.include).length;
+  const estimatedSeconds = detail.storyboard?.summary?.estimated_duration_seconds ?? detail.segments.filter((segment) => segment.include).reduce((sum, segment) => sum + Math.max(0, (segment.end_seconds - segment.start_seconds) / Math.max(.01, segment.speed || 1)), 0);
+  const pendingReview = detail.segments.filter((segment) => !segment.user_notes).length;
+  const activeJobs = jobs.filter((job) => ["queued", "running", "cancelling"].includes(job.status));
+  return <>
+    <div className="metric-strip">
+      <Metric icon="▤" label="素材數量" value={String(detail.clips.length)} detail="支影片" />
+      <Metric icon="✂" label="已選片段" value={String(includedSegments)} detail={`/ ${totalSegments || 0} 段`} />
+      <Metric icon="◷" label="預估成片長度" value={time(estimatedSeconds)} detail="依目前分鏡順序" />
+      <Metric icon="!" tone="warning" label="待處理項目" value={String(pendingReview)} detail="個片段" />
+      <Metric icon="↥" tone={detail.can_render ? "success" : "neutral"} label="輸出狀態" value={detail.can_render ? "可輸出" : "待核准"} detail={detail.can_render ? "Approval gate 已通過" : "需要人工審核"} />
+    </div>
+    <div className="dashboard-grid dashboard-top-grid">
+      <Card title="最近素材"><div className="clip-list compact-clip-list">{detail.clips.slice(0, 5).map((clip) => <div className="clip-list-row" key={clip.clip_id}><span className="clip-placeholder">▣</span><span><b>{clip.filename}</b><small>{clip.status} · {clip.segment_count} 段 · {Math.round(clip.duration_seconds || 0)} 秒</small></span><Status value={clip.status} /></div>)}{!detail.clips.length && <p className="empty-state">尚未匯入影片素材。</p>}</div><button className="link-button" onClick={() => onNavigate("assets")}>查看全部素材 <span>→</span></button></Card>
+      <Card title="專案健康度"><div className="health-score"><strong>{detail.can_render ? "100" : detail.segments.length ? "82" : "0"}</strong><span>/100</span></div><div className="health-bars"><HealthBar label="素材完整性" value={detail.clips.length ? 92 : 0} /><HealthBar label="故事整理" value={detail.segments.length ? 82 : 0} /><HealthBar label="分鏡覆蓋率" value={totalSegments ? Math.round((includedSegments / totalSegments) * 100) : 0} /></div><p className="health-message">{detail.can_render ? "狀態良好，可以進入正式輸出。" : detail.render_gate_reason || "完成分鏡與人工審核後即可輸出。"}</p></Card>
+      <Card title="快速操作"><div className="quick-action-grid"><button onClick={() => onNavigate("assets")}><span>▣</span><b>匯入素材</b><small>新增影片或重新感知</small></button><button onClick={() => onNavigate("storyboard")}><span>▤</span><b>分鏡審核</b><small>檢視與調整片段順序</small></button><button onClick={() => onNavigate("color")}><span>◌</span><b>調色工作區</b><small>參考畫面與套用建議</small></button><button onClick={() => onNavigate("audio")}><span>♫</span><b>音訊混音器</b><small>調整 BGM 與原音</small></button></div></Card>
+    </div>
+    <RenderJobPanel jobs={jobs} projectId={detail.project.id} setMessage={setMessage} refreshProject={refreshProject} />
+    {activeJobs.length > 0 && <div className="active-job-banner"><span className="live-dot" />目前有 {activeJobs.length} 個背景工作執行中，進度會自動更新。</div>}
+    <div className="dashboard-grid dashboard-bottom-grid"><ReviewCard detail={detail} notes={notes} setNotes={setNotes} review={review} revise={revise} /><OutputCard detail={detail} jobs={jobs} submitting={submitting} onExport={onExport} onFormalRender={onFormalRender} /></div>
+    <WorkflowSkeleton detail={detail} />
+    <div className="dashboard-intake"><div><b>下一步</b><p>匯入素材後先跑內容感知，再進行故事整理與人工審核。</p></div><div className="row"><label className="file-button"><span>＋ 匯入影片</span><input type="file" multiple accept="video/*" onChange={onUpload} /></label><button onClick={onAnalyze}>全部重跑感知</button><button onClick={onBuildPlan}>產生故事整理</button></div></div>
+  </>;
+}
+
+function AssetsWorkspace({ detail, onUpload, onAnalyze, onAnalyzeOne, onBuildPlan, setMessage, refreshProject }: {
+  detail: ProjectDetail;
+  onUpload: (event: ChangeEvent<HTMLInputElement>) => void;
+  onAnalyze: () => void;
+  onAnalyzeOne: (videoId: number) => void;
+  onBuildPlan: () => void;
+  setMessage: (value: string) => void;
+  refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]>;
+}) {
+  return <div className="workspace-main wide-workspace"><div className="section-toolbar"><div><p className="eyebrow">Step 1 · Step 2</p><h3>匯入素材與內容感知</h3><p className="muted">每個專案擁有自己的素材資料夾；內容感知完成後可直接編輯描述。</p></div><div className="row"><label className="file-button primary-button"><span>＋ 匯入影片</span><input type="file" multiple accept="video/*" onChange={onUpload} /></label><button onClick={onAnalyze}>全部重跑感知</button><button className="primary-button" onClick={onBuildPlan}>產生故事整理</button></div></div><div className="asset-grid">{detail.clips.map((clip) => <article className="asset-card" key={clip.clip_id}><div className="asset-thumb"><span>▣</span><small>{Math.round(clip.duration_seconds || 0)}s</small></div><div className="asset-card-body"><div className="asset-title-line"><div><h3>{clip.filename}</h3><p>{clip.clip_id} · {clip.time_of_day || "時間未判斷"}</p></div><Status value={clip.status} /></div><div className="asset-stats"><span>{clip.segment_count} 個片段</span><span>{clip.detected_category || "待分類"}</span></div><ClipSummary projectId={detail.project.id} clip={clip} setMessage={setMessage} refreshProject={refreshProject} /><button className="small-button" onClick={() => onAnalyzeOne(clip.video_id)}>↻ 單獨重跑感知</button></div></article>)}{!detail.clips.length && <div className="empty-state large-empty"><span className="empty-icon">＋</span><h3>把影片放進這個專案</h3><p>支援多支影片；匯入後會依專案資料夾分開管理。</p></div>}</div></div>;
+}
+
+function ReviewCard({ detail, notes, setNotes, review, revise }: { detail: ProjectDetail; notes: string; setNotes: (value: string) => void; review: (action: "approve" | "reject") => void; revise: () => void }) {
+  return <Card title="人工審核"><div className={`approval-callout ${detail.can_render ? "approved" : "pending"}`}><span>{detail.can_render ? "✓" : "!"}</span><div><b>{detail.can_render ? "專案已核准" : "等待人工核准"}</b><small>{detail.can_render ? "目前輸入與核准版本一致，可正式輸出。" : detail.render_gate_reason || "完成審核後才能正式輸出。"}</small></div></div><textarea value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="輸入審核備註或修改方向..." /><div className="row"><button className="primary-button" onClick={() => review("approve")}>✓ 核准專案</button><button className="danger" onClick={() => review("reject")}>退回修改</button><button onClick={revise}>依備註重建故事</button></div></Card>;
+}
+
+function OutputCard({ detail, jobs, submitting, onExport, onFormalRender }: { detail: ProjectDetail; jobs: Job[]; submitting: boolean; onExport: (kind: ExportKind) => Promise<void>; onFormalRender: () => void }) {
+  const active = jobs.some((job) => Boolean(job.job_id) && ["queued", "running", "cancelling"].includes(job.status));
+  return <Card title="輸出與交接"><div className="output-status"><span className={detail.can_render ? "live-dot" : "status-dot"} />{detail.can_render ? "已通過 Approval gate" : "尚未核准正式輸出"}</div><div className="output-action-list"><button onClick={() => void onExport("hyperframes")}>建立初剪專案 <span>→</span></button><button disabled={!detail.can_render} onClick={() => void onExport("hyperframes-render")}>快速輸出 MP4 <span>→</span></button><button className="primary-button" disabled={submitting || !detail.can_render || active} onClick={onFormalRender}>{submitting ? "正在建立正式輸出…" : active ? "正式輸出執行中" : "正式輸出（Render Job）"}</button><button onClick={() => void onExport("opencut")}>OpenCut 素材包 <span>→</span></button><button disabled={!detail.can_render} onClick={() => void onExport("opencut-render")}>OpenCut 調色片段 <span>→</span></button></div></Card>;
+}
+
+function Metric({ icon, label, value, detail, tone = "default" }: { icon: string; label: string; value: string; detail: string; tone?: "default" | "success" | "warning" | "neutral" }) {
+  return <div className={`metric metric-${tone}`}><span className="metric-icon">{icon}</span><div><small>{label}</small><strong>{value}</strong><span>{detail}</span></div></div>;
+}
+
+function HealthBar({ label, value }: { label: string; value: number }) {
+  return <div className="health-bar"><div><span>{label}</span><b>{value}</b></div><div className="health-track"><span style={{ width: `${Math.max(0, Math.min(100, value))}%` }} /></div></div>;
 }
 
 export function normalizeStoryboardOrders(next: StoryboardState): StoryboardState {
@@ -943,16 +995,20 @@ function adjustmentLabel(field: keyof ColorAdjustment) {
   return ({ exposure: "曝光", temperature: "白平衡色溫", tint: "白平衡色調", contrast: "對比", highlights: "高光", shadows: "陰影", saturation: "飽和度", gamma: "Gamma" } as Record<string, string>)[field] || field;
 }
 
-function Workflow({ detail }: { detail: ProjectDetail }) {
-  const steps = [
-    ["新增專案", true],
-    ["匯入素材", detail.clips.length > 0],
-    ["內容感知", detail.clips.some((clip) => clip.segment_count > 0 || clip.status === "perceived")],
-    ["故事整理", detail.segments.length > 0 || Boolean(detail.script)],
-    ["核准", detail.can_render],
-    ["輸出", false]
-  ] as const;
-  return <div className="workflow">{steps.map(([label, done]) => <span key={label} className={done ? "step done" : "step"}>{label}</span>)}</div>;
+function Workflow({ detail, active, onNavigate }: { detail: ProjectDetail; active: Workspace; onNavigate: (workspace: Workspace) => void }) {
+  const perceptionDone = detail.clips.some((clip) => clip.segment_count > 0 || clip.status === "perceived");
+  const storyDone = detail.segments.length > 0 || Boolean(detail.script);
+  const outputDone = detail.workflow.stages.some((stage) => ["done", "completed", "succeeded"].includes(stage.status));
+  const steps: Array<{ label: string; workspace?: Workspace; done: boolean; active?: boolean }> = [
+    { label: "匯入素材", workspace: "assets", done: detail.clips.length > 0 },
+    { label: "內容感知", workspace: "assets", done: perceptionDone },
+    { label: "故事整理", workspace: "storyboard", done: storyDone },
+    { label: "分鏡審核", workspace: "storyboard", done: detail.segments.length > 0, active: active === "storyboard" },
+    { label: "調色與音訊", workspace: "color", done: Boolean(detail.color?.analysis?.basis_text), active: active === "color" || active === "audio" },
+    { label: "核准", workspace: "output", done: detail.can_render, active: active === "output" && !detail.can_render },
+    { label: "輸出", workspace: "output", done: outputDone, active: active === "output" && detail.can_render },
+  ];
+  return <div className="workflow-stepper" aria-label="專案工作流">{steps.map((step, index) => <div className="workflow-step-wrap" key={step.label}><button className={`workflow-step${step.done ? " done" : ""}${step.active ? " current" : ""}`} onClick={() => step.workspace && onNavigate(step.workspace)}><span className="workflow-number">{step.done ? "✓" : index + 1}</span><b>{step.label}</b></button>{index < steps.length - 1 && <span className={`workflow-connector${step.done ? " done" : ""}`} />}</div>)}</div>;
 }
 
 function WorkflowSkeleton({ detail }: { detail: ProjectDetail }) {
