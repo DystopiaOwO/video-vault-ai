@@ -52,11 +52,23 @@ describe("Storyboard state behavior", () => {
   it("successful_save_clears_dirty_state", async () => {
     const detail = detailWith();
     vi.spyOn(api, "updateStoryboard").mockResolvedValue({ ok: true, storyboard: detail.storyboard });
-    const view = render(<StoryboardPanel detail={detail} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
+    const setMessage = vi.fn();
+    const view = render(<StoryboardPanel detail={detail} setMessage={setMessage} refreshProject={vi.fn(async () => [])} />);
     fireEvent.change(screen.getAllByPlaceholderText("分鏡備註")[0], { target: { value: "已儲存" } });
     fireEvent.click(screen.getByRole("button", { name: "儲存分鏡" }));
     await vi.waitFor(() => expect(screen.queryByText("有未儲存變更")).toBeNull());
+    expect(setMessage).toHaveBeenCalledWith("分鏡已儲存，這次未修改輸出內容，既有核准仍有效。");
     view.unmount();
+  });
+
+  it("shows reapproval message when storyboard save changes output", async () => {
+    const detail = detailWith();
+    vi.spyOn(api, "updateStoryboard").mockResolvedValue({ ok: true, storyboard: detail.storyboard, approval_invalidated: true });
+    const setMessage = vi.fn();
+    render(<StoryboardPanel detail={detail} setMessage={setMessage} refreshProject={vi.fn(async () => [])} />);
+    fireEvent.change(screen.getAllByPlaceholderText("分鏡備註")[0], { target: { value: "改變剪輯內容" } });
+    fireEvent.click(screen.getByRole("button", { name: "儲存分鏡" }));
+    await vi.waitFor(() => expect(setMessage).toHaveBeenCalledWith("分鏡已儲存，輸出內容有變更，請重新核准後再正式輸出。"));
   });
 
   it("quick_audio_refresh_preserves_dirty_storyboard", async () => {

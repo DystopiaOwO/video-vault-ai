@@ -432,7 +432,11 @@ export function StoryboardPanel({ detail, setMessage, refreshProject }: { detail
     await refreshProject();
     setSaveInProgress(false);
     setBusy("");
-    setMessage("分鏡已儲存，專案已回到待審。重新核准後才能正式輸出。");
+    setMessage(
+      result.approval_invalidated
+        ? "分鏡已儲存，輸出內容有變更，請重新核准後再正式輸出。"
+        : "分鏡已儲存，這次未修改輸出內容，既有核准仍有效。",
+    );
   }
 
   function editSegment(segmentId: string, patch: Partial<StoryboardState["segments"][string]>) {
