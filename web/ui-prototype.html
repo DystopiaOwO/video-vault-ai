@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="zh-Hant" data-prototype="true">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Video Vault AI — UI Prototype</title>
+  <link rel="stylesheet" href="./ui-prototype.css" />
+</head>
+<body>
+  <input class="view-toggle" type="radio" name="workspace" id="view-dashboard" checked />
+  <input class="view-toggle" type="radio" name="workspace" id="view-storyboard" />
+  <input class="view-toggle" type="radio" name="workspace" id="view-tuning" />
+  <input class="view-toggle" type="radio" name="workspace" id="view-output" />
+
+  <div class="prototype-banner">
+    <strong>UI Prototype</strong>
+    <span>示範資料，不會寫入專案或呼叫正式 API。</span>
+  </div>
+
+  <main class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">V</span>
+        <span class="brand-copy"><strong>Video Vault AI</strong><small>本機影片工作台</small></span>
+      </div>
+
+      <nav class="primary-nav" aria-label="工作區">
+        <label for="view-dashboard"><span class="nav-icon">D</span><span>儀表板</span></label>
+        <label for="view-storyboard"><span class="nav-icon">S</span><span>分鏡審核</span></label>
+        <label for="view-tuning"><span class="nav-icon">T</span><span>調色與音訊</span></label>
+        <label for="view-output"><span class="nav-icon">O</span><span>輸出</span></label>
+      </nav>
+
+      <section class="project-panel" aria-labelledby="prototype-projects">
+        <div class="section-label" id="prototype-projects">專案</div>
+        <button class="project-row active" type="button">
+          <span class="project-dot"></span>
+          <span><strong>福岡旅行日記</strong><small>待審核 · 8 支素材</small></span>
+        </button>
+        <button class="project-row" type="button">
+          <span class="project-dot"></span>
+          <span><strong>手沖咖啡紀錄</strong><small>感知中 · 4 支素材</small></span>
+        </button>
+      </section>
+
+      <div class="sidebar-note">
+        <strong>Prototype mode</strong>
+        <span>先驗證資訊層級、操作密度與響應式，再接正式資料。</span>
+      </div>
+    </aside>
+
+    <div class="main-column">
+      <header class="topbar">
+        <label class="project-select">
+          <span>目前專案</span>
+          <select aria-label="目前專案">
+            <option>福岡旅行日記</option>
+            <option>手沖咖啡紀錄</option>
+          </select>
+        </label>
+        <div class="topbar-status">
+          <span class="status-pill pending">等待人工核准</span>
+          <button type="button">開啟專案資料夾</button>
+        </div>
+      </header>
+
+      <div class="content">
+        <section class="workspace workspace-dashboard">
+          <header class="page-heading">
+            <div>
+              <p class="eyebrow">Project overview</p>
+              <h1>福岡旅行日記</h1>
+              <p>以實際專案狀態呈現下一步，不使用虛構健康分數或儲存空間。</p>
+            </div>
+            <label class="primary-action" for="view-storyboard">進入分鏡審核</label>
+          </header>
+
+          <ol class="workflow-stepper" aria-label="專案流程">
+            <li class="done"><span>1</span><strong>匯入素材</strong></li>
+            <li class="done"><span>2</span><strong>內容感知</strong></li>
+            <li class="done"><span>3</span><strong>故事整理</strong></li>
+            <li class="current"><span>4</span><strong>分鏡審核</strong></li>
+            <li><span>5</span><strong>調色與音訊</strong></li>
+            <li><span>6</span><strong>核准與輸出</strong></li>
+          </ol>
+
+          <div class="metric-grid">
+            <article><small>素材</small><strong>8</strong><span>支影片</span></article>
+            <article><small>分鏡</small><strong>14</strong><span>12 段納入</span></article>
+            <article><small>預估成片</small><strong>02:46</strong><span>依目前順序</span></article>
+            <article class="attention"><small>待處理</small><strong>3</strong><span>剪點、音訊或警告</span></article>
+          </div>
+
+          <div class="dashboard-grid">
+            <article class="card project-state-card">
+              <div class="card-heading"><div><p class="eyebrow">Next action</p><h2>完成分鏡審核</h2></div><span class="status-pill pending">進行中</span></div>
+              <p>有 2 段尚未確認剪點，另有 1 段原音角色需要決定。完成後再進入調色與音訊。</p>
+              <div class="check-list">
+                <span class="done">素材與感知已完成</span>
+                <span class="done">故事分組已建立</span>
+                <span>確認片段順序與剪點</span>
+                <span>確認原音與調色例外</span>
+              </div>
+              <label class="primary-action inline" for="view-storyboard">繼續審核</label>
+            </article>
+
+            <article class="card">
+              <div class="card-heading"><h2>最近素材</h2><button type="button">查看全部</button></div>
+              <div class="media-list">
+                <div><span class="media-thumb">01</span><span><strong>FUKUOKA_001.MP4</strong><small>已感知 · 4 個片段</small></span><span class="status-pill success">完成</span></div>
+                <div><span class="media-thumb">02</span><span><strong>CANAL_CITY_NIGHT.MP4</strong><small>已感知 · 3 個片段</small></span><span class="status-pill success">完成</span></div>
+                <div><span class="media-thumb">03</span><span><strong>RAMEN_CLOSEUP_LONG_FILENAME.MP4</strong><small>已感知 · 2 個片段</small></span><span class="status-pill success">完成</span></div>
+              </div>
+            </article>
+
+            <article class="card">
+              <div class="card-heading"><h2>背景工作</h2><span class="status-pill neutral">1 個</span></div>
+              <div class="job-row">
+                <div><strong>產生分鏡代表畫格</strong><small>已完成 9 / 14</small></div>
+                <progress max="14" value="9">9 / 14</progress>
+                <span>64%</span>
+              </div>
+              <p class="subtle">進度由正式 Render Job 或背景工作資料提供；沒有工作時不顯示假通知。</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="workspace workspace-storyboard">
+          <header class="page-heading compact">
+            <div>
+              <p class="eyebrow">Storyboard review</p>
+              <h1>分鏡審核</h1>
+              <p>左側快速掃描與排序，右側只編輯目前選取的片段。</p>
+            </div>
+            <div class="heading-actions">
+              <button type="button">重新產生代表畫格</button>
+              <button class="primary-button" type="button">儲存分鏡</button>
+            </div>
+          </header>
+
+          <div class="storyboard-layout">
+            <div class="segment-browser">
+              <div class="segment-toolbar">
+                <div><strong>12 段納入</strong><span>2 段排除 · 預估 02:46</span></div>
+                <div class="segmented-control"><button class="active" type="button">全部</button><button type="button">待處理</button><button type="button">已排除</button></div>
+              </div>
+
+              <section class="segment-group">
+                <header><div><span class="drag-handle">::</span><strong>抵達與移動</strong><small>4 段 · 00:38</small></div><button type="button">群組設定</button></header>
+                <article class="segment-row selected">
+                  <span class="drag-handle">::</span><span class="segment-thumb">01</span>
+                  <div class="segment-summary"><div><strong>抵達福岡機場</strong><span class="status-pill success">納入</span></div><small>FUKUOKA_001.MP4 · 00:04.2–00:09.8 · 成片 5.6 秒</small><span>開場 · AI 0.92 · 保留原音</span></div>
+                  <button class="icon-button" type="button" aria-label="預覽片段">Play</button>
+                </article>
+                <article class="segment-row">
+                  <span class="drag-handle">::</span><span class="segment-thumb">02</span>
+                  <div class="segment-summary"><div><strong>搭乘地鐵進市區</strong><span class="status-pill warning">待確認</span></div><small>SUBWAY_004.MP4 · 00:12.0–00:19.2 · 成片 7.2 秒</small><span>轉場 · AI 0.86 · 降低原音</span></div>
+                  <button class="icon-button" type="button" aria-label="預覽片段">Play</button>
+                </article>
+              </section>
+
+              <section class="segment-group">
+                <header><div><span class="drag-handle">::</span><strong>城市散步</strong><small>5 段 · 01:12</small></div><button type="button">群組設定</button></header>
+                <article class="segment-row">
+                  <span class="drag-handle">::</span><span class="segment-thumb">03</span>
+                  <div class="segment-summary"><div><strong>運河城夜景</strong><span class="status-pill success">納入</span></div><small>CANAL_CITY_NIGHT.MP4 · 00:02.4–00:12.7 · 成片 10.3 秒</small><span>主畫面 · AI 0.89 · 只留 BGM</span></div>
+                  <button class="icon-button" type="button" aria-label="預覽片段">Play</button>
+                </article>
+                <article class="segment-row excluded">
+                  <span class="drag-handle">::</span><span class="segment-thumb">04</span>
+                  <div class="segment-summary"><div><strong>重複街景移動</strong><span class="status-pill neutral">排除</span></div><small>WALK_009.MP4 · 00:31.0–00:36.0</small><span>重複畫面 · AI 0.51</span></div>
+                  <button class="icon-button" type="button" aria-label="預覽片段">Play</button>
+                </article>
+              </section>
+            </div>
+
+            <aside class="segment-inspector">
+              <div class="inspector-preview"><span>Selected frame preview</span><button type="button">播放片段</button></div>
+              <div class="inspector-heading"><div><p class="eyebrow">Selected segment</p><h2>抵達福岡機場</h2></div><span class="status-pill success">納入</span></div>
+
+              <div class="form-section">
+                <h3>剪輯範圍</h3>
+                <div class="form-grid three">
+                  <label>起點<input type="number" value="4.2" step="0.1" /></label>
+                  <label>終點<input type="number" value="9.8" step="0.1" /></label>
+                  <label>速度<input type="number" value="1" step="0.05" min="0.25" max="4" /></label>
+                </div>
+                <div class="button-row"><button type="button">預覽剪點</button><button type="button">預覽前後銜接</button></div>
+              </div>
+
+              <div class="form-section">
+                <h3>分鏡設定</h3>
+                <label>群組<select><option>抵達與移動</option><option>城市散步</option><option>飲食</option></select></label>
+                <div class="toggle-row"><label><input type="checkbox" checked /> 納入成片</label><label><input type="checkbox" /> 鎖定自動重建</label></div>
+                <label>備註<textarea rows="3">保留機場廣播聲，作為旅程開始的氛圍。</textarea></label>
+              </div>
+
+              <div class="form-section split">
+                <div><h3>原音</h3><select><option>保留原音</option><option>降低原音</option><option>靜音</option><option>只留 BGM</option></select></div>
+                <div><h3>調色</h3><select><option>使用專案預設</option><option>停用此片段</option><option>片段自訂</option></select></div>
+              </div>
+
+              <div class="inspector-footer"><button type="button">復原</button><button class="primary-button" type="button">套用片段設定</button></div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="workspace workspace-tuning">
+          <header class="page-heading compact">
+            <div><p class="eyebrow">Color & audio</p><h1>調色與音訊</h1><p>片段清單、中央預覽與選取片段設定維持固定位置。</p></div>
+            <div class="heading-actions"><button type="button">產生 12 秒預覽</button><button class="primary-button" type="button">儲存設定</button></div>
+          </header>
+
+          <div class="tuning-layout">
+            <aside class="tuning-list">
+              <div class="panel-title"><strong>片段</strong><span>12</span></div>
+              <button class="tuning-item active" type="button"><span class="mini-thumb">01</span><span><strong>抵達福岡機場</strong><small>原音保留 · 專案調色</small></span></button>
+              <button class="tuning-item" type="button"><span class="mini-thumb">02</span><span><strong>搭乘地鐵</strong><small>原音降低 · 專案調色</small></span></button>
+              <button class="tuning-item" type="button"><span class="mini-thumb">03</span><span><strong>運河城夜景</strong><small>只留 BGM · 片段自訂</small></span></button>
+              <button class="tuning-item" type="button"><span class="mini-thumb">04</span><span><strong>拉麵特寫</strong><small>原音保留 · 專案調色</small></span></button>
+            </aside>
+
+            <section class="preview-stage">
+              <div class="preview-tabs"><button class="active" type="button">After</button><button type="button">Before</button><button type="button">並排比較</button></div>
+              <div class="video-placeholder"><span>16:9 Preview</span><button type="button">Play</button></div>
+              <div class="playback-bar"><button type="button">Prev</button><button type="button">Play</button><span>00:04.2 / 00:05.6</span><input aria-label="播放進度" type="range" min="0" max="56" value="42" /><button type="button">Next</button></div>
+              <div class="thumbnail-strip"><button class="active" type="button">01</button><button type="button">02</button><button type="button">03</button><button type="button">04</button><button type="button">05</button></div>
+            </section>
+
+            <aside class="tuning-controls">
+              <div class="tabs"><button class="active" type="button">調色</button><button type="button">音訊</button></div>
+              <div class="form-section">
+                <h3>技術轉換</h3>
+                <label>模式<select><option>DJI D-Log M</option><option>DJI D-Log</option><option>自訂 LUT</option><option>手動</option></select></label>
+                <label>LUT 路徑<input type="text" value="DJI_DLogM_to_Rec709.cube" /></label>
+              </div>
+              <div class="form-section">
+                <h3>片段調整</h3>
+                <label>曝光 <output>+0.15</output><input type="range" min="-100" max="100" value="15" /></label>
+                <label>色溫 <output>+120</output><input type="range" min="-1000" max="1000" value="120" /></label>
+                <label>對比 <output>1.04</output><input type="range" min="50" max="150" value="104" /></label>
+                <label>飽和度 <output>1.02</output><input type="range" min="0" max="150" value="102" /></label>
+              </div>
+              <div class="form-section">
+                <h3>原音角色</h3>
+                <label>模式<select><option>保留原音</option><option>降低原音</option><option>靜音</option><option>只留 BGM</option></select></label>
+                <label>音量 dB<input type="number" value="0" min="-60" max="12" /></label>
+                <div class="form-grid two"><label>淡入<input type="number" value="0.1" step="0.1" /></label><label>淡出<input type="number" value="0.1" step="0.1" /></label></div>
+              </div>
+              <div class="inspector-footer"><button type="button">恢復專案預設</button><button class="primary-button" type="button">套用</button></div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="workspace workspace-output">
+          <header class="page-heading compact">
+            <div><p class="eyebrow">Approval & render</p><h1>核准與輸出</h1><p>正式輸出只有在 Manifest 與核准版本一致時才開放。</p></div>
+          </header>
+          <div class="output-grid">
+            <article class="card approval-card">
+              <div class="approval-state"><span>!</span><div><strong>等待人工核准</strong><small>分鏡剪點與音訊設定尚未全部確認。</small></div></div>
+              <label>審核備註<textarea rows="5" placeholder="輸入需要修改的內容或核准備註"></textarea></label>
+              <div class="button-row"><button class="danger-button" type="button">退回修改</button><button class="primary-button" type="button">核准目前版本</button></div>
+            </article>
+            <article class="card">
+              <div class="card-heading"><h2>輸出選項</h2><span class="status-pill neutral">尚未開放</span></div>
+              <div class="output-actions"><button type="button">建立初剪專案<span>可使用</span></button><button disabled type="button">快速輸出 MP4<span>需核准</span></button><button disabled type="button">正式輸出 Render Job<span>需核准</span></button><button type="button">建立 OpenCut 素材包<span>可使用</span></button></div>
+            </article>
+            <article class="card full-width">
+              <div class="card-heading"><h2>Render Jobs</h2><span class="status-pill neutral">無執行中工作</span></div>
+              <div class="empty-state"><strong>尚無正式輸出工作</strong><span>核准目前版本後，正式輸出按鈕才會啟用。</span></div>
+            </article>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+</body>
+</html>
