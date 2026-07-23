@@ -125,6 +125,10 @@ function renderWorkspace(input = detail()) {
   return { ...view, setMessage, refreshProject };
 }
 
+function bgmVolumeInput(): HTMLInputElement {
+  return screen.getAllByLabelText("音量 dB")[0] as HTMLInputElement;
+}
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -134,27 +138,27 @@ describe("AudioMixingWorkspace", () => {
   it("marks local edits dirty and can restore the server baseline", () => {
     const { setMessage } = renderWorkspace();
 
-    fireEvent.change(screen.getByLabelText("音量 dB"), { target: { value: "-12" } });
+    fireEvent.change(bgmVolumeInput(), { target: { value: "-12" } });
     expect(screen.getByText("有未儲存變更")).toBeTruthy();
     expect((screen.getByRole("button", { name: "儲存音訊設定" }) as HTMLButtonElement).disabled).toBe(false);
 
     fireEvent.click(screen.getByRole("button", { name: "放棄變更" }));
-    expect((screen.getByLabelText("音量 dB") as HTMLInputElement).value).toBe("-18");
+    expect(bgmVolumeInput().value).toBe("-18");
     expect(screen.queryByText("有未儲存變更")).toBeNull();
     expect(setMessage).toHaveBeenCalledWith("已放棄尚未儲存的音訊設定。");
   });
 
-  it("protects a dirty draft from polling but accepts server updates when clean", () => {
+  it("protects a dirty draft from polling but accepts server updates when clean", async () => {
     const cleanServer = detail(1, audio(-16));
     const laterServer = detail(1, audio(-10));
     const view = renderWorkspace();
 
     view.rerender(<AudioMixingWorkspace detail={cleanServer} bgmTracks={[]} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
-    expect((screen.getByLabelText("音量 dB") as HTMLInputElement).value).toBe("-16");
+    await waitFor(() => expect(bgmVolumeInput().value).toBe("-16"));
 
-    fireEvent.change(screen.getByLabelText("音量 dB"), { target: { value: "-13" } });
+    fireEvent.change(bgmVolumeInput(), { target: { value: "-13" } });
     view.rerender(<AudioMixingWorkspace detail={laterServer} bgmTracks={[]} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
-    expect((screen.getByLabelText("音量 dB") as HTMLInputElement).value).toBe("-13");
+    await waitFor(() => expect(bgmVolumeInput().value).toBe("-13"));
     expect(screen.getByText("有未儲存變更")).toBeTruthy();
   });
 
@@ -163,7 +167,7 @@ describe("AudioMixingWorkspace", () => {
     const save = vi.spyOn(api, "audioSettings").mockResolvedValue({ ok: true, state: saved });
     const { refreshProject } = renderWorkspace();
 
-    fireEvent.change(screen.getByLabelText("音量 dB"), { target: { value: "-12" } });
+    fireEvent.change(bgmVolumeInput(), { target: { value: "-12" } });
     fireEvent.click(screen.getByRole("button", { name: "儲存音訊設定" }));
 
     await waitFor(() => expect(save).toHaveBeenCalledWith(1, expect.objectContaining({ bgm: expect.objectContaining({ volume_db: -12 }) })));
@@ -178,20 +182,20 @@ describe("AudioMixingWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "產生 12 秒預覽" }));
     await waitFor(() => expect(document.querySelector("video")?.getAttribute("src")).toBe("/audio-preview.mp4"));
 
-    fireEvent.change(screen.getByLabelText("音量 dB"), { target: { value: "-11" } });
+    fireEvent.change(bgmVolumeInput(), { target: { value: "-11" } });
     expect(document.querySelector("video")).toBeNull();
   });
 
-  it("resets all draft state and search when switching projects", () => {
+  it("resets all draft state and search when switching projects", async () => {
     const view = renderWorkspace();
 
-    fireEvent.change(screen.getByLabelText("音量 dB"), { target: { value: "-9" } });
+    fireEvent.change(bgmVolumeInput(), { target: { value: "-9" } });
     fireEvent.change(screen.getByLabelText("搜尋音訊片段"), { target: { value: "巷弄" } });
     expect(screen.queryByText("抵達車站")).toBeNull();
 
     view.rerender(<AudioMixingWorkspace detail={detail(2, audio(-20))} bgmTracks={[]} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
-    expect((screen.getByLabelText("音量 dB") as HTMLInputElement).value).toBe("-20");
-    expect((screen.getByLabelText("搜尋音訊片段") as HTMLInputElement).value).toBe("");
+    await waitFor(() => expect(bgmVolumeInput().value).toBe("-20"));
+    await waitFor(() => expect((screen.getByLabelText("搜尋音訊片段") as HTMLInputElement).value).toBe(""));
     expect(screen.getByText("抵達車站")).toBeTruthy();
     expect(screen.queryByText("有未儲存變更")).toBeNull();
   });
@@ -202,7 +206,7 @@ describe("AudioMixingWorkspace", () => {
     renderWorkspace(detail(1, customized));
 
     expect(screen.getByText("片段自訂")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "恢復預設" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "恢復預設" })[0]);
     expect(screen.getByText("有未儲存變更")).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText("搜尋音訊片段"), { target: { value: "巷弄" } });
