@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { AudioState, ColorState, ProjectDetail, StoryboardState } from "../src/api";
 import {
+  addStoryboardGroup,
   buildStoryboardViewModel,
+  deleteEmptyStoryboardGroup,
+  editableStoryboardState,
+  moveStoryboardGroup,
+  moveStoryboardSegment,
+  moveStoryboardSegmentToGroup,
+  renameStoryboardGroup,
+  timelineStartForSegment,
   updateStoryboardSegment,
   validateSegmentTiming,
 } from "../src/workspaces/storyboard/storyboardViewModel";
@@ -144,6 +152,12 @@ describe("storyboard production view model", () => {
     expect(view.segments.map((segment) => segment.id)).toContain("c");
   });
 
+  it("keeps a truly empty storyboard empty until generation", () => {
+    const input = detail();
+    input.storyboard = { schema_version: 1, exists: false, groups: [], segments: {} };
+    expect(editableStoryboardState(input)).toEqual({ schema_version: 1, exists: false, groups: [], segments: {} });
+  });
+
   it("updates one storyboard segment without mutating the original state", () => {
     const original = storyboard();
     const updated = updateStoryboardSegment(original, "a", { included: false, notes: "改成排除" });
@@ -154,6 +168,52 @@ describe("storyboard production view model", () => {
     expect(updated.segments.a.notes).toBe("改成排除");
     expect(original.segments.a.included).toBe(true);
     expect(original.segments.a.notes).toBe("第二段");
+  });
+
+  it("moves segments within and across groups with normalized manual ordering", () => {
+    const within = moveStoryboardSegment(storyboard(), "b", 1);
+    expect(within.segments.a.order).toBe(1);
+    expect(within.segments.b.order).toBe(2);
+    expect(within.segments.b.manual_order).toBe(true);
+
+    const across = moveStoryboardSegmentToGroup(storyboard(), "a", "afternoon");
+    expect(across.segments.a.group_id).toBe("afternoon");
+    expect(across.segments.a.manual_group).toBe(true);
+    expect(across.segments.c.order).toBe(1);
+    expect(across.segments.a.order).toBe(2);
+  });
+
+  it("marks a group change made through the inspector as manual", () => {
+    const moved = updateStoryboardSegment(storyboard(), "a", { group_id: "afternoon" });
+    expect(moved.segments.a.group_id).toBe("afternoon");
+    expect(moved.segments.a.manual_group).toBe(true);
+    expect(moved.segments.a.manual_order).toBe(true);
+  });
+
+  it("adds renames reorders and deletes empty groups", () => {
+    const added = addStoryboardGroup(storyboard(), "晚上", "night");
+    expect(added.groups.map((group) => group.group_id)).toEqual(["morning", "afternoon", "night"]);
+
+    const renamed = renameStoryboardGroup(added, "night", "夜間");
+    expect(renamed.groups.find((group) => group.group_id === "night")?.title).toBe("夜間");
+
+    const moved = moveStoryboardGroup(renamed, "night", -1);
+    expect(moved.groups.map((group) => group.group_id)).toEqual(["morning", "night", "afternoon"]);
+    expect(moved.groups.map((group) => group.order)).toEqual([1, 2, 3]);
+
+    const deleted = deleteEmptyStoryboardGroup(moved, "night");
+    expect(deleted.groups.map((group) => group.group_id)).toEqual(["morning", "afternoon"]);
+    expect(deleteEmptyStoryboardGroup(deleted, "morning")).toBe(deleted);
+  });
+
+  it("calculates range preview start from included ordered output duration", () => {
+    const input = detail();
+    input.storyboard.segments.b.included = true;
+    const start = timelineStartForSegment(input.storyboard, input, "c", {
+      b: { startSeconds: 6, endSeconds: 14, speed: 2 },
+      a: { startSeconds: 0, endSeconds: 6, speed: 1 },
+    });
+    expect(start).toBe(10);
   });
 
   it("validates timing with the same user-facing boundaries", () => {
