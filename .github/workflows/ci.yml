@@ -52,7 +52,7 @@ jobs:
       - name: Verify Python UI import
         run: python -c "import video_vault.ui"
       - name: Run pytest
-        run: pytest -q
+        run: pytest -q --tb=short --disable-warnings
       - name: Check source encoding
         run: python scripts/check_encoding.py
       - name: Check pull request or push diff whitespace
