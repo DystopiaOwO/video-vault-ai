@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useRef, useState } from "react";
+import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { ChangeEvent, ReactNode } from "react";
 import { api, AudioSegmentOverride, AudioSegmentSettings, AudioState, BgmTrack, ColorAdjustment, ColorSegmentState, ColorState, ColorStatePatch, Job, Project, ProjectDetail, Segment } from "./api";
@@ -10,6 +10,8 @@ import "./styles.css";
 export function App() {
   if (window.location.pathname === "/bgm") return <BgmPage />;
   const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(true);
+  const [projectQuery, setProjectQuery] = useState("");
   const [currentId, setCurrentId] = useState<number>(0);
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -17,9 +19,17 @@ export function App() {
   const [notes, setNotes] = useState("");
   const [message, setMessage] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
+  const [creatingProject, setCreatingProject] = useState(false);
   const currentIdRef = useRef(0);
   const mountedRef = useRef(true);
   const loaderRef = useRef<ProjectDataLoader | null>(null);
+  const normalizedProjectQuery = projectQuery.trim().toLocaleLowerCase();
+  const filteredProjects = useMemo(() => projects.filter((project) => {
+    if (!normalizedProjectQuery) return true;
+    return [project.name, project.status, String(project.id)]
+      .some((value) => String(value || "").toLocaleLowerCase().includes(normalizedProjectQuery));
+  }), [normalizedProjectQuery, projects]);
+
   if (!loaderRef.current) {
     loaderRef.current = new ProjectDataLoader(
       { project: api.project, jobs: api.jobs },
@@ -34,15 +44,23 @@ export function App() {
   }
 
   useEffect(() => {
-    loadProjects();
+    void loadProjects();
     api.bgm().then(setBgmTracks).catch((error) => setMessage(`BGM 載入失敗：${error instanceof Error ? error.message : "未知錯誤"}`));
   }, []);
 
-  function loadProjects() {
-    return api.projects().then((rows) => {
+  async function loadProjects() {
+    setProjectsLoading(true);
+    try {
+      const rows = await api.projects();
       setProjects(rows);
       setCurrentId((id) => id || rows[0]?.id || 0);
-    }).catch((error) => setMessage(`專案載入失敗：${error instanceof Error ? error.message : "未知錯誤"}`));
+      return rows;
+    } catch (error) {
+      setMessage(`專案載入失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      return [];
+    } finally {
+      setProjectsLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -81,55 +99,115 @@ export function App() {
   async function review(action: "approve" | "reject") {
     if (!detail) return;
     setMessage("送出中...");
-    action === "approve" ? await api.approve(detail.project.id, notes) : await api.reject(detail.project.id, notes);
-    setNotes("");
-    setMessage(action === "approve" ? "已核准專案" : "已退回修改");
-    setDetail(await api.project(detail.project.id));
+    try {
+      action === "approve" ? await api.approve(detail.project.id, notes) : await api.reject(detail.project.id, notes);
+      setNotes("");
+      setMessage(action === "approve" ? "已核准專案" : "已退回修改");
+      setDetail(await api.project(detail.project.id));
+    } catch (error) {
+      setMessage(`審核操作失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+    }
   }
 
   async function revise() {
     if (!detail) return;
     setMessage("正在依備註重建故事...");
-    await api.revise(detail.project.id, notes);
-    setMessage("故事整理已依備註重建");
-    setDetail(await api.project(detail.project.id));
+    try {
+      await api.revise(detail.project.id, notes);
+      setMessage("故事整理已依備註重建");
+      setDetail(await api.project(detail.project.id));
+    } catch (error) {
+      setMessage(`故事重建失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+    }
   }
 
   async function createProject() {
+    const name = newProjectName.trim();
+    if (!name) {
+      setMessage("請先輸入專案名稱。");
+      return;
+    }
+    if (projects.some((project) => project.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase())) {
+      setMessage("已有同名專案，請使用不同名稱。");
+      return;
+    }
+    setCreatingProject(true);
     setMessage("正在建立專案...");
-    const result = await api.createProject(newProjectName);
-    setNewProjectName("");
-    await loadProjects();
-    setCurrentId(result.id);
-    setMessage("專案已建立，下一步請匯入素材。");
+    try {
+      const result = await api.createProject(name);
+      setNewProjectName("");
+      await loadProjects();
+      selectProject(result.id);
+      setMessage("專案已建立，下一步請匯入素材。");
+    } catch (error) {
+      setMessage(`專案建立失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+    } finally {
+      setCreatingProject(false);
+    }
+  }
+
+  function selectProject(projectId: number) {
+    if (projectId === currentId) return;
+    loaderRef.current?.invalidate();
+    setCurrentId(projectId);
+    setDetail(null);
+    setJobs([]);
+    setNotes("");
+    setMessage("");
   }
 
   async function refreshProject(projectId: number, options: ProjectDataLoadOptions = {}): Promise<Job[]> {
     return loadProjectData(projectId, options);
   }
 
+  const projectContent = projectsLoading
+    ? <WorkspaceLoading title="正在載入專案" detail="取得專案清單與工作狀態…" />
+    : projects.length === 0
+      ? <WorkspaceEmpty title="尚未建立專案" detail="從左側輸入名稱建立第一個專案，再匯入多支影片素材。" />
+      : !detail || detail.project.id !== currentId
+        ? <WorkspaceLoading title="正在開啟專案" detail="載入素材、分鏡、調色、音訊與輸出狀態…" />
+        : <ProjectView key={detail.project.id} detail={detail} jobs={jobs} bgmTracks={bgmTracks} notes={notes} setNotes={setNotes} setMessage={setMessage} refreshProject={refreshProject} review={review} revise={revise} />;
+
   return (
     <main>
       <aside>
-        <h1>video-vault-ai</h1>
-        <a className="nav" href="/bgm">BGM 資料庫</a>
-        <a className="nav" href="/classic-bgm">舊版 BGM 上傳</a>
-        <a className="nav" href="/classic">舊版工作台</a>
+        <h1>Video Vault AI</h1>
+        <nav className="sidebar-links" aria-label="主要導覽">
+          <a className="nav" href="/bgm">BGM 資料庫</a>
+          <a className="nav" href="/classic-bgm">舊版 BGM 上傳</a>
+          <a className="nav" href="/classic">舊版工作台</a>
+        </nav>
         <div className="new-project">
-          <input value={newProjectName} onChange={(e) => setNewProjectName(e.target.value)} placeholder="新專案名稱" />
-          <button onClick={createProject}>新增專案</button>
+          <label htmlFor="new-project-name">建立專案</label>
+          <input id="new-project-name" value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void createProject(); }} placeholder="例如：福岡旅行 2026" maxLength={80} />
+          <button disabled={creatingProject || !newProjectName.trim()} onClick={() => void createProject()}>{creatingProject ? "建立中…" : "新增專案"}</button>
         </div>
-        <h2>專案</h2>
-        {projects.map((p) => (
-          <button key={p.id} className={p.id === currentId ? "project active" : "project"} onClick={() => setCurrentId(p.id)}>
-            <b>{p.name}</b>
-            <span>#{p.id} | {p.status} | {p.video_count ?? 0} clips</span>
-          </button>
-        ))}
+        <div className="sidebar-section-heading">
+          <h2>專案</h2>
+          <span>{filteredProjects.length} / {projects.length}</span>
+        </div>
+        <label className="project-search">
+          <span>搜尋專案</span>
+          <input type="search" aria-label="搜尋專案" value={projectQuery} onChange={(event) => setProjectQuery(event.target.value)} placeholder="名稱、狀態或編號" />
+        </label>
+        <div className="project-list" aria-label="專案清單">
+          {projectsLoading && <div className="sidebar-empty">載入專案中…</div>}
+          {!projectsLoading && filteredProjects.map((project) => (
+            <button key={project.id} className={project.id === currentId ? "project active" : "project"} aria-current={project.id === currentId ? "page" : undefined} onClick={() => selectProject(project.id)}>
+              <b>{project.name}</b>
+              <span>#{project.id} · {projectStatusLabel(project.status)} · {project.video_count ?? 0} 支素材</span>
+            </button>
+          ))}
+          {!projectsLoading && projects.length > 0 && filteredProjects.length === 0 && <div className="sidebar-empty">
+            <b>找不到符合的專案</b>
+            <button type="button" onClick={() => setProjectQuery("")}>清除搜尋</button>
+          </div>}
+          {!projectsLoading && projects.length === 0 && <div className="sidebar-empty">建立第一個專案後會顯示在這裡。</div>}
+        </div>
       </aside>
       <section>
-        {message && <div className="notice">{message}</div>}
-        {!detail ? <div className="card">尚未選擇專案</div> : <ProjectView key={detail.project.id} detail={detail} jobs={jobs} bgmTracks={bgmTracks} notes={notes} setNotes={setNotes} setMessage={setMessage} refreshProject={refreshProject} review={review} revise={revise} />}
+        {message && <div className="notice" role="status"><span>{message}</span><button type="button" aria-label="關閉通知" onClick={() => setMessage("")}>×</button></div>}
+        {projectContent}
       </section>
     </main>
   );
@@ -177,62 +255,93 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
 }) {
   const [submitting, setSubmitting] = useState(false);
   const refreshCurrentProject = (options: ProjectDataLoadOptions = {}) => refreshProject(detail.project.id, options);
+  const includedSegments = detail.storyboard?.segments
+    ? Object.values(detail.storyboard.segments).filter((segment) => segment.included).length
+    : detail.segments.filter((segment) => segment.include !== false).length;
   return (
     <>
       <div className="hero">
         <div>
           <h2>{detail.project.name}</h2>
-          <p>{detail.folder}</p>
+          <p>{detail.folder || `專案 #${detail.project.id}`}</p>
         </div>
         <Status value={detail.project.status} />
       </div>
-      <RenderJobPanel jobs={jobs} projectId={detail.project.id} setMessage={setMessage} refreshProject={refreshCurrentProject} />
-      <Workflow detail={detail} />
-      <StoryboardWorkspaceController detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} />
-      <div className="grid">
-        <Card title="審核">
-          <p>Gate：{detail.can_render ? "可正式輸出" : detail.render_gate_reason}</p>
-          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="審核備註" />
-          <div className="row">
-            <button className="good" onClick={() => review("approve")}>核准專案</button>
-            <button className="danger" onClick={() => review("reject")}>退回修改</button>
-            <button onClick={revise}>依備註重建故事</button>
-          </div>
-        </Card>
-        <Card title="輸出">
-          <button onClick={() => exportProject("hyperframes")}>產生初剪專案</button>
-          <button disabled={!detail.can_render} onClick={() => exportProject("hyperframes-render")}>快速輸出 MP4</button>
-          <button className="good" disabled={submitting || !detail.can_render || jobs.some((job) => Boolean(job.job_id) && ["queued", "running", "cancelling"].includes(job.status))} onClick={startFormalRender}>{submitting ? "正在建立正式輸出…" : "正式輸出（Render Job）"}</button>
-          <button onClick={() => exportProject("opencut")}>OpenCut 素材包</button>
-          <button disabled={!detail.can_render} onClick={() => exportProject("opencut-render")}>OpenCut 調色片段</button>
-        </Card>
+      <div className="project-metrics" aria-label="專案摘要">
+        <div><span>素材</span><b>{detail.clips.length}</b></div>
+        <div><span>感知片段</span><b>{detail.segments.length}</b></div>
+        <div><span>納入成片</span><b>{includedSegments}</b></div>
+        <div><span>正式輸出</span><b>{detail.can_render ? "已解鎖" : "待核准"}</b></div>
       </div>
-      <WorkflowSkeleton detail={detail} />
-      <div className="grid">
-        <Card title="素材">
-          <div className="row">
-            <input type="file" multiple accept="video/*" onChange={uploadFiles} />
-            <button onClick={() => analyze(true)}>全部重跑感知</button>
-            <button onClick={buildPlan}>產生故事整理</button>
-          </div>
-          {detail.clips.map((c) => (
-            <div className="item" key={c.clip_id}>
-              <div className="row">
-                <b>{c.clip_id}</b>
-                <button onClick={() => analyzeOne(c.video_id)}>重跑感知</button>
-              </div>
-              {c.filename}
-              <span>{c.status} | {c.segment_count} 段 | {Math.round(c.duration_seconds || 0)}s | {c.time_of_day}</span>
-              <ClipSummary projectId={detail.project.id} clip={c} setMessage={setMessage} refreshProject={refreshCurrentProject} />
+      <WorkspaceNavigation />
+
+      <div className="workspace-section" id="workspace-overview" tabIndex={-1}>
+        <RenderJobPanel jobs={jobs} projectId={detail.project.id} setMessage={setMessage} refreshProject={refreshCurrentProject} />
+        <Workflow detail={detail} />
+      </div>
+
+      <div className="workspace-section" id="workspace-storyboard" tabIndex={-1}>
+        <StoryboardWorkspaceController detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} />
+      </div>
+
+      <div className="workspace-section" id="workspace-review" tabIndex={-1}>
+        <div className="grid">
+          <Card title="審核">
+            <p>Gate：{detail.can_render ? "可正式輸出" : detail.render_gate_reason}</p>
+            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="記錄核准理由、退回項目或重建故事需求" />
+            <div className="row">
+              <button className="good" onClick={() => review("approve")}>核准專案</button>
+              <button className="danger" onClick={() => review("reject")}>退回修改</button>
+              <button disabled={!notes.trim()} onClick={revise}>依備註重建故事</button>
             </div>
-          ))}
-        </Card>
-        <ColorConsistencyPanel detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} />
+          </Card>
+          <Card title="輸出">
+            <div className="output-actions">
+              <button onClick={() => exportProject("hyperframes")}>產生初剪專案</button>
+              <button disabled={!detail.can_render} onClick={() => exportProject("hyperframes-render")}>快速輸出 MP4</button>
+              <button className="good" disabled={submitting || !detail.can_render || jobs.some((job) => Boolean(job.job_id) && ["queued", "running", "cancelling"].includes(job.status))} onClick={startFormalRender}>{submitting ? "正在建立正式輸出…" : "正式輸出（Render Job）"}</button>
+              <button onClick={() => exportProject("opencut")}>OpenCut 素材包</button>
+              <button disabled={!detail.can_render} onClick={() => exportProject("opencut-render")}>OpenCut 調色片段</button>
+            </div>
+          </Card>
+        </div>
       </div>
-      <AudioMixingPanel detail={detail} bgmTracks={bgmTracks} setMessage={setMessage} refreshProject={refreshCurrentProject} />
-      <Card title="故事整理">
-        <pre>{detail.script || "尚未產生故事整理。"}</pre>
-      </Card>
+
+      <div className="workspace-section" id="workspace-media" tabIndex={-1}>
+        <WorkflowSkeleton detail={detail} />
+        <div className="grid">
+          <Card title="素材">
+            <div className="row">
+              <input type="file" multiple accept="video/*" onChange={uploadFiles} />
+              <button onClick={() => analyze(true)}>全部重跑感知</button>
+              <button disabled={!detail.clips.length} onClick={buildPlan}>產生故事整理</button>
+            </div>
+            {detail.clips.map((clip) => (
+              <div className="item" key={clip.clip_id}>
+                <div className="row">
+                  <b>{clip.clip_id}</b>
+                  <button onClick={() => analyzeOne(clip.video_id)}>重跑感知</button>
+                </div>
+                {clip.filename}
+                <span>{projectStatusLabel(clip.status)} · {clip.segment_count} 段 · {Math.round(clip.duration_seconds || 0)} 秒 · {clip.time_of_day || "未分類時段"}</span>
+                <ClipSummary projectId={detail.project.id} clip={clip} setMessage={setMessage} refreshProject={refreshCurrentProject} />
+              </div>
+            ))}
+            {!detail.clips.length && <div className="inline-empty">尚無素材。先選擇多支影片匯入，再進行內容感知。</div>}
+          </Card>
+          <ColorConsistencyPanel detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} />
+        </div>
+      </div>
+
+      <div className="workspace-section" id="workspace-audio" tabIndex={-1}>
+        <AudioMixingPanel detail={detail} bgmTracks={bgmTracks} setMessage={setMessage} refreshProject={refreshCurrentProject} />
+      </div>
+
+      <div className="workspace-section" id="workspace-script" tabIndex={-1}>
+        <Card title="故事整理">
+          <pre>{detail.script || "尚未產生故事整理。"}</pre>
+        </Card>
+      </div>
     </>
   );
 
@@ -280,31 +389,48 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
     const files = event.target.files;
     if (!files?.length) return;
     setMessage("正在匯入素材...");
-    const result = await api.uploadProject(detail.project.id, files);
-    event.target.value = "";
-    setMessage(result.ok ? `已匯入 ${result.files?.length || 0} 支素材，下一步請跑內容感知。` : result.error || "匯入失敗");
-    await refreshCurrentProject();
+    try {
+      const result = await api.uploadProject(detail.project.id, files);
+      event.target.value = "";
+      setMessage(result.ok ? `已匯入 ${result.files?.length || 0} 支素材，下一步請跑內容感知。` : result.error || "匯入失敗");
+      await refreshCurrentProject({ forceFresh: true });
+    } catch (error) {
+      event.target.value = "";
+      setMessage(`素材匯入失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+    }
   }
 
   async function analyze(force: boolean) {
     setMessage(force ? "已送出全部重跑感知。" : "已送出待感知素材。");
-    const result = await api.analyzeJob(detail.project.id, force);
-    setMessage(result.message || "內容感知工作已開始");
-    await refreshCurrentProject();
+    try {
+      const result = await api.analyzeJob(detail.project.id, force);
+      setMessage(result.message || "內容感知工作已開始");
+      await refreshCurrentProject();
+    } catch (error) {
+      setMessage(`內容感知啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+    }
   }
 
   async function analyzeOne(videoId: number) {
     setMessage("已送出單支素材感知，請看工作狀態百分比。");
-    const result = await api.analyzeVideo(detail.project.id, videoId);
-    setMessage(result.message || "單支素材感知已開始");
-    await refreshCurrentProject();
+    try {
+      const result = await api.analyzeVideo(detail.project.id, videoId);
+      setMessage(result.message || "單支素材感知已開始");
+      await refreshCurrentProject();
+    } catch (error) {
+      setMessage(`單支素材感知啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+    }
   }
 
   async function buildPlan() {
     setMessage("正在產生故事整理...");
-    await api.buildPlan(detail.project.id);
-    setMessage("故事整理已更新，請審核片段。");
-    await refreshCurrentProject();
+    try {
+      await api.buildPlan(detail.project.id);
+      setMessage("故事整理已更新，請審核片段。");
+      await refreshCurrentProject({ forceFresh: true });
+    } catch (error) {
+      setMessage(`故事整理失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+    }
   }
 }
 
@@ -614,6 +740,20 @@ function Workflow({ detail }: { detail: ProjectDetail }) {
   return <div className="workflow">{steps.map(([label, done]) => <span key={label} className={done ? "step done" : "step"}>{label}</span>)}</div>;
 }
 
+function WorkspaceNavigation() {
+  const items = [
+    ["workspace-overview", "總覽"],
+    ["workspace-storyboard", "分鏡"],
+    ["workspace-review", "審核與輸出"],
+    ["workspace-media", "素材與調色"],
+    ["workspace-audio", "音訊"],
+    ["workspace-script", "故事整理"],
+  ] as const;
+  return <nav className="workspace-nav" aria-label="專案工作區導覽">
+    {items.map(([id, label]) => <a key={id} href={`#${id}`}>{label}</a>)}
+  </nav>;
+}
+
 function WorkflowSkeleton({ detail }: { detail: ProjectDetail }) {
   return (
     <Card title="OpenMontage-style 工作流骨架">
@@ -630,12 +770,40 @@ function WorkflowSkeleton({ detail }: { detail: ProjectDetail }) {
   );
 }
 
+function WorkspaceLoading({ title, detail }: { title: string; detail: string }) {
+  return <div className="workspace-state" role="status">
+    <span className="workspace-spinner" aria-hidden="true" />
+    <div><h2>{title}</h2><p>{detail}</p></div>
+  </div>;
+}
+
+function WorkspaceEmpty({ title, detail }: { title: string; detail: string }) {
+  return <div className="workspace-state empty">
+    <span className="workspace-empty-icon" aria-hidden="true">＋</span>
+    <div><h2>{title}</h2><p>{detail}</p></div>
+  </div>;
+}
+
+function projectStatusLabel(value: string): string {
+  const labels: Record<string, string> = {
+    approved: "已核准",
+    needs_review: "待審核",
+    rejected: "已退回",
+    processing: "處理中",
+    perceived: "已感知",
+    pending: "等待中",
+    ready: "已就緒",
+    failed: "失敗",
+  };
+  return labels[value] || value || "未知狀態";
+}
+
 function Card({ title, children }: { title: string; children: ReactNode }) {
   return <div className="card"><h3>{title}</h3>{children}</div>;
 }
 
 function Status({ value }: { value: string }) {
-  return <span className={value === "approved" ? "pill ok" : "pill"}>{value}</span>;
+  return <span className={value === "approved" ? "pill ok" : "pill"}>{projectStatusLabel(value)}</span>;
 }
 
 const rootElement = document.getElementById("root");
