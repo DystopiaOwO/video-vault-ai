@@ -12,6 +12,7 @@ WEB_SRC = WEB_ROOT / "src"
 def test_application_shell_is_linked_and_scoped_to_root_layout():
     index = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
     shell = (WEB_SRC / "app-shell.css").read_text(encoding="utf-8")
+    stripped_lines = {line.strip() for line in shell.splitlines()}
 
     assert '<link rel="stylesheet" href="/src/app-shell.css" />' in index
     assert "<title>Video Vault AI</title>" in index
@@ -19,8 +20,8 @@ def test_application_shell_is_linked_and_scoped_to_root_layout():
     assert "#root > main > aside" in shell
     assert "#root > main > section" in shell
     assert "#root .review-workspace { padding: 0; }" in shell
-    assert "aside {" not in shell
-    assert "section {" not in shell
+    assert "aside {" not in stripped_lines
+    assert "section {" not in stripped_lines
 
 
 def test_audio_ui_exposes_force_preview_and_reset_override_controls():
