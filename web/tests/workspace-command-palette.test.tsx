@@ -5,6 +5,7 @@ import { buildWorkspaceCommands, WorkspaceCommandPalette } from "../src/componen
 afterEach(() => {
   cleanup();
   document.body.innerHTML = "";
+  document.body.style.overflow = "";
   vi.restoreAllMocks();
 });
 
@@ -53,6 +54,27 @@ describe("WorkspaceCommandPalette", () => {
     expect(options[1].getAttribute("aria-selected")).toBe("true");
     fireEvent.keyDown(window, { key: "ArrowUp" });
     expect(options[0].getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("locks background scrolling, traps focus, and restores the trigger", async () => {
+    render(<WorkspaceCommandPalette />);
+    const trigger = screen.getByRole("button", { name: "開啟命令面板" });
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const input = await screen.findByLabelText("搜尋命令");
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    expect(document.body.style.overflow).toBe("hidden");
+
+    const options = screen.getAllByRole("option");
+    const last = options[options.length - 1] as HTMLButtonElement;
+    last.focus();
+    fireEvent.keyDown(window, { key: "Tab" });
+    expect(document.activeElement).toBe(input);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(document.body.style.overflow).toBe("");
   });
 
   it("builds a project-search command that focuses the existing field", () => {
