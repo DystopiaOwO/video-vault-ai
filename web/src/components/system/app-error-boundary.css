@@ -1,0 +1,111 @@
+#root .app-error-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(circle at top left, color-mix(in srgb, var(--accent, #7c9cff) 14%, transparent), transparent 42%),
+    var(--background, #0f131c);
+}
+
+#root .app-error-panel {
+  width: min(100%, 680px);
+  padding: clamp(22px, 5vw, 42px);
+  border: 1px solid color-mix(in srgb, var(--danger, #ef4444) 38%, var(--border, #2d3548));
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--panel, #151a25) 94%, black);
+  box-shadow: 0 22px 80px rgb(0 0 0 / 32%);
+}
+
+#root .app-error-kicker {
+  color: var(--danger, #f87171);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .14em;
+}
+
+#root .app-error-panel h1 {
+  margin: 8px 0 10px;
+  font-size: clamp(26px, 5vw, 40px);
+}
+
+#root .app-error-panel > p {
+  max-width: 56ch;
+  color: var(--muted, #a6adbd);
+  line-height: 1.65;
+}
+
+#root .app-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin: 22px 0;
+}
+
+#root .app-error-actions .nav {
+  width: auto;
+  margin: 0;
+}
+
+#root .app-error-details {
+  border-top: 1px solid color-mix(in srgb, var(--border, #2d3548) 86%, transparent);
+  padding-top: 14px;
+}
+
+#root .app-error-details > summary {
+  cursor: pointer;
+  color: var(--muted, #a6adbd);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+#root .app-error-details dl {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+#root .app-error-details dl > div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+}
+
+#root .app-error-details dt {
+  color: var(--muted, #a6adbd);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+#root .app-error-details dd {
+  min-width: 0;
+  margin: 0;
+}
+
+#root .app-error-details code {
+  display: block;
+  overflow: hidden;
+  color: var(--text, #f5f7ff);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 560px) {
+  #root .app-error-shell {
+    align-items: stretch;
+    padding: 12px;
+  }
+
+  #root .app-error-panel {
+    align-self: center;
+  }
+
+  #root .app-error-actions > * {
+    flex: 1 1 100%;
+    width: 100%;
+    text-align: center;
+  }
+
+  #root .app-error-details dl > div {
+    grid-template-columns: 1fr;
+  }
+}
