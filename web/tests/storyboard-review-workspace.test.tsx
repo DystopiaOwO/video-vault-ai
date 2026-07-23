@@ -39,7 +39,7 @@ function segment(id: string, title: string, patch: Partial<StoryboardSegmentView
 }
 
 function model(): StoryboardViewModel {
-  const segments = [
+  const morning = [
     segment("a", "抵達車站"),
     segment("b", "巷弄散步", { order: 2, included: false, locked: true, sceneRole: "walk" }),
   ];
@@ -48,8 +48,11 @@ function model(): StoryboardViewModel {
     valid: true,
     errors: [],
     warnings: [],
-    groups: [{ id: "morning", title: "早上", category: "travel", order: 1, segments }],
-    segments,
+    groups: [
+      { id: "morning", title: "早上", category: "travel", order: 1, segments: morning },
+      { id: "empty", title: "備用", category: "custom", order: 2, segments: [] },
+    ],
+    segments: morning,
     summary: { totalSegments: 2, includedSegments: 1, excludedSegments: 1, estimatedDurationSeconds: 5 },
   };
 }
@@ -121,16 +124,71 @@ describe("StoryboardReviewWorkspace", () => {
     expect(onSaveTiming).not.toHaveBeenCalled();
   });
 
-  it("routes preview and effective color actions through callbacks", () => {
+  it("routes ordering, group management, and thumbnail actions through callbacks", () => {
+    const onMoveSegment = vi.fn();
+    const onAddGroup = vi.fn();
+    const onRenameGroup = vi.fn();
+    const onMoveGroup = vi.fn();
+    const onDeleteGroup = vi.fn();
+    const onGenerateThumbnail = vi.fn();
+    render(<StoryboardReviewWorkspace {...props({
+      onMoveSegment,
+      onAddGroup,
+      onRenameGroup,
+      onMoveGroup,
+      onDeleteGroup,
+      onGenerateThumbnail,
+    })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "片段下移" }));
+    expect(onMoveSegment).toHaveBeenCalledWith("a", 1);
+
+    fireEvent.change(screen.getByLabelText("新增分組名稱"), { target: { value: "晚上" } });
+    fireEvent.click(screen.getByRole("button", { name: "新增分組" }));
+    expect(onAddGroup).toHaveBeenCalledWith("晚上");
+
+    fireEvent.change(screen.getByLabelText("早上 分組名稱"), { target: { value: "上午" } });
+    expect(onRenameGroup).toHaveBeenCalledWith("morning", "上午");
+
+    fireEvent.click(screen.getByRole("button", { name: "早上 分組下移" }));
+    expect(onMoveGroup).toHaveBeenCalledWith("morning", 1);
+
+    fireEvent.click(screen.getByRole("button", { name: "刪除" }));
+    expect(onDeleteGroup).toHaveBeenCalledWith("empty");
+
+    fireEvent.click(screen.getByRole("button", { name: "產生代表畫格" }));
+    expect(onGenerateThumbnail).toHaveBeenCalledWith("a", 0.5);
+  });
+
+  it("shows preview players and routes preview and color actions", () => {
     const onPreview = vi.fn();
     const onToggleColor = vi.fn();
-    render(<StoryboardReviewWorkspace {...props({ onPreview, onToggleColor })} />);
+    const onResetColor = vi.fn();
+    const customized = model();
+    customized.segments[0] = { ...customized.segments[0], colorCustomized: true };
+    customized.groups[0] = { ...customized.groups[0], segments: [customized.segments[0], customized.segments[1]] };
+    render(<StoryboardReviewWorkspace {...props({
+      model: customized,
+      onPreview,
+      onToggleColor,
+      onResetColor,
+      previewItems: [{ kind: "segment", url: "/preview.mp4", durationSeconds: 5 }],
+    })} />);
 
     fireEvent.click(screen.getByRole("button", { name: "產生 5 秒預覽" }));
     expect(onPreview).toHaveBeenCalledWith("a", "segment");
 
+    fireEvent.click(screen.getByRole("button", { name: "預覽前後銜接" }));
+    expect(onPreview).toHaveBeenCalledWith("a", "transition");
+
     fireEvent.click(screen.getByRole("button", { name: "停用此片段" }));
     expect(onToggleColor).toHaveBeenCalledWith("a");
+
+    fireEvent.click(screen.getByRole("button", { name: "恢復專案預設" }));
+    expect(onResetColor).toHaveBeenCalledWith("a");
+
+    const video = document.querySelector("video");
+    expect(video?.getAttribute("src")).toBe("/preview.mp4");
   });
 
   it("shows a single create action when storyboard data does not exist", () => {
