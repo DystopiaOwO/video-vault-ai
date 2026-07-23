@@ -169,6 +169,9 @@ describe("Issue #51 Gate 1 Storyboard 行為", () => {
 
     fireEvent.change(screen.getByLabelText("搜尋片段"), { target: { value: "visible" } });
     expect(screen.queryByRole("button", { name: /B (收合|展開)/ })).toBeNull();
+    expect((screen.getByRole("button", { name: "C 分組上移" }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("搜尋片段"), { target: { value: "" } });
     fireEvent.click(screen.getByRole("button", { name: "C 分組上移" }));
     fireEvent.click(screen.getByRole("button", { name: "儲存分鏡" }));
 
