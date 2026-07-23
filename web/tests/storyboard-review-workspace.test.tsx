@@ -164,6 +164,29 @@ describe("StoryboardReviewWorkspace", () => {
     expect(onPreview).not.toHaveBeenCalled();
   });
 
+  it("blocks preview when another segment still has an unsaved timing draft", () => {
+    const onPreview = vi.fn();
+    render(<StoryboardReviewWorkspace {...props({
+      timingDirty: { b: true },
+      hasUnsavedTiming: true,
+      onPreview,
+    })} />);
+
+    expect(screen.getByText("請先儲存所有未完成的片段剪點，再產生預覽。")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "從此片段預覽 8 秒" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(onPreview).not.toHaveBeenCalled();
+  });
+
+  it("makes excluded preview explicitly unavailable", () => {
+    const onPreview = vi.fn();
+    render(<StoryboardReviewWorkspace {...props({ selectedId: "b", onPreview })} />);
+
+    expect(screen.getByText("此片段已排除，不會進入正式輸出；請先納入成片後再預覽。")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "產生 5 秒預覽" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "預覽前後銜接" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(onPreview).not.toHaveBeenCalled();
+  });
+
   it("routes ordering, group management, and thumbnail actions through callbacks", () => {
     const onMoveSegment = vi.fn();
     const onAddGroup = vi.fn();

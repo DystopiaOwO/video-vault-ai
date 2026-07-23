@@ -34,6 +34,7 @@ export type StoryboardReviewWorkspaceProps = {
   thumbnailing?: boolean;
   timingDrafts?: Record<string, { startSeconds: number; endSeconds: number; speed: number }>;
   timingDirty?: Record<string, boolean>;
+  hasUnsavedTiming?: boolean;
   previewItems?: StoryboardPreviewItem[];
   onSelect: (segmentId: string) => void;
   onStoryboardChange: (segmentId: string, patch: Partial<StoryboardSegmentEdit>) => void;
@@ -65,6 +66,7 @@ export function StoryboardReviewWorkspace({
   thumbnailing = false,
   timingDrafts = {},
   timingDirty = {},
+  hasUnsavedTiming = false,
   previewItems = [],
   onSelect,
   onStoryboardChange,
@@ -108,7 +110,6 @@ export function StoryboardReviewWorkspace({
       }))
       .filter((group) => group.segments.length > 0 || (!normalizedQuery && visibility === "all"));
   }, [model.groups, query, visibility]);
-
   const visibleSegments = useMemo(
     () => visibleGroups.flatMap((group) => collapsedGroupIds.includes(group.id) ? [] : group.segments),
     [collapsedGroupIds, visibleGroups],
@@ -260,6 +261,7 @@ export function StoryboardReviewWorkspace({
       groups={model.groups.map((group) => ({ id: group.id, title: group.title }))}
       timingDraft={timingDrafts[selected.id]}
       timingDirty={Boolean(timingDirty[selected.id])}
+      hasUnsavedTiming={hasUnsavedTiming}
       busy={busy}
       previewing={previewing}
       thumbnailing={thumbnailing}
@@ -325,6 +327,7 @@ function SegmentInspector({
   groups,
   timingDraft,
   timingDirty,
+  hasUnsavedTiming,
   busy,
   previewing,
   thumbnailing,
@@ -347,6 +350,7 @@ function SegmentInspector({
   groups: Array<{ id: string; title: string }>;
   timingDraft?: { startSeconds: number; endSeconds: number; speed: number };
   timingDirty: boolean;
+  hasUnsavedTiming: boolean;
   busy: boolean;
   previewing: boolean;
   thumbnailing: boolean;
@@ -372,7 +376,12 @@ function SegmentInspector({
   };
   const timingErrors = validateSegmentTiming(timing.startSeconds, timing.endSeconds, timing.speed);
   const outputDuration = Math.max(0, timing.endSeconds - timing.startSeconds) / Math.max(0.25, timing.speed);
-  const previewBlocked = timingDirty;
+  const previewBlocked = timingDirty || hasUnsavedTiming || !segment.included;
+  const previewHint = !segment.included
+    ? "此片段已排除，不會進入正式輸出；請先納入成片後再預覽。"
+    : timingDirty || hasUnsavedTiming
+      ? "請先儲存所有未完成的片段剪點，再產生預覽。"
+      : "先看短預覽，再決定是否正式輸出";
 
   return <aside ref={asideRef} className="review-inspector" aria-label="片段設定">
     <header>
@@ -437,7 +446,7 @@ function SegmentInspector({
     </section>
 
     <section className="review-inspector-section">
-      <div className="review-section-title"><b>預覽</b><span>{previewBlocked ? "請先儲存剪點，避免預覽與目前設定不一致" : "先看短預覽，再決定是否正式輸出"}</span></div>
+      <div className="review-section-title"><b>預覽</b><span>{previewHint}</span></div>
       <div className="review-preview-actions">
         <button type="button" disabled={busy || previewing || previewBlocked} onClick={() => onPreview(segment.id, "transition", ignoreCache)}>預覽前後銜接</button>
         <button type="button" disabled={busy || previewing || previewBlocked} onClick={() => onPreview(segment.id, "range", ignoreCache)}>從此片段預覽 8 秒</button>

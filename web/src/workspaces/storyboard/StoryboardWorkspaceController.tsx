@@ -44,6 +44,7 @@ export function StoryboardWorkspaceController({
   const [selectedId, setSelectedId] = useState(() => firstSegmentId(detail));
   const [timingDrafts, setTimingDrafts] = useState<Record<string, TimingDraft>>(() => timingFromDetail(detail));
   const [timingDirty, setTimingDirty] = useState<Record<string, boolean>>({});
+  const committedTimingsRef = useRef<Record<string, TimingDraft>>(timingFromDetail(detail));
   const [previewItems, setPreviewItems] = useState<StoryboardPreviewItem[]>([]);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<BusyAction>("");
@@ -80,6 +81,7 @@ export function StoryboardWorkspaceController({
       setTimingDirty({});
       setState(editableStoryboardState(detail));
       setTimingDrafts(timingFromDetail(detail));
+      committedTimingsRef.current = timingFromDetail(detail);
       setSelectedId(firstSegmentId(detail));
       setPreviewItems([]);
       setBusy("");
@@ -88,6 +90,9 @@ export function StoryboardWorkspaceController({
 
     if (!dirtyRef.current) setState(editableStoryboardState(detail));
     setTimingDrafts((current) => syncServerTiming(current, detail, timingDirtyRef.current));
+    if (!Object.values(timingDirtyRef.current).some(Boolean)) {
+      committedTimingsRef.current = timingFromDetail(detail);
+    }
     setSelectedId((current) => current && detail.segments.some((segment) => segment.segment_id === current)
       ? current
       : firstSegmentId(detail));
@@ -156,10 +161,11 @@ export function StoryboardWorkspaceController({
       }
       setState(editableStoryboardState({ ...detail, storyboard: result.storyboard }));
       setStoryboardDirty(false);
-      setMessage(result.approval_invalidated
+      const successMessage = result.approval_invalidated
         ? "分鏡已儲存，輸出內容有變更，請重新核准後再正式輸出。"
-        : "分鏡已儲存，這次未修改輸出內容，既有核准仍有效。");
-      await refreshProject({ forceFresh: true });
+        : "分鏡已儲存，這次未修改輸出內容，既有核准仍有效。";
+      setMessage(successMessage);
+      await refreshAfterMutation(successMessage);
     } catch (error) {
       setMessage(`分鏡儲存失敗：${errorMessage(error)}`);
     } finally {
@@ -185,10 +191,11 @@ export function StoryboardWorkspaceController({
       setSelectedId(firstStoryboardSegmentId(generated) || firstSegmentId(detail));
       setPreviewItems([]);
       setStoryboardDirty(false);
-      setMessage(model.exists
+      const successMessage = model.exists
         ? "分鏡已重新產生，鎖定片段、人工排序、備註與自訂群組已保留。"
-        : "分鏡已建立，請開始審核與排序。");
-      await refreshProject({ forceFresh: true });
+        : "分鏡已建立，請開始審核與排序。";
+      setMessage(successMessage);
+      await refreshAfterMutation(successMessage);
     } catch (error) {
       setMessage(`分鏡產生失敗：${errorMessage(error)}`);
     } finally {
@@ -212,9 +219,11 @@ export function StoryboardWorkspaceController({
         return;
       }
       setSegmentTimingDirty(segmentId, false);
+      committedTimingsRef.current = { ...committedTimingsRef.current, [segmentId]: { ...timing } };
       setPreviewItems([]);
-      setMessage("片段剪點已儲存，輸出內容有變更，請重新核准。");
-      await refreshProject({ forceFresh: true });
+      const successMessage = "片段剪點已儲存，輸出內容有變更，請重新核准。";
+      setMessage(successMessage);
+      await refreshAfterMutation(successMessage);
     } catch (error) {
       setMessage(`剪點儲存失敗：${errorMessage(error)}`);
     } finally {
@@ -224,8 +233,13 @@ export function StoryboardWorkspaceController({
 
   async function preview(segmentId: string, mode: StoryboardPreviewMode, force = false) {
     if (busy) return;
-    if (timingDirtyRef.current[segmentId]) {
-      setMessage("請先儲存此片段剪點，再產生預覽。");
+    const selectedSegment = model.segments.find((item) => item.id === segmentId);
+    if (!selectedSegment?.included) {
+      setMessage("此片段已排除，預覽已停用，不會進入正式輸出。請先納入成片後再預覽。");
+      return;
+    }
+    if (Object.values(timingDirtyRef.current).some(Boolean)) {
+      setMessage("請先儲存所有未完成的片段剪點，再產生預覽。");
       return;
     }
     setBusy("preview");
@@ -241,7 +255,7 @@ export function StoryboardWorkspaceController({
         mode,
         segmentId,
         durationSeconds: mode === "segment" ? 5 : 8,
-        timelineStartSeconds: mode === "range" ? timelineStartForSegment(state, detail, segmentId, timingDrafts) : 0,
+        timelineStartSeconds: mode === "range" ? timelineStartForSegment(state, detail, segmentId, committedTimingsRef.current) : 0,
         storyboardState: state,
         force,
       });
@@ -313,8 +327,9 @@ export function StoryboardWorkspaceController({
         return;
       }
       setPreviewItems([]);
-      setMessage(role === "default" ? "片段已改回專案音訊預設。" : "片段原音角色已更新，請重新確認預覽。");
-      await refreshProject({ forceFresh: true });
+      const successMessage = role === "default" ? "片段已改回專案音訊預設。" : "片段原音角色已更新，請重新確認預覽。";
+      setMessage(successMessage);
+      await refreshAfterMutation(successMessage);
     } catch (error) {
       setMessage(`原音角色更新失敗：${errorMessage(error)}`);
     } finally {
@@ -346,8 +361,9 @@ export function StoryboardWorkspaceController({
         return;
       }
       setPreviewItems([]);
-      setMessage(!segment.colorEnabled ? "已啟用此片段調色。" : "已停用此片段調色。");
-      await refreshProject({ forceFresh: true });
+      const successMessage = !segment.colorEnabled ? "已啟用此片段調色。" : "已停用此片段調色。";
+      setMessage(successMessage);
+      await refreshAfterMutation(successMessage);
     } catch (error) {
       setMessage(`片段調色更新失敗：${errorMessage(error)}`);
     } finally {
@@ -370,8 +386,9 @@ export function StoryboardWorkspaceController({
         return;
       }
       setPreviewItems([]);
-      setMessage("已恢復此片段的專案調色預設。");
-      await refreshProject({ forceFresh: true });
+      const successMessage = "已恢復此片段的專案調色預設。";
+      setMessage(successMessage);
+      await refreshAfterMutation(successMessage);
     } catch (error) {
       setMessage(`恢復調色預設失敗：${errorMessage(error)}`);
     } finally {
@@ -390,6 +407,7 @@ export function StoryboardWorkspaceController({
     thumbnailing={busy === "thumbnail"}
     timingDrafts={timingDrafts}
     timingDirty={timingDirty}
+    hasUnsavedTiming={hasUnsavedTiming}
     previewItems={previewItems}
     onSelect={selectSegment}
     onStoryboardChange={changeStoryboard}
@@ -409,6 +427,14 @@ export function StoryboardWorkspaceController({
     onMoveGroup={(groupId, delta) => replaceLocalState(moveStoryboardGroup(state, groupId, delta))}
     onDeleteGroup={(groupId) => replaceLocalState(deleteEmptyStoryboardGroup(state, groupId))}
   />;
+
+  async function refreshAfterMutation(successMessage: string) {
+    try {
+      await refreshProject({ forceFresh: true });
+    } catch (error) {
+      setMessage(successMessage + " 但畫面更新失敗：" + errorMessage(error));
+    }
+  }
 }
 
 function timingFromDetail(detail: ProjectDetail): Record<string, TimingDraft> {
