@@ -134,19 +134,26 @@ describe("StoryboardWorkspaceController", () => {
     expect(updateStoryboard).not.toHaveBeenCalled();
   });
 
-  it("maps audio, color, and preview controls to the existing APIs", async () => {
+  it("maps audio role changes to the existing audio settings API", async () => {
     const audioSettings = vi.spyOn(api, "audioSettings").mockResolvedValue({ ok: true, state: audio() });
-    const colorSettings = vi.spyOn(api, "colorSettings").mockResolvedValue({ ok: true, state: color() });
-    const storyboardPreview = vi.spyOn(api, "storyboardPreview").mockResolvedValue({ ok: true, url: "/preview.mp4" });
-    const refreshProject = vi.fn(async () => []);
-    render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={refreshProject} />);
+    render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
 
     fireEvent.change(screen.getByLabelText("原音角色"), { target: { value: "keep" } });
     await waitFor(() => expect(audioSettings).toHaveBeenCalledWith(1, { segments: { a: { role: "keep" } } }));
+  });
+
+  it("maps effective color toggles to the existing color settings API", async () => {
+    const colorSettings = vi.spyOn(api, "colorSettings").mockResolvedValue({ ok: true, state: color() });
+    render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
 
     fireEvent.click(screen.getByRole("button", { name: "停用此片段" }));
     await waitFor(() => expect(colorSettings).toHaveBeenCalled());
     expect(colorSettings.mock.calls[0][1].segments.a?.enabled).toBe(false);
+  });
+
+  it("maps short previews to the existing storyboard preview API", async () => {
+    const storyboardPreview = vi.spyOn(api, "storyboardPreview").mockResolvedValue({ ok: true, url: "/preview.mp4" });
+    render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
 
     fireEvent.click(screen.getByRole("button", { name: "產生 5 秒預覽" }));
     await waitFor(() => expect(storyboardPreview).toHaveBeenCalledWith(1, expect.objectContaining({ mode: "segment", segmentId: "a", durationSeconds: 5 })));
