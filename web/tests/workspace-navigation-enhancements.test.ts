@@ -54,7 +54,7 @@ afterEach(() => {
 });
 
 describe("workspace navigation enhancements", () => {
-  it("focuses and selects the project search", () => {
+  it("focuses and selects the project search when called by another control", () => {
     const input = document.querySelector('input[aria-label="搜尋專案"]') as HTMLInputElement;
 
     expect(focusProjectSearch()).toBe(true);
@@ -74,20 +74,20 @@ describe("workspace navigation enhancements", () => {
     expect(link.getAttribute("aria-current")).toBe("location");
   });
 
-  it("decorates shortcuts and supports Ctrl+K and Alt+number", () => {
+  it("decorates Alt shortcuts and leaves Ctrl K to the command palette", () => {
     cleanupNavigation = installWorkspaceNavigationEnhancements();
     const search = document.querySelector('input[aria-label="搜尋專案"]') as HTMLInputElement;
     const media = document.getElementById("workspace-media") as HTMLElement;
     const mediaLink = document.querySelector('a[href="#workspace-media"]') as HTMLAnchorElement;
 
-    expect(search.getAttribute("aria-keyshortcuts")).toBe("Control+K Meta+K");
+    expect(search.getAttribute("aria-keyshortcuts")).toBeNull();
+    expect(search.title).toBe("搜尋專案");
     expect(mediaLink.getAttribute("aria-keyshortcuts")).toBe("Alt+4");
     expect(document.querySelector('a[href="#workspace-overview"]')?.getAttribute("aria-current")).toBe("location");
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true }));
-    expect(document.activeElement).toBe(search);
+    expect(document.activeElement).not.toBe(search);
 
-    search.blur();
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "4", altKey: true, bubbles: true, cancelable: true }));
     expect(document.activeElement).toBe(media);
     expect(mediaLink.getAttribute("aria-current")).toBe("location");
