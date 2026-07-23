@@ -95,6 +95,40 @@ describe("project navigation", () => {
     await waitFor(() => expect(screen.getByText("專案已建立，下一步請匯入素材。")).toBeTruthy());
   });
 
+  it("can create another project after the first request fails", async () => {
+    setup();
+    const create = vi.spyOn(api, "createProject")
+      .mockRejectedValueOnce(new Error("server unavailable"))
+      .mockResolvedValueOnce({ ok: true, id: 9 });
+    render(<App />);
+    await screen.findByRole("heading", { name: "福岡旅行" });
+
+    const input = screen.getByLabelText("建立專案");
+    fireEvent.change(input, { target: { value: "重試旅程" } });
+    fireEvent.click(screen.getByRole("button", { name: "新增專案" }));
+    await screen.findByText("專案建立失敗：server unavailable");
+
+    fireEvent.click(screen.getByRole("button", { name: "新增專案" }));
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByText("專案已建立，下一步請匯入素材。")).toBeTruthy());
+  });
+
+  it("does not submit a project while an IME composition is being confirmed", async () => {
+    setup();
+    const create = vi.spyOn(api, "createProject").mockResolvedValue({ ok: true, id: 9 });
+    render(<App />);
+    await screen.findByRole("heading", { name: "福岡旅行" });
+
+    const input = screen.getByLabelText("建立專案");
+    fireEvent.change(input, { target: { value: "中文旅程" } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229, which: 229 });
+    expect(create).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+  });
+
   it("does not let a delayed create response switch away from a project selected meanwhile", async () => {
     setup();
     const createRequest = deferred<{ id: number }>();
