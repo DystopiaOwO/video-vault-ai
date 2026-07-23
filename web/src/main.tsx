@@ -2,11 +2,14 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import "./styles.css";
-import { installUnsavedNavigationGuard } from "./unsavedNavigationGuard";
+import "./workspace-navigation-enhancements.css";
+import { registerUnsavedNavigationGuard } from "./unsavedNavigationGuard";
+import { registerWorkspaceNavigationEnhancements } from "./workspaceNavigationEnhancements";
 
 export { App } from "./App";
 
-installUnsavedNavigationGuard();
+registerUnsavedNavigationGuard();
+registerWorkspaceNavigationEnhancements();
 
 const rootElement = document.getElementById("root");
 if (rootElement) createRoot(rootElement).render(<StrictMode><App /></StrictMode>);
