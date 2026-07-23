@@ -9,10 +9,19 @@ import {
 import {
   StoryboardReviewWorkspace,
   type SegmentTimingPatch,
+  type StoryboardPreviewItem,
   type StoryboardPreviewMode,
 } from "./StoryboardReviewWorkspace";
 import {
+  addStoryboardGroup,
   buildStoryboardViewModel,
+  deleteEmptyStoryboardGroup,
+  editableStoryboardState,
+  moveStoryboardGroup,
+  moveStoryboardSegment,
+  normalizeStoryboardState,
+  renameStoryboardGroup,
+  timelineStartForSegment,
   updateStoryboardSegment,
   type StoryboardSegmentEdit,
 } from "./storyboardViewModel";
@@ -24,17 +33,19 @@ export type StoryboardWorkspaceControllerProps = {
 };
 
 type TimingDraft = { startSeconds: number; endSeconds: number; speed: number };
+type BusyAction = "" | "save" | "regenerate" | "timing" | "preview" | "thumbnail" | "audio" | "color";
 
 export function StoryboardWorkspaceController({
   detail,
   setMessage,
   refreshProject,
 }: StoryboardWorkspaceControllerProps) {
-  const [state, setState] = useState<StoryboardState>(() => detail.storyboard);
+  const [state, setState] = useState<StoryboardState>(() => editableStoryboardState(detail));
   const [selectedId, setSelectedId] = useState(() => firstSegmentId(detail));
   const [timingDrafts, setTimingDrafts] = useState<Record<string, TimingDraft>>(() => timingFromDetail(detail));
+  const [previewItems, setPreviewItems] = useState<StoryboardPreviewItem[]>([]);
   const [dirty, setDirty] = useState(false);
-  const [busy, setBusy] = useState<"" | "save" | "regenerate" | "timing" | "preview" | "audio" | "color">("");
+  const [busy, setBusy] = useState<BusyAction>("");
   const dirtyRef = useRef(false);
   const projectIdRef = useRef(detail.project.id);
 
@@ -48,14 +59,15 @@ export function StoryboardWorkspaceController({
       projectIdRef.current = detail.project.id;
       dirtyRef.current = false;
       setDirty(false);
-      setState(detail.storyboard);
+      setState(editableStoryboardState(detail));
       setTimingDrafts(timingFromDetail(detail));
       setSelectedId(firstSegmentId(detail));
+      setPreviewItems([]);
       setBusy("");
       return;
     }
 
-    if (!dirtyRef.current) setState(detail.storyboard);
+    if (!dirtyRef.current) setState(editableStoryboardState(detail));
     setTimingDrafts((current) => mergeServerTiming(current, detail));
     setSelectedId((current) => current && detail.segments.some((segment) => segment.segment_id === current)
       ? current
@@ -67,9 +79,13 @@ export function StoryboardWorkspaceController({
     [detail, state],
   );
 
-  function changeStoryboard(segmentId: string, patch: Partial<StoryboardSegmentEdit>) {
-    setState((current) => updateStoryboardSegment(current, segmentId, patch));
+  function replaceLocalState(next: StoryboardState) {
+    setState(normalizeStoryboardState(next));
     setDirty(true);
+  }
+
+  function changeStoryboard(segmentId: string, patch: Partial<StoryboardSegmentEdit>) {
+    replaceLocalState(updateStoryboardSegment(state, segmentId, patch));
   }
 
   function changeTiming(segmentId: string, patch: SegmentTimingPatch) {
@@ -81,15 +97,16 @@ export function StoryboardWorkspaceController({
 
   async function saveStoryboard() {
     if (!dirty || busy) return;
+    const normalized = normalizeStoryboardState(state);
     setBusy("save");
     setMessage("正在儲存分鏡…");
     try {
-      const result = await api.updateStoryboard(detail.project.id, state);
+      const result = await api.updateStoryboard(detail.project.id, normalized);
       if (!result.ok || !result.storyboard) {
         setMessage(`分鏡儲存失敗：${result.error || "未知錯誤"}`);
         return;
       }
-      setState(result.storyboard);
+      setState(editableStoryboardState({ ...detail, storyboard: result.storyboard }));
       dirtyRef.current = false;
       setDirty(false);
       setMessage(result.approval_invalidated
@@ -106,18 +123,24 @@ export function StoryboardWorkspaceController({
   async function regenerateStoryboard() {
     if (dirty || busy) return;
     setBusy("regenerate");
-    setMessage("正在重新產生分鏡…");
+    setMessage(model.exists ? "正在重新產生分鏡…" : "正在建立分鏡…");
     try {
-      const result = await api.generateStoryboard(detail.project.id, true);
+      const result = await api.generateStoryboard(detail.project.id, model.exists);
       if (!result.ok || !result.storyboard) {
         setMessage(`分鏡產生失敗：${result.error || "未知錯誤"}`);
         return;
       }
-      setState(result.storyboard);
+      const generated = editableStoryboardState({ ...detail, storyboard: result.storyboard });
+      setState(generated);
       setTimingDrafts(timingFromDetail(detail));
-      setSelectedId(firstStoryboardSegmentId(result.storyboard) || firstSegmentId(detail));
-      setMessage("分鏡已重新產生，請確認後儲存。");
-      setDirty(true);
+      setSelectedId(firstStoryboardSegmentId(generated) || firstSegmentId(detail));
+      setPreviewItems([]);
+      dirtyRef.current = false;
+      setDirty(false);
+      setMessage(model.exists
+        ? "分鏡已重新產生，鎖定片段、人工排序、備註與自訂群組已保留。"
+        : "分鏡已建立，請開始審核與排序。");
+      await refreshProject({ forceFresh: true });
     } catch (error) {
       setMessage(`分鏡產生失敗：${errorMessage(error)}`);
     } finally {
@@ -140,7 +163,7 @@ export function StoryboardWorkspaceController({
         setMessage(`剪點儲存失敗：${result.error || "未知錯誤"}`);
         return;
       }
-      setMessage("片段剪點已儲存，輸出內容有變更，請重新核准。 ");
+      setMessage("片段剪點已儲存，輸出內容有變更，請重新核准。");
       await refreshProject({ forceFresh: true });
     } catch (error) {
       setMessage(`剪點儲存失敗：${errorMessage(error)}`);
@@ -152,22 +175,55 @@ export function StoryboardWorkspaceController({
   async function preview(segmentId: string, mode: StoryboardPreviewMode) {
     if (busy) return;
     setBusy("preview");
-    setMessage(mode === "segment" ? "正在產生片段短預覽…" : "正在產生片段銜接預覽…");
+    setMessage(mode === "segment" ? "正在產生片段短預覽…" : mode === "range" ? "正在產生分鏡範圍預覽…" : "正在產生片段銜接預覽…");
     try {
       const result = await api.storyboardPreview(detail.project.id, {
-        mode: mode === "segment" ? "segment" : "transition",
+        mode,
         segmentId,
-        durationSeconds: 5,
+        durationSeconds: mode === "segment" ? 5 : 8,
+        timelineStartSeconds: mode === "range" ? timelineStartForSegment(state, detail, segmentId, timingDrafts) : 0,
         storyboardState: state,
       });
       if (!result.ok) {
         setMessage(`預覽產生失敗：${result.error || "未知錯誤"}`);
         return;
       }
-      const previewCount = result.previews?.length || (result.url ? 1 : 0);
-      setMessage(`${mode === "segment" ? "片段" : "銜接"}預覽已完成，共 ${previewCount} 個預覽。`);
+      const items = result.previews?.map((item) => ({
+        kind: item.kind,
+        url: item.url,
+        durationSeconds: Number(item.duration_seconds || 0),
+      })) || (result.url ? [{
+        kind: mode,
+        url: result.url,
+        durationSeconds: Number(result.duration_seconds || 0),
+      }] : []);
+      setPreviewItems(items);
+      setMessage(`${previewModeLabel(mode)}已完成，共 ${items.length} 個預覽。`);
     } catch (error) {
       setMessage(`預覽產生失敗：${errorMessage(error)}`);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function generateThumbnail(segmentId: string, ratio: number) {
+    if (busy) return;
+    setBusy("thumbnail");
+    setMessage("正在產生代表畫格…");
+    try {
+      const result = await api.storyboardThumbnail(detail.project.id, segmentId, ratio);
+      if (!result.ok) {
+        setMessage(`代表畫格產生失敗：${result.error || "未知錯誤"}`);
+        return;
+      }
+      setState((current) => updateStoryboardSegment(current, segmentId, {
+        thumbnail_time_ratio: ratio,
+        thumbnail_url: result.url,
+      }));
+      setDirty(true);
+      setMessage(result.cache_hit ? "代表畫格已從快取載入，請儲存分鏡。" : "代表畫格已產生，請儲存分鏡以保留位置。");
+    } catch (error) {
+      setMessage(`代表畫格產生失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
     }
@@ -186,7 +242,7 @@ export function StoryboardWorkspaceController({
         setMessage(`原音角色更新失敗：${result.error || "未知錯誤"}`);
         return;
       }
-      setMessage(role === "default" ? "片段已改回專案音訊預設。" : "片段原音角色已更新，請重新確認預覽。 ");
+      setMessage(role === "default" ? "片段已改回專案音訊預設。" : "片段原音角色已更新，請重新確認預覽。");
       await refreshProject({ forceFresh: true });
     } catch (error) {
       setMessage(`原音角色更新失敗：${errorMessage(error)}`);
@@ -227,6 +283,29 @@ export function StoryboardWorkspaceController({
     }
   }
 
+  async function resetColor(segmentId: string) {
+    if (busy) return;
+    setBusy("color");
+    try {
+      const result = await api.colorSettings(detail.project.id, {
+        schema_version: detail.color.schema_version,
+        enabled: detail.color.enabled,
+        applied: { ...detail.color.applied },
+        segments: { [segmentId]: null },
+      });
+      if (!result.ok) {
+        setMessage(`恢復調色預設失敗：${result.error || "未知錯誤"}`);
+        return;
+      }
+      setMessage("已恢復此片段的專案調色預設。");
+      await refreshProject({ forceFresh: true });
+    } catch (error) {
+      setMessage(`恢復調色預設失敗：${errorMessage(error)}`);
+    } finally {
+      setBusy("");
+    }
+  }
+
   return <StoryboardReviewWorkspace
     model={model}
     selectedId={selectedId}
@@ -234,7 +313,9 @@ export function StoryboardWorkspaceController({
     saving={busy === "save"}
     regenerating={busy === "regenerate"}
     previewing={busy === "preview"}
+    thumbnailing={busy === "thumbnail"}
     timingDrafts={timingDrafts}
+    previewItems={previewItems}
     onSelect={setSelectedId}
     onStoryboardChange={changeStoryboard}
     onTimingChange={changeTiming}
@@ -244,6 +325,13 @@ export function StoryboardWorkspaceController({
     onPreview={(segmentId, mode) => void preview(segmentId, mode)}
     onAudioRoleChange={(segmentId, role) => void changeAudioRole(segmentId, role)}
     onToggleColor={(segmentId) => void toggleColor(segmentId)}
+    onResetColor={(segmentId) => void resetColor(segmentId)}
+    onGenerateThumbnail={(segmentId, ratio) => void generateThumbnail(segmentId, ratio)}
+    onMoveSegment={(segmentId, delta) => replaceLocalState(moveStoryboardSegment(state, segmentId, delta))}
+    onAddGroup={(title) => replaceLocalState(addStoryboardGroup(state, title))}
+    onRenameGroup={(groupId, title) => replaceLocalState(renameStoryboardGroup(state, groupId, title))}
+    onMoveGroup={(groupId, delta) => replaceLocalState(moveStoryboardGroup(state, groupId, delta))}
+    onDeleteGroup={(groupId) => replaceLocalState(deleteEmptyStoryboardGroup(state, groupId))}
   />;
 }
 
@@ -273,20 +361,31 @@ function mergeServerTiming(current: Record<string, TimingDraft>, detail: Project
 function timingForSegment(detail: ProjectDetail, segmentId: string): TimingDraft {
   const segment = detail.segments.find((item) => item.segment_id === segmentId);
   return {
-    startSeconds: segment?.start_seconds || 0,
-    endSeconds: segment?.end_seconds || 0,
+    startSeconds: segment?.start_seconds ?? 0,
+    endSeconds: segment?.end_seconds ?? 0,
     speed: segment?.speed || 1,
   };
 }
 
 function firstSegmentId(detail: ProjectDetail): string {
-  return firstStoryboardSegmentId(detail.storyboard) || detail.segments[0]?.segment_id || "";
+  return firstStoryboardSegmentId(editableStoryboardState(detail)) || detail.segments[0]?.segment_id || "";
 }
 
 function firstStoryboardSegmentId(state: StoryboardState): string {
-  return Object.entries(state.segments || {})
-    .sort(([, left], [, right]) => left.order - right.order)
-    .map(([segmentId]) => segmentId)[0] || "";
+  for (const group of [...(state.groups || [])].sort((left, right) => left.order - right.order)) {
+    const segmentId = Object.entries(state.segments || {})
+      .filter(([, segment]) => segment.group_id === group.group_id)
+      .sort(([, left], [, right]) => left.order - right.order)
+      .map(([id]) => id)[0];
+    if (segmentId) return segmentId;
+  }
+  return "";
+}
+
+function previewModeLabel(mode: StoryboardPreviewMode): string {
+  if (mode === "transition") return "片段銜接預覽";
+  if (mode === "range") return "分鏡範圍預覽";
+  return "片段預覽";
 }
 
 function errorMessage(error: unknown): string {
