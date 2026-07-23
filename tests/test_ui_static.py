@@ -4,7 +4,24 @@ from video_vault import ui
 from video_vault.ui import JOBS, JOBS_LOCK, _kill_video_vault_processes, _set_job, _static_file, _web_dist, cancel_legacy_job, project_jobs, stop_project_jobs
 
 
-WEB_SRC = Path(__file__).parents[1] / "web" / "src"
+REPO_ROOT = Path(__file__).parents[1]
+WEB_ROOT = REPO_ROOT / "web"
+WEB_SRC = WEB_ROOT / "src"
+
+
+def test_application_shell_is_linked_and_scoped_to_root_layout():
+    index = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
+    shell = (WEB_SRC / "app-shell.css").read_text(encoding="utf-8")
+    stripped_lines = {line.strip() for line in shell.splitlines()}
+
+    assert '<link rel="stylesheet" href="/src/app-shell.css" />' in index
+    assert "<title>Video Vault AI</title>" in index
+    assert "#root > main" in shell
+    assert "#root > main > aside" in shell
+    assert "#root > main > section" in shell
+    assert "#root .review-workspace { padding: 0; }" in shell
+    assert "aside {" not in stripped_lines
+    assert "section {" not in stripped_lines
 
 
 def test_audio_ui_exposes_force_preview_and_reset_override_controls():
