@@ -38,11 +38,11 @@ export type StoryboardReviewWorkspaceProps = {
   onSaveTiming: (segmentId: string) => void;
   onSave: () => void;
   onRegenerate: () => void;
-  onPreview: (segmentId: string, mode: StoryboardPreviewMode) => void;
+  onPreview: (segmentId: string, mode: StoryboardPreviewMode, force?: boolean) => void;
   onAudioRoleChange?: (segmentId: string, role: AudioSegmentSettings["role"] | "default") => void;
   onToggleColor?: (segmentId: string) => void;
   onResetColor?: (segmentId: string) => void;
-  onGenerateThumbnail?: (segmentId: string, ratio: number) => void;
+  onGenerateThumbnail?: (segmentId: string, ratio: number, force?: boolean) => void;
   onMoveSegment?: (segmentId: string, delta: number) => void;
   onAddGroup?: (title: string) => void;
   onRenameGroup?: (groupId: string, title: string) => void;
@@ -232,13 +232,14 @@ function SegmentInspector({
   onStoryboardChange: (segmentId: string, patch: Partial<StoryboardSegmentEdit>) => void;
   onTimingChange: (segmentId: string, patch: SegmentTimingPatch) => void;
   onSaveTiming: (segmentId: string) => void;
-  onPreview: (segmentId: string, mode: StoryboardPreviewMode) => void;
+  onPreview: (segmentId: string, mode: StoryboardPreviewMode, force?: boolean) => void;
   onAudioRoleChange?: (segmentId: string, role: AudioSegmentSettings["role"] | "default") => void;
   onToggleColor?: (segmentId: string) => void;
   onResetColor?: (segmentId: string) => void;
-  onGenerateThumbnail?: (segmentId: string, ratio: number) => void;
+  onGenerateThumbnail?: (segmentId: string, ratio: number, force?: boolean) => void;
   onMoveSegment?: (segmentId: string, delta: number) => void;
 }) {
+  const [ignoreCache, setIgnoreCache] = useState(false);
   const timing = timingDraft || {
     startSeconds: segment.startSeconds,
     endSeconds: segment.endSeconds,
@@ -271,7 +272,8 @@ function SegmentInspector({
       <label>速度<select aria-label="片段速度" value={timing.speed} onChange={(event) => onTimingChange(segment.id, { speed: Number(event.target.value) })}><option value={0.5}>0.50×</option><option value={0.75}>0.75×</option><option value={1}>1.00×</option><option value={1.15}>1.15×</option><option value={1.25}>1.25×</option><option value={1.5}>1.50×</option><option value={2}>2.00×</option></select></label>
       <label>成片長度<input aria-label="成片長度" readOnly value={`${outputDuration.toFixed(1)} 秒`} /></label>
       <label className="wide">代表畫格<select aria-label="代表畫格位置" value={segment.thumbnailRatio} onChange={(event) => onStoryboardChange(segment.id, { thumbnail_time_ratio: Number(event.target.value) })}><option value={0.25}>片段 25%</option><option value={0.5}>片段 50%</option><option value={0.75}>片段 75%</option></select></label>
-      {onGenerateThumbnail && <button type="button" className="review-wide-button" disabled={thumbnailing} onClick={() => onGenerateThumbnail(segment.id, segment.thumbnailRatio)}>{thumbnailing ? "產生中…" : "產生代表畫格"}</button>}
+      {onGenerateThumbnail && <button type="button" className="review-wide-button" disabled={thumbnailing} onClick={() => onGenerateThumbnail(segment.id, segment.thumbnailRatio, ignoreCache)}>{thumbnailing ? "產生中…" : "產生代表畫格"}</button>}
+      <label className="wide"><input aria-label="忽略快取並強制重跑" type="checkbox" checked={ignoreCache} onChange={(event) => setIgnoreCache(event.target.checked)} />忽略快取並強制重跑</label>
       <label className="wide">原音角色<select aria-label="原音角色" value={segment.audioCustomized ? segment.audioRole : "default"} disabled={!onAudioRoleChange} onChange={(event) => onAudioRoleChange?.(segment.id, event.target.value as AudioSegmentSettings["role"] | "default")}><option value="default">使用專案預設（{segment.audioLabel}）</option><option value="keep">保留原音</option><option value="lower">降低原音</option><option value="mute">靜音</option><option value="bgm_only">只留 BGM</option></select></label>
       <label className="wide">分鏡備註<textarea aria-label="分鏡備註" value={segment.notes} onChange={(event) => onStoryboardChange(segment.id, { notes: event.target.value })} /></label>
     </div>
@@ -289,9 +291,9 @@ function SegmentInspector({
     <button type="button" className="review-save-timing" disabled={timingErrors.length > 0} onClick={() => onSaveTiming(segment.id)}>儲存剪點</button>
 
     <div className="review-preview-actions">
-      <button type="button" disabled={previewing} onClick={() => onPreview(segment.id, "transition")}>預覽前後銜接</button>
-      <button type="button" disabled={previewing} onClick={() => onPreview(segment.id, "range")}>從此片段預覽 8 秒</button>
-      <button type="button" className="review-primary" disabled={previewing} onClick={() => onPreview(segment.id, "segment")}>{previewing ? "產生中…" : "產生 5 秒預覽"}</button>
+      <button type="button" disabled={previewing} onClick={() => onPreview(segment.id, "transition", ignoreCache)}>預覽前後銜接</button>
+      <button type="button" disabled={previewing} onClick={() => onPreview(segment.id, "range", ignoreCache)}>從此片段預覽 8 秒</button>
+      <button type="button" className="review-primary" disabled={previewing} onClick={() => onPreview(segment.id, "segment", ignoreCache)}>{previewing ? "產生中…" : "產生 5 秒預覽"}</button>
     </div>
 
     {previewItems.length > 0 && <div className="review-preview-results" aria-label="分鏡預覽結果">
