@@ -170,11 +170,11 @@ describe("ColorConsistencyWorkspace", () => {
     const view = renderWorkspace();
 
     view.rerender(<ColorConsistencyWorkspace detail={detail(1, color(.3))} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
-    await waitFor(() => expect((screen.getByLabelText("專案曝光") as HTMLInputElement).value).toBe("0.3"));
+    await waitFor(() => expect(Number((screen.getByLabelText("專案曝光") as HTMLInputElement).value)).toBe(.3));
 
     fireEvent.change(screen.getByLabelText("專案曝光"), { target: { value: ".8" } });
     view.rerender(<ColorConsistencyWorkspace detail={detail(1, color(1.2))} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
-    await waitFor(() => expect((screen.getByLabelText("專案曝光") as HTMLInputElement).value).toBe("0.8"));
+    await waitFor(() => expect(Number((screen.getByLabelText("專案曝光") as HTMLInputElement).value)).toBe(.8));
     expect(screen.getByText("有未儲存變更")).toBeTruthy();
   });
 
@@ -196,7 +196,7 @@ describe("ColorConsistencyWorkspace", () => {
     analyzed.analysis.basis_text = "重新分析完成";
     const analyze = vi.spyOn(api, "colorAnalyze").mockResolvedValue({ ok: true, state: analyzed });
     const referenceState = color(.15);
-    referenceState.reference = referenceState.references[1];
+    referenceState.reference = referenceState.references[1]!;
     const reference = vi.spyOn(api, "colorReference").mockResolvedValue({ ok: true, state: referenceState });
     renderWorkspace();
 
@@ -228,7 +228,7 @@ describe("ColorConsistencyWorkspace", () => {
     renderWorkspace(detail(1, customized));
 
     expect(screen.getByText(/片段自訂/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "恢復專案預設" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "恢復專案預設" })[0]);
     expect(screen.getByText("有未儲存變更")).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText("搜尋調色片段"), { target: { value: "巷弄" } });
@@ -243,7 +243,7 @@ describe("ColorConsistencyWorkspace", () => {
     fireEvent.change(screen.getByLabelText("搜尋調色片段"), { target: { value: "巷弄" } });
 
     view.rerender(<ColorConsistencyWorkspace detail={detail(2, color(-.2))} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
-    await waitFor(() => expect((screen.getByLabelText("專案曝光") as HTMLInputElement).value).toBe("-0.2"));
+    await waitFor(() => expect(Number((screen.getByLabelText("專案曝光") as HTMLInputElement).value)).toBe(-.2));
     await waitFor(() => expect((screen.getByLabelText("搜尋調色片段") as HTMLInputElement).value).toBe(""));
     expect(screen.queryByText("有未儲存變更")).toBeNull();
   });
