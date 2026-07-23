@@ -133,6 +133,27 @@ describe("StoryboardWorkspaceController", () => {
     expect(update.mock.calls[0][1].segments.a.notes).toBe("本地未儲存內容");
   });
 
+  it("syncs clean timing from the server but protects a dirty timing draft", () => {
+    const base = detail();
+    const serverUpdate = detail();
+    serverUpdate.segments[0] = { ...serverUpdate.segments[0], end_seconds: 6 };
+    const laterServerUpdate = detail();
+    laterServerUpdate.segments[0] = { ...laterServerUpdate.segments[0], end_seconds: 7 };
+    const view = render(<StoryboardWorkspaceController detail={base} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
+
+    view.rerender(<StoryboardWorkspaceController detail={serverUpdate} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
+    expect((screen.getByLabelText("片段終點") as HTMLInputElement).value).toBe("6");
+
+    fireEvent.change(screen.getByLabelText("片段終點"), { target: { value: "8" } });
+    view.rerender(<StoryboardWorkspaceController detail={laterServerUpdate} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
+    expect((screen.getByLabelText("片段終點") as HTMLInputElement).value).toBe("8");
+    expect(screen.getAllByText("剪點未儲存").length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "放棄剪點變更" }));
+    expect((screen.getByLabelText("片段終點") as HTMLInputElement).value).toBe("7");
+    expect(screen.queryByText("剪點未儲存")).toBeNull();
+  });
+
   it("normalizes reordered segments before saving", async () => {
     const update = vi.spyOn(api, "updateStoryboard").mockImplementation(async (_projectId, state) => ({ ok: true, storyboard: state }));
     render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
@@ -167,16 +188,19 @@ describe("StoryboardWorkspaceController", () => {
     expect(screen.queryByText("有未儲存變更")).toBeNull();
   });
 
-  it("keeps timing persistence separate from storyboard persistence", async () => {
+  it("keeps timing persistence separate from storyboard persistence and clears the dirty state", async () => {
     const saveTiming = vi.spyOn(api, "saveSegmentTiming").mockResolvedValue({ ok: true, path: "segment_review.json" });
     const updateStoryboard = vi.spyOn(api, "updateStoryboard");
     render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
 
+    expect((screen.getByRole("button", { name: "儲存剪點" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.change(screen.getByLabelText("片段終點"), { target: { value: "8" } });
     fireEvent.change(screen.getByLabelText("片段速度"), { target: { value: "2" } });
+    expect((screen.getByRole("button", { name: "儲存剪點" }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "儲存剪點" }));
 
     await waitFor(() => expect(saveTiming).toHaveBeenCalledWith(1, "a", { start_seconds: 0, end_seconds: 8, speed: 2 }));
+    await waitFor(() => expect(screen.queryByText("剪點未儲存")).toBeNull());
     expect(updateStoryboard).not.toHaveBeenCalled();
   });
 
@@ -215,12 +239,13 @@ describe("StoryboardWorkspaceController", () => {
     expect((screen.getByAltText("抵達車站 代表畫格") as HTMLImageElement).src).toContain("/thumb.jpg");
 
     thumbnail.mockClear();
+    await waitFor(() => expect((screen.getByLabelText("忽略快取並強制重跑") as HTMLInputElement).disabled).toBe(false));
     fireEvent.click(screen.getByLabelText("忽略快取並強制重跑"));
     fireEvent.click(screen.getByRole("button", { name: "產生代表畫格" }));
     await waitFor(() => expect(thumbnail).toHaveBeenCalledWith(1, "a", 0.5, true));
   });
 
-  it("maps normal and forced previews to the existing API and renders the result", async () => {
+  it("maps normal and forced previews to the existing API, renders, and clears stale results on selection", async () => {
     const storyboardPreview = vi.spyOn(api, "storyboardPreview").mockResolvedValue({ ok: true, url: "/preview.mp4", duration_seconds: 5 });
     render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
 
@@ -228,6 +253,10 @@ describe("StoryboardWorkspaceController", () => {
     await waitFor(() => expect(storyboardPreview).toHaveBeenCalledWith(1, expect.objectContaining({ mode: "segment", segmentId: "a", durationSeconds: 5, force: false })));
     expect(document.querySelector("video")?.getAttribute("src")).toBe("/preview.mp4");
 
+    fireEvent.click(screen.getByRole("button", { name: /巷弄散步/ }));
+    expect(document.querySelector("video")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /抵達車站/ }));
     storyboardPreview.mockClear();
     fireEvent.click(screen.getByLabelText("忽略快取並強制重跑"));
     fireEvent.click(screen.getByRole("button", { name: "從此片段預覽 8 秒" }));
@@ -240,9 +269,12 @@ describe("StoryboardWorkspaceController", () => {
     const view = render(<StoryboardWorkspaceController detail={first} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
 
     fireEvent.change(screen.getByLabelText("分鏡備註"), { target: { value: "本地修改" } });
+    fireEvent.change(screen.getByLabelText("片段終點"), { target: { value: "8" } });
     view.rerender(<StoryboardWorkspaceController detail={second} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
 
     expect((screen.getByLabelText("分鏡備註") as HTMLTextAreaElement).value).toBe("project two");
+    expect((screen.getByLabelText("片段終點") as HTMLInputElement).value).toBe("5");
     expect(screen.queryByText("有未儲存變更")).toBeNull();
+    expect(screen.queryByText("剪點未儲存")).toBeNull();
   });
 });
