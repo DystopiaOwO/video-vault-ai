@@ -44,6 +44,8 @@ export function WorkspaceCommandPalette() {
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
   const commands = useMemo(() => buildWorkspaceCommands(() => setOpen(false)), []);
   const filtered = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
@@ -71,6 +73,18 @@ export function WorkspaceCommandPalette() {
       } else if (event.key === "Enter" && filtered[activeIndex]) {
         event.preventDefault();
         filtered[activeIndex].run();
+      } else if (event.key === "Tab") {
+        const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('input, button:not([disabled]), [tabindex]:not([tabindex="-1"])') || []);
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -79,9 +93,16 @@ export function WorkspaceCommandPalette() {
 
   useEffect(() => {
     if (!open) return;
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     setQuery("");
     setActiveIndex(0);
     window.requestAnimationFrame(() => inputRef.current?.focus());
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      previousFocusRef.current?.focus();
+    };
   }, [open]);
 
   useEffect(() => setActiveIndex(0), [query]);
@@ -93,7 +114,7 @@ export function WorkspaceCommandPalette() {
     {open && <div className="command-palette-backdrop" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget) setOpen(false);
     }}>
-      <section className="command-palette" role="dialog" aria-modal="true" aria-label="工作區命令面板">
+      <section ref={dialogRef} className="command-palette" role="dialog" aria-modal="true" aria-label="工作區命令面板">
         <header>
           <span aria-hidden="true">⌕</span>
           <input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜尋工作區或功能…" aria-label="搜尋命令" />
