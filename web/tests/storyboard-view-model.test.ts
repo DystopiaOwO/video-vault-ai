@@ -158,7 +158,7 @@ describe("storyboard production view model", () => {
 
   it("validates timing with the same user-facing boundaries", () => {
     expect(validateSegmentTiming(0, 5, 1, 10)).toEqual([]);
-    expect(validateSegmentTiming(-1, 0, 0.1, 0.5)).toEqual([
+    expect(validateSegmentTiming(-1, -2, 0.1, 0.5)).toEqual([
       "片段起點不可小於 0 秒",
       "片段終點必須大於起點",
       "片段速度必須介於 0.25 到 4 倍",
