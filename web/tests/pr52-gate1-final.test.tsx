@@ -89,8 +89,9 @@ async function openApp(ids = [1], canRender = true, initialJobs: Job[] = []) {
 function nativeKeyDown(target: EventTarget, keyCode: number) {
   const event = createEvent.keyDown(target, { key: "Enter", code: "Enter", bubbles: true, cancelable: true });
   Object.defineProperty(event, "keyCode", { configurable: true, value: keyCode });
-  fireEvent(target, event);
-  return event;
+  const preventDefault = vi.spyOn(event, "preventDefault");
+  target.dispatchEvent(event);
+  return { event, preventDefault };
 }
 
 afterEach(() => {
@@ -152,7 +153,7 @@ describe("PR #52 Gate 1 final behavior contracts", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "工作區命令面板" })).toBeNull());
   });
 
-  it("native keyCode 229 is blocked by the unsaved project-creation guard", () => {
+  it("native keyCode 229 does not trigger the unsaved project-creation guard", () => {
     document.body.innerHTML = `
       <section id="workspace-review"><textarea placeholder="記錄核准理由、退回項目或重建故事需求">尚未儲存</textarea></section>
       <div class="new-project"><input id="new-project-name" /></div>
@@ -162,9 +163,9 @@ describe("PR #52 Gate 1 final behavior contracts", () => {
 
     try {
       const imeEvent = nativeKeyDown(input, 229);
-      expect(imeEvent.defaultPrevented).toBe(true);
+      expect(imeEvent.preventDefault).not.toHaveBeenCalled();
       const committedEvent = nativeKeyDown(input, 13);
-      expect(committedEvent.defaultPrevented).toBe(true);
+      expect(committedEvent.preventDefault).toHaveBeenCalled();
     } finally {
       cleanupGuard();
     }
@@ -238,7 +239,7 @@ describe("PR #52 Gate 1 final behavior contracts", () => {
     expect(input.value).toBe("");
 
     reviewRequest.resolve({ ok: true });
-    await waitFor(() => expect(screen.getByRole("button", { name: "核准專案" })).not.toBeDisabled());
+    await waitFor(() => expect((screen.getByRole("button", { name: "核准專案" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.change(input, { target: { files: [file] } });
     await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
   });

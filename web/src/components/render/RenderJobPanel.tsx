@@ -106,11 +106,11 @@ export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject, mu
         : await api.cancelLegacyJob(projectId, job.legacy_job_key || job.kind);
       if (!result.ok) {
         const error = ("error" in result && result.error) || ("reason" in result && result.reason) || "停止要求未成功";
-        await refreshProject({ forceFresh: true });
+        await refreshProject({ forceFresh: true, throwOnError: true });
         setMessage(`停止失敗：${error}`);
         return;
       }
-      await refreshProject({ forceFresh: true });
+      await refreshProject({ forceFresh: true, throwOnError: true });
       const message = "message" in result ? result.message : ("reason" in result ? result.reason : undefined);
       setMessage(message || "停止要求已送出");
     } catch (error) {

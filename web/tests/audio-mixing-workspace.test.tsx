@@ -171,7 +171,7 @@ describe("AudioMixingWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "儲存音訊設定" }));
 
     await waitFor(() => expect(save).toHaveBeenCalledWith(1, expect.objectContaining({ bgm: expect.objectContaining({ volume_db: -12 }) })));
-    await waitFor(() => expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true }));
+    await waitFor(() => expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true, throwOnError: true }));
     expect(screen.queryByText("有未儲存變更")).toBeNull();
   });
 

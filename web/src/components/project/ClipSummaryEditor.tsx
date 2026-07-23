@@ -68,7 +68,7 @@ export function ClipSummaryEditor({ projectId, clip, setMessage, refreshProject,
       setText(summary);
       setBaseline(summary);
       setMessage("內容感知描述已儲存，專案已回到待審。");
-      await refreshProject({ forceFresh: true });
+      await refreshProject({ forceFresh: true, throwOnError: true });
     } catch (error) {
       setMessage(`內容感知描述儲存失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
     } finally {

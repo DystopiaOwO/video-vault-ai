@@ -214,7 +214,7 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
       setBaseline(analyzed);
       setPreviews([]);
       setMessage("色彩分析完成，請確認建議值與基準畫面。");
-      await refreshProject({ forceFresh: true });
+      await refreshProject({ forceFresh: true, throwOnError: true });
     } catch (error) {
       setMessage(`色彩分析失敗：${errorMessage(error)}`);
     } finally {
@@ -246,7 +246,7 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
       setBaseline(referenced);
       setPreviews([]);
       setMessage("色彩基準已更新，請重新確認建議值。");
-      await refreshProject({ forceFresh: true });
+      await refreshProject({ forceFresh: true, throwOnError: true });
     } catch (error) {
       setMessage(`色彩基準更新失敗：${errorMessage(error)}`);
     } finally {
@@ -275,7 +275,7 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
       setBaseline(saved);
       setPreviews([]);
       setMessage("色彩設定已儲存，專案已回到待審。");
-      await refreshProject({ forceFresh: true });
+      await refreshProject({ forceFresh: true, throwOnError: true });
     } catch (error) {
       setMessage(`色彩設定儲存失敗：${errorMessage(error)}`);
     } finally {

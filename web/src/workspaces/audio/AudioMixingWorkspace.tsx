@@ -177,7 +177,7 @@ export function AudioMixingWorkspace({ detail, bgmTracks, setMessage, refreshPro
       setBaseline(saved);
       clearPreview();
       setMessage("音訊設定已儲存，專案已回到待審。");
-      await refreshProject({ forceFresh: true });
+      await refreshProject({ forceFresh: true, throwOnError: true });
     } catch (error) {
       setMessage(`音訊設定儲存失敗：${errorMessage(error)}`);
     } finally {

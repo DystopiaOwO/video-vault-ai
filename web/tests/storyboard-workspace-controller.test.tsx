@@ -188,7 +188,7 @@ describe("StoryboardWorkspaceController", () => {
     fireEvent.click(screen.getByRole("button", { name: "儲存分鏡" }));
 
     await waitFor(() => expect(setMessage).toHaveBeenLastCalledWith("分鏡已儲存，這次未修改輸出內容，既有核准仍有效。 但畫面更新失敗：GET failed"));
-    expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true });
+    expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true, throwOnError: true });
   });
 
   it("uses create mode for an empty storyboard and does not create a fake dirty state", async () => {

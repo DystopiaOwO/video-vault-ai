@@ -25,12 +25,13 @@ import {
   updateStoryboardSegment,
   type StoryboardSegmentEdit,
 } from "./storyboardViewModel";
+import type { ProjectDataLoadOptions } from "../../projectDataLoader";
 import { createProjectMutationControls, mutationLabel, ProjectMutationCoordinator, type ProjectMutationControls, type ProjectMutation } from "../../projectMutation";
 
 export type StoryboardWorkspaceControllerProps = {
   detail: ProjectDetail;
   setMessage: (message: string) => void;
-  refreshProject: (options?: { forceFresh?: boolean; jobs?: boolean }) => Promise<unknown>;
+  refreshProject: (options?: ProjectDataLoadOptions) => Promise<unknown>;
   mutationControls?: ProjectMutationControls;
 };
 
@@ -494,7 +495,7 @@ export function StoryboardWorkspaceController({
 
   async function refreshAfterMutation(successMessage: string) {
     try {
-      await refreshProject({ forceFresh: true });
+      await refreshProject({ forceFresh: true, throwOnError: true });
     } catch (error) {
       setMessage(successMessage + " 但畫面更新失敗：" + errorMessage(error));
     }

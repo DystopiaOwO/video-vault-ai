@@ -49,7 +49,7 @@ describe("RenderJobPanel", () => {
 
     await vi.waitFor(() => expect(setMessage).toHaveBeenCalledWith("停止失敗：找不到指定背景工作"));
     expect(setMessage).not.toHaveBeenCalledWith("停止要求已送出");
-    expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true });
+    expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true, throwOnError: true });
   });
 
   it("shows formal cancellation reason when the API returns ok=false", async () => {
@@ -62,7 +62,7 @@ describe("RenderJobPanel", () => {
 
     await vi.waitFor(() => expect(setMessage).toHaveBeenCalledWith("停止失敗：job is already finished"));
     expect(setMessage).not.toHaveBeenCalledWith("停止要求已送出");
-    expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true });
+    expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true, throwOnError: true });
   });
 
   it("shows cache only after a formal render succeeds", () => {
