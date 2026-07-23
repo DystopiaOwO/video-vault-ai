@@ -190,7 +190,7 @@ export function BgmLibraryPage() {
       </div>}
       {!error && !loading && tracks.length > 0 && visibleTracks.length === 0 && <div className="workspace-state empty">
         <span className="workspace-empty-icon" aria-hidden="true">⌕</span>
-        <div><h2>找不到符合的曲目</h2><p>調整搜尋字詞、情緒或授權條件。</p><button type="button" onClick={clearFilters}>清除篩選</button></div>
+        <div><h2>找不到符合的曲目</h2><p>調整搜尋字詞、情緒或授權條件。</p><button type="button" onClick={clearFilters}>重設所有篩選</button></div>
       </div>}
 
       {!error && !loading && visibleTracks.length > 0 && <div className="bgm-track-grid">
