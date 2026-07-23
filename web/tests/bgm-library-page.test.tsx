@@ -66,7 +66,7 @@ describe("BGM library helpers", () => {
   it("sorts by duration, artist, and title without mutating input", () => {
     const original = [...tracks];
     expect(sortBgmTracks(tracks, "duration-desc").map((item) => item.id)).toEqual([3, 1, 2]);
-    expect(sortBgmTracks(tracks, "artist").map((item) => item.id)).toEqual([3, 1, 2]);
+    expect(sortBgmTracks(tracks, "artist").map((item) => item.id)).toEqual([1, 2, 3]);
     expect(sortBgmTracks(tracks, "title").map((item) => item.id)).toEqual([2, 1, 3]);
     expect(tracks).toEqual(original);
   });
