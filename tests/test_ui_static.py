@@ -7,6 +7,17 @@ from video_vault.ui import JOBS, JOBS_LOCK, _kill_video_vault_processes, _set_jo
 REPO_ROOT = Path(__file__).parents[1]
 WEB_ROOT = REPO_ROOT / "web"
 WEB_SRC = WEB_ROOT / "src"
+APP_SOURCE = WEB_SRC / "App.tsx"
+
+
+def test_application_entry_mounts_and_reexports_the_workspace_app():
+    entry = (WEB_SRC / "main.tsx").read_text(encoding="utf-8")
+    app = APP_SOURCE.read_text(encoding="utf-8")
+
+    assert 'export { App } from "./App";' in entry
+    assert "createRoot(rootElement)" in entry
+    assert "export function App()" in app
+    assert "createRoot(rootElement)" not in app
 
 
 def test_application_shell_is_linked_and_scoped_to_root_layout():
@@ -29,7 +40,7 @@ def test_application_shell_is_linked_and_scoped_to_root_layout():
 
 
 def test_project_workspace_exposes_search_loading_and_anchor_navigation():
-    source = (WEB_SRC / "main.tsx").read_text(encoding="utf-8")
+    source = APP_SOURCE.read_text(encoding="utf-8")
 
     assert 'aria-label="搜尋專案"' in source
     assert "WorkspaceLoading" in source
@@ -39,22 +50,40 @@ def test_project_workspace_exposes_search_loading_and_anchor_navigation():
     assert "已有同名專案" in source
 
 
-def test_audio_ui_exposes_force_preview_and_reset_override_controls():
-    source = (WEB_SRC / "main.tsx").read_text(encoding="utf-8")
-    assert "強制重新產生" in source
-    assert "強制重跑" in source
-    assert "resetSegment" in source
-    assert "使用專案預設" in source
+def test_audio_ui_exposes_polling_safe_drafts_and_preview_controls():
+    app = APP_SOURCE.read_text(encoding="utf-8")
+    workspace = (WEB_SRC / "workspaces" / "audio" / "AudioMixingWorkspace.tsx").read_text(encoding="utf-8")
+
+    assert "<AudioMixingWorkspace" in app
+    assert "有未儲存變更" in workspace
+    assert "放棄變更" in workspace
+    assert "beforeunload" in workspace
+    assert "搜尋音訊片段" in workspace
+    assert "忽略快取重跑" in workspace
+    assert "AudioMixingPanel" not in app
+
+
+def test_color_ui_exposes_polling_safe_drafts_and_saved_preview_boundaries():
+    app = APP_SOURCE.read_text(encoding="utf-8")
+    workspace = (WEB_SRC / "workspaces" / "color" / "ColorConsistencyWorkspace.tsx").read_text(encoding="utf-8")
+
+    assert "<ColorConsistencyWorkspace" in app
+    assert "有未儲存變更" in workspace
+    assert "放棄變更" in workspace
+    assert "beforeunload" in workspace
+    assert "搜尋調色片段" in workspace
+    assert "預覽目前使用已儲存設定" in workspace
+    assert "ColorConsistencyPanel" not in app
 
 
 def test_storyboard_ui_exposes_review_first_controls():
-    entry = (WEB_SRC / "main.tsx").read_text(encoding="utf-8")
+    app = APP_SOURCE.read_text(encoding="utf-8")
     workspace = (WEB_SRC / "workspaces" / "storyboard" / "StoryboardReviewWorkspace.tsx").read_text(encoding="utf-8")
     controller = (WEB_SRC / "workspaces" / "storyboard" / "StoryboardWorkspaceController.tsx").read_text(encoding="utf-8")
 
-    assert "StoryboardWorkspaceController" in entry
-    assert "<StoryboardWorkspaceController" in entry
-    assert "StoryboardPanel" not in entry
+    assert "StoryboardWorkspaceController" in app
+    assert "<StoryboardWorkspaceController" in app
+    assert "StoryboardPanel" not in app
 
     assert "分鏡審核" in workspace
     assert "建立分鏡" in workspace
