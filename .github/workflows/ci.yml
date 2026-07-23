@@ -97,5 +97,20 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
-      - run: npm test
+      - name: Run frontend tests
+        id: frontend_tests
+        continue-on-error: true
+        run: npm test > frontend-test-output.txt 2>&1
+      - name: Upload frontend test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-test-output
+          path: web/frontend-test-output.txt
+          retention-days: 3
+      - name: Report frontend test failure
+        if: steps.frontend_tests.outcome == 'failure'
+        run: |
+          tail -n 350 frontend-test-output.txt
+          exit 1
       - run: npm run build
