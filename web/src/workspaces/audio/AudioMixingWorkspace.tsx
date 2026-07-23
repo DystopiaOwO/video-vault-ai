@@ -10,6 +10,7 @@ import {
   type Segment,
 } from "../../api";
 import type { ProjectDataLoadOptions } from "../../projectDataLoader";
+import { createProjectMutationControls, mutationLabel, ProjectMutationCoordinator, type ProjectMutationControls } from "../../projectMutation";
 import "./audio-mixing-workspace.css";
 
 export type AudioMixingWorkspaceProps = {
@@ -17,6 +18,7 @@ export type AudioMixingWorkspaceProps = {
   bgmTracks: BgmTrack[];
   setMessage: (value: string) => void;
   refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]>;
+  mutationControls?: ProjectMutationControls;
 };
 
 type PreviewInfo = {
@@ -53,7 +55,7 @@ const FALLBACK_AUDIO: AudioState = {
   segments: {},
 };
 
-export function AudioMixingWorkspace({ detail, bgmTracks, setMessage, refreshProject }: AudioMixingWorkspaceProps) {
+export function AudioMixingWorkspace({ detail, bgmTracks, setMessage, refreshProject, mutationControls }: AudioMixingWorkspaceProps) {
   const [state, setState] = useState<AudioState>(() => cloneAudioState(detail.audio || FALLBACK_AUDIO));
   const [baseline, setBaseline] = useState<AudioState>(() => cloneAudioState(detail.audio || FALLBACK_AUDIO));
   const [previewUrl, setPreviewUrl] = useState("");
@@ -63,6 +65,9 @@ export function AudioMixingWorkspace({ detail, bgmTracks, setMessage, refreshPro
   const projectIdRef = useRef(detail.project.id);
   const dirty = useMemo(() => audioSignature(state) !== audioSignature(baseline), [baseline, state]);
   const dirtyRef = useRef(dirty);
+  const fallbackControlsRef = useRef<ProjectMutationControls | null>(null);
+  if (!fallbackControlsRef.current) fallbackControlsRef.current = createProjectMutationControls(new ProjectMutationCoordinator());
+  const controls = mutationControls || fallbackControlsRef.current;
 
   useEffect(() => {
     dirtyRef.current = dirty;
@@ -148,6 +153,11 @@ export function AudioMixingWorkspace({ detail, bgmTracks, setMessage, refreshPro
 
   async function save() {
     if (!dirty || busy) return;
+    const mutation = controls.beginProjectMutation(detail.project.id, "audio");
+    if (!mutation) {
+      setMessage(`目前正在${mutationLabel("audio")}，請完成後再執行其他操作。`);
+      return;
+    }
     setBusy("save");
     setMessage("正在儲存音訊設定…");
     try {
@@ -172,6 +182,7 @@ export function AudioMixingWorkspace({ detail, bgmTracks, setMessage, refreshPro
       setMessage(`音訊設定儲存失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 

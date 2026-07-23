@@ -10,12 +10,14 @@ import {
   type Segment,
 } from "../../api";
 import type { ProjectDataLoadOptions } from "../../projectDataLoader";
+import { createProjectMutationControls, mutationLabel, ProjectMutationCoordinator, type ProjectMutationControls } from "../../projectMutation";
 import "./color-consistency-workspace.css";
 
 export type ColorConsistencyWorkspaceProps = {
   detail: ProjectDetail;
   setMessage: (value: string) => void;
   refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]>;
+  mutationControls?: ProjectMutationControls;
 };
 
 type ColorPreviewItem = {
@@ -44,7 +46,7 @@ const EMPTY_ADJUSTMENT: ColorAdjustment = {
   shadows: 0,
 };
 
-export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject }: ColorConsistencyWorkspaceProps) {
+export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, mutationControls }: ColorConsistencyWorkspaceProps) {
   const initial = cloneColorState(detail.color || emptyColorState());
   const [state, setState] = useState<ColorState>(initial);
   const [baseline, setBaseline] = useState<ColorState>(initial);
@@ -54,6 +56,9 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject }
   const projectIdRef = useRef(detail.project.id);
   const dirty = useMemo(() => colorSignature(state) !== colorSignature(baseline), [baseline, state]);
   const dirtyRef = useRef(dirty);
+  const fallbackControlsRef = useRef<ProjectMutationControls | null>(null);
+  if (!fallbackControlsRef.current) fallbackControlsRef.current = createProjectMutationControls(new ProjectMutationCoordinator());
+  const controls = mutationControls || fallbackControlsRef.current;
   const selectedReferenceId = isColorReference(state.reference) ? state.reference.id : "";
   const requiresLutPath = state.enabled && state.applied.mode === "dji_lut" && !state.applied.lut_path.trim();
 
@@ -191,6 +196,11 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject }
       if (dirty) setMessage("請先儲存或放棄調色變更，再重新分析核心畫面。");
       return;
     }
+    const mutation = controls.beginProjectMutation(detail.project.id, "color");
+    if (!mutation) {
+      setMessage(`目前正在${mutationLabel("color")}，請完成後再執行其他操作。`);
+      return;
+    }
     setBusy("analyze");
     setMessage(force ? "正在忽略快取並重跑色彩分析…" : "正在分析核心畫面色彩…");
     try {
@@ -209,12 +219,18 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject }
       setMessage(`色彩分析失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 
   async function changeReference(referenceId: string) {
     if (!referenceId || busy || dirty) {
       if (dirty) setMessage("請先儲存或放棄調色變更，再切換色彩基準。");
+      return;
+    }
+    const mutation = controls.beginProjectMutation(detail.project.id, "color");
+    if (!mutation) {
+      setMessage(`目前正在${mutationLabel("color")}，請完成後再執行其他操作。`);
       return;
     }
     setBusy("reference");
@@ -235,11 +251,17 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject }
       setMessage(`色彩基準更新失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 
   async function save() {
     if (!dirty || busy || requiresLutPath) return;
+    const mutation = controls.beginProjectMutation(detail.project.id, "color");
+    if (!mutation) {
+      setMessage(`目前正在${mutationLabel("color")}，請完成後再執行其他操作。`);
+      return;
+    }
     setBusy("save");
     setMessage("正在儲存調色設定…");
     try {
@@ -258,12 +280,18 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject }
       setMessage(`色彩設定儲存失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 
   async function preview(force = false) {
     if (busy || dirty) {
       if (dirty) setMessage("調色預覽目前使用已儲存設定；請先儲存或放棄草稿。");
+      return;
+    }
+    const mutation = controls.beginProjectMutation(detail.project.id, "color");
+    if (!mutation) {
+      setMessage(`目前正在${mutationLabel("color")}，請完成後再執行其他操作。`);
       return;
     }
     setBusy("preview");
@@ -282,6 +310,7 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject }
       setMessage(`調色預覽失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 

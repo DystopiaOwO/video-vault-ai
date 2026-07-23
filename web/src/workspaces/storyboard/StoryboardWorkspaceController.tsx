@@ -25,11 +25,13 @@ import {
   updateStoryboardSegment,
   type StoryboardSegmentEdit,
 } from "./storyboardViewModel";
+import { createProjectMutationControls, mutationLabel, ProjectMutationCoordinator, type ProjectMutationControls, type ProjectMutation } from "../../projectMutation";
 
 export type StoryboardWorkspaceControllerProps = {
   detail: ProjectDetail;
   setMessage: (message: string) => void;
   refreshProject: (options?: { forceFresh?: boolean; jobs?: boolean }) => Promise<unknown>;
+  mutationControls?: ProjectMutationControls;
 };
 
 type TimingDraft = { startSeconds: number; endSeconds: number; speed: number };
@@ -39,6 +41,7 @@ export function StoryboardWorkspaceController({
   detail,
   setMessage,
   refreshProject,
+  mutationControls,
 }: StoryboardWorkspaceControllerProps) {
   const [state, setState] = useState<StoryboardState>(() => editableStoryboardState(detail));
   const [selectedId, setSelectedId] = useState(() => firstSegmentId(detail));
@@ -53,7 +56,16 @@ export function StoryboardWorkspaceController({
   const dirtyRef = useRef(false);
   const timingDirtyRef = useRef<Record<string, boolean>>({});
   const projectIdRef = useRef(detail.project.id);
+  const fallbackControlsRef = useRef<ProjectMutationControls | null>(null);
+  if (!fallbackControlsRef.current) fallbackControlsRef.current = createProjectMutationControls(new ProjectMutationCoordinator());
+  const controls = mutationControls || fallbackControlsRef.current;
   const hasUnsavedTiming = Object.values(timingDirty).some(Boolean);
+
+  function beginMutation(mutation: ProjectMutation) {
+    const token = controls.beginProjectMutation(detail.project.id, mutation);
+    if (!token) setMessage(`目前正在${mutationLabel(mutation)}，請完成後再執行其他操作。`);
+    return token;
+  }
 
   useEffect(() => {
     dirtyRef.current = dirty;
@@ -180,6 +192,8 @@ export function StoryboardWorkspaceController({
 
   async function saveStoryboard() {
     if (!dirty || busy) return;
+    const mutation = beginMutation("storyboard");
+    if (!mutation) return;
     const normalized = normalizeStoryboardState(state);
     setBusy("save");
     setMessage("正在儲存分鏡…");
@@ -200,11 +214,14 @@ export function StoryboardWorkspaceController({
       setMessage(`分鏡儲存失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 
   async function regenerateStoryboard() {
     if (dirty || hasUnsavedTiming || busy) return;
+    const mutation = beginMutation("storyboard");
+    if (!mutation) return;
     setBusy("regenerate");
     setMessage(model.exists ? "正在重新產生分鏡…" : "正在建立分鏡…");
     try {
@@ -230,11 +247,14 @@ export function StoryboardWorkspaceController({
       setMessage(`分鏡產生失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 
   async function saveTiming(segmentId: string) {
     if (busy || !timingDirtyRef.current[segmentId]) return;
+    const mutation = beginMutation("timing");
+    if (!mutation) return;
     const timing = timingDrafts[segmentId] || committedTimingForSegment(committedTimingsRef.current, detail, segmentId);
     setBusy("timing");
     setMessage("正在儲存片段剪點…");
@@ -259,6 +279,7 @@ export function StoryboardWorkspaceController({
       setMessage(`剪點儲存失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 
@@ -318,6 +339,8 @@ export function StoryboardWorkspaceController({
 
   async function generateThumbnail(segmentId: string, ratio: number, force = false) {
     if (busy) return;
+    const mutation = beginMutation("storyboard");
+    if (!mutation) return;
     setBusy("thumbnail");
     setMessage(force ? "正在忽略快取並重新產生代表畫格…" : "正在產生代表畫格…");
     try {
@@ -341,11 +364,14 @@ export function StoryboardWorkspaceController({
       setMessage(`代表畫格產生失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 
   async function changeAudioRole(segmentId: string, role: AudioSegmentSettings["role"] | "default") {
     if (busy) return;
+    const mutation = beginMutation("audio");
+    if (!mutation) return;
     setBusy("audio");
     try {
       const existing = detail.audio.segments[segmentId];
@@ -365,6 +391,7 @@ export function StoryboardWorkspaceController({
       setMessage(`原音角色更新失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 
@@ -372,6 +399,8 @@ export function StoryboardWorkspaceController({
     if (busy) return;
     const segment = model.segments.find((item) => item.id === segmentId);
     if (!segment) return;
+    const mutation = beginMutation("color");
+    if (!mutation) return;
     setBusy("color");
     try {
       const existing = detail.color.segments[segmentId];
@@ -399,11 +428,14 @@ export function StoryboardWorkspaceController({
       setMessage(`片段調色更新失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 
   async function resetColor(segmentId: string) {
     if (busy) return;
+    const mutation = beginMutation("color");
+    if (!mutation) return;
     setBusy("color");
     try {
       const result = await api.colorSettings(detail.project.id, {
@@ -424,6 +456,7 @@ export function StoryboardWorkspaceController({
       setMessage(`恢復調色預設失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 

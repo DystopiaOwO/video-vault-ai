@@ -4,7 +4,13 @@ export type ProjectMutation =
   | "revise"
   | "upload"
   | "analyze"
+  | "storyboard"
+  | "timing"
+  | "audio"
+  | "color"
+  | "clip-summary"
   | "render"
+  | "render-cancel"
   | "export";
 
 export type ProjectMutationChannel = "review" | "media" | "output";
@@ -24,7 +30,13 @@ const CHANNELS: Record<ProjectMutation, ProjectMutationChannel> = {
   revise: "review",
   upload: "media",
   analyze: "media",
+  storyboard: "review",
+  timing: "review",
+  audio: "media",
+  color: "media",
+  "clip-summary": "media",
   render: "output",
+  "render-cancel": "output",
   export: "output",
 };
 
@@ -39,11 +51,24 @@ export function mutationLabel(mutation: ProjectMutation): string {
     revise: "故事重建",
     upload: "素材匯入",
     analyze: "內容感知",
+    storyboard: "分鏡",
+    timing: "片段剪點",
+    audio: "音訊設定",
+    color: "調色設定",
+    "clip-summary": "內容感知描述",
     render: "正式輸出",
+    "render-cancel": "停止背景工作",
     export: "素材輸出",
   };
   return labels[mutation];
 }
+
+export type ProjectMutationControls = {
+  beginProjectMutation: (projectId: number, mutation: ProjectMutation) => ProjectMutationToken | null;
+  finishProjectMutation: (token: ProjectMutationToken) => void;
+  isProjectMutationBusy: (projectId: number) => boolean;
+  currentProjectMutation: (projectId?: number) => ProjectMutationSnapshot | null;
+};
 
 export function refreshFailureMessage(successMessage: string, error: unknown, subject = "畫面"): string {
   const reason = error instanceof Error ? error.message : "未知錯誤";
@@ -79,6 +104,10 @@ export class ProjectMutationCoordinator {
     return this.active;
   }
 
+  isBusy(projectId: number): boolean {
+    return this.active?.projectId === projectId;
+  }
+
   isCurrent(token: ProjectMutationToken, projectId: number): boolean {
     return Boolean(
       this.active
@@ -87,4 +116,27 @@ export class ProjectMutationCoordinator {
       && token.projectId === projectId,
     );
   }
+}
+
+export function createProjectMutationControls(
+  coordinator: ProjectMutationCoordinator,
+  onBegin?: (token: ProjectMutationToken) => void,
+  onFinish?: (token: ProjectMutationToken) => void,
+): ProjectMutationControls {
+  return {
+    beginProjectMutation: (projectId, mutation) => {
+      const token = coordinator.begin(projectId, mutation);
+      if (token) onBegin?.(token);
+      return token;
+    },
+    finishProjectMutation: (token) => {
+      coordinator.finish(token);
+      onFinish?.(token);
+    },
+    isProjectMutationBusy: (projectId) => coordinator.isBusy(projectId),
+    currentProjectMutation: (projectId) => {
+      const current = coordinator.current();
+      return !current || projectId === undefined || current.projectId === projectId ? current : null;
+    },
+  };
 }

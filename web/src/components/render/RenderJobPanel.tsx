@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { api, type Job } from "../../api";
 import type { ProjectDataLoadOptions } from "../../projectDataLoader";
+import { createProjectMutationControls, mutationLabel, ProjectMutationCoordinator, type ProjectMutationControls } from "../../projectMutation";
 import { copyText } from "../../utils/clipboard";
 import "./render-job-panel.css";
 
@@ -40,6 +41,7 @@ type Props = {
   projectId: number;
   setMessage: (value: string) => void;
   refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]>;
+  mutationControls?: ProjectMutationControls;
 };
 
 function updatedTimestamp(job: Job): number {
@@ -66,11 +68,15 @@ export function filterRenderJobs(jobs: Job[], filter: JobFilter): Job[] {
   return jobs;
 }
 
-export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject }: Props) {
+export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject, mutationControls }: Props) {
   const [cancelling, setCancelling] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<JobFilter>("all");
   const [expanded, setExpanded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const pendingCancelsRef = useRef<Job[]>([]);
+  const fallbackControlsRef = useRef<ProjectMutationControls | null>(null);
+  if (!fallbackControlsRef.current) fallbackControlsRef.current = createProjectMutationControls(new ProjectMutationCoordinator());
+  const controls = mutationControls || fallbackControlsRef.current;
   const sortedJobs = useMemo(() => sortRenderJobs(jobs), [jobs]);
   const filteredJobs = useMemo(() => filterRenderJobs(sortedJobs, filter), [filter, sortedJobs]);
   const displayedJobs = expanded ? filteredJobs : filteredJobs.slice(0, DEFAULT_VISIBLE_JOBS);
@@ -80,6 +86,18 @@ export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject }: 
 
   async function cancel(job: Job) {
     const key = jobKey(job, projectId);
+    const mutation = controls.beginProjectMutation(projectId, "render-cancel");
+    if (!mutation) {
+      const current = controls.currentProjectMutation(projectId);
+      if (current?.mutation === "render-cancel" && !cancelling.has(key)) {
+        setCancelling((value) => new Set(value).add(key));
+        pendingCancelsRef.current.push(job);
+        setMessage("停止要求已排入目前工作之後。 ");
+        return;
+      }
+      setMessage(`目前正在${mutationLabel("render-cancel")}，請完成後再執行其他操作。`);
+      return;
+    }
     setCancelling((current) => new Set(current).add(key));
     setMessage("正在停止指定工作...");
     try {
@@ -103,6 +121,9 @@ export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject }: 
         next.delete(key);
         return next;
       });
+      controls.finishProjectMutation(mutation);
+      const next = pendingCancelsRef.current.shift();
+      if (next) void cancel(next);
     }
   }
 
