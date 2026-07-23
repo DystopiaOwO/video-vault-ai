@@ -157,7 +157,11 @@ describe("StoryboardReviewWorkspace", () => {
     expect(onDeleteGroup).toHaveBeenCalledWith("empty");
 
     fireEvent.click(screen.getByRole("button", { name: "產生代表畫格" }));
-    expect(onGenerateThumbnail).toHaveBeenCalledWith("a", 0.5);
+    expect(onGenerateThumbnail).toHaveBeenCalledWith("a", 0.5, false);
+
+    fireEvent.click(screen.getByLabelText("忽略快取並強制重跑"));
+    fireEvent.click(screen.getByRole("button", { name: "產生代表畫格" }));
+    expect(onGenerateThumbnail).toHaveBeenLastCalledWith("a", 0.5, true);
   });
 
   it("shows preview players and routes preview and color actions", () => {
@@ -176,10 +180,14 @@ describe("StoryboardReviewWorkspace", () => {
     })} />);
 
     fireEvent.click(screen.getByRole("button", { name: "產生 5 秒預覽" }));
-    expect(onPreview).toHaveBeenCalledWith("a", "segment");
+    expect(onPreview).toHaveBeenCalledWith("a", "segment", false);
 
     fireEvent.click(screen.getByRole("button", { name: "預覽前後銜接" }));
-    expect(onPreview).toHaveBeenCalledWith("a", "transition");
+    expect(onPreview).toHaveBeenCalledWith("a", "transition", false);
+
+    fireEvent.click(screen.getByLabelText("忽略快取並強制重跑"));
+    fireEvent.click(screen.getByRole("button", { name: "從此片段預覽 8 秒" }));
+    expect(onPreview).toHaveBeenLastCalledWith("a", "range", true);
 
     fireEvent.click(screen.getByRole("button", { name: "停用此片段" }));
     expect(onToggleColor).toHaveBeenCalledWith("a");
