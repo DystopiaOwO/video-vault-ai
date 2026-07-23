@@ -85,8 +85,7 @@ export function AudioMixingWorkspace({ detail, bgmTracks, setMessage, refreshPro
       projectIdRef.current = detail.project.id;
       setState(incoming);
       setBaseline(incoming);
-      setPreviewUrl("");
-      setPreviewInfo(null);
+      clearPreview();
       setSegmentQuery("");
       setBusy("");
       return;
@@ -103,6 +102,11 @@ export function AudioMixingWorkspace({ detail, bgmTracks, setMessage, refreshPro
     return detail.segments.filter((segment) => [segment.title, segment.segment_id, segment.clip_id, segment.scene_role]
       .some((value) => String(value || "").toLocaleLowerCase().includes(query)));
   }, [detail.segments, segmentQuery]);
+
+  function clearPreview() {
+    setPreviewUrl("");
+    setPreviewInfo(null);
+  }
 
   function applyState(updater: (current: AudioState) => AudioState) {
     setState((current) => updater(current));
@@ -345,15 +349,6 @@ function audioSignature(state: AudioState): string {
   });
 }
 
-function clearableUrl(url: string): string {
-  return url;
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "網路或服務錯誤";
-}
-
-function clearPreviewState(setPreviewUrl: (value: string) => void, setPreviewInfo: (value: PreviewInfo | null) => void) {
-  setPreviewUrl(clearableUrl(""));
-  setPreviewInfo(null);
 }
