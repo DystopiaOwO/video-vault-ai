@@ -12,16 +12,31 @@ WEB_SRC = WEB_ROOT / "src"
 def test_application_shell_is_linked_and_scoped_to_root_layout():
     index = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
     shell = (WEB_SRC / "app-shell.css").read_text(encoding="utf-8")
+    navigation = (WEB_SRC / "project-navigation.css").read_text(encoding="utf-8")
     stripped_lines = {line.strip() for line in shell.splitlines()}
 
     assert '<link rel="stylesheet" href="/src/app-shell.css" />' in index
+    assert '<link rel="stylesheet" href="/src/project-navigation.css" />' in index
     assert "<title>Video Vault AI</title>" in index
     assert "#root > main" in shell
     assert "#root > main > aside" in shell
     assert "#root > main > section" in shell
     assert "#root .review-workspace { padding: 0; }" in shell
+    assert "#root > main > section .workspace-nav" in navigation
+    assert "#root > main > aside .project-search" in navigation
     assert "aside {" not in stripped_lines
     assert "section {" not in stripped_lines
+
+
+def test_project_workspace_exposes_search_loading_and_anchor_navigation():
+    source = (WEB_SRC / "main.tsx").read_text(encoding="utf-8")
+
+    assert 'aria-label="搜尋專案"' in source
+    assert "WorkspaceLoading" in source
+    assert "WorkspaceEmpty" in source
+    assert 'aria-label="專案工作區導覽"' in source
+    assert "workspace-storyboard" in source
+    assert "已有同名專案" in source
 
 
 def test_audio_ui_exposes_force_preview_and_reset_override_controls():
