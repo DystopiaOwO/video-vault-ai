@@ -64,8 +64,8 @@ function setCurrentWorkspace(id: WorkspaceSectionId) {
 
 function decorateShortcuts() {
   const search = projectSearchInput();
-  search?.setAttribute("aria-keyshortcuts", "Control+K Meta+K");
-  search?.setAttribute("title", "搜尋專案（Ctrl / ⌘ + K）");
+  search?.removeAttribute("aria-keyshortcuts");
+  search?.setAttribute("title", "搜尋專案");
 
   WORKSPACE_SECTION_IDS.forEach((id, index) => {
     const link = workspaceLink(id);
@@ -129,12 +129,6 @@ export function installWorkspaceNavigationEnhancements(): () => void {
   };
 
   const handleKeyDown = (event: KeyboardEvent) => {
-    const commandSearch = (event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "k";
-    if (commandSearch) {
-      if (focusProjectSearch()) event.preventDefault();
-      return;
-    }
-
     if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || editableTarget(event.target)) return;
     const index = Number(event.key) - 1;
     if (Number.isInteger(index) && navigateToWorkspace(index)) event.preventDefault();
