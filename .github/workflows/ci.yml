@@ -52,7 +52,21 @@ jobs:
       - name: Verify Python UI import
         run: python -c "import video_vault.ui"
       - name: Run pytest
-        run: pytest -q --tb=short --disable-warnings
+        id: pytest
+        continue-on-error: true
+        run: pytest -q --tb=short --disable-warnings > pytest-output.txt 2>&1
+      - name: Upload pytest output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output-${{ matrix.os }}-${{ matrix.python-version }}
+          path: pytest-output.txt
+          retention-days: 3
+      - name: Report pytest failure
+        if: steps.pytest.outcome == 'failure'
+        run: |
+          python -c "from pathlib import Path; text = Path('pytest-output.txt').read_text(encoding='utf-8', errors='replace'); print(text[-12000:])"
+          python -c "raise SystemExit(1)"
       - name: Check source encoding
         run: python scripts/check_encoding.py
       - name: Check pull request or push diff whitespace
