@@ -172,10 +172,16 @@ export function StoryboardWorkspaceController({
     }
   }
 
-  async function preview(segmentId: string, mode: StoryboardPreviewMode) {
+  async function preview(segmentId: string, mode: StoryboardPreviewMode, force = false) {
     if (busy) return;
     setBusy("preview");
-    setMessage(mode === "segment" ? "正在產生片段短預覽…" : mode === "range" ? "正在產生分鏡範圍預覽…" : "正在產生片段銜接預覽…");
+    setMessage(force
+      ? "正在忽略快取並重新產生分鏡預覽…"
+      : mode === "segment"
+        ? "正在產生片段短預覽…"
+        : mode === "range"
+          ? "正在產生分鏡範圍預覽…"
+          : "正在產生片段銜接預覽…");
     try {
       const result = await api.storyboardPreview(detail.project.id, {
         mode,
@@ -183,6 +189,7 @@ export function StoryboardWorkspaceController({
         durationSeconds: mode === "segment" ? 5 : 8,
         timelineStartSeconds: mode === "range" ? timelineStartForSegment(state, detail, segmentId, timingDrafts) : 0,
         storyboardState: state,
+        force,
       });
       if (!result.ok) {
         setMessage(`預覽產生失敗：${result.error || "未知錯誤"}`);
@@ -198,7 +205,11 @@ export function StoryboardWorkspaceController({
         durationSeconds: Number(result.duration_seconds || 0),
       }] : []);
       setPreviewItems(items);
-      setMessage(`${previewModeLabel(mode)}已完成，共 ${items.length} 個預覽。`);
+      setMessage(force
+        ? `${previewModeLabel(mode)}已忽略快取重新產生，共 ${items.length} 個預覽。`
+        : result.cache_hit
+          ? `${previewModeLabel(mode)}已從快取載入，共 ${items.length} 個預覽。`
+          : `${previewModeLabel(mode)}已完成，共 ${items.length} 個預覽。`);
     } catch (error) {
       setMessage(`預覽產生失敗：${errorMessage(error)}`);
     } finally {
@@ -206,12 +217,12 @@ export function StoryboardWorkspaceController({
     }
   }
 
-  async function generateThumbnail(segmentId: string, ratio: number) {
+  async function generateThumbnail(segmentId: string, ratio: number, force = false) {
     if (busy) return;
     setBusy("thumbnail");
-    setMessage("正在產生代表畫格…");
+    setMessage(force ? "正在忽略快取並重新產生代表畫格…" : "正在產生代表畫格…");
     try {
-      const result = await api.storyboardThumbnail(detail.project.id, segmentId, ratio);
+      const result = await api.storyboardThumbnail(detail.project.id, segmentId, ratio, force);
       if (!result.ok) {
         setMessage(`代表畫格產生失敗：${result.error || "未知錯誤"}`);
         return;
@@ -221,7 +232,11 @@ export function StoryboardWorkspaceController({
         thumbnail_url: result.url,
       }));
       setDirty(true);
-      setMessage(result.cache_hit ? "代表畫格已從快取載入，請儲存分鏡。" : "代表畫格已產生，請儲存分鏡以保留位置。");
+      setMessage(force
+        ? "代表畫格已忽略快取重新產生，請儲存分鏡。"
+        : result.cache_hit
+          ? "代表畫格已從快取載入，請儲存分鏡。"
+          : "代表畫格已產生，請儲存分鏡以保留位置。");
     } catch (error) {
       setMessage(`代表畫格產生失敗：${errorMessage(error)}`);
     } finally {
@@ -322,11 +337,11 @@ export function StoryboardWorkspaceController({
     onSaveTiming={(segmentId) => void saveTiming(segmentId)}
     onSave={() => void saveStoryboard()}
     onRegenerate={() => void regenerateStoryboard()}
-    onPreview={(segmentId, mode) => void preview(segmentId, mode)}
+    onPreview={(segmentId, mode, force) => void preview(segmentId, mode, force)}
     onAudioRoleChange={(segmentId, role) => void changeAudioRole(segmentId, role)}
     onToggleColor={(segmentId) => void toggleColor(segmentId)}
     onResetColor={(segmentId) => void resetColor(segmentId)}
-    onGenerateThumbnail={(segmentId, ratio) => void generateThumbnail(segmentId, ratio)}
+    onGenerateThumbnail={(segmentId, ratio, force) => void generateThumbnail(segmentId, ratio, force)}
     onMoveSegment={(segmentId, delta) => replaceLocalState(moveStoryboardSegment(state, segmentId, delta))}
     onAddGroup={(title) => replaceLocalState(addStoryboardGroup(state, title))}
     onRenameGroup={(groupId, title) => replaceLocalState(renameStoryboardGroup(state, groupId, title))}
