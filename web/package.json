@@ -7,7 +7,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 5173",
     "test": "vitest run",
-    "test:prototype": "vitest run tests/ui-prototype-v2.test.ts"
+    "test:prototype": "vitest run tests/ui-prototype-v2.test.ts",
+    "test:prototype-react": "vitest run tests/ui-prototype-react.test.tsx"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",
