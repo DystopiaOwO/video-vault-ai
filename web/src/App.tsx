@@ -6,6 +6,7 @@ import { ProjectLocation } from "./components/project/ProjectLocation";
 import { ProjectWorkflow, projectWorkflowSteps } from "./components/project/ProjectWorkflow";
 import { RenderJobPanel } from "./components/render/RenderJobPanel";
 import { type ProjectDataLoadOptions, ProjectDataLoader } from "./projectDataLoader";
+import { ProjectNavigationIdentity, type ProjectOperationToken } from "./projectNavigationIdentity";
 import { AudioMixingWorkspace } from "./workspaces/audio/AudioMixingWorkspace";
 import { ColorConsistencyWorkspace } from "./workspaces/color/ColorConsistencyWorkspace";
 import { StoryboardWorkspaceController } from "./workspaces/storyboard/StoryboardWorkspaceController";
@@ -27,6 +28,8 @@ export function App() {
   const currentIdRef = useRef(0);
   const mountedRef = useRef(true);
   const loaderRef = useRef<ProjectDataLoader | null>(null);
+  const navigationIdentityRef = useRef(new ProjectNavigationIdentity());
+  const creatingProjectRef = useRef(false);
   const normalizedProjectQuery = projectQuery.trim().toLocaleLowerCase();
   const filteredProjects = useMemo(() => projects.filter((project) => {
     if (!normalizedProjectQuery) return true;
@@ -102,31 +105,40 @@ export function App() {
 
   async function review(action: "approve" | "reject") {
     if (!detail) return;
+    const requestedProjectId = detail.project.id;
+    const operation = beginProjectOperation(requestedProjectId);
     setMessage("送出中...");
     try {
-      action === "approve" ? await api.approve(detail.project.id, notes) : await api.reject(detail.project.id, notes);
+      action === "approve" ? await api.approve(requestedProjectId, notes) : await api.reject(requestedProjectId, notes);
+      if (!isCurrentProjectOperation(operation)) return;
       setNotes("");
       setMessage(action === "approve" ? "已核准專案" : "已退回修改");
-      setDetail(await api.project(detail.project.id));
+      const nextDetail = await api.project(requestedProjectId);
+      if (isCurrentProjectOperation(operation)) setDetail(nextDetail);
     } catch (error) {
-      setMessage(`審核操作失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (isCurrentProjectOperation(operation)) setMessage(`審核操作失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
     }
   }
 
   async function revise() {
     if (!detail) return;
+    const requestedProjectId = detail.project.id;
+    const operation = beginProjectOperation(requestedProjectId);
     setMessage("正在依備註重建故事...");
     try {
-      await api.revise(detail.project.id, notes);
+      await api.revise(requestedProjectId, notes);
+      if (!isCurrentProjectOperation(operation)) return;
       setNotes("");
       setMessage("故事整理已依備註重建");
-      setDetail(await api.project(detail.project.id));
+      const nextDetail = await api.project(requestedProjectId);
+      if (isCurrentProjectOperation(operation)) setDetail(nextDetail);
     } catch (error) {
-      setMessage(`故事重建失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (isCurrentProjectOperation(operation)) setMessage(`故事重建失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
     }
   }
 
   async function createProject() {
+    if (creatingProjectRef.current) return;
     const name = newProjectName.trim();
     if (!name) {
       setMessage("請先輸入專案名稱。");
@@ -136,16 +148,21 @@ export function App() {
       setMessage("已有同名專案，請使用不同名稱。");
       return;
     }
+    const operation = navigationIdentityRef.current.begin(currentIdRef.current);
+    creatingProjectRef.current = true;
     setCreatingProject(true);
     setMessage("正在建立專案...");
     try {
       const result = await api.createProject(name);
-      setNewProjectName("");
       await loadProjects();
+      if (!navigationIdentityRef.current.isCurrent(operation, currentIdRef.current)) return;
+      setNewProjectName("");
       selectProject(result.id);
       setMessage("專案已建立，下一步請匯入素材。");
     } catch (error) {
-      setMessage(`專案建立失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (navigationIdentityRef.current.isCurrent(operation, currentIdRef.current)) {
+        setMessage(`專案建立失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
     } finally {
       setCreatingProject(false);
     }
@@ -153,12 +170,22 @@ export function App() {
 
   function selectProject(projectId: number) {
     if (projectId === currentId) return;
+    currentIdRef.current = projectId;
+    navigationIdentityRef.current.switchProject();
     loaderRef.current?.invalidate();
     setCurrentId(projectId);
     setDetail(null);
     setJobs([]);
     setNotes("");
     setMessage("");
+  }
+
+  function beginProjectOperation(projectId: number): ProjectOperationToken {
+    return navigationIdentityRef.current.begin(projectId);
+  }
+
+  function isCurrentProjectOperation(operation: ProjectOperationToken): boolean {
+    return navigationIdentityRef.current.isCurrent(operation, currentIdRef.current);
   }
 
   async function refreshProject(projectId: number, options: ProjectDataLoadOptions = {}): Promise<Job[]> {
@@ -171,7 +198,7 @@ export function App() {
       ? <WorkspaceEmpty title="尚未建立專案" detail="從左側輸入名稱建立第一個專案，再匯入多支影片素材。" />
       : !detail || detail.project.id !== currentId
         ? <WorkspaceLoading title="正在開啟專案" detail="載入素材、分鏡、調色、音訊與輸出狀態…" />
-        : <ProjectView key={detail.project.id} detail={detail} jobs={jobs} bgmTracks={bgmTracks} notes={notes} setNotes={setNotes} setMessage={setMessage} refreshProject={refreshProject} review={review} revise={revise} />;
+        : <ProjectView key={detail.project.id} detail={detail} jobs={jobs} bgmTracks={bgmTracks} notes={notes} setNotes={setNotes} setMessage={setMessage} refreshProject={refreshProject} review={review} revise={revise} beginProjectOperation={beginProjectOperation} isCurrentProjectOperation={isCurrentProjectOperation} />;
 
   return <main>
     <aside>
@@ -183,7 +210,7 @@ export function App() {
       </nav>
       <div className="new-project">
         <label htmlFor="new-project-name">建立專案</label>
-        <input id="new-project-name" value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void createProject(); }} placeholder="例如：福岡旅行 2026" maxLength={80} />
+        <input id="new-project-name" value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void createProject(); } }} placeholder="例如：福岡旅行 2026" maxLength={80} />
         <button disabled={creatingProject || !newProjectName.trim()} onClick={() => void createProject()}>{creatingProject ? "建立中…" : "新增專案"}</button>
       </div>
       <div className="sidebar-section-heading">
@@ -241,7 +268,7 @@ function BgmPage() {
   </main>;
 }
 
-function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, refreshProject, review, revise }: {
+function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, refreshProject, review, revise, beginProjectOperation, isCurrentProjectOperation }: {
   detail: ProjectDetail;
   jobs: Job[];
   bgmTracks: BgmTrack[];
@@ -251,6 +278,8 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   refreshProject: (projectId: number, options?: ProjectDataLoadOptions) => Promise<Job[]>;
   review: (action: "approve" | "reject") => void;
   revise: () => void;
+  beginProjectOperation: (projectId: number) => ProjectOperationToken;
+  isCurrentProjectOperation: (operation: ProjectOperationToken) => boolean;
 }) {
   const [submitting, setSubmitting] = useState(false);
   const refreshCurrentProject = (options: ProjectDataLoadOptions = {}) => refreshProject(detail.project.id, options);
@@ -348,19 +377,24 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   </>;
 
   async function exportProject(kind: "hyperframes" | "hyperframes-render" | "opencut" | "opencut-render") {
+    const operation = beginProjectOperation(detail.project.id);
     try {
       setMessage("工作已送出，請看 Render Job 狀態與進度。");
       const result = kind.startsWith("hyperframes")
         ? await api.hyperframesJob(detail.project.id, kind === "hyperframes-render")
         : await api.opencutJob(detail.project.id, kind === "opencut-render");
+      if (!isCurrentProjectOperation(operation)) return;
       await refreshCurrentProject({ forceFresh: true });
+      if (!isCurrentProjectOperation(operation)) return;
       if (!result.ok) {
         setMessage(`工作啟動失敗：${result.error || result.message || "工作未成功送出"}`);
         return;
       }
       setMessage(result.message || "工作已開始");
     } catch (error) {
-      setMessage(`工作啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (isCurrentProjectOperation(operation)) {
+        setMessage(`工作啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
     }
   }
 
@@ -370,18 +404,23 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
       return;
     }
     const requestedProjectId = detail.project.id;
+    const operation = beginProjectOperation(requestedProjectId);
     try {
       setSubmitting(true);
       setMessage("正在建立正式輸出…");
       const result = await api.createRenderJob(requestedProjectId);
       if (!result.ok) {
+        if (!isCurrentProjectOperation(operation)) return;
         setMessage(`正式輸出失敗：${result.error || "建立 Render Job 未成功"}`);
         return;
       }
       await refreshProject(requestedProjectId, { forceFresh: true });
+      if (!isCurrentProjectOperation(operation)) return;
       setMessage(result.created ? "正式輸出已排入佇列" : "正式輸出工作已在執行中");
     } catch (error) {
-      setMessage(`正式輸出啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (isCurrentProjectOperation(operation)) {
+        setMessage(`正式輸出啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -390,48 +429,66 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   async function uploadFiles(event: ChangeEvent<HTMLInputElement>) {
     const files = event.target.files;
     if (!files?.length) return;
+    const operation = beginProjectOperation(detail.project.id);
     setMessage("正在匯入素材...");
     try {
       const result = await api.uploadProject(detail.project.id, files);
+      if (!isCurrentProjectOperation(operation)) return;
       event.target.value = "";
       setMessage(result.ok ? `已匯入 ${result.files?.length || 0} 支素材，下一步請跑內容感知。` : result.error || "匯入失敗");
       await refreshCurrentProject({ forceFresh: true });
+      if (!isCurrentProjectOperation(operation)) return;
     } catch (error) {
       event.target.value = "";
-      setMessage(`素材匯入失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (isCurrentProjectOperation(operation)) {
+        setMessage(`素材匯入失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
     }
   }
 
   async function analyze(force: boolean) {
+    const operation = beginProjectOperation(detail.project.id);
     setMessage(force ? "已送出全部重跑感知。" : "已送出待感知素材。");
     try {
       const result = await api.analyzeJob(detail.project.id, force);
+      if (!isCurrentProjectOperation(operation)) return;
       setMessage(result.message || "內容感知工作已開始");
       await refreshCurrentProject();
     } catch (error) {
-      setMessage(`內容感知啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (isCurrentProjectOperation(operation)) {
+        setMessage(`內容感知啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
     }
   }
 
   async function analyzeOne(videoId: number) {
+    const operation = beginProjectOperation(detail.project.id);
     setMessage("已送出單支素材感知，請看工作狀態百分比。");
     try {
       const result = await api.analyzeVideo(detail.project.id, videoId);
+      if (!isCurrentProjectOperation(operation)) return;
       setMessage(result.message || "單支素材感知已開始");
       await refreshCurrentProject();
     } catch (error) {
-      setMessage(`單支素材感知啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (isCurrentProjectOperation(operation)) {
+        setMessage(`單支素材感知啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
     }
   }
 
   async function buildPlan() {
+    const operation = beginProjectOperation(detail.project.id);
     setMessage("正在產生故事整理...");
     try {
       await api.buildPlan(detail.project.id);
+      if (!isCurrentProjectOperation(operation)) return;
       setMessage("故事整理已更新，請審核片段。");
       await refreshCurrentProject({ forceFresh: true });
+      if (!isCurrentProjectOperation(operation)) return;
     } catch (error) {
-      setMessage(`故事整理失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (isCurrentProjectOperation(operation)) {
+        setMessage(`故事整理失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
     }
   }
 }
