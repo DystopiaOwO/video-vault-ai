@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 import { api, type BgmTrack, type Job, type Project, type ProjectDetail } from "./api";
+import { ClipSummaryEditor } from "./components/project/ClipSummaryEditor";
+import { ProjectLocation } from "./components/project/ProjectLocation";
+import { ProjectWorkflow, projectWorkflowSteps } from "./components/project/ProjectWorkflow";
 import { RenderJobPanel } from "./components/render/RenderJobPanel";
 import { type ProjectDataLoadOptions, ProjectDataLoader } from "./projectDataLoader";
 import { AudioMixingWorkspace } from "./workspaces/audio/AudioMixingWorkspace";
 import { ColorConsistencyWorkspace } from "./workspaces/color/ColorConsistencyWorkspace";
 import { StoryboardWorkspaceController } from "./workspaces/storyboard/StoryboardWorkspaceController";
+import "./project-detail-polish.css";
 
 export function App() {
   if (window.location.pathname === "/bgm") return <BgmPage />;
@@ -114,6 +118,7 @@ export function App() {
     setMessage("正在依備註重建故事...");
     try {
       await api.revise(detail.project.id, notes);
+      setNotes("");
       setMessage("故事整理已依備註重建");
       setDetail(await api.project(detail.project.id));
     } catch (error) {
@@ -211,8 +216,9 @@ export function App() {
 
 function BgmPage() {
   const [tracks, setTracks] = useState<BgmTrack[]>([]);
+  const [error, setError] = useState("");
   useEffect(() => {
-    api.bgm().then(setTracks);
+    api.bgm().then(setTracks).catch((reason) => setError(reason instanceof Error ? reason.message : "未知錯誤"));
   }, []);
   return <main>
     <aside>
@@ -222,13 +228,14 @@ function BgmPage() {
     </aside>
     <section>
       <div className="hero"><div><h2>本地 BGM 總覽</h2><p>{tracks.length} 首可用音樂</p></div></div>
+      {error && <div className="notice" role="alert">BGM 載入失敗：{error}</div>}
       <div className="grid">
         {tracks.map((track) => <Card key={track.id} title={track.title}>
           <p>{track.artist || "未知作者"} | {track.license_name || "未填授權"} | {track.mood || "未分類"}</p>
-          {track.source_url && <p><a href={track.source_url} target="_blank">來源</a></p>}
+          {track.source_url && <p><a href={track.source_url} target="_blank" rel="noreferrer">來源</a></p>}
           <pre>{track.attribution_text || "尚未填寫 YouTube 署名文字。"}</pre>
         </Card>)}
-        {!tracks.length && <Card title="尚無 BGM"><p>請先到舊版 BGM 上傳頁登錄本地音樂。</p></Card>}
+        {!tracks.length && !error && <Card title="尚無 BGM"><p>請先到舊版 BGM 上傳頁登錄本地音樂。</p></Card>}
       </div>
     </section>
   </main>;
@@ -250,12 +257,15 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   const includedSegments = detail.storyboard?.segments
     ? Object.values(detail.storyboard.segments).filter((segment) => segment.included).length
     : detail.segments.filter((segment) => segment.include !== false).length;
+  const workflowSteps = projectWorkflowSteps(detail, jobs);
+  const outputDone = workflowSteps[workflowSteps.length - 1]?.done ?? false;
+  const renderRunning = jobs.some((job) => Boolean(job.job_id) && ["queued", "running", "cancelling"].includes(job.status));
 
   return <>
     <div className="hero">
       <div>
         <h2>{detail.project.name}</h2>
-        <p>{detail.folder || `專案 #${detail.project.id}`}</p>
+        <ProjectLocation projectId={detail.project.id} folder={detail.folder} setMessage={setMessage} />
       </div>
       <Status value={detail.project.status} />
     </div>
@@ -263,13 +273,14 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
       <div><span>素材</span><b>{detail.clips.length}</b></div>
       <div><span>感知片段</span><b>{detail.segments.length}</b></div>
       <div><span>納入成片</span><b>{includedSegments}</b></div>
-      <div><span>正式輸出</span><b>{detail.can_render ? "已解鎖" : "待核准"}</b></div>
+      <div><span>正式輸出</span><b>{outputDone ? "已完成" : detail.can_render ? "可開始" : "待核准"}</b></div>
     </div>
     <WorkspaceNavigation />
 
     <div className="workspace-section" id="workspace-overview" tabIndex={-1}>
       <RenderJobPanel jobs={jobs} projectId={detail.project.id} setMessage={setMessage} refreshProject={refreshCurrentProject} />
-      <Workflow detail={detail} />
+      <ProjectWorkflow detail={detail} jobs={jobs} />
+      <WorkflowSkeleton detail={detail} />
     </div>
 
     <div className="workspace-section" id="workspace-storyboard" tabIndex={-1}>
@@ -280,42 +291,46 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
       <div className="grid">
         <Card title="審核">
           <p>Gate：{detail.can_render ? "可正式輸出" : detail.render_gate_reason}</p>
-          <textarea value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="記錄核准理由、退回項目或重建故事需求" />
+          <div className="review-note-heading">
+            <label htmlFor="review-notes">審核與重建備註</label>
+            {notes.trim() && <span role="status">有尚未送出的備註</span>}
+          </div>
+          <textarea id="review-notes" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="記錄核准理由、退回項目或重建故事需求" />
           <div className="row">
-            <button className="good" onClick={() => review("approve")}>核准專案</button>
-            <button className="danger" onClick={() => review("reject")}>退回修改</button>
-            <button disabled={!notes.trim()} onClick={revise}>依備註重建故事</button>
+            <button type="button" disabled={!notes} onClick={() => setNotes("")}>清除備註</button>
+            <button type="button" className="good" onClick={() => review("approve")}>核准專案</button>
+            <button type="button" className="danger" onClick={() => review("reject")}>退回修改</button>
+            <button type="button" disabled={!notes.trim()} onClick={revise}>依備註重建故事</button>
           </div>
         </Card>
         <Card title="輸出">
           <div className="output-actions">
-            <button onClick={() => void exportProject("hyperframes")}>產生初剪專案</button>
-            <button disabled={!detail.can_render} onClick={() => void exportProject("hyperframes-render")}>快速輸出 MP4</button>
-            <button className="good" disabled={submitting || !detail.can_render || jobs.some((job) => Boolean(job.job_id) && ["queued", "running", "cancelling"].includes(job.status))} onClick={() => void startFormalRender()}>{submitting ? "正在建立正式輸出…" : "正式輸出（Render Job）"}</button>
-            <button onClick={() => void exportProject("opencut")}>OpenCut 素材包</button>
-            <button disabled={!detail.can_render} onClick={() => void exportProject("opencut-render")}>OpenCut 調色片段</button>
+            <button type="button" onClick={() => void exportProject("hyperframes")}>產生初剪專案</button>
+            <button type="button" disabled={!detail.can_render} onClick={() => void exportProject("hyperframes-render")}>快速輸出 MP4</button>
+            <button type="button" className="good" disabled={submitting || !detail.can_render || renderRunning} onClick={() => void startFormalRender()}>{submitting ? "正在建立正式輸出…" : renderRunning ? "正式輸出進行中" : "正式輸出（Render Job）"}</button>
+            <button type="button" onClick={() => void exportProject("opencut")}>OpenCut 素材包</button>
+            <button type="button" disabled={!detail.can_render} onClick={() => void exportProject("opencut-render")}>OpenCut 調色片段</button>
           </div>
         </Card>
       </div>
     </div>
 
     <div className="workspace-section" id="workspace-media" tabIndex={-1}>
-      <WorkflowSkeleton detail={detail} />
       <div className="grid">
         <Card title="素材">
           <div className="row">
             <input type="file" multiple accept="video/*" onChange={uploadFiles} />
-            <button onClick={() => void analyze(true)}>全部重跑感知</button>
-            <button disabled={!detail.clips.length} onClick={() => void buildPlan()}>產生故事整理</button>
+            <button type="button" onClick={() => void analyze(true)}>全部重跑感知</button>
+            <button type="button" disabled={!detail.clips.length} onClick={() => void buildPlan()}>產生故事整理</button>
           </div>
           {detail.clips.map((clip) => <div className="item" key={clip.clip_id}>
             <div className="row">
               <b>{clip.clip_id}</b>
-              <button onClick={() => void analyzeOne(clip.video_id)}>重跑感知</button>
+              <button type="button" onClick={() => void analyzeOne(clip.video_id)}>重跑感知</button>
             </div>
             {clip.filename}
             <span>{projectStatusLabel(clip.status)} · {clip.segment_count} 段 · {Math.round(clip.duration_seconds || 0)} 秒 · {clip.time_of_day || "未分類時段"}</span>
-            <ClipSummary projectId={detail.project.id} clip={clip} setMessage={setMessage} refreshProject={refreshCurrentProject} />
+            <ClipSummaryEditor projectId={detail.project.id} clip={clip} setMessage={setMessage} refreshProject={refreshCurrentProject} />
           </div>)}
           {!detail.clips.length && <div className="inline-empty">尚無素材。先選擇多支影片匯入，再進行內容感知。</div>}
         </Card>
@@ -421,44 +436,6 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   }
 }
 
-function ClipSummary({ projectId, clip, setMessage, refreshProject }: {
-  projectId: number;
-  clip: { video_id: number; visual_summary: string };
-  setMessage: (value: string) => void;
-  refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]>;
-}) {
-  const [text, setText] = useState(clip.visual_summary || "");
-  useEffect(() => setText(clip.visual_summary || ""), [clip.visual_summary]);
-
-  async function save() {
-    setMessage("正在儲存內容感知描述...");
-    try {
-      const result = await api.saveClipSummary(projectId, clip.video_id, text);
-      setMessage(result.ok ? "內容感知描述已儲存，專案已回到待審。" : "儲存失敗：找不到素材");
-      await refreshProject({ forceFresh: true });
-    } catch (error) {
-      setMessage(`內容感知描述儲存失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
-    }
-  }
-
-  return <div className="stack">
-    <textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="內容感知描述" />
-    <button onClick={() => void save()}>儲存描述</button>
-  </div>;
-}
-
-function Workflow({ detail }: { detail: ProjectDetail }) {
-  const steps = [
-    ["新增專案", true],
-    ["匯入素材", detail.clips.length > 0],
-    ["內容感知", detail.clips.some((clip) => clip.segment_count > 0 || clip.status === "perceived")],
-    ["故事整理", detail.segments.length > 0 || Boolean(detail.script)],
-    ["核准", detail.can_render],
-    ["輸出", false],
-  ] as const;
-  return <div className="workflow">{steps.map(([label, done]) => <span key={label} className={done ? "step done" : "step"}>{label}</span>)}</div>;
-}
-
 function WorkspaceNavigation() {
   const items = [
     ["workspace-overview", "總覽"],
@@ -474,15 +451,20 @@ function WorkspaceNavigation() {
 }
 
 function WorkflowSkeleton({ detail }: { detail: ProjectDetail }) {
-  return <Card title="OpenMontage-style 工作流骨架">
+  return <details className="workflow-diagnostics">
+    <summary>進階工作流診斷 · {detail.workflow.stages.length} 個階段</summary>
     <div className="workflow-grid">
       {detail.workflow.stages.map((stage) => <div className="workflow-card" key={stage.id}>
         <b>{stage.label}</b>
-        <span className={stage.status === "done" ? "pill ok" : "pill"}>{stage.status}</span>
-        <small>{stage.artifacts.join("\n")}</small>
+        <span className={["done", "completed", "succeeded", "success"].includes(stage.status) ? "pill ok" : "pill"}>{projectStatusLabel(stage.status)}</span>
+        {stage.artifacts.length > 0 ? <details>
+          <summary>{stage.artifacts.length} 個產物</summary>
+          {stage.artifacts.map((artifact) => <code key={artifact} title={artifact}>{artifact}</code>)}
+        </details> : <small>尚無產物</small>}
       </div>)}
+      {!detail.workflow.stages.length && <div className="inline-empty">目前沒有進階工作流資料。</div>}
     </div>
-  </Card>;
+  </details>;
 }
 
 function WorkspaceLoading({ title, detail }: { title: string; detail: string }) {
@@ -508,6 +490,15 @@ function projectStatusLabel(value: string): string {
     perceived: "已感知",
     pending: "等待中",
     ready: "已就緒",
+    queued: "佇列中",
+    running: "執行中",
+    cancelling: "取消中",
+    cancelled: "已取消",
+    stopped: "已停止",
+    done: "已完成",
+    completed: "已完成",
+    succeeded: "成功",
+    success: "成功",
     failed: "失敗",
   };
   return labels[value] || value || "未知狀態";

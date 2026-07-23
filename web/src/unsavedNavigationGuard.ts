@@ -2,7 +2,8 @@ const PROJECT_SWITCH_SELECTOR = ".project-list button.project:not(.active)";
 const NEW_PROJECT_BUTTON_SELECTOR = ".new-project button";
 const NEW_PROJECT_INPUT_SELECTOR = "#new-project-name";
 const REVIEW_NOTES_SELECTOR = '#workspace-review textarea[placeholder*="核准理由"]';
-const CLIP_SUMMARY_SELECTOR = 'textarea[placeholder="內容感知描述"]';
+const EXPLICIT_TEXT_DRAFT_SELECTOR = '[data-unsaved-text-draft="true"]';
+const LEGACY_CLIP_SUMMARY_SELECTOR = 'textarea[placeholder="內容感知描述"]';
 
 type GuardWindow = Window & {
   __videoVaultUnsavedNavigationGuardCleanup?: () => void;
@@ -11,10 +12,12 @@ type GuardWindow = Window & {
 export const UNSAVED_NAVIGATION_MESSAGE = "目前有尚未儲存的工作區變更。離開目前專案會放棄這些變更，仍要繼續嗎？";
 
 export function hasUnsavedTextDrafts(root: ParentNode = document): boolean {
+  if (root.querySelector(EXPLICIT_TEXT_DRAFT_SELECTOR)) return true;
+
   const reviewNotes = root.querySelector<HTMLTextAreaElement>(REVIEW_NOTES_SELECTOR);
   if (reviewNotes?.value.trim()) return true;
 
-  return Array.from(root.querySelectorAll<HTMLTextAreaElement>(CLIP_SUMMARY_SELECTOR))
+  return Array.from(root.querySelectorAll<HTMLTextAreaElement>(LEGACY_CLIP_SUMMARY_SELECTOR))
     .some((textarea) => textarea.value !== textarea.defaultValue);
 }
 
