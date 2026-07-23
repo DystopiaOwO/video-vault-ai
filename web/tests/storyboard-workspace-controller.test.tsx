@@ -24,9 +24,14 @@ function storyboard(notes = ""): StoryboardState {
     groups: [{ group_id: "g1", title: "第一段", category: "travel", order: 1 }],
     segments: {
       a: { group_id: "g1", order: 1, included: true, locked: false, thumbnail_time_ratio: 0.5, notes },
+      b: { group_id: "g1", order: 2, included: true, locked: false, thumbnail_time_ratio: 0.5, notes: "" },
     },
     validation: { valid: true, errors: [], warnings: [] },
   };
+}
+
+function emptyStoryboard(): StoryboardState {
+  return { schema_version: 1, exists: false, groups: [], segments: {} };
 }
 
 function audio(): AudioState {
@@ -57,23 +62,42 @@ function detail(projectId = 1, state = storyboard()): ProjectDetail {
   return {
     project: { id: projectId, name: `project-${projectId}`, status: "needs_review" },
     clips: [],
-    segments: [{
-      segment_id: "a",
-      clip_id: "clip-a",
-      title: "抵達車站",
-      group: "travel",
-      start_seconds: 0,
-      end_seconds: 5,
-      score: 0.9,
-      suggested_use: "main",
-      scene_role: "arrival",
-      story_position: "opening",
-      manual_order: 1,
-      audio_role: "lower",
-      speed: 1,
-      include: true,
-      user_notes: "",
-    }],
+    segments: [
+      {
+        segment_id: "a",
+        clip_id: "clip-a",
+        title: "抵達車站",
+        group: "travel",
+        start_seconds: 0,
+        end_seconds: 5,
+        score: 0.9,
+        suggested_use: "main",
+        scene_role: "arrival",
+        story_position: "opening",
+        manual_order: 1,
+        audio_role: "lower",
+        speed: 1,
+        include: true,
+        user_notes: "",
+      },
+      {
+        segment_id: "b",
+        clip_id: "clip-b",
+        title: "巷弄散步",
+        group: "travel",
+        start_seconds: 5,
+        end_seconds: 10,
+        score: 0.8,
+        suggested_use: "transition",
+        scene_role: "walk",
+        story_position: "middle",
+        manual_order: 2,
+        audio_role: "lower",
+        speed: 1,
+        include: true,
+        user_notes: "",
+      },
+    ],
     bgm: [],
     plan: {},
     workflow: { style: "test", current: "storyboard", stages: [] },
@@ -109,6 +133,18 @@ describe("StoryboardWorkspaceController", () => {
     expect(update.mock.calls[0][1].segments.a.notes).toBe("本地未儲存內容");
   });
 
+  it("normalizes reordered segments before saving", async () => {
+    const update = vi.spyOn(api, "updateStoryboard").mockImplementation(async (_projectId, state) => ({ ok: true, storyboard: state }));
+    render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "片段下移" }));
+    fireEvent.click(screen.getByRole("button", { name: "儲存分鏡" }));
+
+    await waitFor(() => expect(update).toHaveBeenCalled());
+    expect(update.mock.calls[0][1].segments.b.order).toBe(1);
+    expect(update.mock.calls[0][1].segments.a.order).toBe(2);
+  });
+
   it("shows the reapproval message returned by storyboard save", async () => {
     vi.spyOn(api, "updateStoryboard").mockResolvedValue({ ok: true, storyboard: storyboard("變更"), approval_invalidated: true });
     const setMessage = vi.fn();
@@ -118,6 +154,16 @@ describe("StoryboardWorkspaceController", () => {
     fireEvent.click(screen.getByRole("button", { name: "儲存分鏡" }));
 
     await waitFor(() => expect(setMessage).toHaveBeenCalledWith("分鏡已儲存，輸出內容有變更，請重新核准後再正式輸出。"));
+    expect(screen.queryByText("有未儲存變更")).toBeNull();
+  });
+
+  it("uses create mode for an empty storyboard and does not create a fake dirty state", async () => {
+    vi.spyOn(api, "generateStoryboard").mockResolvedValue({ ok: true, storyboard: storyboard() });
+    render(<StoryboardWorkspaceController detail={detail(1, emptyStoryboard())} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "建立分鏡" }));
+
+    await waitFor(() => expect(api.generateStoryboard).toHaveBeenCalledWith(1, false));
     expect(screen.queryByText("有未儲存變更")).toBeNull();
   });
 
@@ -142,21 +188,44 @@ describe("StoryboardWorkspaceController", () => {
     await waitFor(() => expect(audioSettings).toHaveBeenCalledWith(1, { segments: { a: { role: "keep" } } }));
   });
 
-  it("maps effective color toggles to the existing color settings API", async () => {
+  it("maps effective color toggles and reset to the existing color settings API", async () => {
+    const input = detail();
+    input.color.segments.a = { enabled: false, locked: true, excluded: false };
     const colorSettings = vi.spyOn(api, "colorSettings").mockResolvedValue({ ok: true, state: color() });
-    render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
+    const view = render(<StoryboardWorkspaceController detail={input} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "停用此片段" }));
+    fireEvent.click(screen.getByRole("button", { name: "啟用此片段" }));
     await waitFor(() => expect(colorSettings).toHaveBeenCalled());
-    expect(colorSettings.mock.calls[0][1].segments.a?.enabled).toBe(false);
+    expect(colorSettings.mock.calls[0][1].segments.a?.enabled).toBe(true);
+
+    colorSettings.mockClear();
+    view.rerender(<StoryboardWorkspaceController detail={input} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
+    fireEvent.click(screen.getByRole("button", { name: "恢復專案預設" }));
+    await waitFor(() => expect(colorSettings).toHaveBeenCalledWith(1, expect.objectContaining({ segments: { a: null } })));
   });
 
-  it("maps short previews to the existing storyboard preview API", async () => {
-    const storyboardPreview = vi.spyOn(api, "storyboardPreview").mockResolvedValue({ ok: true, url: "/preview.mp4" });
+  it("generates a representative frame and keeps it as a local storyboard change", async () => {
+    const thumbnail = vi.spyOn(api, "storyboardThumbnail").mockResolvedValue({ ok: true, url: "/thumb.jpg", cache_hit: false });
+    render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "產生代表畫格" }));
+
+    await waitFor(() => expect(thumbnail).toHaveBeenCalledWith(1, "a", 0.5));
+    expect(screen.getByText("有未儲存變更")).toBeTruthy();
+    expect((screen.getByAltText("抵達車站 代表畫格") as HTMLImageElement).src).toContain("/thumb.jpg");
+  });
+
+  it("maps short and range previews to the existing API and renders the result", async () => {
+    const storyboardPreview = vi.spyOn(api, "storyboardPreview").mockResolvedValue({ ok: true, url: "/preview.mp4", duration_seconds: 5 });
     render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
 
     fireEvent.click(screen.getByRole("button", { name: "產生 5 秒預覽" }));
     await waitFor(() => expect(storyboardPreview).toHaveBeenCalledWith(1, expect.objectContaining({ mode: "segment", segmentId: "a", durationSeconds: 5 })));
+    expect(document.querySelector("video")?.getAttribute("src")).toBe("/preview.mp4");
+
+    storyboardPreview.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "從此片段預覽 8 秒" }));
+    await waitFor(() => expect(storyboardPreview).toHaveBeenCalledWith(1, expect.objectContaining({ mode: "range", segmentId: "a", durationSeconds: 8, timelineStartSeconds: 0 })));
   });
 
   it("resets local state when switching to another project", () => {
