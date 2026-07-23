@@ -25,8 +25,9 @@ function outputStageSucceeded(detail: ProjectDetail): boolean {
 function outputJobSucceeded(jobs: Job[]): boolean {
   return jobs.some((job) => {
     if (!successful(job.status)) return false;
-    const identity = [job.kind, job.stage, job.message, job.output_path].map(normalized).join(" ");
-    return Boolean(job.output_path) || /(render|output|export|輸出|成片|mp4)/.test(identity);
+    const identity = [job.kind, job.stage, job.message].map(normalized).join(" ");
+    const outputPath = normalized(job.output_path);
+    return /(render|output|export|輸出|成片)/.test(identity) || /\.(mp4|mov|mkv|webm)$/.test(outputPath);
   });
 }
 
