@@ -80,7 +80,14 @@ export function buildStoryboardViewModel(detail: ProjectDetail): StoryboardViewM
     const storyboard = state.segments?.[segment.segment_id];
     const groupId = storyboard?.group_id || segment.storyboard_group_id || segment.group || "ungrouped";
     if (!groupMeta.has(groupId) && !fallbackGroupIds.includes(groupId)) fallbackGroupIds.push(groupId);
-    return toSegmentView(detail, segment, storyboard, groupId, groupMeta.get(groupId)?.title || readableGroupName(groupId), groupMeta.get(groupId)?.order ?? Number.MAX_SAFE_INTEGER);
+    return toSegmentView(
+      detail,
+      segment,
+      storyboard,
+      groupId,
+      groupMeta.get(groupId)?.title || readableGroupName(groupId),
+      groupMeta.get(groupId)?.order ?? Number.MAX_SAFE_INTEGER,
+    );
   });
 
   const allGroups = [
@@ -214,9 +221,9 @@ function normalizeAudioRole(value: string | undefined): AudioSegmentSettings["ro
 
 function readableGroupName(value: string): string {
   if (!value || value === "ungrouped") return "未分組";
-  return value.replaceAll("_", " ");
+  return value.replace(/_/g, " ");
 }
 
 function finiteOr(value: number | undefined, fallback: number): number {
-  return Number.isFinite(value) ? Number(value) : fallback;
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
