@@ -7,6 +7,16 @@ from video_vault.ui import JOBS, JOBS_LOCK, _kill_video_vault_processes, _set_jo
 REPO_ROOT = Path(__file__).parents[1]
 WEB_ROOT = REPO_ROOT / "web"
 WEB_SRC = WEB_ROOT / "src"
+APP_SOURCE = WEB_SRC / "App.tsx"
+
+
+def test_application_entry_reexports_the_workspace_app():
+    entry = (WEB_SRC / "main.tsx").read_text(encoding="utf-8")
+    app = APP_SOURCE.read_text(encoding="utf-8")
+
+    assert 'export { App } from "./App";' in entry
+    assert "export function App()" in app
+    assert "createRoot(rootElement)" in app
 
 
 def test_application_shell_is_linked_and_scoped_to_root_layout():
@@ -29,7 +39,7 @@ def test_application_shell_is_linked_and_scoped_to_root_layout():
 
 
 def test_project_workspace_exposes_search_loading_and_anchor_navigation():
-    source = (WEB_SRC / "main.tsx").read_text(encoding="utf-8")
+    source = APP_SOURCE.read_text(encoding="utf-8")
 
     assert 'aria-label="搜尋專案"' in source
     assert "WorkspaceLoading" in source
@@ -40,7 +50,7 @@ def test_project_workspace_exposes_search_loading_and_anchor_navigation():
 
 
 def test_audio_ui_exposes_force_preview_and_reset_override_controls():
-    source = (WEB_SRC / "main.tsx").read_text(encoding="utf-8")
+    source = APP_SOURCE.read_text(encoding="utf-8")
     assert "強制重新產生" in source
     assert "強制重跑" in source
     assert "resetSegment" in source
@@ -48,13 +58,13 @@ def test_audio_ui_exposes_force_preview_and_reset_override_controls():
 
 
 def test_storyboard_ui_exposes_review_first_controls():
-    entry = (WEB_SRC / "main.tsx").read_text(encoding="utf-8")
+    app = APP_SOURCE.read_text(encoding="utf-8")
     workspace = (WEB_SRC / "workspaces" / "storyboard" / "StoryboardReviewWorkspace.tsx").read_text(encoding="utf-8")
     controller = (WEB_SRC / "workspaces" / "storyboard" / "StoryboardWorkspaceController.tsx").read_text(encoding="utf-8")
 
-    assert "StoryboardWorkspaceController" in entry
-    assert "<StoryboardWorkspaceController" in entry
-    assert "StoryboardPanel" not in entry
+    assert "StoryboardWorkspaceController" in app
+    assert "<StoryboardWorkspaceController" in app
+    assert "StoryboardPanel" not in app
 
     assert "分鏡審核" in workspace
     assert "建立分鏡" in workspace
