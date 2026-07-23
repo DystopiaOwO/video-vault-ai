@@ -43,22 +43,41 @@ export function StoryboardWorkspaceController({
   const [state, setState] = useState<StoryboardState>(() => editableStoryboardState(detail));
   const [selectedId, setSelectedId] = useState(() => firstSegmentId(detail));
   const [timingDrafts, setTimingDrafts] = useState<Record<string, TimingDraft>>(() => timingFromDetail(detail));
+  const [timingDirty, setTimingDirty] = useState<Record<string, boolean>>({});
   const [previewItems, setPreviewItems] = useState<StoryboardPreviewItem[]>([]);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<BusyAction>("");
   const dirtyRef = useRef(false);
+  const timingDirtyRef = useRef<Record<string, boolean>>({});
   const projectIdRef = useRef(detail.project.id);
+  const hasUnsavedTiming = Object.values(timingDirty).some(Boolean);
 
   useEffect(() => {
     dirtyRef.current = dirty;
   }, [dirty]);
 
   useEffect(() => {
+    timingDirtyRef.current = timingDirty;
+  }, [timingDirty]);
+
+  useEffect(() => {
+    if (!dirty && !hasUnsavedTiming) return;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [dirty, hasUnsavedTiming]);
+
+  useEffect(() => {
     const projectChanged = projectIdRef.current !== detail.project.id;
     if (projectChanged) {
       projectIdRef.current = detail.project.id;
       dirtyRef.current = false;
+      timingDirtyRef.current = {};
       setDirty(false);
+      setTimingDirty({});
       setState(editableStoryboardState(detail));
       setTimingDrafts(timingFromDetail(detail));
       setSelectedId(firstSegmentId(detail));
@@ -68,7 +87,7 @@ export function StoryboardWorkspaceController({
     }
 
     if (!dirtyRef.current) setState(editableStoryboardState(detail));
-    setTimingDrafts((current) => mergeServerTiming(current, detail));
+    setTimingDrafts((current) => syncServerTiming(current, detail, timingDirtyRef.current));
     setSelectedId((current) => current && detail.segments.some((segment) => segment.segment_id === current)
       ? current
       : firstSegmentId(detail));
@@ -79,9 +98,25 @@ export function StoryboardWorkspaceController({
     [detail, state],
   );
 
+  function setStoryboardDirty(value: boolean) {
+    dirtyRef.current = value;
+    setDirty(value);
+  }
+
+  function setSegmentTimingDirty(segmentId: string, value: boolean) {
+    setTimingDirty((current) => {
+      const next = { ...current };
+      if (value) next[segmentId] = true;
+      else delete next[segmentId];
+      timingDirtyRef.current = next;
+      return next;
+    });
+  }
+
   function replaceLocalState(next: StoryboardState) {
     setState(normalizeStoryboardState(next));
-    setDirty(true);
+    setStoryboardDirty(true);
+    setPreviewItems([]);
   }
 
   function changeStoryboard(segmentId: string, patch: Partial<StoryboardSegmentEdit>) {
@@ -89,10 +124,23 @@ export function StoryboardWorkspaceController({
   }
 
   function changeTiming(segmentId: string, patch: SegmentTimingPatch) {
-    setTimingDrafts((current) => {
-      const source = current[segmentId] || timingForSegment(detail, segmentId);
-      return { ...current, [segmentId]: { ...source, ...patch } };
-    });
+    const source = timingDrafts[segmentId] || timingForSegment(detail, segmentId);
+    const next = { ...source, ...patch };
+    setTimingDrafts((current) => ({ ...current, [segmentId]: { ...(current[segmentId] || source), ...patch } }));
+    setSegmentTimingDirty(segmentId, !sameTiming(next, timingForSegment(detail, segmentId)));
+    setPreviewItems([]);
+  }
+
+  function resetTiming(segmentId: string) {
+    setTimingDrafts((current) => ({ ...current, [segmentId]: timingForSegment(detail, segmentId) }));
+    setSegmentTimingDirty(segmentId, false);
+    setPreviewItems([]);
+    setMessage("已放棄此片段尚未儲存的剪點變更。");
+  }
+
+  function selectSegment(segmentId: string) {
+    if (segmentId !== selectedId) setPreviewItems([]);
+    setSelectedId(segmentId);
   }
 
   async function saveStoryboard() {
@@ -107,8 +155,7 @@ export function StoryboardWorkspaceController({
         return;
       }
       setState(editableStoryboardState({ ...detail, storyboard: result.storyboard }));
-      dirtyRef.current = false;
-      setDirty(false);
+      setStoryboardDirty(false);
       setMessage(result.approval_invalidated
         ? "分鏡已儲存，輸出內容有變更，請重新核准後再正式輸出。"
         : "分鏡已儲存，這次未修改輸出內容，既有核准仍有效。");
@@ -121,7 +168,7 @@ export function StoryboardWorkspaceController({
   }
 
   async function regenerateStoryboard() {
-    if (dirty || busy) return;
+    if (dirty || hasUnsavedTiming || busy) return;
     setBusy("regenerate");
     setMessage(model.exists ? "正在重新產生分鏡…" : "正在建立分鏡…");
     try {
@@ -133,10 +180,11 @@ export function StoryboardWorkspaceController({
       const generated = editableStoryboardState({ ...detail, storyboard: result.storyboard });
       setState(generated);
       setTimingDrafts(timingFromDetail(detail));
+      setTimingDirty({});
+      timingDirtyRef.current = {};
       setSelectedId(firstStoryboardSegmentId(generated) || firstSegmentId(detail));
       setPreviewItems([]);
-      dirtyRef.current = false;
-      setDirty(false);
+      setStoryboardDirty(false);
       setMessage(model.exists
         ? "分鏡已重新產生，鎖定片段、人工排序、備註與自訂群組已保留。"
         : "分鏡已建立，請開始審核與排序。");
@@ -149,7 +197,7 @@ export function StoryboardWorkspaceController({
   }
 
   async function saveTiming(segmentId: string) {
-    if (busy) return;
+    if (busy || !timingDirtyRef.current[segmentId]) return;
     const timing = timingDrafts[segmentId] || timingForSegment(detail, segmentId);
     setBusy("timing");
     setMessage("正在儲存片段剪點…");
@@ -163,6 +211,8 @@ export function StoryboardWorkspaceController({
         setMessage(`剪點儲存失敗：${result.error || "未知錯誤"}`);
         return;
       }
+      setSegmentTimingDirty(segmentId, false);
+      setPreviewItems([]);
       setMessage("片段剪點已儲存，輸出內容有變更，請重新核准。");
       await refreshProject({ forceFresh: true });
     } catch (error) {
@@ -174,6 +224,10 @@ export function StoryboardWorkspaceController({
 
   async function preview(segmentId: string, mode: StoryboardPreviewMode, force = false) {
     if (busy) return;
+    if (timingDirtyRef.current[segmentId]) {
+      setMessage("請先儲存此片段剪點，再產生預覽。");
+      return;
+    }
     setBusy("preview");
     setMessage(force
       ? "正在忽略快取並重新產生分鏡預覽…"
@@ -231,7 +285,8 @@ export function StoryboardWorkspaceController({
         thumbnail_time_ratio: ratio,
         thumbnail_url: result.url,
       }));
-      setDirty(true);
+      setStoryboardDirty(true);
+      setPreviewItems([]);
       setMessage(force
         ? "代表畫格已忽略快取重新產生，請儲存分鏡。"
         : result.cache_hit
@@ -257,6 +312,7 @@ export function StoryboardWorkspaceController({
         setMessage(`原音角色更新失敗：${result.error || "未知錯誤"}`);
         return;
       }
+      setPreviewItems([]);
       setMessage(role === "default" ? "片段已改回專案音訊預設。" : "片段原音角色已更新，請重新確認預覽。");
       await refreshProject({ forceFresh: true });
     } catch (error) {
@@ -289,6 +345,7 @@ export function StoryboardWorkspaceController({
         setMessage(`片段調色更新失敗：${result.error || "未知錯誤"}`);
         return;
       }
+      setPreviewItems([]);
       setMessage(!segment.colorEnabled ? "已啟用此片段調色。" : "已停用此片段調色。");
       await refreshProject({ forceFresh: true });
     } catch (error) {
@@ -312,6 +369,7 @@ export function StoryboardWorkspaceController({
         setMessage(`恢復調色預設失敗：${result.error || "未知錯誤"}`);
         return;
       }
+      setPreviewItems([]);
       setMessage("已恢復此片段的專案調色預設。");
       await refreshProject({ forceFresh: true });
     } catch (error) {
@@ -325,16 +383,19 @@ export function StoryboardWorkspaceController({
     model={model}
     selectedId={selectedId}
     dirty={dirty}
+    busy={Boolean(busy)}
     saving={busy === "save"}
     regenerating={busy === "regenerate"}
     previewing={busy === "preview"}
     thumbnailing={busy === "thumbnail"}
     timingDrafts={timingDrafts}
+    timingDirty={timingDirty}
     previewItems={previewItems}
-    onSelect={setSelectedId}
+    onSelect={selectSegment}
     onStoryboardChange={changeStoryboard}
     onTimingChange={changeTiming}
     onSaveTiming={(segmentId) => void saveTiming(segmentId)}
+    onResetTiming={resetTiming}
     onSave={() => void saveStoryboard()}
     onRegenerate={() => void regenerateStoryboard()}
     onPreview={(segmentId, mode, force) => void preview(segmentId, mode, force)}
@@ -358,19 +419,17 @@ function timingFromDetail(detail: ProjectDetail): Record<string, TimingDraft> {
   }]));
 }
 
-function mergeServerTiming(current: Record<string, TimingDraft>, detail: ProjectDetail): Record<string, TimingDraft> {
-  const next = { ...current };
-  for (const segment of detail.segments) {
-    if (!next[segment.segment_id]) next[segment.segment_id] = {
-      startSeconds: segment.start_seconds,
-      endSeconds: segment.end_seconds,
-      speed: segment.speed || 1,
-    };
-  }
-  for (const segmentId of Object.keys(next)) {
-    if (!detail.segments.some((segment) => segment.segment_id === segmentId)) delete next[segmentId];
-  }
-  return next;
+function syncServerTiming(
+  current: Record<string, TimingDraft>,
+  detail: ProjectDetail,
+  dirty: Record<string, boolean>,
+): Record<string, TimingDraft> {
+  return Object.fromEntries(detail.segments.map((segment) => {
+    const server = timingForSegment(detail, segment.segment_id);
+    return [segment.segment_id, dirty[segment.segment_id] && current[segment.segment_id]
+      ? current[segment.segment_id]
+      : server];
+  }));
 }
 
 function timingForSegment(detail: ProjectDetail, segmentId: string): TimingDraft {
@@ -380,6 +439,12 @@ function timingForSegment(detail: ProjectDetail, segmentId: string): TimingDraft
     endSeconds: segment?.end_seconds ?? 0,
     speed: segment?.speed || 1,
   };
+}
+
+function sameTiming(left: TimingDraft, right: TimingDraft): boolean {
+  return Math.abs(left.startSeconds - right.startSeconds) < 0.0005
+    && Math.abs(left.endSeconds - right.endSeconds) < 0.0005
+    && Math.abs(left.speed - right.speed) < 0.0005;
 }
 
 function firstSegmentId(detail: ProjectDetail): string {
