@@ -4,8 +4,11 @@ from video_vault import ui
 from video_vault.ui import JOBS, JOBS_LOCK, _kill_video_vault_processes, _set_job, _static_file, _web_dist, cancel_legacy_job, project_jobs, stop_project_jobs
 
 
+WEB_SRC = Path(__file__).parents[1] / "web" / "src"
+
+
 def test_audio_ui_exposes_force_preview_and_reset_override_controls():
-    source = (Path(__file__).parents[1] / "web" / "src" / "main.tsx").read_text(encoding="utf-8")
+    source = (WEB_SRC / "main.tsx").read_text(encoding="utf-8")
     assert "強制重新產生" in source
     assert "強制重跑" in source
     assert "resetSegment" in source
@@ -13,12 +16,22 @@ def test_audio_ui_exposes_force_preview_and_reset_override_controls():
 
 
 def test_storyboard_ui_exposes_review_first_controls():
-    source = (Path(__file__).parents[1] / "web" / "src" / "main.tsx").read_text(encoding="utf-8")
-    assert "分鏡審核" in source
-    assert "建立分鏡" in source
-    assert "預覽前後銜接" in source
-    assert "onDragStart" in source
-    assert "代表畫格 25%" in source
+    entry = (WEB_SRC / "main.tsx").read_text(encoding="utf-8")
+    workspace = (WEB_SRC / "workspaces" / "storyboard" / "StoryboardReviewWorkspace.tsx").read_text(encoding="utf-8")
+    controller = (WEB_SRC / "workspaces" / "storyboard" / "StoryboardWorkspaceController.tsx").read_text(encoding="utf-8")
+
+    assert "StoryboardWorkspaceController" in entry
+    assert "<StoryboardWorkspaceController" in entry
+    assert "StoryboardPanel" not in entry
+
+    assert "分鏡審核" in workspace
+    assert "建立分鏡" in workspace
+    assert "預覽前後銜接" in workspace
+    assert "onMoveSegment" in workspace
+    assert "片段 25%" in workspace
+
+    assert "api.storyboardPreview" in controller
+    assert "api.storyboardThumbnail" in controller
 
 
 def test_static_file_serving_stays_inside_web_dist():
