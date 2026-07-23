@@ -96,6 +96,11 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - run: npm ci
-      - run: npm test
-      - run: npm run build
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Verify production storyboard entry
+        run: npm test -- tests/production-storyboard-entry.test.ts
+      - name: Run frontend tests
+        run: npm test
+      - name: Build frontend
+        run: npm run build
