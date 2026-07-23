@@ -30,7 +30,7 @@ export class ProjectDataLoader {
   load(projectId: number, options: ProjectDataLoadOptions = {}): Promise<Job[]> {
     if (!projectId) return Promise.resolve([]);
     const pending = this.pending;
-    const requiresFreshRequest = options.forceFresh === true || options.throwOnError === true;
+    const requiresFreshRequest = options.forceFresh === true;
     if (requiresFreshRequest && pending?.projectId === projectId) {
       this.generation += 1;
       return pending.promise.then(
@@ -48,7 +48,7 @@ export class ProjectDataLoader {
 
   private start(projectId: number, options: ProjectDataLoadOptions = {}): Promise<Job[]> {
     const generation = ++this.generation;
-    const throwOnError = options.throwOnError === true || options.forceFresh === true;
+    const throwOnError = options.throwOnError === true;
     const promise = (async () => {
       try {
         const [project, jobs] = await Promise.all([this.client.project(projectId), this.client.jobs(projectId)]);

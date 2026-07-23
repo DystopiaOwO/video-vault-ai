@@ -250,6 +250,7 @@ export function App() {
   }
 
   function beginProjectMutation(projectId: number, mutation: ProjectMutation): ProjectMutationToken | null {
+    if (currentIdRef.current !== projectId) return null;
     const token = mutationCoordinatorRef.current.begin(projectId, mutation);
     if (!token) {
       if (currentIdRef.current === projectId) {
@@ -269,6 +270,7 @@ export function App() {
   const mutationControls: ProjectMutationControls = {
     beginProjectMutation,
     finishProjectMutation,
+    isCurrentProject: (projectId) => currentIdRef.current === projectId,
     isProjectMutationBusy: (projectId) => mutationCoordinatorRef.current.isBusy(projectId),
     currentProjectMutation: (projectId) => {
       const current = mutationCoordinatorRef.current.current();
@@ -538,7 +540,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
 
   async function uploadFiles(event: ChangeEvent<HTMLInputElement>) {
     const input = event.currentTarget;
-    const files = input.files;
+    const files = Array.from(input.files || []);
     input.value = "";
     if (!files?.length) return;
     const mutation = mutationControls.beginProjectMutation(detail.project.id, "upload");

@@ -25,6 +25,10 @@ export function ClipSummaryEditor({ projectId, clip, setMessage, refreshProject,
   const projectMutationBusy = controls.isProjectMutationBusy(projectId);
   const editorId = `clip-summary-${projectId}-${clip.video_id}`;
 
+  function setProjectMessage(message: string) {
+    if (controls.isCurrentProject(projectId)) setMessage(message);
+  }
+
   useEffect(() => {
     dirtyRef.current = dirty;
   }, [dirty]);
@@ -53,24 +57,33 @@ export function ClipSummaryEditor({ projectId, clip, setMessage, refreshProject,
   async function save() {
     const mutation = controls.beginProjectMutation(projectId, "clip-summary");
     if (!mutation) {
-      setMessage(`目前正在${mutationLabel("clip-summary")}，請完成後再執行其他操作。`);
+      setProjectMessage(`目前正在${mutationLabel("clip-summary")}，請完成後再執行其他操作。`);
       return;
     }
     const summary = text.trim();
     setSaving(true);
-    setMessage("正在儲存內容感知描述...");
+    setProjectMessage("正在儲存內容感知描述...");
     try {
       const result = await api.saveClipSummary(projectId, clip.video_id, summary);
       if (!result.ok) {
-        setMessage("內容感知描述儲存失敗：找不到素材。");
+        setProjectMessage("內容感知描述儲存失敗：找不到素材。");
         return;
       }
       setText(summary);
       setBaseline(summary);
-      setMessage("內容感知描述已儲存，專案已回到待審。");
-      await refreshProject({ forceFresh: true, throwOnError: true });
+      const successMessage = "內容感知描述已儲存，專案已回到待審。";
+      setProjectMessage(successMessage);
+      try {
+        await refreshProject({ forceFresh: true, throwOnError: true });
+      } catch (error) {
+        if (controls.isCurrentProject(projectId)) {
+          setProjectMessage(`${successMessage}，但畫面更新失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+        }
+      }
     } catch (error) {
-      setMessage(`內容感知描述儲存失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (controls.isCurrentProject(projectId)) {
+        setProjectMessage(`內容感知描述儲存失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
     } finally {
       setSaving(false);
       controls.finishProjectMutation(mutation);

@@ -62,12 +62,26 @@ describe("ProjectDataLoader", () => {
     const loader = new ProjectDataLoader(client, () => true, () => true, vi.fn(), reportError);
     const error = new Error("jobs unavailable");
 
-    const request = loader.load(7, { forceFresh: true });
+    const request = loader.load(7, { forceFresh: true, throwOnError: true });
     requests[0].project.resolve(detail(7));
     requests[0].jobs.reject(error);
 
     await expect(request).rejects.toBe(error);
     expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it("keeps a forceFresh refresh non-throwing unless throwOnError is explicit", async () => {
+    const { client, requests } = createClient();
+    const reportError = vi.fn();
+    const loader = new ProjectDataLoader(client, () => true, () => true, vi.fn(), reportError);
+    const error = new Error("fresh refresh unavailable");
+
+    const request = loader.load(7, { forceFresh: true });
+    requests[0].project.resolve(detail(7));
+    requests[0].jobs.reject(error);
+
+    await expect(request).resolves.toEqual([]);
+    expect(reportError).toHaveBeenCalledWith(error);
   });
 
   it("rejects an explicit throwOnError request", async () => {

@@ -66,6 +66,7 @@ export function mutationLabel(mutation: ProjectMutation): string {
 export type ProjectMutationControls = {
   beginProjectMutation: (projectId: number, mutation: ProjectMutation) => ProjectMutationToken | null;
   finishProjectMutation: (token: ProjectMutationToken) => void;
+  isCurrentProject: (projectId: number) => boolean;
   isProjectMutationBusy: (projectId: number) => boolean;
   currentProjectMutation: (projectId?: number) => ProjectMutationSnapshot | null;
 };
@@ -133,6 +134,7 @@ export function createProjectMutationControls(
       coordinator.finish(token);
       onFinish?.(token);
     },
+    isCurrentProject: () => true,
     isProjectMutationBusy: (projectId) => coordinator.isBusy(projectId),
     currentProjectMutation: (projectId) => {
       const current = coordinator.current();

@@ -225,7 +225,11 @@ describe("PR #52 Gate 1 final behavior contracts", () => {
 
   it("busy file selection clears its value, skips upload, and can upload the same file later", async () => {
     const reviewRequest = deferred<{ ok: boolean }>();
-    const upload = vi.spyOn(api, "uploadProject").mockResolvedValue({ ok: true, files: ["clip-1.mp4"] });
+    let capturedFiles: ReadonlyArray<File> | undefined;
+    const upload = vi.spyOn(api, "uploadProject").mockImplementation(async (_projectId, files) => {
+      capturedFiles = files;
+      return { ok: true, files: ["clip-1.mp4"] };
+    });
     vi.spyOn(api, "approve").mockReturnValue(reviewRequest.promise);
     await openApp();
 
@@ -242,6 +246,8 @@ describe("PR #52 Gate 1 final behavior contracts", () => {
     await waitFor(() => expect((screen.getByRole("button", { name: "核准專案" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.change(input, { target: { files: [file] } });
     await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+    expect(Array.isArray(capturedFiles)).toBe(true);
+    expect(capturedFiles).toEqual([file]);
   });
 
   it("workspace saves and Render cancel share the App mutation busy boundary", async () => {

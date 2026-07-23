@@ -59,6 +59,12 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
   const fallbackControlsRef = useRef<ProjectMutationControls | null>(null);
   if (!fallbackControlsRef.current) fallbackControlsRef.current = createProjectMutationControls(new ProjectMutationCoordinator());
   const controls = mutationControls || fallbackControlsRef.current;
+  const projectMutationBusy = controls.isProjectMutationBusy(detail.project.id);
+  const workspaceBusy = Boolean(busy) || projectMutationBusy;
+
+  function setProjectMessage(message: string) {
+    if (controls.isCurrentProject(detail.project.id)) setMessage(message);
+  }
   const selectedReferenceId = isColorReference(state.reference) ? state.reference.id : "";
   const requiresLutPath = state.enabled && state.applied.mode === "dji_lut" && !state.applied.lut_path.trim();
 
@@ -109,7 +115,7 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
   function resetAll() {
     setState(cloneColorState(baseline));
     setPreviews([]);
-    setMessage("已放棄尚未儲存的調色設定。");
+    setProjectMessage("已放棄尚未儲存的調色設定。");
   }
 
   function updateApplied(field: keyof ColorAdjustment, value: string | number) {
@@ -193,30 +199,37 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
 
   async function analyze(force = false) {
     if (busy || dirty) {
-      if (dirty) setMessage("請先儲存或放棄調色變更，再重新分析核心畫面。");
+      if (dirty) setProjectMessage("請先儲存或放棄調色變更，再重新分析核心畫面。");
       return;
     }
     const mutation = controls.beginProjectMutation(detail.project.id, "color");
     if (!mutation) {
-      setMessage(`目前正在${mutationLabel("color")}，請完成後再執行其他操作。`);
+      setProjectMessage(`目前正在${mutationLabel("color")}，請完成後再執行其他操作。`);
       return;
     }
     setBusy("analyze");
-    setMessage(force ? "正在忽略快取並重跑色彩分析…" : "正在分析核心畫面色彩…");
+    setProjectMessage(force ? "正在忽略快取並重跑色彩分析…" : "正在分析核心畫面色彩…");
     try {
       const result = await api.colorAnalyze(detail.project.id, force);
       if (!result.ok || !result.state) {
-        setMessage(`色彩分析失敗：${result.error || "未知錯誤"}`);
+        setProjectMessage(`色彩分析失敗：${result.error || "未知錯誤"}`);
         return;
       }
       const analyzed = cloneColorState(result.state);
-      setState(analyzed);
-      setBaseline(analyzed);
-      setPreviews([]);
-      setMessage("色彩分析完成，請確認建議值與基準畫面。");
-      await refreshProject({ forceFresh: true, throwOnError: true });
+      const successMessage = "色彩分析完成，請確認建議值與基準畫面。";
+      if (controls.isCurrentProject(detail.project.id)) {
+        setState(analyzed);
+        setBaseline(analyzed);
+        setPreviews([]);
+        setProjectMessage(successMessage);
+      }
+      try {
+        await refreshProject({ forceFresh: true, throwOnError: true });
+      } catch (refreshError) {
+        setProjectMessage(`${successMessage}，但畫面更新失敗：${errorMessage(refreshError)}`);
+      }
     } catch (error) {
-      setMessage(`色彩分析失敗：${errorMessage(error)}`);
+      if (controls.isCurrentProject(detail.project.id)) setMessage(`色彩分析失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
       controls.finishProjectMutation(mutation);
@@ -225,30 +238,37 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
 
   async function changeReference(referenceId: string) {
     if (!referenceId || busy || dirty) {
-      if (dirty) setMessage("請先儲存或放棄調色變更，再切換色彩基準。");
+      if (dirty) setProjectMessage("請先儲存或放棄調色變更，再切換色彩基準。");
       return;
     }
     const mutation = controls.beginProjectMutation(detail.project.id, "color");
     if (!mutation) {
-      setMessage(`目前正在${mutationLabel("color")}，請完成後再執行其他操作。`);
+      setProjectMessage(`目前正在${mutationLabel("color")}，請完成後再執行其他操作。`);
       return;
     }
     setBusy("reference");
-    setMessage("正在更新色彩基準…");
+    setProjectMessage("正在更新色彩基準…");
     try {
       const result = await api.colorReference(detail.project.id, referenceId);
       if (!result.ok || !result.state) {
-        setMessage(`色彩基準更新失敗：${result.error || "未知錯誤"}`);
+        setProjectMessage(`色彩基準更新失敗：${result.error || "未知錯誤"}`);
         return;
       }
       const referenced = cloneColorState(result.state);
-      setState(referenced);
-      setBaseline(referenced);
-      setPreviews([]);
-      setMessage("色彩基準已更新，請重新確認建議值。");
-      await refreshProject({ forceFresh: true, throwOnError: true });
+      const successMessage = "色彩基準已更新，請重新確認建議值。";
+      if (controls.isCurrentProject(detail.project.id)) {
+        setState(referenced);
+        setBaseline(referenced);
+        setPreviews([]);
+        setProjectMessage(successMessage);
+      }
+      try {
+        await refreshProject({ forceFresh: true, throwOnError: true });
+      } catch (refreshError) {
+        setProjectMessage(`${successMessage}，但畫面更新失敗：${errorMessage(refreshError)}`);
+      }
     } catch (error) {
-      setMessage(`色彩基準更新失敗：${errorMessage(error)}`);
+      if (controls.isCurrentProject(detail.project.id)) setMessage(`色彩基準更新失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
       controls.finishProjectMutation(mutation);
@@ -259,25 +279,32 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
     if (!dirty || busy || requiresLutPath) return;
     const mutation = controls.beginProjectMutation(detail.project.id, "color");
     if (!mutation) {
-      setMessage(`目前正在${mutationLabel("color")}，請完成後再執行其他操作。`);
+      setProjectMessage(`目前正在${mutationLabel("color")}，請完成後再執行其他操作。`);
       return;
     }
     setBusy("save");
-    setMessage("正在儲存調色設定…");
+    setProjectMessage("正在儲存調色設定…");
     try {
       const result = await api.colorSettings(detail.project.id, toColorStatePatch(state));
       if (!result.ok || !result.state) {
-        setMessage(`色彩設定儲存失敗：${result.error || "未知錯誤"}`);
+        setProjectMessage(`色彩設定儲存失敗：${result.error || "未知錯誤"}`);
         return;
       }
       const saved = cloneColorState(result.state);
-      setState(saved);
-      setBaseline(saved);
-      setPreviews([]);
-      setMessage("色彩設定已儲存，專案已回到待審。");
-      await refreshProject({ forceFresh: true, throwOnError: true });
+      const successMessage = "色彩設定已儲存，專案已回到待審。";
+      if (controls.isCurrentProject(detail.project.id)) {
+        setState(saved);
+        setBaseline(saved);
+        setPreviews([]);
+        setProjectMessage(successMessage);
+      }
+      try {
+        await refreshProject({ forceFresh: true, throwOnError: true });
+      } catch (refreshError) {
+        setProjectMessage(`${successMessage}，但畫面更新失敗：${errorMessage(refreshError)}`);
+      }
     } catch (error) {
-      setMessage(`色彩設定儲存失敗：${errorMessage(error)}`);
+      if (controls.isCurrentProject(detail.project.id)) setMessage(`色彩設定儲存失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
       controls.finishProjectMutation(mutation);
@@ -286,31 +313,29 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
 
   async function preview(force = false) {
     if (busy || dirty) {
-      if (dirty) setMessage("調色預覽目前使用已儲存設定；請先儲存或放棄草稿。");
-      return;
-    }
-    const mutation = controls.beginProjectMutation(detail.project.id, "color");
-    if (!mutation) {
-      setMessage(`目前正在${mutationLabel("color")}，請完成後再執行其他操作。`);
+      if (dirty) setProjectMessage("調色預覽目前使用已儲存設定；請先儲存或放棄草稿。");
       return;
     }
     setBusy("preview");
-    setMessage(force ? "正在忽略快取並重新產生調色預覽…" : "正在產生 Before / After 調色預覽…");
+    setProjectMessage(force ? "正在忽略快取並重新產生調色預覽…" : "正在產生 Before / After 調色預覽…");
     try {
       const result = await api.colorPreviewDirect(detail.project.id, force);
       if (!result.ok) {
         setPreviews([]);
-        setMessage(`調色預覽失敗：${result.error || "未知錯誤"}`);
+        setProjectMessage(`調色預覽失敗：${result.error || "未知錯誤"}`);
         return;
       }
-      setPreviews(result.previews || []);
-      setMessage(force ? "調色預覽已忽略快取重新產生。" : "Before / After 調色預覽已完成。");
+      if (controls.isCurrentProject(detail.project.id)) {
+        setPreviews(result.previews || []);
+        setProjectMessage(force ? "調色預覽已忽略快取重新產生。" : "Before / After 調色預覽已完成。");
+      }
     } catch (error) {
-      setPreviews([]);
-      setMessage(`調色預覽失敗：${errorMessage(error)}`);
+      if (controls.isCurrentProject(detail.project.id)) {
+        setPreviews([]);
+        setProjectMessage(`調色預覽失敗：${errorMessage(error)}`);
+      }
     } finally {
       setBusy("");
-      controls.finishProjectMutation(mutation);
     }
   }
 
@@ -324,23 +349,23 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
         </div>
         <div className="color-header-actions">
           {dirty && <strong>有未儲存變更</strong>}
-          <button type="button" disabled={Boolean(busy) || !dirty} onClick={resetAll}>放棄變更</button>
-          <button type="button" className="good" disabled={Boolean(busy) || !dirty || requiresLutPath} onClick={() => void save()}>{busy === "save" ? "儲存中…" : "儲存調色設定"}</button>
+          <button type="button" disabled={workspaceBusy || !dirty} onClick={resetAll}>放棄變更</button>
+          <button type="button" className="good" disabled={workspaceBusy || !dirty || requiresLutPath} onClick={() => void save()}>{busy === "save" ? "儲存中…" : "儲存調色設定"}</button>
         </div>
       </header>
 
       <div className="color-analysis-toolbar">
-        <button type="button" disabled={Boolean(busy) || dirty} onClick={() => void analyze(false)}>{busy === "analyze" ? "分析中…" : "分析核心畫面"}</button>
-        <button type="button" disabled={Boolean(busy) || dirty} onClick={() => void analyze(true)}>忽略快取重跑分析</button>
+        <button type="button" disabled={workspaceBusy || dirty} onClick={() => void analyze(false)}>{busy === "analyze" ? "分析中…" : "分析核心畫面"}</button>
+        <button type="button" disabled={workspaceBusy || dirty} onClick={() => void analyze(true)}>忽略快取重跑分析</button>
         <span>{dirty ? "先處理未儲存變更，才能避免分析結果覆蓋草稿。" : state.analysis.basis_text || "尚未分析色彩基準。"}</span>
       </div>
 
-      <label className="color-toggle"><input type="checkbox" disabled={Boolean(busy)} checked={state.enabled} onChange={(event) => applyState((current) => ({ ...current, enabled: event.target.checked }))} /> 啟用專案色彩一致性</label>
+      <label className="color-toggle"><input type="checkbox" disabled={workspaceBusy} checked={state.enabled} onChange={(event) => applyState((current) => ({ ...current, enabled: event.target.checked }))} /> 啟用專案色彩一致性</label>
 
       <div className="color-overview-grid">
         <section className="color-reference-card">
           <div className="color-section-title"><b>色彩基準</b><span>基準變更會重新計算建議值</span></div>
-          <label>Reference Clip / Frame<select aria-label="色彩基準" disabled={Boolean(busy) || dirty || state.references.length === 0} value={selectedReferenceId} onChange={(event) => void changeReference(event.target.value)}><option value="">尚未選擇基準畫面</option>{state.references.map((reference) => <option key={reference.id} value={reference.id}>{reference.type === "segment" ? "片段" : "畫格"} · {reference.label || "未命名"} · {reference.score.toFixed(2)}</option>)}</select></label>
+          <label>Reference Clip / Frame<select aria-label="色彩基準" disabled={workspaceBusy || dirty || state.references.length === 0} value={selectedReferenceId} onChange={(event) => void changeReference(event.target.value)}><option value="">尚未選擇基準畫面</option>{state.references.map((reference) => <option key={reference.id} value={reference.id}>{reference.type === "segment" ? "片段" : "畫格"} · {reference.label || "未命名"} · {reference.score.toFixed(2)}</option>)}</select></label>
           {isColorReference(state.reference) && state.reference.frame_url
             ? <img src={state.reference.frame_url} alt="色彩基準畫面" />
             : <div className="color-reference-empty">尚無基準畫面縮圖</div>}
@@ -355,23 +380,23 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
         <section className="color-project-settings">
           <div className="color-section-title"><b>專案套用值</b><span>正式輸出與預覽使用已儲存的套用值</span></div>
           <div className="color-form-grid">
-            <label>技術模式<select aria-label="技術 LUT 模式" disabled={Boolean(busy)} value={state.applied.mode} onChange={(event) => updateApplied("mode", event.target.value)}><option value="dji_dlog_m">DJI D-Log M</option><option value="dji_dlog">DJI D-Log</option><option value="dji_lut">自訂 DJI LUT</option><option value="safe_restore">保守修正</option><option value="manual">手動調整</option><option value="none">不套用</option></select></label>
-            <label className="wide">LUT 路徑<input aria-label="LUT 路徑" disabled={Boolean(busy) || state.applied.mode !== "dji_lut"} value={state.applied.lut_path} onChange={(event) => updateApplied("lut_path", event.target.value)} placeholder=".cube LUT 路徑" /></label>
+            <label>技術模式<select aria-label="技術 LUT 模式" disabled={workspaceBusy} value={state.applied.mode} onChange={(event) => updateApplied("mode", event.target.value)}><option value="dji_dlog_m">DJI D-Log M</option><option value="dji_dlog">DJI D-Log</option><option value="dji_lut">自訂 DJI LUT</option><option value="safe_restore">保守修正</option><option value="manual">手動調整</option><option value="none">不套用</option></select></label>
+            <label className="wide">LUT 路徑<input aria-label="LUT 路徑" disabled={workspaceBusy || state.applied.mode !== "dji_lut"} value={state.applied.lut_path} onChange={(event) => updateApplied("lut_path", event.target.value)} placeholder=".cube LUT 路徑" /></label>
           </div>
           {requiresLutPath && <div className="color-warning">自訂 DJI LUT 模式需要有效的 .cube 路徑。</div>}
           <div className="color-adjustment-grid">
-            {adjustmentFields.map((field) => <label key={field}>{adjustmentLabel(field)}<input aria-label={`專案${adjustmentLabel(field)}`} disabled={Boolean(busy)} type="number" step="0.01" value={state.applied[field]} onChange={(event) => updateApplied(field, event.target.value)} /></label>)}
+            {adjustmentFields.map((field) => <label key={field}>{adjustmentLabel(field)}<input aria-label={`專案${adjustmentLabel(field)}`} disabled={workspaceBusy} type="number" step="0.01" value={state.applied[field]} onChange={(event) => updateApplied(field, event.target.value)} /></label>)}
           </div>
           <div className="color-suggestion">
             <div><b>系統建議值</b><span>曝光 {state.suggested.exposure} · 色溫 {state.suggested.temperature} · 色調 {state.suggested.tint} · 對比 {state.suggested.contrast} · 飽和 {state.suggested.saturation}</span></div>
-            <button type="button" disabled={Boolean(busy)} onClick={applySuggestedToProject}>套用全部建議</button>
+            <button type="button" disabled={workspaceBusy} onClick={applySuggestedToProject}>套用全部建議</button>
           </div>
         </section>
       </div>
 
       <div className="color-preview-toolbar">
-        <button type="button" disabled={Boolean(busy) || dirty} onClick={() => void preview(false)}>{busy === "preview" ? "預覽產生中…" : "產生 Before / After 預覽"}</button>
-        <button type="button" disabled={Boolean(busy) || dirty} onClick={() => void preview(true)}>忽略快取重跑預覽</button>
+        <button type="button" disabled={workspaceBusy || dirty} onClick={() => void preview(false)}>{busy === "preview" ? "預覽產生中…" : "產生 Before / After 預覽"}</button>
+        <button type="button" disabled={workspaceBusy || dirty} onClick={() => void preview(true)}>忽略快取重跑預覽</button>
         <span>{dirty ? "請先儲存或放棄草稿。" : "預覽使用目前已儲存的調色設定。"}</span>
       </div>
 
@@ -396,7 +421,7 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
           state={state}
           item={effectiveSegment(state, segment.segment_id)}
           customized={Boolean(state.segments[segment.segment_id])}
-          busy={Boolean(busy)}
+          busy={workspaceBusy}
           onToggle={(patch) => updateSegment(segment.segment_id, patch)}
           onAdjustment={(field, value) => updateSegmentApplied(segment.segment_id, field, value)}
           onSuggestion={() => applySegmentSuggestion(segment.segment_id)}
