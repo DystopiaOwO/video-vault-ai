@@ -63,6 +63,19 @@ def test_audio_ui_exposes_polling_safe_drafts_and_preview_controls():
     assert "AudioMixingPanel" not in app
 
 
+def test_color_ui_exposes_polling_safe_drafts_and_saved_preview_boundaries():
+    app = APP_SOURCE.read_text(encoding="utf-8")
+    workspace = (WEB_SRC / "workspaces" / "color" / "ColorConsistencyWorkspace.tsx").read_text(encoding="utf-8")
+
+    assert "<ColorConsistencyWorkspace" in app
+    assert "有未儲存變更" in workspace
+    assert "放棄變更" in workspace
+    assert "beforeunload" in workspace
+    assert "搜尋調色片段" in workspace
+    assert "預覽目前使用已儲存設定" in workspace
+    assert "ColorConsistencyPanel" not in app
+
+
 def test_storyboard_ui_exposes_review_first_controls():
     app = APP_SOURCE.read_text(encoding="utf-8")
     workspace = (WEB_SRC / "workspaces" / "storyboard" / "StoryboardReviewWorkspace.tsx").read_text(encoding="utf-8")
