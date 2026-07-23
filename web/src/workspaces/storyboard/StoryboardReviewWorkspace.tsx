@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { isCommittedEnter } from "../../keyboard";
 import type { AudioSegmentSettings } from "../../api";
 import {
   type StoryboardSegmentEdit,
@@ -212,7 +213,7 @@ export function StoryboardReviewWorkspace({
       </div>
 
       {onAddGroup && <div className="review-add-group">
-        <input aria-label="新增分組名稱" disabled={busy} value={newGroupTitle} onChange={(event) => setNewGroupTitle(event.target.value)} placeholder="新增自訂分組" onKeyDown={(event) => { if (event.key === "Enter") addGroup(); }} />
+        <input aria-label="新增分組名稱" disabled={busy} value={newGroupTitle} onChange={(event) => setNewGroupTitle(event.target.value)} placeholder="新增自訂分組" onKeyDown={(event) => { if (isCommittedEnter(event)) { event.preventDefault(); addGroup(); } }} />
         <button type="button" disabled={busy || !newGroupTitle.trim()} onClick={addGroup}>新增分組</button>
       </div>}
 

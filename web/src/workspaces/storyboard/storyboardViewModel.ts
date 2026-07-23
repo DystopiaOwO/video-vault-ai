@@ -435,7 +435,9 @@ function stringValue(value: unknown): string {
 
 function stableLegacyGroupFingerprint(group: Record<string, unknown>, memberIds: string[]): string {
   const stableFields = Object.entries(group)
-    .filter(([key]) => !["group_id", "order"].includes(key))
+    // Legacy groups have no durable id. Exclude display and ordering fields so
+    // renaming or reordering the migrated group cannot create a new identity.
+    .filter(([key]) => !["group_id", "id", "order", "title", "category"].includes(key))
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => [key, value]);
   return JSON.stringify({ fields: stableFields, members: memberIds });

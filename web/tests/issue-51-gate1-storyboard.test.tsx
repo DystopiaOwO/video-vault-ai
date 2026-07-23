@@ -194,4 +194,28 @@ describe("Issue #51 Gate 1 Storyboard 行為", () => {
     expect(saved.groups.find((group) => group.group_id === "group-a")?.title).toBe("A 改名");
     expect(saved.groups.map((group) => group.group_id).sort()).toEqual(["group-a", "group-b", "group-c"]);
   });
+
+  it("legacy group 改名與重排仍維持由成員決定的 identity", async () => {
+    const legacy = {
+      ...storyboardState(),
+      groups: [
+        { group_id: "", group: "morning", title: "早上", category: "travel", order: 1 },
+        { group_id: "", group: "night", title: "晚上", category: "travel", order: 2 },
+      ],
+      segments: {
+        a: { ...storyboardState().segments.a, group_id: "morning" },
+        b: { ...storyboardState().segments.b, group_id: "night" },
+        c: { ...storyboardState().segments.c, group_id: "night", order: 2 },
+      },
+    } as unknown as StoryboardState;
+    const first = buildStoryboardViewModel(detail(legacy));
+    const morningId = first.groups.find((group) => group.title === "早上")?.id;
+    const renamed = {
+      ...legacy,
+      groups: legacy.groups.map((group) => group.title === "早上" ? { ...group, title: "上午" } : group),
+    };
+    const second = buildStoryboardViewModel(detail(renamed));
+    expect(morningId).toBeTruthy();
+    expect(second.groups.find((group) => group.title === "上午")?.id).toBe(morningId);
+  });
 });
