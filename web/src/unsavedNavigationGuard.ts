@@ -4,6 +4,10 @@ const NEW_PROJECT_INPUT_SELECTOR = "#new-project-name";
 const REVIEW_NOTES_SELECTOR = '#workspace-review textarea[placeholder*="核准理由"]';
 const CLIP_SUMMARY_SELECTOR = 'textarea[placeholder="內容感知描述"]';
 
+type GuardWindow = Window & {
+  __videoVaultUnsavedNavigationGuardCleanup?: () => void;
+};
+
 export const UNSAVED_NAVIGATION_MESSAGE = "目前有尚未儲存的工作區變更。離開目前專案會放棄這些變更，仍要繼續嗎？";
 
 export function hasUnsavedTextDrafts(root: ParentNode = document): boolean {
@@ -20,7 +24,9 @@ export function workspaceHasUnsavedChanges(): boolean {
   return !window.dispatchEvent(event);
 }
 
-export function installUnsavedNavigationGuard(confirmNavigation: (message: string) => boolean = window.confirm): () => void {
+export function installUnsavedNavigationGuard(
+  confirmNavigation: (message: string) => boolean = (message) => window.confirm(message),
+): () => void {
   const allowNavigation = () => !workspaceHasUnsavedChanges() || confirmNavigation(UNSAVED_NAVIGATION_MESSAGE);
 
   const handleClick = (event: MouseEvent) => {
@@ -58,4 +64,10 @@ export function installUnsavedNavigationGuard(confirmNavigation: (message: strin
     document.removeEventListener("keydown", handleKeyDown, true);
     window.removeEventListener("beforeunload", handleBeforeUnload);
   };
+}
+
+export function registerUnsavedNavigationGuard() {
+  const guardWindow = window as GuardWindow;
+  guardWindow.__videoVaultUnsavedNavigationGuardCleanup?.();
+  guardWindow.__videoVaultUnsavedNavigationGuardCleanup = installUnsavedNavigationGuard();
 }
