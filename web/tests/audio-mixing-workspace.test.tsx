@@ -205,7 +205,7 @@ describe("AudioMixingWorkspace", () => {
     customized.segments.a = { role: "keep", volume_db: -2 };
     renderWorkspace(detail(1, customized));
 
-    expect(screen.getByText("片段自訂")).toBeTruthy();
+    expect(screen.getByText(/片段自訂/)).toBeTruthy();
     fireEvent.click(screen.getAllByRole("button", { name: "恢復預設" })[0]);
     expect(screen.getByText("有未儲存變更")).toBeTruthy();
 
