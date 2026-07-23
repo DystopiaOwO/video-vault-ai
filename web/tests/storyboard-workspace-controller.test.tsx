@@ -204,28 +204,34 @@ describe("StoryboardWorkspaceController", () => {
     await waitFor(() => expect(colorSettings).toHaveBeenCalledWith(1, expect.objectContaining({ segments: { a: null } })));
   });
 
-  it("generates a representative frame and keeps it as a local storyboard change", async () => {
+  it("generates representative frames with normal and forced cache behavior", async () => {
     const thumbnail = vi.spyOn(api, "storyboardThumbnail").mockResolvedValue({ ok: true, url: "/thumb.jpg", cache_hit: false });
     render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
 
     fireEvent.click(screen.getByRole("button", { name: "產生代表畫格" }));
 
-    await waitFor(() => expect(thumbnail).toHaveBeenCalledWith(1, "a", 0.5));
+    await waitFor(() => expect(thumbnail).toHaveBeenCalledWith(1, "a", 0.5, false));
     expect(screen.getByText("有未儲存變更")).toBeTruthy();
     expect((screen.getByAltText("抵達車站 代表畫格") as HTMLImageElement).src).toContain("/thumb.jpg");
+
+    thumbnail.mockClear();
+    fireEvent.click(screen.getByLabelText("忽略快取並強制重跑"));
+    fireEvent.click(screen.getByRole("button", { name: "產生代表畫格" }));
+    await waitFor(() => expect(thumbnail).toHaveBeenCalledWith(1, "a", 0.5, true));
   });
 
-  it("maps short and range previews to the existing API and renders the result", async () => {
+  it("maps normal and forced previews to the existing API and renders the result", async () => {
     const storyboardPreview = vi.spyOn(api, "storyboardPreview").mockResolvedValue({ ok: true, url: "/preview.mp4", duration_seconds: 5 });
     render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
 
     fireEvent.click(screen.getByRole("button", { name: "產生 5 秒預覽" }));
-    await waitFor(() => expect(storyboardPreview).toHaveBeenCalledWith(1, expect.objectContaining({ mode: "segment", segmentId: "a", durationSeconds: 5 })));
+    await waitFor(() => expect(storyboardPreview).toHaveBeenCalledWith(1, expect.objectContaining({ mode: "segment", segmentId: "a", durationSeconds: 5, force: false })));
     expect(document.querySelector("video")?.getAttribute("src")).toBe("/preview.mp4");
 
     storyboardPreview.mockClear();
+    fireEvent.click(screen.getByLabelText("忽略快取並強制重跑"));
     fireEvent.click(screen.getByRole("button", { name: "從此片段預覽 8 秒" }));
-    await waitFor(() => expect(storyboardPreview).toHaveBeenCalledWith(1, expect.objectContaining({ mode: "range", segmentId: "a", durationSeconds: 8, timelineStartSeconds: 0 })));
+    await waitFor(() => expect(storyboardPreview).toHaveBeenCalledWith(1, expect.objectContaining({ mode: "range", segmentId: "a", durationSeconds: 8, timelineStartSeconds: 0, force: true })));
   });
 
   it("resets local state when switching to another project", () => {
