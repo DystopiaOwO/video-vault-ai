@@ -98,8 +98,6 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Install frontend dependencies
         run: npm ci
-      - name: Verify production storyboard entry
-        run: npm test -- tests/production-storyboard-entry.test.ts
       - name: Run frontend tests
         run: npm test
       - name: Build frontend
