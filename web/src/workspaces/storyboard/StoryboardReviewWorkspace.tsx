@@ -94,6 +94,8 @@ export function StoryboardReviewWorkspace({
   const previousSelectedId = useRef<string | undefined>(undefined);
   const selected = model.segments.find((segment) => segment.id === selectedId) || model.segments[0];
   const timingDirtyCount = Object.values(timingDirty).filter(Boolean).length;
+  const groupReorderBlocked = query.trim().length > 0 || visibility !== "all";
+  const groupReorderHint = "搜尋或篩選期間無法安全調整分組順序，請先清除篩選。";
 
   const visibleGroups = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -206,6 +208,7 @@ export function StoryboardReviewWorkspace({
             onClick={() => setCollapsedGroupIds(collapsedGroupIds.length ? [] : model.groups.map((group) => group.id))}
           >{collapsedGroupIds.length ? "全部展開" : "全部收合"}</button>
         </div>
+        {groupReorderBlocked && <span className="review-filter-hint" role="status">{groupReorderHint}</span>}
       </div>
 
       {onAddGroup && <div className="review-add-group">
@@ -214,8 +217,9 @@ export function StoryboardReviewWorkspace({
       </div>}
 
       <div className="review-groups">
-        {visibleGroups.map((group, groupIndex) => {
+        {visibleGroups.map((group) => {
           const collapsed = collapsedGroupIds.includes(group.id);
+          const fullGroupIndex = model.groups.findIndex((candidate) => candidate.id === group.id);
           return <section className="review-group" key={group.id}>
             <header>
               <button type="button" className="review-group-toggle" aria-expanded={!collapsed} aria-label={`${group.title} ${collapsed ? "展開" : "收合"}`} onClick={() => toggleGroup(group.id)}>
@@ -229,8 +233,8 @@ export function StoryboardReviewWorkspace({
               </div>
               <div className="review-group-actions">
                 <span>{group.category}</span>
-                {onMoveGroup && <button type="button" aria-label={`${group.title} 分組上移`} disabled={busy || groupIndex === 0} onClick={() => onMoveGroup(group.id, -1)}>↑</button>}
-                {onMoveGroup && <button type="button" aria-label={`${group.title} 分組下移`} disabled={busy || groupIndex === visibleGroups.length - 1} onClick={() => onMoveGroup(group.id, 1)}>↓</button>}
+                {onMoveGroup && <button type="button" aria-label={`${group.title} 分組上移`} title={groupReorderBlocked ? groupReorderHint : undefined} disabled={busy || groupReorderBlocked || fullGroupIndex <= 0} onClick={() => onMoveGroup(group.id, -1)}>↑</button>}
+                {onMoveGroup && <button type="button" aria-label={`${group.title} 分組下移`} title={groupReorderBlocked ? groupReorderHint : undefined} disabled={busy || groupReorderBlocked || fullGroupIndex < 0 || fullGroupIndex >= model.groups.length - 1} onClick={() => onMoveGroup(group.id, 1)}>↓</button>}
                 {onDeleteGroup && group.segments.length === 0 && <button type="button" disabled={busy} onClick={() => onDeleteGroup(group.id)}>刪除</button>}
               </div>
             </header>

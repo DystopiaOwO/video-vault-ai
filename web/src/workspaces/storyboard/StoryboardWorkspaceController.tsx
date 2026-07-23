@@ -45,6 +45,8 @@ export function StoryboardWorkspaceController({
   const [timingDrafts, setTimingDrafts] = useState<Record<string, TimingDraft>>(() => timingFromDetail(detail));
   const [timingDirty, setTimingDirty] = useState<Record<string, boolean>>({});
   const committedTimingsRef = useRef<Record<string, TimingDraft>>(timingFromDetail(detail));
+  const serverTimingSnapshotRef = useRef<Record<string, TimingDraft>>(timingFromDetail(detail));
+  const awaitingTimingAckRef = useRef<Set<string>>(new Set());
   const [previewItems, setPreviewItems] = useState<StoryboardPreviewItem[]>([]);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<BusyAction>("");
@@ -82,6 +84,8 @@ export function StoryboardWorkspaceController({
       setState(editableStoryboardState(detail));
       setTimingDrafts(timingFromDetail(detail));
       committedTimingsRef.current = timingFromDetail(detail);
+      serverTimingSnapshotRef.current = timingFromDetail(detail);
+      awaitingTimingAckRef.current = new Set();
       setSelectedId(firstSegmentId(detail));
       setPreviewItems([]);
       setBusy("");
@@ -89,10 +93,32 @@ export function StoryboardWorkspaceController({
     }
 
     if (!dirtyRef.current) setState(editableStoryboardState(detail));
-    setTimingDrafts((current) => syncServerTiming(current, detail, timingDirtyRef.current));
-    if (!Object.values(timingDirtyRef.current).some(Boolean)) {
-      committedTimingsRef.current = timingFromDetail(detail);
+    const incomingTimings = timingFromDetail(detail);
+    const previousServerTimings = serverTimingSnapshotRef.current;
+    const nextCommittedTimings = { ...committedTimingsRef.current };
+    for (const segment of detail.segments) {
+      const id = segment.segment_id;
+      const incoming = incomingTimings[id];
+      const previousServer = previousServerTimings[id];
+      const awaitingAck = awaitingTimingAckRef.current.has(id);
+      if (timingDirtyRef.current[id]) {
+        if (!awaitingAck && (!previousServer || !sameTiming(incoming, previousServer))) {
+          nextCommittedTimings[id] = incoming;
+        }
+        continue;
+      }
+      // Preserve a just-saved local commit when a stale GET arrives. A real
+      // server change is accepted once it differs from the last server snapshot.
+      if (!previousServer || !sameTiming(incoming, previousServer)) {
+        nextCommittedTimings[id] = incoming;
+        awaitingTimingAckRef.current.delete(id);
+      } else if (!nextCommittedTimings[id] && !awaitingAck) {
+        nextCommittedTimings[id] = incoming;
+      }
     }
+    committedTimingsRef.current = nextCommittedTimings;
+    serverTimingSnapshotRef.current = incomingTimings;
+    setTimingDrafts((current) => syncServerTiming(current, detail, timingDirtyRef.current, nextCommittedTimings));
     setSelectedId((current) => current && detail.segments.some((segment) => segment.segment_id === current)
       ? current
       : firstSegmentId(detail));
@@ -129,15 +155,19 @@ export function StoryboardWorkspaceController({
   }
 
   function changeTiming(segmentId: string, patch: SegmentTimingPatch) {
-    const source = timingDrafts[segmentId] || timingForSegment(detail, segmentId);
+    const source = timingDrafts[segmentId] || committedTimingForSegment(committedTimingsRef.current, detail, segmentId);
     const next = { ...source, ...patch };
     setTimingDrafts((current) => ({ ...current, [segmentId]: { ...(current[segmentId] || source), ...patch } }));
-    setSegmentTimingDirty(segmentId, !sameTiming(next, timingForSegment(detail, segmentId)));
+    setSegmentTimingDirty(segmentId, !sameTiming(next, committedTimingForSegment(committedTimingsRef.current, detail, segmentId)));
     setPreviewItems([]);
   }
 
   function resetTiming(segmentId: string) {
-    setTimingDrafts((current) => ({ ...current, [segmentId]: timingForSegment(detail, segmentId) }));
+    const committed = awaitingTimingAckRef.current.has(segmentId)
+      ? committedTimingForSegment(committedTimingsRef.current, detail, segmentId)
+      : serverTimingSnapshotRef.current[segmentId]
+        || committedTimingForSegment(committedTimingsRef.current, detail, segmentId);
+    setTimingDrafts((current) => ({ ...current, [segmentId]: committed }));
     setSegmentTimingDirty(segmentId, false);
     setPreviewItems([]);
     setMessage("已放棄此片段尚未儲存的剪點變更。");
@@ -205,7 +235,7 @@ export function StoryboardWorkspaceController({
 
   async function saveTiming(segmentId: string) {
     if (busy || !timingDirtyRef.current[segmentId]) return;
-    const timing = timingDrafts[segmentId] || timingForSegment(detail, segmentId);
+    const timing = timingDrafts[segmentId] || committedTimingForSegment(committedTimingsRef.current, detail, segmentId);
     setBusy("timing");
     setMessage("正在儲存片段剪點…");
     try {
@@ -220,6 +250,7 @@ export function StoryboardWorkspaceController({
       }
       setSegmentTimingDirty(segmentId, false);
       committedTimingsRef.current = { ...committedTimingsRef.current, [segmentId]: { ...timing } };
+      awaitingTimingAckRef.current.add(segmentId);
       setPreviewItems([]);
       const successMessage = "片段剪點已儲存，輸出內容有變更，請重新核准。";
       setMessage(successMessage);
@@ -449,13 +480,22 @@ function syncServerTiming(
   current: Record<string, TimingDraft>,
   detail: ProjectDetail,
   dirty: Record<string, boolean>,
+  committed: Record<string, TimingDraft>,
 ): Record<string, TimingDraft> {
   return Object.fromEntries(detail.segments.map((segment) => {
     const server = timingForSegment(detail, segment.segment_id);
     return [segment.segment_id, dirty[segment.segment_id] && current[segment.segment_id]
       ? current[segment.segment_id]
-      : server];
+      : committed[segment.segment_id] || server];
   }));
+}
+
+function committedTimingForSegment(
+  committed: Record<string, TimingDraft>,
+  detail: ProjectDetail,
+  segmentId: string,
+): TimingDraft {
+  return committed[segmentId] || timingForSegment(detail, segmentId);
 }
 
 function timingForSegment(detail: ProjectDetail, segmentId: string): TimingDraft {

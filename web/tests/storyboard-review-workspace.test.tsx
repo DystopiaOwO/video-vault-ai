@@ -118,6 +118,51 @@ describe("StoryboardReviewWorkspace", () => {
     expect(screen.getByRole("button", { name: /抵達車站/ })).toBeTruthy();
   });
 
+  it("disables group reorder while a filter hides groups instead of using visible indexes", () => {
+    const first = segment("a", "A", { groupId: "a", groupTitle: "A", notes: "顯示" });
+    const hidden = segment("b", "B", { groupId: "b", groupTitle: "B", notes: "隱藏" });
+    const last = segment("c", "C", { groupId: "c", groupTitle: "C", notes: "顯示" });
+    const filteredModel: StoryboardViewModel = {
+      ...model(),
+      groups: [
+        { id: "a", title: "A", category: "travel", order: 1, segments: [first] },
+        { id: "b", title: "B", category: "travel", order: 2, segments: [hidden] },
+        { id: "c", title: "C", category: "travel", order: 3, segments: [last] },
+      ],
+      segments: [first, hidden, last],
+      summary: { totalSegments: 3, includedSegments: 3, excludedSegments: 0, estimatedDurationSeconds: 15 },
+    };
+    const onMoveGroup = vi.fn();
+    render(<StoryboardReviewWorkspace {...props({ model: filteredModel, onMoveGroup })} />);
+
+    fireEvent.change(screen.getByLabelText("搜尋片段"), { target: { value: "顯示" } });
+    expect((screen.getByRole("button", { name: "C 分組下移" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("status").textContent).toContain("無法安全調整分組順序");
+    expect(onMoveGroup).not.toHaveBeenCalled();
+  });
+
+  it("uses the full group order when a group is collapsed", () => {
+    const first = segment("a", "A", { groupId: "a", groupTitle: "A" });
+    const hidden = segment("b", "B", { groupId: "b", groupTitle: "B" });
+    const last = segment("c", "C", { groupId: "c", groupTitle: "C" });
+    const collapsedModel: StoryboardViewModel = {
+      ...model(),
+      groups: [
+        { id: "a", title: "A", category: "travel", order: 1, segments: [first] },
+        { id: "b", title: "B", category: "travel", order: 2, segments: [hidden] },
+        { id: "c", title: "C", category: "travel", order: 3, segments: [last] },
+      ],
+      segments: [first, hidden, last],
+      summary: { totalSegments: 3, includedSegments: 3, excludedSegments: 0, estimatedDurationSeconds: 15 },
+    };
+    const onMoveGroup = vi.fn();
+    render(<StoryboardReviewWorkspace {...props({ model: collapsedModel, onMoveGroup })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "B 收合" }));
+    fireEvent.click(screen.getByRole("button", { name: "A 分組下移" }));
+    expect(onMoveGroup).toHaveBeenCalledWith("a", 1);
+  });
+
   it("emits storyboard-only changes through the controlled callback", () => {
     const onStoryboardChange = vi.fn();
     render(<StoryboardReviewWorkspace {...props({ onStoryboardChange })} />);

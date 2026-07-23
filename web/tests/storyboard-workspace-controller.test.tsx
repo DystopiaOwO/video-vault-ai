@@ -236,6 +236,27 @@ describe("StoryboardWorkspaceController", () => {
     })));
   });
 
+  it("keeps the newly committed timing when refresh returns a stale detail", async () => {
+    const saveTiming = vi.spyOn(api, "saveSegmentTiming").mockResolvedValue({ ok: true, path: "segment_review.json" });
+    const storyboardPreview = vi.spyOn(api, "storyboardPreview").mockResolvedValue({ ok: true, url: "/preview.mp4", duration_seconds: 8 });
+    const refreshProject = vi.fn().mockRejectedValue(new Error("GET failed"));
+    const view = render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={refreshProject} />);
+
+    fireEvent.change(screen.getByLabelText("片段終點"), { target: { value: "8" } });
+    fireEvent.change(screen.getByLabelText("片段速度"), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: "儲存剪點" }));
+    await waitFor(() => expect(saveTiming).toHaveBeenCalled());
+
+    view.rerender(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={refreshProject} />);
+    fireEvent.click(screen.getByRole("button", { name: /巷弄散步/ }));
+    fireEvent.click(screen.getByRole("button", { name: "從此片段預覽 8 秒" }));
+    await waitFor(() => expect(storyboardPreview).toHaveBeenCalledWith(1, expect.objectContaining({
+      mode: "range",
+      segmentId: "b",
+      timelineStartSeconds: 4,
+    })));
+  });
+
   it("maps audio role changes to the existing audio settings API", async () => {
     const audioSettings = vi.spyOn(api, "audioSettings").mockResolvedValue({ ok: true, state: audio() });
     render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
