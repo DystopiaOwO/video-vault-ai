@@ -42,6 +42,68 @@ function createClient() {
 }
 
 describe("ProjectDataLoader", () => {
+  it("keeps ordinary polling errors resolved and reported", async () => {
+    const { client, requests } = createClient();
+    const reportError = vi.fn();
+    const loader = new ProjectDataLoader(client, () => true, () => true, vi.fn(), reportError);
+    const error = new Error("project unavailable");
+
+    const request = loader.load(7);
+    requests[0].project.reject(error);
+    requests[0].jobs.resolve([]);
+
+    await expect(request).resolves.toEqual([]);
+    expect(reportError).toHaveBeenCalledWith(error);
+  });
+
+  it("rejects mutation refresh failures without reporting a duplicate UI error", async () => {
+    const { client, requests } = createClient();
+    const reportError = vi.fn();
+    const loader = new ProjectDataLoader(client, () => true, () => true, vi.fn(), reportError);
+    const error = new Error("jobs unavailable");
+
+    const request = loader.load(7, { forceFresh: true });
+    requests[0].project.resolve(detail(7));
+    requests[0].jobs.reject(error);
+
+    await expect(request).rejects.toBe(error);
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it("rejects an explicit throwOnError request", async () => {
+    const { client, requests } = createClient();
+    const reportError = vi.fn();
+    const loader = new ProjectDataLoader(client, () => true, () => true, vi.fn(), reportError);
+    const error = new Error("project unavailable");
+
+    const request = loader.load(7, { throwOnError: true });
+    requests[0].project.reject(error);
+    requests[0].jobs.resolve([]);
+
+    await expect(request).rejects.toBe(error);
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it("starts a throwing fresh request after a pending request fails", async () => {
+    const { client, requests } = createClient();
+    const reportError = vi.fn();
+    const loader = new ProjectDataLoader(client, () => true, () => true, vi.fn(), reportError);
+    const oldError = new Error("old request failed");
+    const freshError = new Error("fresh request failed");
+
+    const requestA = loader.load(7);
+    const requestB = loader.load(7, { forceFresh: true, throwOnError: true });
+    requests[0].project.reject(oldError);
+    requests[0].jobs.resolve([]);
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    requests[1].project.reject(freshError);
+    requests[1].jobs.resolve([]);
+
+    await expect(requestA).resolves.toEqual([]);
+    await expect(requestB).rejects.toBe(freshError);
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
   it("waits for request A, then starts fresh request B after a mutation", async () => {
     const { client, requests } = createClient();
     const applied: Job[][] = [];

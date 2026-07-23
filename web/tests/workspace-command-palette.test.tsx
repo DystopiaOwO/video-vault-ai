@@ -70,6 +70,22 @@ describe("WorkspaceCommandPalette", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "工作區命令面板" })).toBeNull());
   });
 
+  it("does not execute the active command for native keyCode 229", async () => {
+    const audio = document.createElement("section");
+    audio.id = "workspace-audio";
+    audio.tabIndex = -1;
+    audio.scrollIntoView = vi.fn();
+    document.body.appendChild(audio);
+    render(<WorkspaceCommandPalette />);
+
+    fireEvent.click(screen.getByRole("button", { name: "開啟命令面板" }));
+    await screen.findByRole("dialog", { name: "工作區命令面板" });
+    fireEvent.keyDown(window, { key: "Enter", keyCode: 229, which: 229 });
+
+    expect(screen.getByRole("dialog", { name: "工作區命令面板" })).toBeTruthy();
+    expect(audio.scrollIntoView).not.toHaveBeenCalled();
+  });
+
   it("moves through results with arrow keys", async () => {
     render(<WorkspaceCommandPalette />);
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });

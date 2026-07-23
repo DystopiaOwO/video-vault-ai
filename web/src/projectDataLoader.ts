@@ -2,6 +2,7 @@ import { Job, ProjectDetail } from "./api";
 
 export type ProjectDataLoadOptions = {
   forceFresh?: boolean;
+  throwOnError?: boolean;
 };
 
 export type ProjectDataClient = {
@@ -29,20 +30,25 @@ export class ProjectDataLoader {
   load(projectId: number, options: ProjectDataLoadOptions = {}): Promise<Job[]> {
     if (!projectId) return Promise.resolve([]);
     const pending = this.pending;
-    if (options.forceFresh && pending?.projectId === projectId) {
+    const requiresFreshRequest = options.forceFresh === true || options.throwOnError === true;
+    if (requiresFreshRequest && pending?.projectId === projectId) {
       this.generation += 1;
-      return pending.promise.then(() => this.start(projectId));
+      return pending.promise.then(
+        () => this.start(projectId, options),
+        () => this.start(projectId, options),
+      );
     }
     if (pending?.projectId === projectId) return pending.promise;
-    return this.start(projectId);
+    return this.start(projectId, options);
   }
 
   invalidate(): void {
     this.generation += 1;
   }
 
-  private start(projectId: number): Promise<Job[]> {
+  private start(projectId: number, options: ProjectDataLoadOptions = {}): Promise<Job[]> {
     const generation = ++this.generation;
+    const throwOnError = options.throwOnError === true || options.forceFresh === true;
     const promise = (async () => {
       try {
         const [project, jobs] = await Promise.all([this.client.project(projectId), this.client.jobs(projectId)]);
@@ -51,6 +57,7 @@ export class ProjectDataLoader {
           return jobs;
         }
       } catch (error) {
+        if (throwOnError) throw error;
         if (this.isMounted() && generation === this.generation && this.isCurrentProject(projectId)) {
           this.reportError(error);
         }
@@ -58,9 +65,14 @@ export class ProjectDataLoader {
       return [];
     })();
     this.pending = { projectId, promise };
-    void promise.finally(() => {
-      if (this.pending?.promise === promise) this.pending = null;
-    });
+    void promise.then(
+      () => {
+        if (this.pending?.promise === promise) this.pending = null;
+      },
+      () => {
+        if (this.pending?.promise === promise) this.pending = null;
+      },
+    );
     return promise;
   }
 }

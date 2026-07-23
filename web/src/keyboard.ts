@@ -6,6 +6,7 @@ type NativeKeyboardEventLike = {
 export type EnterKeyboardEventLike = {
   key: string;
   isComposing?: boolean;
+  keyCode?: number;
   nativeEvent?: NativeKeyboardEventLike;
 };
 
@@ -14,6 +15,7 @@ export function isCommittedEnter(event: EnterKeyboardEventLike): boolean {
   if (event.key !== "Enter") return false;
   return !(
     event.isComposing === true
+    || event.keyCode === 229
     || event.nativeEvent?.isComposing === true
     || event.nativeEvent?.keyCode === 229
   );

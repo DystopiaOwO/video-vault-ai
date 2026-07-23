@@ -18,6 +18,10 @@ describe("IME-safe Enter", () => {
     expect(isCommittedEnter({ key: "Enter", nativeEvent: { keyCode: 229 } })).toBe(false);
   });
 
+  it("ignores the outer keyboard event keyCode 229 confirmation event", () => {
+    expect(isCommittedEnter({ key: "Enter", keyCode: 229 })).toBe(false);
+  });
+
   it("does not treat another key as Enter", () => {
     expect(isCommittedEnter({ key: "Space" })).toBe(false);
   });
