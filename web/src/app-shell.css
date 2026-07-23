@@ -309,8 +309,8 @@ body {
 
 #root > main > section .row { gap: 9px; }
 
-#root > main > section button,
-#root > main > section .nav {
+:where(#root > main > section) button,
+:where(#root > main > section) .nav {
   min-height: 38px;
   padding: 0 13px;
   border: 1px solid var(--app-border-strong);
@@ -322,29 +322,29 @@ body {
   box-shadow: none;
 }
 
-#root > main > section button:hover:not(:disabled),
-#root > main > section .nav:hover {
+:where(#root > main > section) button:hover:not(:disabled),
+:where(#root > main > section) .nav:hover {
   border-color: #9eb0c8;
   background: #f8fafc;
   box-shadow: 0 5px 15px rgba(28, 42, 67, .07);
 }
 
-#root > main > section button.good,
-#root > main > section button.ok {
+:where(#root > main > section) button.good,
+:where(#root > main > section) button.ok {
   border-color: var(--app-success);
   color: #fff;
   background: var(--app-success);
 }
 
-#root > main > section button.danger {
+:where(#root > main > section) button.danger {
   border-color: var(--app-danger);
   color: #fff;
   background: var(--app-danger);
 }
 
-#root > main > section input,
-#root > main > section select,
-#root > main > section textarea {
+:where(#root > main > section) input,
+:where(#root > main > section) select,
+:where(#root > main > section) textarea {
   min-height: 38px;
   border: 1px solid #d5deea;
   border-radius: 9px;
@@ -353,7 +353,7 @@ body {
   outline: none;
 }
 
-#root > main > section textarea {
+:where(#root > main > section) textarea {
   width: 100%;
   min-height: 90px;
   padding: 10px;
@@ -361,9 +361,9 @@ body {
   resize: vertical;
 }
 
-#root > main > section input:focus,
-#root > main > section select:focus,
-#root > main > section textarea:focus {
+:where(#root > main > section) input:focus,
+:where(#root > main > section) select:focus,
+:where(#root > main > section) textarea:focus {
   border-color: #7895ff;
   box-shadow: 0 0 0 3px rgba(49, 94, 251, .13);
 }
