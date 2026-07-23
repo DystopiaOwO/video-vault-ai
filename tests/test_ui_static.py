@@ -10,13 +10,14 @@ WEB_SRC = WEB_ROOT / "src"
 APP_SOURCE = WEB_SRC / "App.tsx"
 
 
-def test_application_entry_reexports_the_workspace_app():
+def test_application_entry_mounts_and_reexports_the_workspace_app():
     entry = (WEB_SRC / "main.tsx").read_text(encoding="utf-8")
     app = APP_SOURCE.read_text(encoding="utf-8")
 
     assert 'export { App } from "./App";' in entry
+    assert "createRoot(rootElement)" in entry
     assert "export function App()" in app
-    assert "createRoot(rootElement)" in app
+    assert "createRoot(rootElement)" not in app
 
 
 def test_application_shell_is_linked_and_scoped_to_root_layout():
@@ -49,12 +50,17 @@ def test_project_workspace_exposes_search_loading_and_anchor_navigation():
     assert "已有同名專案" in source
 
 
-def test_audio_ui_exposes_force_preview_and_reset_override_controls():
-    source = APP_SOURCE.read_text(encoding="utf-8")
-    assert "強制重新產生" in source
-    assert "強制重跑" in source
-    assert "resetSegment" in source
-    assert "使用專案預設" in source
+def test_audio_ui_exposes_polling_safe_drafts_and_preview_controls():
+    app = APP_SOURCE.read_text(encoding="utf-8")
+    workspace = (WEB_SRC / "workspaces" / "audio" / "AudioMixingWorkspace.tsx").read_text(encoding="utf-8")
+
+    assert "<AudioMixingWorkspace" in app
+    assert "有未儲存變更" in workspace
+    assert "放棄變更" in workspace
+    assert "beforeunload" in workspace
+    assert "搜尋音訊片段" in workspace
+    assert "忽略快取重跑" in workspace
+    assert "AudioMixingPanel" not in app
 
 
 def test_storyboard_ui_exposes_review_first_controls():
