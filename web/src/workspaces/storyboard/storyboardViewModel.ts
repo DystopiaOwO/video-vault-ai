@@ -2,7 +2,6 @@ import type {
   AudioSegmentSettings,
   ProjectDetail,
   Segment,
-  StoryboardGroup,
   StoryboardSegment,
   StoryboardState,
 } from "../../api";
@@ -73,54 +72,51 @@ const AUDIO_LABELS: Record<AudioSegmentSettings["role"], string> = {
 
 export function buildStoryboardViewModel(detail: ProjectDetail): StoryboardViewModel {
   const state = detail.storyboard || emptyStoryboard();
-  const declaredGroups = [...(state.groups || [])].sort((left, right) => left.order - right.order);
-  const groupMeta = new Map(declaredGroups.map((group) => [group.group_id, group]));
-  const fallbackGroupIds: string[] = [];
+  const declared = [...(state.groups || [])].sort(compareOrder);
+  const declaredById = new Map(declared.map((group) => [group.group_id, group]));
+  const fallbackIds: string[] = [];
 
   const rows = detail.segments.map((segment) => {
-    const storyboard = state.segments?.[segment.segment_id];
-    const groupId = storyboard?.group_id || segment.storyboard_group_id || segment.group || "ungrouped";
-    if (!groupMeta.has(groupId) && !fallbackGroupIds.includes(groupId)) fallbackGroupIds.push(groupId);
+    const item = state.segments?.[segment.segment_id];
+    const groupId = item?.group_id || segment.storyboard_group_id || segment.group || "ungrouped";
+    if (!declaredById.has(groupId) && !fallbackIds.includes(groupId)) fallbackIds.push(groupId);
     return toSegmentView(
       detail,
       segment,
-      storyboard,
+      item,
       groupId,
-      groupMeta.get(groupId)?.title || readableGroupName(groupId),
-      groupMeta.get(groupId)?.order ?? Number.MAX_SAFE_INTEGER,
+      declaredById.get(groupId)?.title || readableGroupName(groupId),
+      declaredById.get(groupId)?.order ?? Number.MAX_SAFE_INTEGER,
     );
   });
 
-  const allGroups = [
-    ...declaredGroups.map((group) => ({ id: group.group_id, title: group.title, category: group.category, order: group.order })),
-    ...fallbackGroupIds.map((groupId, index) => ({ id: groupId, title: readableGroupName(groupId), category: "other", order: declaredGroups.length + index + 1 })),
-  ];
-
-  const groups = allGroups
+  const groups = [
+    ...declared.map((group) => ({ id: group.group_id, title: group.title, category: group.category, order: group.order })),
+    ...fallbackIds.map((id, index) => ({ id, title: readableGroupName(id), category: "other", order: declared.length + index + 1 })),
+  ]
     .map((group) => ({
       ...group,
       segments: rows
         .filter((segment) => segment.groupId === group.id)
         .sort((left, right) => left.order - right.order || left.startSeconds - right.startSeconds || left.id.localeCompare(right.id)),
     }))
-    .filter((group) => group.segments.length > 0 || declaredGroups.some((declared) => declared.group_id === group.id))
-    .sort((left, right) => left.order - right.order || left.title.localeCompare(right.title));
+    .filter((group) => group.segments.length > 0 || declaredById.has(group.id))
+    .sort(compareOrder);
 
-  const orderedSegments = groups.flatMap((group) => group.segments);
-  const includedSegments = orderedSegments.filter((segment) => segment.included);
-
+  const ordered = groups.flatMap((group) => group.segments);
+  const included = ordered.filter((segment) => segment.included);
   return {
     exists: Boolean(state.exists || state.groups?.length || Object.keys(state.segments || {}).length),
     valid: state.validation?.valid !== false,
     errors: [...(state.validation?.errors || [])],
     warnings: [...(state.validation?.warnings || [])],
     groups,
-    segments: orderedSegments,
+    segments: ordered,
     summary: {
-      totalSegments: orderedSegments.length,
-      includedSegments: includedSegments.length,
-      excludedSegments: orderedSegments.length - includedSegments.length,
-      estimatedDurationSeconds: includedSegments.reduce((total, segment) => total + segment.durationSeconds, 0),
+      totalSegments: ordered.length,
+      includedSegments: included.length,
+      excludedSegments: ordered.length - included.length,
+      estimatedDurationSeconds: included.reduce((total, segment) => total + segment.durationSeconds, 0),
     },
   };
 }
@@ -129,25 +125,15 @@ export function editableStoryboardState(detail: ProjectDetail): StoryboardState 
   const source = detail.storyboard || emptyStoryboard();
   if (!source.exists && !source.groups?.length && !Object.keys(source.segments || {}).length) return emptyStoryboard();
 
-  const next: StoryboardState = {
-    ...source,
-    groups: (source.groups || []).map((group) => ({ ...group })),
-    segments: Object.fromEntries(Object.entries(source.segments || {}).map(([id, segment]) => [id, { ...segment }])),
-  };
+  const next = cloneStoryboardState(source);
   const groupIds = new Set(next.groups.map((group) => group.group_id));
-
   for (const [index, segment] of detail.segments.entries()) {
     const groupId = next.segments[segment.segment_id]?.group_id
       || segment.storyboard_group_id
       || segment.group
       || "ungrouped";
     if (!groupIds.has(groupId)) {
-      next.groups.push({
-        group_id: groupId,
-        title: readableGroupName(groupId),
-        category: "other",
-        order: next.groups.length + 1,
-      });
+      next.groups.push({ group_id: groupId, title: readableGroupName(groupId), category: "other", order: next.groups.length + 1 });
       groupIds.add(groupId);
     }
     if (!next.segments[segment.segment_id]) {
@@ -161,7 +147,6 @@ export function editableStoryboardState(detail: ProjectDetail): StoryboardState 
       };
     }
   }
-
   return normalizeStoryboardState(next);
 }
 
@@ -172,37 +157,35 @@ export function updateStoryboardSegment(
 ): StoryboardState {
   const current = state.segments?.[segmentId];
   if (!current) return state;
-  const next = {
+
+  if (patch.group_id && patch.group_id !== current.group_id) {
+    const moved = moveStoryboardSegmentToGroup(state, segmentId, patch.group_id);
+    return {
+      ...moved,
+      segments: {
+        ...moved.segments,
+        [segmentId]: { ...moved.segments[segmentId], ...patch, manual_group: true, manual_order: true },
+      },
+    };
+  }
+
+  return {
     ...state,
     groups: state.groups.map((group) => ({ ...group })),
-    segments: {
-      ...state.segments,
-      [segmentId]: {
-        ...current,
-        ...patch,
-      },
-    },
+    segments: { ...state.segments, [segmentId]: { ...current, ...patch } },
   };
-  return patch.group_id && patch.group_id !== current.group_id
-    ? moveStoryboardSegmentToGroup(next, segmentId, patch.group_id)
-    : next;
 }
 
 export function normalizeStoryboardState(state: StoryboardState): StoryboardState {
   const groups = [...(state.groups || [])]
-    .sort((left, right) => left.order - right.order || left.title.localeCompare(right.title))
+    .sort(compareOrder)
     .map((group, index) => ({ ...group, order: index + 1 }));
   const segments = Object.fromEntries(Object.entries(state.segments || {}).map(([id, segment]) => [id, { ...segment }]));
-
   for (const group of groups) {
-    Object.entries(segments)
-      .filter(([, segment]) => segment.group_id === group.group_id)
-      .sort(([, left], [, right]) => left.order - right.order)
-      .forEach(([segmentId], index) => {
-        segments[segmentId] = { ...segments[segmentId], order: index + 1 };
-      });
+    segmentIdsForGroup({ ...state, groups, segments }, group.group_id).forEach((id, index) => {
+      segments[id] = { ...segments[id], order: index + 1 };
+    });
   }
-
   return { ...state, groups, segments };
 }
 
@@ -216,16 +199,16 @@ export function reorderStoryboardSegments(
   const next = cloneStoryboardState(state);
   const sourceGroup = next.segments[sourceId].group_id;
   const targetGroup = next.segments[targetId].group_id;
-  const orderedIds = segmentIdsForGroup(next, targetGroup).filter((id) => id !== sourceId);
-  const targetIndex = orderedIds.indexOf(targetId);
-  orderedIds.splice(Math.max(0, targetIndex + (position === "after" ? 1 : 0)), 0, sourceId);
+  const ids = segmentIdsForGroup(next, targetGroup).filter((id) => id !== sourceId);
+  const targetIndex = ids.indexOf(targetId);
+  ids.splice(Math.max(0, targetIndex + (position === "after" ? 1 : 0)), 0, sourceId);
   next.segments[sourceId] = {
     ...next.segments[sourceId],
     group_id: targetGroup,
     manual_group: Boolean(next.segments[sourceId].manual_group || sourceGroup !== targetGroup),
     manual_order: true,
   };
-  orderedIds.forEach((id, index) => {
+  ids.forEach((id, index) => {
     next.segments[id] = { ...next.segments[id], order: index + 1, manual_order: true };
   });
   return normalizeStoryboardState(next);
@@ -262,35 +245,34 @@ export function moveStoryboardSegmentToGroup(state: StoryboardState, segmentId: 
 export function addStoryboardGroup(state: StoryboardState, title: string, groupId = `custom_${Date.now()}`): StoryboardState {
   const trimmed = title.trim();
   if (!trimmed || state.groups.some((group) => group.group_id === groupId)) return state;
-  return normalizeStoryboardState({
-    ...cloneStoryboardState(state),
-    groups: [...state.groups, { group_id: groupId, title: trimmed, category: "custom", order: state.groups.length + 1 }],
-  });
+  const next = cloneStoryboardState(state);
+  next.groups.push({ group_id: groupId, title: trimmed, category: "custom", order: next.groups.length + 1 });
+  return normalizeStoryboardState(next);
 }
 
 export function renameStoryboardGroup(state: StoryboardState, groupId: string, title: string): StoryboardState {
   if (!state.groups.some((group) => group.group_id === groupId)) return state;
-  return {
-    ...cloneStoryboardState(state),
-    groups: state.groups.map((group) => group.group_id === groupId ? { ...group, title } : { ...group }),
-  };
+  const next = cloneStoryboardState(state);
+  next.groups = next.groups.map((group) => group.group_id === groupId ? { ...group, title } : group);
+  return next;
 }
 
 export function moveStoryboardGroup(state: StoryboardState, groupId: string, delta: number): StoryboardState {
-  const groups = [...state.groups].sort((left, right) => left.order - right.order);
+  const next = cloneStoryboardState(state);
+  const groups = [...next.groups].sort(compareOrder);
   const currentIndex = groups.findIndex((group) => group.group_id === groupId);
   const targetIndex = currentIndex + delta;
   if (currentIndex < 0 || targetIndex < 0 || targetIndex >= groups.length) return state;
   [groups[currentIndex], groups[targetIndex]] = [groups[targetIndex], groups[currentIndex]];
-  return normalizeStoryboardState({ ...cloneStoryboardState(state), groups });
+  next.groups = groups.map((group, index) => ({ ...group, order: index + 1 }));
+  return normalizeStoryboardState(next);
 }
 
 export function deleteEmptyStoryboardGroup(state: StoryboardState, groupId: string): StoryboardState {
   if (Object.values(state.segments).some((segment) => segment.group_id === groupId)) return state;
-  return normalizeStoryboardState({
-    ...cloneStoryboardState(state),
-    groups: state.groups.filter((group) => group.group_id !== groupId),
-  });
+  const next = cloneStoryboardState(state);
+  next.groups = next.groups.filter((group) => group.group_id !== groupId);
+  return normalizeStoryboardState(next);
 }
 
 export function validateSegmentTiming(
@@ -304,9 +286,7 @@ export function validateSegmentTiming(
   if (startSeconds < 0) errors.push("片段起點不可小於 0 秒");
   if (endSeconds <= startSeconds) errors.push("片段終點必須大於起點");
   if (speed < 0.25 || speed > 4) errors.push("片段速度必須介於 0.25 到 4 倍");
-  if (sourceDurationSeconds !== undefined && sourceDurationSeconds > 0 && endSeconds > sourceDurationSeconds + 0.001) {
-    errors.push("片段終點超過來源影片長度");
-  }
+  if (sourceDurationSeconds !== undefined && sourceDurationSeconds > 0 && endSeconds > sourceDurationSeconds + 0.001) errors.push("片段終點超過來源影片長度");
   return errors;
 }
 
@@ -320,10 +300,10 @@ export function timelineStartForSegment(
   let total = 0;
   for (const group of normalized.groups) {
     for (const id of segmentIdsForGroup(normalized, group.group_id)) {
-      const storyboard = normalized.segments[id];
-      if (!storyboard?.included) continue;
+      const item = normalized.segments[id];
+      if (!item?.included) continue;
       if (id === segmentId) return total;
-      const segment = detail.segments.find((item) => item.segment_id === id);
+      const segment = detail.segments.find((row) => row.segment_id === id);
       const timing = timings[id];
       const start = timing?.startSeconds ?? segment?.start_seconds ?? 0;
       const end = timing?.endSeconds ?? segment?.end_seconds ?? start;
@@ -343,18 +323,14 @@ function toSegmentView(
   groupOrder: number,
 ): StoryboardSegmentView {
   const audioOverride = detail.audio.segments?.[segment.segment_id];
-  const audioRole = normalizeAudioRole(
-    audioOverride?.role || storyboard?.effective_audio_role || detail.audio.original_audio.default_role || segment.audio_role,
-  );
+  const audioRole = normalizeAudioRole(audioOverride?.role || storyboard?.effective_audio_role || detail.audio.original_audio.default_role || segment.audio_role);
   const colorOverride = detail.color.segments?.[segment.segment_id];
-  const explicitlyEnabled = colorOverride?.enabled === true;
-  const colorEnabled = (detail.color.enabled || explicitlyEnabled)
+  const colorEnabled = (detail.color.enabled || colorOverride?.enabled === true)
     && colorOverride?.enabled !== false
     && colorOverride?.excluded !== true;
   const startSeconds = finiteOr(segment.start_seconds, 0);
   const endSeconds = finiteOr(segment.end_seconds, startSeconds);
   const speed = Math.min(4, Math.max(0.25, finiteOr(segment.speed, 1)));
-
   return {
     id: segment.segment_id,
     title: segment.title || segment.segment_id,
@@ -388,13 +364,13 @@ function toSegmentView(
 function cloneStoryboardState(state: StoryboardState): StoryboardState {
   return {
     ...state,
-    groups: state.groups.map((group: StoryboardGroup) => ({ ...group })),
-    segments: Object.fromEntries(Object.entries(state.segments).map(([id, segment]) => [id, { ...segment }])),
+    groups: (state.groups || []).map((group) => ({ ...group })),
+    segments: Object.fromEntries(Object.entries(state.segments || {}).map(([id, segment]) => [id, { ...segment }])),
   };
 }
 
 function segmentIdsForGroup(state: StoryboardState, groupId: string): string[] {
-  return Object.entries(state.segments)
+  return Object.entries(state.segments || {})
     .filter(([, segment]) => segment.group_id === groupId)
     .sort(([, left], [, right]) => left.order - right.order)
     .map(([id]) => id);
@@ -402,6 +378,10 @@ function segmentIdsForGroup(state: StoryboardState, groupId: string): string[] {
 
 function emptyStoryboard(): StoryboardState {
   return { schema_version: 1, exists: false, groups: [], segments: {} };
+}
+
+function compareOrder<T extends { order: number; title?: string }>(left: T, right: T): number {
+  return left.order - right.order || String(left.title || "").localeCompare(String(right.title || ""));
 }
 
 function normalizeAudioRole(value: string | undefined): AudioSegmentSettings["role"] {
