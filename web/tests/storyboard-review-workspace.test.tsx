@@ -86,14 +86,36 @@ describe("StoryboardReviewWorkspace", () => {
     expect(screen.getByText("排除 1 段")).toBeTruthy();
   });
 
-  it("selects a row without embedding editing controls in every row", () => {
+  it("selects rows and supports keyboard navigation without embedding editors in every row", () => {
     const onSelect = vi.fn();
     render(<StoryboardReviewWorkspace {...props({ onSelect })} />);
 
     fireEvent.click(screen.getByRole("button", { name: /巷弄散步/ }));
     expect(onSelect).toHaveBeenCalledWith("b");
+
+    fireEvent.keyDown(screen.getByRole("button", { name: /抵達車站/ }), { key: "ArrowDown" });
+    expect(onSelect).toHaveBeenLastCalledWith("b");
     expect(screen.getAllByLabelText("片段起點")).toHaveLength(1);
     expect(screen.getAllByLabelText("原音角色")).toHaveLength(1);
+  });
+
+  it("filters, searches, collapses, and restores the segment list", () => {
+    render(<StoryboardReviewWorkspace {...props()} />);
+
+    fireEvent.change(screen.getByLabelText("搜尋片段"), { target: { value: "巷弄" } });
+    expect(screen.queryByRole("button", { name: /抵達車站/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /巷弄散步/ })).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("搜尋片段"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "已排除" }));
+    expect(screen.queryByRole("button", { name: /抵達車站/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /巷弄散步/ })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "全部" }));
+    fireEvent.click(screen.getByRole("button", { name: "早上 收合" }));
+    expect(screen.queryByRole("button", { name: /抵達車站/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "早上 展開" }));
+    expect(screen.getByRole("button", { name: /抵達車站/ })).toBeTruthy();
   });
 
   it("emits storyboard-only changes through the controlled callback", () => {
@@ -112,6 +134,7 @@ describe("StoryboardReviewWorkspace", () => {
     const onSaveTiming = vi.fn();
     render(<StoryboardReviewWorkspace {...props({
       timingDrafts: { a: { startSeconds: 5, endSeconds: 4, speed: 1 } },
+      timingDirty: { a: true },
       onTimingChange,
       onSaveTiming,
     })} />);
@@ -122,6 +145,23 @@ describe("StoryboardReviewWorkspace", () => {
     fireEvent.change(screen.getByLabelText("片段終點"), { target: { value: "8" } });
     expect(onTimingChange).toHaveBeenCalledWith("a", { endSeconds: 8 });
     expect(onSaveTiming).not.toHaveBeenCalled();
+  });
+
+  it("shows timing dirty state, allows reset, and blocks stale previews", () => {
+    const onResetTiming = vi.fn();
+    const onSaveTiming = vi.fn();
+    const onPreview = vi.fn();
+    render(<StoryboardReviewWorkspace {...props({ timingDirty: { a: true }, onResetTiming, onSaveTiming, onPreview })} />);
+
+    expect(screen.getAllByText("剪點未儲存").length).toBeGreaterThan(0);
+    expect((screen.getByRole("button", { name: "產生 5 秒預覽" }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "放棄剪點變更" }));
+    expect(onResetTiming).toHaveBeenCalledWith("a");
+
+    fireEvent.click(screen.getByRole("button", { name: "儲存剪點" }));
+    expect(onSaveTiming).toHaveBeenCalledWith("a");
+    expect(onPreview).not.toHaveBeenCalled();
   });
 
   it("routes ordering, group management, and thumbnail actions through callbacks", () => {
@@ -197,6 +237,14 @@ describe("StoryboardReviewWorkspace", () => {
 
     const video = document.querySelector("video");
     expect(video?.getAttribute("src")).toBe("/preview.mp4");
+  });
+
+  it("disables mutations while a controller action is busy", () => {
+    render(<StoryboardReviewWorkspace {...props({ busy: true })} />);
+
+    expect((screen.getByRole("button", { name: /抵達車站/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByLabelText("分鏡備註") as HTMLTextAreaElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "儲存分鏡" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("shows a single create action when storyboard data does not exist", () => {
