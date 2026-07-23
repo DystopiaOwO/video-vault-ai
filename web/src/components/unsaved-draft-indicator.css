@@ -1,0 +1,74 @@
+.unsaved-draft-indicator {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: min(720px, calc(100vw - 48px));
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent, #7c5cff) 42%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, #11131a 94%, transparent);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 36%);
+  backdrop-filter: blur(18px);
+}
+
+.unsaved-draft-indicator > div {
+  display: grid;
+  min-width: 150px;
+  gap: 2px;
+}
+
+.unsaved-draft-indicator strong {
+  font-size: 14px;
+  color: #fff;
+}
+
+.unsaved-draft-indicator span {
+  font-size: 12px;
+  color: rgb(255 255 255 / 62%);
+}
+
+.unsaved-draft-indicator nav {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.unsaved-draft-indicator button {
+  min-height: 34px;
+  padding: 7px 11px;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 7%);
+  color: rgb(255 255 255 / 88%);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.unsaved-draft-indicator button:hover,
+.unsaved-draft-indicator button:focus-visible {
+  border-color: color-mix(in srgb, var(--accent, #7c5cff) 66%, transparent);
+  background: color-mix(in srgb, var(--accent, #7c5cff) 20%, transparent);
+  outline: none;
+}
+
+@media (max-width: 760px) {
+  .unsaved-draft-indicator {
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    width: auto;
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .unsaved-draft-indicator nav {
+    justify-content: flex-start;
+  }
+}
