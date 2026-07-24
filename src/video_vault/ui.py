@@ -420,8 +420,9 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json({"ok": started, "message": "單支素材感知已開始" if started else "內容感知已在執行中"})
             elif path == "/api/project/clip-summary":
                 project_id = int(data.get("project_id", 0))
-                ok = update_clip_summary(cfg, db, project_id, int(data.get("video_id", 0)), str(data.get("summary", "")))
-                self._json({"ok": ok})
+                user_summary = data.get("user_summary", data.get("summary", ""))
+                ok = update_clip_summary(cfg, db, project_id, int(data.get("video_id", 0)), str(user_summary))
+                self._json({"ok": ok, "plan_rebuilt": ok})
             elif path == "/api/projects":
                 project_id = create_project(db, data.get("name", ""), [int(v) for v in data.get("video_ids", [])], category=data.get("category", "unknown"), content_type=data.get("content_type", "diary_montage"), platform=data.get("platform", "YouTube"), target_duration_seconds=float(data.get("target_duration_seconds") or 0))
                 sync_project_files(cfg, db, project_id)
@@ -1628,7 +1629,7 @@ def update_clip_summary(cfg: dict, db: Path, project_id: int, video_id: int, sum
         return False
     ok = update_video_summary(db, video_id, summary.strip(), project_id=project_id)
     if ok:
-        mark_project_needs_review(cfg, db, project_id)
+        build_project_plan(cfg, db, project_id)
     return ok
 
 

@@ -199,7 +199,7 @@ def test_project_detail_exposes_clip_visual_summary(tmp_path):
     assert detail["clips"][0]["visual_summary"] == "手沖咖啡特寫"
 
 
-def test_manual_clip_summary_updates_project_detail(tmp_path):
+def test_manual_clip_summary_updates_user_context_without_mutating_ai_detail(tmp_path):
     db = tmp_path / "db.sqlite3"
     init_db(db)
     video_id = upsert_video(db, {"original_path": "a.mp4", "current_path": "a.mp4", "filename": "a.mp4", "category": "coffee"})
@@ -214,7 +214,13 @@ def test_manual_clip_summary_updates_project_detail(tmp_path):
     assert update_video_summary(db, video_id, "手動改過的描述")
 
     detail = project_detail({"library_root": str(tmp_path)}, db, project_id)
-    assert detail["clips"][0]["visual_summary"] == "手動改過的描述"
+    clip = detail["clips"][0]
+    assert clip["visual_summary"] == "舊描述 A / 舊描述 B"
+    assert clip["ai_visual_summary"] == "舊描述 A / 舊描述 B"
+    assert clip["user_summary"] == "手動改過的描述"
+    assert clip["effective_summary"] == "手動改過的描述"
+    assert clip["effective_summary_source"] == "user"
+    assert [row["vision_summary"] for row in db_frames(db, video_id)] == ["舊描述 A", "舊描述 B"]
 
 
 def test_project_plan_recommends_bgm_per_content_group(tmp_path):

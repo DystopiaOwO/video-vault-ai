@@ -5,14 +5,15 @@ import { createProjectMutationControls, mutationLabel, ProjectMutationCoordinato
 
 export type ClipSummaryEditorProps = {
   projectId: number;
-  clip: Pick<Clip, "video_id" | "filename" | "visual_summary">;
+  clip: Pick<Clip, "video_id" | "filename" | "ai_visual_summary" | "user_summary" | "user_summary_migration_state">;
   setMessage: (value: string) => void;
   refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]>;
   mutationControls?: ProjectMutationControls;
 };
 
 export function ClipSummaryEditor({ projectId, clip, setMessage, refreshProject, mutationControls }: ClipSummaryEditorProps) {
-  const incomingSummary = clip.visual_summary || "";
+  const incomingSummary = clip.user_summary || "";
+  const aiSummary = clip.ai_visual_summary || "";
   const [text, setText] = useState(incomingSummary);
   const [baseline, setBaseline] = useState(incomingSummary);
   const [saving, setSaving] = useState(false);
@@ -23,7 +24,7 @@ export function ClipSummaryEditor({ projectId, clip, setMessage, refreshProject,
   if (!fallbackControlsRef.current) fallbackControlsRef.current = createProjectMutationControls(new ProjectMutationCoordinator());
   const controls = mutationControls || fallbackControlsRef.current;
   const projectMutationBusy = controls.isProjectMutationBusy(projectId);
-  const editorId = `clip-summary-${projectId}-${clip.video_id}`;
+  const editorId = `clip-user-summary-${projectId}-${clip.video_id}`;
 
   function setProjectMessage(message: string) {
     if (controls.isCurrentProject(projectId)) setMessage(message);
@@ -62,16 +63,16 @@ export function ClipSummaryEditor({ projectId, clip, setMessage, refreshProject,
     }
     const summary = text.trim();
     setSaving(true);
-    setProjectMessage("正在儲存內容感知描述...");
+    setProjectMessage("正在儲存使用者故事備註並重建故事整理...");
     try {
       const result = await api.saveClipSummary(projectId, clip.video_id, summary);
       if (!result.ok) {
-        setProjectMessage("內容感知描述儲存失敗：找不到素材。");
+        setProjectMessage("使用者故事備註儲存失敗：找不到素材。");
         return;
       }
       setText(summary);
       setBaseline(summary);
-      const successMessage = "內容感知描述已儲存，專案已回到待審。";
+      const successMessage = "使用者故事備註已儲存，故事整理已重建並回到待審。";
       setProjectMessage(successMessage);
       try {
         await refreshProject({ forceFresh: true, throwOnError: true });
@@ -82,7 +83,7 @@ export function ClipSummaryEditor({ projectId, clip, setMessage, refreshProject,
       }
     } catch (error) {
       if (controls.isCurrentProject(projectId)) {
-        setProjectMessage(`內容感知描述儲存失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+        setProjectMessage(`使用者故事備註儲存失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
       }
     } finally {
       setSaving(false);
@@ -91,22 +92,31 @@ export function ClipSummaryEditor({ projectId, clip, setMessage, refreshProject,
   }
 
   return <div className="clip-summary-editor" data-unsaved-text-draft={dirty ? "true" : undefined}>
+    <section className="clip-ai-summary" aria-label={`${clip.filename} AI 畫面感知`}>
+      <div className="clip-summary-heading">
+        <strong>AI 畫面感知</strong>
+        <span>唯讀，重新感知時更新</span>
+      </div>
+      <p>{aiSummary || "尚未產生 AI 畫面感知。"}</p>
+    </section>
     <div className="clip-summary-heading">
-      <label htmlFor={editorId}>內容感知描述</label>
+      <label htmlFor={editorId}>使用者故事備註</label>
       {dirty && <span role="status">有未儲存變更</span>}
     </div>
     <textarea
       id={editorId}
-      aria-label={`${clip.filename} 內容感知描述`}
+      aria-label={`${clip.filename} 使用者故事備註`}
       value={text}
       onChange={(event) => setText(event.target.value)}
-      placeholder="內容感知描述"
+      placeholder="例如：這段是抵達飯店，不要放在早餐章節"
       disabled={saving || projectMutationBusy}
     />
+    <small>儲存後會重新產生故事整理；不會修改 AI 的逐幀感知。</small>
+    {clip.user_summary_migration_state === "review" && <p role="note">舊版描述與所有 AI frame 內容相同，無法安全判斷來源，請確認後重新儲存。</p>}
     <div className="clip-summary-actions">
       <small>{text.length} 字</small>
       <button type="button" disabled={!dirty || saving || projectMutationBusy} onClick={() => setText(baseline)}>放棄變更</button>
-      <button type="button" className="good" disabled={!dirty || saving || projectMutationBusy} onClick={() => void save()}>{saving ? "儲存中…" : "儲存描述"}</button>
+      <button type="button" className="good" disabled={!dirty || saving || projectMutationBusy} onClick={() => void save()}>{saving ? "儲存中…" : "儲存故事備註"}</button>
     </div>
   </div>;
 }

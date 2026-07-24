@@ -130,14 +130,26 @@ def test_summary_edit_is_project_local_and_legacy_shared_write_fails_closed(tmp_
     assert str(frames(db, video_id)[0]["vision_summary"]) == "global summary"
 
     cfg = {"library_root": str(tmp_path)}
-    assert project_detail(cfg, db, project_a)["clips"][0]["visual_summary"] == "A-only summary"
-    assert project_detail(cfg, db, project_b)["clips"][0]["visual_summary"] == "global summary"
+    clip_a = project_detail(cfg, db, project_a)["clips"][0]
+    clip_b = project_detail(cfg, db, project_b)["clips"][0]
+    assert clip_a["visual_summary"] == "global summary"
+    assert clip_b["visual_summary"] == "global summary"
+    assert clip_a["user_summary"] == "A-only summary"
+    assert clip_b["user_summary"] == ""
+    assert clip_a["effective_summary"] == "A-only summary"
+    assert clip_b["effective_summary"] == "global summary"
 
     assert update_video_summary(db, video_id, "A second edit", project_id=project_a) is True
     assert dict(project_videos(db, project_a)[0])["project_summary"] == "A second edit"
     assert dict(project_videos(db, project_b)[0])["project_summary"] == "global summary"
-    assert project_detail(cfg, db, project_a)["clips"][0]["visual_summary"] == "A second edit"
-    assert project_detail(cfg, db, project_b)["clips"][0]["visual_summary"] == "global summary"
+    clip_a = project_detail(cfg, db, project_a)["clips"][0]
+    clip_b = project_detail(cfg, db, project_b)["clips"][0]
+    assert clip_a["visual_summary"] == "global summary"
+    assert clip_b["visual_summary"] == "global summary"
+    assert clip_a["user_summary"] == "A second edit"
+    assert clip_b["user_summary"] == ""
+    assert clip_a["effective_summary"] == "A second edit"
+    assert clip_b["effective_summary"] == "global summary"
 
 
 def test_reanalysis_of_shared_effective_input_invalidates_every_linked_project(tmp_path):

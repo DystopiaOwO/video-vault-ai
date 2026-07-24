@@ -23,6 +23,8 @@ create table if not exists videos (
   codec text default '',
   file_size integer default 0,
   proxy_path text,
+  user_summary text default '',
+  user_summary_updated_at text,
   status text default 'new'
 );
 create table if not exists frames (
@@ -97,6 +99,9 @@ create table if not exists project_videos (
   display_name text,
   category_override text,
   summary_override text,
+  user_summary text default '',
+  user_summary_updated_at text,
+  summary_migration_state text default 'none',
   analysis_status text,
   perception_revision integer default 0,
   perceived_at text,
@@ -135,6 +140,14 @@ def init_db(db: Path) -> None:
         )
         _ensure_columns(
             con,
+            "videos",
+            {
+                "user_summary": "text default ''",
+                "user_summary_updated_at": "text",
+            },
+        )
+        _ensure_columns(
+            con,
             "segments",
             {
                 "segment_uuid": "text",
@@ -149,6 +162,9 @@ def init_db(db: Path) -> None:
                 "display_name": "text",
                 "category_override": "text",
                 "summary_override": "text",
+                "user_summary": "text default ''",
+                "user_summary_updated_at": "text",
+                "summary_migration_state": "text default 'none'",
                 "analysis_status": "text",
                 "perception_revision": "integer default 0",
                 "perceived_at": "text",
@@ -173,6 +189,7 @@ def init_db(db: Path) -> None:
                 ),
             )
         _backfill_project_media_snapshots(con)
+        _migrate_legacy_summary_ownership(con)
         con.execute(
             "create unique index if not exists idx_segments_segment_uuid on segments(segment_uuid)"
         )
@@ -194,15 +211,59 @@ def _backfill_project_media_snapshots(con: sqlite3.Connection) -> None:
         set display_name=coalesce(nullif(display_name, ''), (select filename from videos where id=project_videos.video_id)),
             category_override=coalesce(nullif(category_override, ''), (select category from videos where id=project_videos.video_id), 'unknown'),
             analysis_status=coalesce(nullif(analysis_status, ''), (select status from videos where id=project_videos.video_id), 'new'),
-            summary_override=coalesce(summary_override, (
-                select coalesce(vision_summary, '')
-                from frames
-                where frames.video_id=project_videos.video_id
-                order by timestamp_seconds, id
-                limit 1
-            ), ''),
+            user_summary=coalesce(user_summary, ''),
+            summary_migration_state=coalesce(nullif(summary_migration_state, ''), 'none'),
             perception_revision=coalesce(perception_revision, 0)"""
     )
+
+
+def _migrate_legacy_summary_ownership(con: sqlite3.Connection) -> None:
+    """Conservatively recover user-authored text from legacy summary_override.
+
+    #37 used summary_override both as an AI snapshot and as the editable field.
+    We migrate only values that clearly differ from the first AI observation, or
+    values saved before frames existed. Identical repeated observations remain
+    flagged for review instead of being guessed as user-authored.
+    """
+    rows = con.execute(
+        """select project_id, video_id, summary_override, user_summary,
+                  coalesce(summary_migration_state, 'none') as migration_state
+        from project_videos
+        where coalesce(summary_override, '')<>''
+          and coalesce(user_summary, '')=''
+          and coalesce(summary_migration_state, 'none')='none'"""
+    ).fetchall()
+    for row in rows:
+        legacy = str(row["summary_override"] or "").strip()
+        frame_summaries = [
+            str(frame["vision_summary"] or "").strip()
+            for frame in con.execute(
+                """select vision_summary from frames
+                where video_id=? and coalesce(vision_summary, '')<>''
+                order by timestamp_seconds, id""",
+                (int(row["video_id"]),),
+            ).fetchall()
+        ]
+        if not frame_summaries or legacy != frame_summaries[0]:
+            con.execute(
+                """update project_videos
+                set user_summary=?, user_summary_updated_at=coalesce(user_summary_updated_at, current_timestamp),
+                    summary_migration_state='migrated'
+                where project_id=? and video_id=?""",
+                (legacy, int(row["project_id"]), int(row["video_id"])),
+            )
+        elif len(set(frame_summaries)) == 1:
+            con.execute(
+                """update project_videos set summary_migration_state='review'
+                where project_id=? and video_id=?""",
+                (int(row["project_id"]), int(row["video_id"])),
+            )
+        else:
+            con.execute(
+                """update project_videos set summary_migration_state='legacy_ai_snapshot'
+                where project_id=? and video_id=?""",
+                (int(row["project_id"]), int(row["video_id"])),
+            )
 
 
 def _legacy_segment_uuid(video_id: int, row_id: int) -> str:
@@ -571,20 +632,18 @@ def update_project_media_summary(db: Path, project_id: int, video_id: int, summa
         if not row:
             return False
         con.execute(
-            "update project_videos set summary_override=? where project_id=? and video_id=?",
-            (str(summary), int(project_id), int(video_id)),
+            """update project_videos
+            set user_summary=?, user_summary_updated_at=current_timestamp,
+                summary_migration_state='native'
+            where project_id=? and video_id=?""",
+            (str(summary).strip(), int(project_id), int(video_id)),
         )
         con.execute("update projects set updated_at=current_timestamp where id=?", (int(project_id),))
         return True
 
 
 def update_video_summary(db: Path, video_id: int, summary: str, project_id: int | None = None) -> bool:
-    """Update a summary without silently mutating multiple projects.
-
-    Project callers should pass ``project_id``. The legacy three-argument call is
-    allowed only when the video is unowned or belongs to exactly one project.
-    Shared media fails closed so an old client cannot overwrite every project.
-    """
+    """Save user-authored context without mutating AI frame perception."""
     init_db(db)
     if project_id is not None:
         return update_project_media_summary(db, int(project_id), int(video_id), summary)
@@ -600,15 +659,21 @@ def update_video_summary(db: Path, video_id: int, summary: str, project_id: int 
             return False
         if len(owners) == 1:
             con.execute(
-                "update project_videos set summary_override=? where project_id=? and video_id=?",
-                (str(summary), owners[0], int(video_id)),
+                """update project_videos
+                set user_summary=?, user_summary_updated_at=current_timestamp,
+                    summary_migration_state='native'
+                where project_id=? and video_id=?""",
+                (str(summary).strip(), owners[0], int(video_id)),
             )
             con.execute("update projects set updated_at=current_timestamp where id=?", (owners[0],))
             return True
-        row = con.execute("select id from frames where video_id=? order by timestamp_seconds limit 1", (video_id,)).fetchone()
-        if not row:
+        exists = con.execute("select 1 from videos where id=?", (int(video_id),)).fetchone()
+        if not exists:
             return False
-        con.execute("update frames set vision_summary=? where video_id=?", (summary, video_id))
+        con.execute(
+            "update videos set user_summary=?, user_summary_updated_at=current_timestamp where id=?",
+            (str(summary).strip(), int(video_id)),
+        )
         return True
 
 
@@ -749,7 +814,8 @@ def set_project_videos(db: Path, project_id: int, video_ids: list[int]) -> None:
             media_uuid = existing.get(video_id) or _project_media_uuid(project_id, video_id)
             snapshot = con.execute(
                 """select filename, category, status,
-                    coalesce((select vision_summary from frames where frames.video_id=videos.id order by timestamp_seconds, id limit 1), '') as summary
+                    coalesce(user_summary, '') as user_summary,
+                    user_summary_updated_at
                 from videos where id=?""",
                 (video_id,),
             ).fetchone()
@@ -758,8 +824,9 @@ def set_project_videos(db: Path, project_id: int, video_ids: list[int]) -> None:
             con.execute(
                 """insert into project_videos(
                     project_id, video_id, project_media_uuid, display_name, category_override,
-                    summary_override, analysis_status, perception_revision, sort_order
-                ) values(?, ?, ?, ?, ?, ?, ?, 0, ?)
+                    summary_override, user_summary, user_summary_updated_at, summary_migration_state,
+                    analysis_status, perception_revision, sort_order
+                ) values(?, ?, ?, ?, ?, '', ?, ?, 'none', ?, 0, ?)
                 on conflict(project_id, video_id) do update set
                   sort_order=excluded.sort_order,
                   project_media_uuid=coalesce(nullif(project_videos.project_media_uuid, ''), excluded.project_media_uuid)""",
@@ -769,7 +836,8 @@ def set_project_videos(db: Path, project_id: int, video_ids: list[int]) -> None:
                     media_uuid,
                     str(snapshot["filename"] or ""),
                     str(snapshot["category"] or "unknown"),
-                    str(snapshot["summary"] or ""),
+                    str(snapshot["user_summary"] or ""),
+                    snapshot["user_summary_updated_at"],
                     str(snapshot["status"] or "new"),
                     order,
                 ),
@@ -817,7 +885,15 @@ def project_videos(db: Path, project_id: int) -> list[sqlite3.Row]:
               pv.project_media_uuid,
               pv.display_name as project_display_name,
               pv.category_override as project_category,
-              pv.summary_override as project_summary,
+              coalesce(nullif(pv.user_summary, ''), (
+                select coalesce(vision_summary, '') from frames
+                where frames.video_id=pv.video_id
+                order by timestamp_seconds, id limit 1
+              ), '') as project_summary,
+              coalesce(pv.user_summary, '') as user_summary,
+              pv.user_summary_updated_at,
+              coalesce(pv.summary_migration_state, 'none') as user_summary_migration_state,
+              pv.summary_override as legacy_summary_override,
               pv.analysis_status as project_analysis_status,
               coalesce(pv.perception_revision, 0) as perception_revision,
               pv.perceived_at,
