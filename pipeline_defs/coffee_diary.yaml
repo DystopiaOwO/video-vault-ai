@@ -1,0 +1,35 @@
+pipeline_id: coffee_diary
+display_name: Coffee Diary
+content_types:
+  - diary_montage
+  - coffee_process
+stages:
+  - ingest
+  - perception
+  - clip_summary
+  - story_planning
+  - review
+  - approval_gate
+  - pre_render_validation
+  - render
+  - post_render_review
+requires_approval_before:
+  - render
+  - opencut_render_clips
+  - hyperframes_mp4
+allowed_before_approval:
+  - story_outline
+  - color_preview
+  - html_preview
+  - dry_run
+perception_tags:
+  - coffee
+  - hands
+  - steam
+  - dripping
+  - closeup
+bgm_mood:
+  - coffee
+  - warm
+  - cozy
+  - lofi

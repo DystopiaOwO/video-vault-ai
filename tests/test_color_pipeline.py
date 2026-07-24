@@ -1,0 +1,58 @@
+from pathlib import Path
+import os
+
+import pytest
+
+from video_vault.color_pipeline import ColorPipelineError, build_color_filter, escape_filter_path
+
+
+def test_none_color_does_not_add_filter():
+    assert build_color_filter({"mode": "none"}) == ""
+
+
+def test_dji_lut_requires_existing_file_and_escapes_path(tmp_path: Path):
+    lut = tmp_path / "DJI LUT.cube"
+    lut.write_text("LUT_3D_SIZE 2\n", encoding="utf-8")
+    result = build_color_filter({"mode": "dji_lut", "lut_path": str(lut)})
+    assert result.startswith("lut3d=file=")
+    assert "DJI LUT.cube" in result
+    with pytest.raises(ColorPipelineError, match="does not exist"):
+        build_color_filter({"mode": "dji_lut", "lut_path": str(tmp_path / "missing.cube")})
+
+
+def test_special_windows_lut_path_is_resolved_and_escaped(tmp_path: Path):
+    lut_dir = tmp_path / "LUT dir,semi;[test]'quote"
+    lut_dir.mkdir()
+    lut = lut_dir / "identity look.cube"
+    lut.write_text("LUT_3D_SIZE 2\n", encoding="utf-8")
+    result = build_color_filter({"mode": "dji_lut", "lut_path": str(lut)})
+    assert r"LUT dir\,semi\;\[test\]\\\'quote/identity look.cube" in result
+    if os.name == "nt":
+        assert r"C\\:" in result
+    else:
+        assert str(lut.resolve()).replace("\\", "/").startswith("/")
+    assert "\\," in result and "\\;" in result and "\\[" in result and "\\]" in result
+
+
+def test_windows_filter_path_escapes_drive_colon_backslash_and_quote():
+    escaped = escape_filter_path(r"C:\work dir\it's.cube")
+    assert escaped == r"C\\:/work dir/it\\\'s.cube"
+
+
+def test_lut_is_not_applied_twice(tmp_path: Path):
+    lut = tmp_path / "identity.cube"
+    lut.write_text("LUT_3D_SIZE 2\n", encoding="utf-8")
+    with pytest.raises(ColorPipelineError, match="more than once"):
+        build_color_filter({"mode": "dji_lut", "lut_path": str(lut)}, lut_already_applied=True)
+
+
+def test_color_filter_order_is_lut_exposure_white_balance_contrast_saturation(tmp_path: Path):
+    lut = tmp_path / "identity.cube"
+    lut.write_text("LUT_3D_SIZE 2\n", encoding="utf-8")
+    result = build_color_filter({"mode": "dji_dlog_m", "lut_path": str(lut), "exposure": 0.4, "temperature": 10, "contrast": 1.05, "saturation": 1.08})
+    assert result.index("lut3d=") < result.index("eq=brightness=") < result.index("colorbalance=") < result.index("eq=contrast=") < result.index("eq=saturation=")
+
+
+def test_highlights_and_shadows_keep_curve_endpoints_in_range():
+    result = build_color_filter({"mode": "manual", "highlights": 0.4, "shadows": 0.3})
+    assert "curves=all='0/0.0360 0.5/0.4920 1/0.9520'" in result
