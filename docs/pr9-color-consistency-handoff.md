@@ -112,7 +112,7 @@
 ## 明天建議接續指令
 
 ```powershell
-cd C:\Users\b3b3b\Documents\Codex\AI剪片助手-render-jobs
+cd <repo-root>
 
 pytest -q
 pytest -q tests/test_color_consistency.py tests/test_segment_renderer.py tests/test_render_manifest.py
