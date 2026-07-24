@@ -15,6 +15,8 @@ from video_vault.timeline_assembler import build_timeline_command
 
 from test_render_manifest import _project
 
+pytestmark = pytest.mark.media_e2e
+
 
 def test_audio_state_is_compiled_into_manifest_and_bgm_is_single_selected_track(tmp_path: Path):
     cfg, db, project_id = _project(tmp_path, count=1)
@@ -212,3 +214,4 @@ def _make_audio(path: Path) -> None:
     ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
     result = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:a", "libmp3lame", str(path)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+

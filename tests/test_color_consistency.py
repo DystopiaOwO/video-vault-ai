@@ -252,6 +252,7 @@ def test_force_analysis_preserves_locked_segment(tmp_path, monkeypatch):
     assert result["segments"]["clip_001_00000000"]["suggested"]["exposure"] == 0.2
 
 
+@pytest.mark.media_e2e
 def test_reference_frame_is_extracted_and_api_has_thumbnail_url(tmp_path):
     cfg, db, project_id, source, video_id = _project(tmp_path)
     subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=320x240:d=1", "-y", str(source)], check=True)
@@ -468,6 +469,7 @@ def test_force_preview_bypasses_cache(tmp_path, monkeypatch):
     assert len(calls) == 4
 
 
+@pytest.mark.media_e2e
 def test_real_ffmpeg_color_preview_writes_before_after(tmp_path):
     cfg, db, project_id, source, _ = _project(tmp_path)
     cfg["color"] = {"video_encoder": "libx264"}
@@ -529,3 +531,4 @@ def test_project_preview_cache_misses_after_same_path_lut_replacement(tmp_path, 
     assert len(calls) == 4
     assert third["previews"][0]["cache_hit"] is False
     assert third["previews"][0]["cache_key"] != second["previews"][0]["cache_key"]
+

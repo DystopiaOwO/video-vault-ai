@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 concurrency:
   group: video-vault-ci-${{ github.workflow }}-${{ github.ref }}
@@ -51,7 +52,13 @@ jobs:
           ffprobe -version
       - name: Verify Python UI import
         run: python -c "import video_vault.ui"
-      - name: Run pytest
+      # Pull requests keep fast feedback by excluding tests that invoke real
+      # FFmpeg pipelines. The complete suite still runs on main and manually.
+      - name: Run pytest (PR fast suite)
+        if: github.event_name == 'pull_request'
+        run: pytest -q -m "not media_e2e"
+      - name: Run pytest (full suite)
+        if: github.event_name != 'pull_request'
         run: pytest -q
       - name: Check source encoding
         run: python scripts/check_encoding.py
@@ -99,3 +106,4 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+

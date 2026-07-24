@@ -13,7 +13,10 @@ from video_vault.segment_renderer import render_segment
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
-pytestmark = pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed")
+pytestmark = [
+    pytest.mark.media_e2e,
+    pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed"),
+]
 
 
 def _run(command):
@@ -120,3 +123,4 @@ def test_real_renderer_handles_audio_silent_speed_cache_corruption_and_lut(tmp_p
     assert (sixty_probe.width, sixty_probe.height, sixty_probe.fps, sixty_probe.pixel_format) == (1920, 1080, 30, "yuv420p")
     assert sixty_probe.has_audio and (sixty_probe.sample_rate, sixty_probe.channels) == (48000, 2)
     assert sixty_probe.duration_seconds == pytest.approx(1, abs=0.12)
+

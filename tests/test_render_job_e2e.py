@@ -19,6 +19,8 @@ from video_vault.render_job_manager import RenderJobManager
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
 
+pytestmark = pytest.mark.media_e2e
+
 
 def _run(command):
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False)
@@ -216,3 +218,4 @@ def _pid_exists(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+

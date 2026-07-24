@@ -14,7 +14,10 @@ from video_vault.storyboard_preview import render_storyboard_preview, storyboard
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
-pytestmark = pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed")
+pytestmark = [
+    pytest.mark.media_e2e,
+    pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed"),
+]
 
 
 def _project(tmp_path: Path) -> tuple[dict, Path, int]:
@@ -115,3 +118,4 @@ def test_range_preview_honors_timeline_start_and_transient_state(tmp_path: Path)
 
     assert result["timeline_start_seconds"] == pytest.approx(3, abs=0.01)
     assert state_path.read_text(encoding="utf-8") == before
+

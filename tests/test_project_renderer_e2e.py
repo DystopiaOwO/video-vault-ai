@@ -16,7 +16,10 @@ from video_vault.project_renderer import render_project
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
-pytestmark = pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed")
+pytestmark = [
+    pytest.mark.media_e2e,
+    pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed"),
+]
 
 
 def _run(command):
@@ -201,3 +204,4 @@ def test_real_ffmpeg_speed_keeps_audio_video_aligned(tmp_path: Path, speed: floa
     assert any(stream.get("codec_type") == "video" for stream in streams)
     assert any(stream.get("codec_type") == "audio" for stream in streams)
     assert result.duration_seconds == pytest.approx(expected, abs=0.15)
+

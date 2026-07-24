@@ -14,7 +14,10 @@ from video_vault.project import build_project_plan, create_project, project_dir
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
-pytestmark = pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed")
+pytestmark = [
+    pytest.mark.media_e2e,
+    pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed"),
+]
 
 
 def _run(command: list[str]) -> None:
@@ -223,3 +226,4 @@ def test_source_same_size_same_mtime_content_change_changes_fingerprint(tmp_path
     assert before["size"] == after["size"]
     assert before["mtime_ns"] == after["mtime_ns"]
     assert before["sha256"] != after["sha256"]
+
