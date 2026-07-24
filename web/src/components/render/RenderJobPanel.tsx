@@ -153,7 +153,7 @@ export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject, mu
   async function refresh() {
     setRefreshing(true);
     try {
-      await refreshProject({ forceFresh: true });
+      await refreshProject({ forceFresh: true, throwOnError: true });
       setProjectMessage("工作狀態已更新。");
     } catch (error) {
       if (controls.isCurrentProject(projectId)) {
