@@ -21,6 +21,7 @@ from video_vault.database import (
 from video_vault.naming import rename_after_perception
 from video_vault.project import build_project_plan, create_project, project_detail
 from video_vault.segment_state_migration import migrate_segment_state_for_video
+from video_vault.ui import _restore_project_registration
 
 
 def _video(db: Path, path: Path) -> int:
@@ -195,3 +196,51 @@ def test_reordering_preserves_project_local_metadata(tmp_path):
     assert [int(row["id"]) for row in rows] == [second, first]
     assert rows[1]["project_media_uuid"] == first_uuid
     assert rows[1]["project_summary"] == "first summary"
+
+
+def test_upload_rollback_restores_complete_project_media_rows(tmp_path):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    video_id = _video(db, tmp_path / "clip.mp4")
+    project_id = create_project(db, "A", [video_id])
+    with connect(db) as con:
+        con.execute(
+            """update project_videos
+            set display_name=?, category_override=?, summary_override=?, analysis_status=?,
+                perception_revision=?, perceived_at=?
+            where project_id=? and video_id=?""",
+            (
+                "A display.mp4",
+                "coffee",
+                "A summary",
+                "perceived",
+                7,
+                "2026-07-24 18:00:00",
+                project_id,
+                video_id,
+            ),
+        )
+    before = dict(project_videos(db, project_id)[0])
+    previous_project = dict(project(db, project_id))
+
+    _restore_project_registration(
+        db,
+        project_id,
+        [video_id],
+        [],
+        previous_project["status"],
+        previous_project["updated_at"],
+    )
+
+    after = dict(project_videos(db, project_id)[0])
+    for key in (
+        "project_media_uuid",
+        "project_display_name",
+        "project_category",
+        "project_summary",
+        "project_analysis_status",
+        "perception_revision",
+        "perceived_at",
+        "sort_order",
+    ):
+        assert after[key] == before[key]
