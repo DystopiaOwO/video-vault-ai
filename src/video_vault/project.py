@@ -32,14 +32,20 @@ def sync_project_files(cfg: dict, db: Path, project_id: int) -> list[dict]:
     result = []
     for order, video in enumerate(rows, 1):
         clip_id = f"clip_{order:03}"
+        project_media_id = str(video.get("project_media_uuid") or f"video_{video['id']}")
+        storage_id = f"media_{project_media_id}"
         src = Path(video["current_path"])
-        dst = src if src.parent.resolve() == source_dir.resolve() else source_dir / f"{clip_id}_{src.name}"
+        dst = src if src.parent.resolve() == source_dir.resolve() else source_dir / f"{storage_id}_{src.name}"
         if src.exists() and not dst.exists():
             shutil.copy2(src, dst)
-        clip_dir = clips_dir / clip_id
-        clip_dir.mkdir(parents=True, exist_ok=True)
+        stable_clip_dir = clips_dir / storage_id
+        display_clip_dir = clips_dir / clip_id
+        stable_clip_dir.mkdir(parents=True, exist_ok=True)
+        display_clip_dir.mkdir(parents=True, exist_ok=True)
         data = {
             "clip_id": clip_id,
+            "project_media_id": project_media_id,
+            "storage_id": storage_id,
             "project_id": project_id,
             "video_id": video["id"],
             "filename": dst.name,
@@ -54,7 +60,10 @@ def sync_project_files(cfg: dict, db: Path, project_id: int) -> list[dict]:
             "segment_count": len(list(segments(db, int(video["id"])))),
             "visual_summary": _visual_summary(db, int(video["id"])),
         }
-        (clip_dir / "clip.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload = json.dumps(data, ensure_ascii=False, indent=2)
+        (stable_clip_dir / "clip.json").write_text(payload, encoding="utf-8")
+        # clip_001 remains a display alias for compatibility; stable references use project_media_id.
+        (display_clip_dir / "clip.json").write_text(payload, encoding="utf-8")
         result.append(data)
     return result
 
@@ -86,7 +95,10 @@ def build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
             group["clips"].append(_clip_summary(clip))
             group["segments"].append(
                 {
+                    "segment_id": str(seg.get("segment_uuid") or ""),
+                    "segment_revision": int(seg.get("revision") or 1),
                     "clip_id": clip["clip_id"],
+                    "project_media_id": clip["project_media_id"],
                     "video_id": video["id"],
                     "source_file": clip["source_path"],
                     "start_seconds": seg["start_seconds"],
@@ -162,7 +174,7 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
 
     public_plan = _public_plan_bgm(plan)
     public_segments = []
-    for segment in project_segments(cfg, project_id, plan):
+    for segment in project_segments(cfg, project_id, plan, db=db):
         public_segment = dict(segment)
         source = public_segment.get("source_file", "")
         public_segment["source_filename"] = Path(str(source)).name if source else ""
@@ -190,7 +202,7 @@ def project_workflow(cfg: dict, db: Path, project_id: int, plan: dict | None = N
     clips = sync_project_files(cfg, db, project_id)
     plan = plan or _read_json(folder / "project_plan.json")
     review = _read_json(folder / "review_status.json")
-    segments = project_segments(cfg, project_id, plan)
+    project_segments(cfg, project_id, plan, db=db)
     outputs = folder / "output"
     stages = [
         _stage("import", "匯入素材", bool(clips), [folder / "source"]),
@@ -235,16 +247,26 @@ def _public_bgm_row(row: dict) -> dict:
     }
 
 
-def project_segments(cfg: dict, project_id: int, plan: dict, *, apply_storyboard: bool = True) -> list[dict]:
-    reviews = {row.get("segment_id"): row for row in _segment_review(cfg, project_id)}
+def project_segments(cfg: dict, project_id: int, plan: dict, *, apply_storyboard: bool = True, db: Path | None = None) -> list[dict]:
+    review_rows = _segment_review(cfg, project_id)
+    reviews = {str(row.get("segment_id") or ""): row for row in review_rows}
+    identity_rows = _project_segment_identity_rows(db, project_id) if db is not None else {}
     rows = []
     for group in plan.get("groups", []):
         for order, seg in enumerate(group.get("segments", []), 1):
-            segment_id = f"{seg.get('clip_id', 'clip')}_{int(float(seg.get('start_seconds') or 0) * 1000):08d}"
+            legacy_segment_id = _legacy_segment_id(seg)
+            segment_id = str(seg.get("segment_id") or seg.get("segment_uuid") or "")
+            if not segment_id and identity_rows:
+                segment_id = _resolve_plan_segment_identity(seg, identity_rows)
+            if not segment_id:
+                segment_id = legacy_segment_id
+            review = reviews.get(segment_id) or reviews.get(legacy_segment_id) or {}
             rows.append(
                 {
                     **seg,
                     "segment_id": segment_id,
+                    "legacy_segment_id": legacy_segment_id,
+                    "identity_aliases": [legacy_segment_id] if legacy_segment_id != segment_id else [],
                     "group": group.get("label", ""),
                     "manual_order": len(rows) + 1,
                     "scene_role": _scene_role(seg),
@@ -254,7 +276,8 @@ def project_segments(cfg: dict, project_id: int, plan: dict, *, apply_storyboard
                     "speed": 1.0,
                     "user_notes": "",
                     "group_order": int(group.get("order", 999)),
-                    **reviews.get(segment_id, {}),
+                    **review,
+                    "segment_id": segment_id,
                 }
             )
     ordered = sorted(rows, key=lambda row: (int(row.get("manual_order") or 999999), int(row.get("group_order") or 999), row.get("clip_id", ""), float(row.get("start_seconds") or 0)))
@@ -263,7 +286,7 @@ def project_segments(cfg: dict, project_id: int, plan: dict, *, apply_storyboard
 
         state = load_storyboard(cfg, project_id)
         if state is not None:
-            return apply_storyboard_state(ordered, state)
+            return apply_storyboard_state(ordered, _state_with_identity_aliases(state, ordered))
     return ordered
 
 
@@ -273,7 +296,7 @@ def _stage(stage_id: str, label: str, done: bool, artifacts: list[Path]) -> dict
 
 def save_segment_review(cfg: dict, db: Path, project_id: int, rows: list[dict]) -> Path:
     allowed = {"segment_id", "include", "user_notes", "manual_order", "scene_role", "story_position", "audio_role", "speed", "start_seconds", "end_seconds"}
-    current = {str(row.get("segment_id")): row for row in project_segments(cfg, project_id, _read_json(project_dir(cfg, project_id) / "project_plan.json"), apply_storyboard=False)}
+    current = {str(row.get("segment_id")): row for row in project_segments(cfg, project_id, _read_json(project_dir(cfg, project_id) / "project_plan.json"), apply_storyboard=False, db=db)}
     videos = {int(row["id"]): dict(row) for row in project_videos(db, project_id)}
     data = []
     for index, row in enumerate(rows, 1):
@@ -314,7 +337,7 @@ def update_segment_timing(
     """Patch only one segment's timing without copying storyboard metadata."""
     segment_id = str(segment_id or "")
     plan = _read_json(project_dir(cfg, project_id) / "project_plan.json")
-    raw_rows = project_segments(cfg, project_id, plan, apply_storyboard=False)
+    raw_rows = project_segments(cfg, project_id, plan, apply_storyboard=False, db=db)
     source = next((row for row in raw_rows if str(row.get("segment_id")) == segment_id), None)
     if source is None:
         raise ValueError(f"找不到片段：{segment_id}")
@@ -449,7 +472,7 @@ def can_project_render(cfg: dict, db: Path, project_id: int) -> tuple[bool, str]
         from .storyboard import load_storyboard, validate_storyboard
 
         storyboard = load_storyboard(cfg, project_id)
-        storyboard_validation = validate_storyboard(storyboard or {}, project_segments(cfg, project_id, plan, apply_storyboard=False))
+        storyboard_validation = validate_storyboard(storyboard or {}, project_segments(cfg, project_id, plan, apply_storyboard=False, db=db))
         if not storyboard_validation["valid"]:
             return False, "Storyboard 無效：" + "; ".join(storyboard_validation["errors"])
     except Exception as exc:
@@ -495,7 +518,7 @@ def pre_render_validation(cfg: dict, db: Path, project_id: int) -> dict:
     for clip in sync_project_files(cfg, db, project_id):
         if not Path(clip["source_path"]).exists():
             errors.append(f"source missing: {clip['source_path']}")
-    for seg in project_segments(cfg, project_id, plan):
+    for seg in project_segments(cfg, project_id, plan, db=db):
         if float(seg.get("end_seconds") or 0) <= float(seg.get("start_seconds") or 0):
             errors.append(f"bad segment range: {seg.get('segment_id')}")
     for track in project_bgm_tracks(db, project_id):
@@ -562,12 +585,12 @@ def write_project_files(cfg: dict, plan: dict) -> tuple[Path, Path]:
 
 
 def project_script(plan: dict) -> str:
-    segments = [seg for group in plan["groups"] for seg in group["segments"]]
+    segments_list = [seg for group in plan["groups"] for seg in group["segments"]]
     lines = [
         f"# {plan['name']}",
         "",
         "## 剪輯方向",
-        f"- 這個專案有 {len(plan['clips'])} 支素材，目前找到 {len(segments)} 段可用片段。",
+        f"- 這個專案有 {len(plan['clips'])} 支素材，目前找到 {len(segments_list)} 段可用片段。",
         f"- 建議先做成「{_content_type_label(plan['content_type'])}」，用時間順序當主線，再穿插特寫與氣氛鏡頭。",
         f"- 先不要急著全剪進去，優先挑每組分數最高的片段做第一版。",
         _bgm_line(plan.get("bgm_recommendations", []) or plan.get("bgm", [])),
@@ -695,7 +718,65 @@ def project_info_is_travel(row) -> bool:
 
 
 def _clip_summary(clip: dict) -> dict:
-    return {k: clip[k] for k in ("clip_id", "video_id", "filename", "source_path", "order", "duration_seconds", "detected_category", "time_of_day", "status", "segment_count", "visual_summary")}
+    return {k: clip[k] for k in ("clip_id", "project_media_id", "video_id", "filename", "source_path", "order", "duration_seconds", "detected_category", "time_of_day", "status", "segment_count", "visual_summary")}
+
+
+def _project_segment_identity_rows(db: Path, project_id: int) -> dict[int, list[dict]]:
+    by_video: dict[int, list[dict]] = {}
+    for video in project_videos(db, project_id):
+        video_id = int(video["id"])
+        by_video[video_id] = [dict(row) for row in segments(db, video_id)]
+    return by_video
+
+
+def _resolve_plan_segment_identity(seg: dict, identity_rows: dict[int, list[dict]]) -> str:
+    try:
+        video_id = int(seg.get("video_id") or 0)
+    except (TypeError, ValueError):
+        return ""
+    candidates = identity_rows.get(video_id, [])
+    if not candidates:
+        return ""
+    ranked = sorted(
+        ((_plan_segment_match_score(seg, candidate), candidate) for candidate in candidates),
+        key=lambda pair: pair[0],
+        reverse=True,
+    )
+    if not ranked or ranked[0][0] < 0.45:
+        return ""
+    return str(ranked[0][1].get("segment_uuid") or "")
+
+
+def _plan_segment_match_score(left: dict, right: dict) -> float:
+    left_start = float(left.get("start_seconds") or 0)
+    left_end = float(left.get("end_seconds") or left_start)
+    right_start = float(right.get("start_seconds") or 0)
+    right_end = float(right.get("end_seconds") or right_start)
+    overlap = max(0.0, min(left_end, right_end) - max(left_start, right_start))
+    union = max(0.001, max(left_end, right_end) - min(left_start, right_start))
+    iou = overlap / union
+    left_duration = max(0.001, left_end - left_start)
+    right_duration = max(0.001, right_end - right_start)
+    midpoint_scale = max(1.0, left_duration, right_duration)
+    midpoint_similarity = max(0.0, 1.0 - abs((left_start + left_end) / 2 - (right_start + right_end) / 2) / midpoint_scale)
+    return 0.8 * iou + 0.2 * midpoint_similarity
+
+
+def _legacy_segment_id(seg: dict) -> str:
+    return f"{seg.get('clip_id', 'clip')}_{int(float(seg.get('start_seconds') or 0) * 1000):08d}"
+
+
+def _state_with_identity_aliases(state: dict, rows: list[dict]) -> dict:
+    result = deepcopy(state)
+    configured = result.get("segments")
+    if not isinstance(configured, dict):
+        return result
+    for row in rows:
+        stable_id = str(row.get("segment_id") or "")
+        legacy_id = str(row.get("legacy_segment_id") or "")
+        if stable_id and legacy_id and stable_id not in configured and legacy_id in configured:
+            configured[stable_id] = deepcopy(configured[legacy_id])
+    return result
 
 
 def _visual_summary(db: Path, video_id: int) -> str:
@@ -713,8 +794,9 @@ def _dedupe(items: list[dict]) -> list[dict]:
     seen = set()
     result = []
     for item in items:
-        if item["clip_id"] not in seen:
-            seen.add(item["clip_id"])
+        identity = item.get("project_media_id") or item["clip_id"]
+        if identity not in seen:
+            seen.add(identity)
             result.append(item)
     return result
 
