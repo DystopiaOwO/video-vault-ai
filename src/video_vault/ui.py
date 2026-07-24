@@ -1275,13 +1275,31 @@ def _restore_project_registration(
     previous_status: str | None,
     previous_updated_at: str | None,
 ) -> None:
-    """Restore the project relation and remove only rows created by this request."""
+    """Restore complete project-media rows and remove only request-created rows."""
     with connect(db) as con:
+        previous_rows = {
+            int(row["video_id"]): dict(row)
+            for row in con.execute(
+                "select * from project_videos where project_id=?",
+                (project_id,),
+            ).fetchall()
+        }
         con.execute("delete from project_videos where project_id=?", (project_id,))
         for order, video_id in enumerate(previous_video_ids, 1):
+            snapshot = previous_rows.get(int(video_id))
+            if snapshot is None:
+                con.execute(
+                    "insert into project_videos(project_id, video_id, sort_order) values(?, ?, ?)",
+                    (project_id, video_id, order),
+                )
+                continue
+            snapshot["project_id"] = project_id
+            snapshot["video_id"] = int(video_id)
+            snapshot["sort_order"] = order
+            columns = list(snapshot)
             con.execute(
-                "insert into project_videos(project_id, video_id, sort_order) values(?, ?, ?)",
-                (project_id, video_id, order),
+                f"insert into project_videos({', '.join(columns)}) values({', '.join('?' for _ in columns)})",
+                tuple(snapshot[column] for column in columns),
             )
         if previous_status is not None:
             if previous_updated_at is None:

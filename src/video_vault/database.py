@@ -94,6 +94,12 @@ create table if not exists project_videos (
   project_id integer not null,
   video_id integer not null,
   project_media_uuid text,
+  display_name text,
+  category_override text,
+  summary_override text,
+  analysis_status text,
+  perception_revision integer default 0,
+  perceived_at text,
   sort_order integer default 0,
   primary key(project_id, video_id)
 );
@@ -135,7 +141,19 @@ def init_db(db: Path) -> None:
                 "revision": "integer default 1",
             },
         )
-        _ensure_columns(con, "project_videos", {"project_media_uuid": "text"})
+        _ensure_columns(
+            con,
+            "project_videos",
+            {
+                "project_media_uuid": "text",
+                "display_name": "text",
+                "category_override": "text",
+                "summary_override": "text",
+                "analysis_status": "text",
+                "perception_revision": "integer default 0",
+                "perceived_at": "text",
+            },
+        )
         for row in con.execute(
             "select id, video_id from segments where segment_uuid is null or segment_uuid=''"
         ).fetchall():
@@ -154,6 +172,7 @@ def init_db(db: Path) -> None:
                     int(row["video_id"]),
                 ),
             )
+        _backfill_project_media_snapshots(con)
         con.execute(
             "create unique index if not exists idx_segments_segment_uuid on segments(segment_uuid)"
         )
@@ -167,6 +186,23 @@ def _ensure_columns(con: sqlite3.Connection, table: str, columns: dict[str, str]
     for name, spec in columns.items():
         if name not in existing:
             con.execute(f"alter table {table} add column {name} {spec}")
+
+
+def _backfill_project_media_snapshots(con: sqlite3.Connection) -> None:
+    con.execute(
+        """update project_videos
+        set display_name=coalesce(nullif(display_name, ''), (select filename from videos where id=project_videos.video_id)),
+            category_override=coalesce(nullif(category_override, ''), (select category from videos where id=project_videos.video_id), 'unknown'),
+            analysis_status=coalesce(nullif(analysis_status, ''), (select status from videos where id=project_videos.video_id), 'new'),
+            summary_override=coalesce(summary_override, (
+                select coalesce(vision_summary, '')
+                from frames
+                where frames.video_id=project_videos.video_id
+                order by timestamp_seconds, id
+                limit 1
+            ), ''),
+            perception_revision=coalesce(perception_revision, 0)"""
+    )
 
 
 def _legacy_segment_uuid(video_id: int, row_id: int) -> str:
@@ -525,13 +561,107 @@ def frames(db: Path, video_id: int) -> list[sqlite3.Row]:
         return con.execute("select * from frames where video_id=? order by timestamp_seconds", (video_id,)).fetchall()
 
 
-def update_video_summary(db: Path, video_id: int, summary: str) -> bool:
+def update_project_media_summary(db: Path, project_id: int, video_id: int, summary: str) -> bool:
+    init_db(db)
     with connect(db) as con:
+        row = con.execute(
+            "select 1 from project_videos where project_id=? and video_id=?",
+            (int(project_id), int(video_id)),
+        ).fetchone()
+        if not row:
+            return False
+        con.execute(
+            "update project_videos set summary_override=? where project_id=? and video_id=?",
+            (str(summary), int(project_id), int(video_id)),
+        )
+        con.execute("update projects set updated_at=current_timestamp where id=?", (int(project_id),))
+        return True
+
+
+def update_video_summary(db: Path, video_id: int, summary: str, project_id: int | None = None) -> bool:
+    """Update a summary without silently mutating multiple projects.
+
+    Project callers should pass ``project_id``. The legacy three-argument call is
+    allowed only when the video is unowned or belongs to exactly one project.
+    Shared media fails closed so an old client cannot overwrite every project.
+    """
+    init_db(db)
+    if project_id is not None:
+        return update_project_media_summary(db, int(project_id), int(video_id), summary)
+    with connect(db) as con:
+        owners = [
+            int(row["project_id"])
+            for row in con.execute(
+                "select project_id from project_videos where video_id=? order by project_id",
+                (int(video_id),),
+            ).fetchall()
+        ]
+        if len(owners) > 1:
+            return False
+        if len(owners) == 1:
+            con.execute(
+                "update project_videos set summary_override=? where project_id=? and video_id=?",
+                (str(summary), owners[0], int(video_id)),
+            )
+            con.execute("update projects set updated_at=current_timestamp where id=?", (owners[0],))
+            return True
         row = con.execute("select id from frames where video_id=? order by timestamp_seconds limit 1", (video_id,)).fetchone()
         if not row:
             return False
         con.execute("update frames set vision_summary=? where video_id=?", (summary, video_id))
         return True
+
+
+def update_project_media_metadata(
+    db: Path,
+    project_media_uuid: str,
+    *,
+    display_name: str | None = None,
+    category: str | None = None,
+    analysis_status: str | None = None,
+    increment_perception_revision: bool = False,
+) -> bool:
+    init_db(db)
+    updates: list[str] = []
+    values: list[object] = []
+    if display_name is not None:
+        updates.append("display_name=?")
+        values.append(str(display_name))
+    if category is not None:
+        updates.append("category_override=?")
+        values.append(str(category))
+    if analysis_status is not None:
+        updates.append("analysis_status=?")
+        values.append(str(analysis_status))
+    if increment_perception_revision:
+        updates.extend(["perception_revision=coalesce(perception_revision, 0)+1", "perceived_at=current_timestamp"])
+    if not updates:
+        return False
+    with connect(db) as con:
+        owner = con.execute(
+            "select project_id from project_videos where project_media_uuid=?",
+            (str(project_media_uuid),),
+        ).fetchone()
+        if not owner:
+            return False
+        con.execute(
+            f"update project_videos set {', '.join(updates)} where project_media_uuid=?",
+            (*values, str(project_media_uuid)),
+        )
+        con.execute("update projects set updated_at=current_timestamp where id=?", (int(owner["project_id"]),))
+        return True
+
+
+def project_ids_for_video(db: Path, video_id: int) -> list[int]:
+    init_db(db)
+    with connect(db) as con:
+        return [
+            int(row["project_id"])
+            for row in con.execute(
+                "select project_id from project_videos where video_id=? order by project_id",
+                (int(video_id),),
+            ).fetchall()
+        ]
 
 
 def set_video_status(db: Path, video_id: int, status: str) -> None:
@@ -617,13 +747,32 @@ def set_project_videos(db: Path, project_id: int, video_ids: list[int]) -> None:
             con.execute("delete from project_videos where project_id=?", (project_id,))
         for order, video_id in enumerate(ordered_ids, 1):
             media_uuid = existing.get(video_id) or _project_media_uuid(project_id, video_id)
+            snapshot = con.execute(
+                """select filename, category, status,
+                    coalesce((select vision_summary from frames where frames.video_id=videos.id order by timestamp_seconds, id limit 1), '') as summary
+                from videos where id=?""",
+                (video_id,),
+            ).fetchone()
+            if not snapshot:
+                raise ValueError(f"video not found: {video_id}")
             con.execute(
-                """insert into project_videos(project_id, video_id, project_media_uuid, sort_order)
-                values(?, ?, ?, ?)
+                """insert into project_videos(
+                    project_id, video_id, project_media_uuid, display_name, category_override,
+                    summary_override, analysis_status, perception_revision, sort_order
+                ) values(?, ?, ?, ?, ?, ?, ?, 0, ?)
                 on conflict(project_id, video_id) do update set
                   sort_order=excluded.sort_order,
                   project_media_uuid=coalesce(nullif(project_videos.project_media_uuid, ''), excluded.project_media_uuid)""",
-                (project_id, video_id, media_uuid, order),
+                (
+                    project_id,
+                    video_id,
+                    media_uuid,
+                    str(snapshot["filename"] or ""),
+                    str(snapshot["category"] or "unknown"),
+                    str(snapshot["summary"] or ""),
+                    str(snapshot["status"] or "new"),
+                    order,
+                ),
             )
         con.execute("update projects set updated_at=current_timestamp where id=?", (project_id,))
 
@@ -645,9 +794,34 @@ def project(db: Path, project_id: int) -> sqlite3.Row | None:
 
 
 def project_videos(db: Path, project_id: int) -> list[sqlite3.Row]:
+    init_db(db)
     with connect(db) as con:
         return con.execute(
-            """select v.*, pv.project_media_uuid, pv.sort_order
+            """select
+              v.id,
+              v.original_path,
+              v.current_path,
+              coalesce(nullif(pv.display_name, ''), v.filename) as filename,
+              coalesce(nullif(pv.category_override, ''), v.category, 'unknown') as category,
+              v.created_at,
+              v.imported_at,
+              v.duration_seconds,
+              v.width,
+              v.height,
+              v.fps,
+              v.codec,
+              v.file_size,
+              v.proxy_path,
+              coalesce(nullif(pv.analysis_status, ''), v.status, 'new') as status,
+              pv.project_id,
+              pv.project_media_uuid,
+              pv.display_name as project_display_name,
+              pv.category_override as project_category,
+              pv.summary_override as project_summary,
+              pv.analysis_status as project_analysis_status,
+              coalesce(pv.perception_revision, 0) as perception_revision,
+              pv.perceived_at,
+              pv.sort_order
             from project_videos pv
             join videos v on v.id=pv.video_id
             where pv.project_id=?

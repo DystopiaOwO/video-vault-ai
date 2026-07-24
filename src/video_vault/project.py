@@ -42,23 +42,27 @@ def sync_project_files(cfg: dict, db: Path, project_id: int) -> list[dict]:
         display_clip_dir = clips_dir / clip_id
         stable_clip_dir.mkdir(parents=True, exist_ok=True)
         display_clip_dir.mkdir(parents=True, exist_ok=True)
+        display_name = str(video.get("filename") or src.name)
+        project_summary = video.get("project_summary")
+        visual_summary = str(project_summary) if project_summary is not None else _visual_summary(db, int(video["id"]))
         data = {
             "clip_id": clip_id,
             "project_media_id": project_media_id,
             "storage_id": storage_id,
             "project_id": project_id,
             "video_id": video["id"],
-            "filename": dst.name,
+            "filename": display_name,
+            "physical_filename": dst.name,
             "source_path": str(dst),
             "original_source_path": video["current_path"],
             "order": order,
             "included": True,
             "duration_seconds": video["duration_seconds"],
             "detected_category": video["category"],
-            "time_of_day": _time_label(video),
+            "time_of_day": _time_label({**video, "filename": display_name}),
             "status": video.get("status") or "uploaded",
             "segment_count": len(list(segments(db, int(video["id"])))),
-            "visual_summary": _visual_summary(db, int(video["id"])),
+            "visual_summary": visual_summary,
         }
         payload = json.dumps(data, ensure_ascii=False, indent=2)
         (stable_clip_dir / "clip.json").write_text(payload, encoding="utf-8")
