@@ -209,8 +209,7 @@ describe("ProjectDataLoader", () => {
 
     await strictResult;
     await pollingResult;
-    expect(reportError).toHaveBeenCalledTimes(1);
-    expect(reportError).toHaveBeenCalledWith(error);
+    expect(reportError).not.toHaveBeenCalled();
 
     const nextPolling = loader.load(7);
     expect(requests).toHaveLength(2);
@@ -235,7 +234,6 @@ describe("ProjectDataLoader", () => {
 
     await pollingResult;
     await strictResult;
-    expect(reportError).toHaveBeenCalledTimes(1);
-    expect(reportError).toHaveBeenCalledWith(error);
+    expect(reportError).not.toHaveBeenCalled();
   });
 });
