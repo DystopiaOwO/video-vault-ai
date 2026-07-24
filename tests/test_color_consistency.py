@@ -181,7 +181,6 @@ def test_frame_in_excluded_project_segment_is_not_a_reference_candidate(tmp_path
     assert analyze_project_color(cfg, db, project_id, force=True)["reference"]["timestamp_seconds"] == 25
 
 
-@pytest.mark.media_e2e
 def test_frame_in_disabled_project_segment_is_not_a_reference_candidate(tmp_path):
     cfg, db, project_id, _, video_id = _project(tmp_path)
     segment = {"clip_id": "disabled", "video_id": video_id, "start_seconds": 0, "end_seconds": 10, "title": "disabled"}

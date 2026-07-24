@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+import subprocess
 import sys
 
 
@@ -63,3 +64,38 @@ def test_media_smoke_test_change_enables_media_smoke():
     selection = select_changed_files(["tests/test_media_smoke.py"])
     assert selection.media_smoke is True
     assert selection.targeted_tests == []
+
+
+def _collect(path: str, marker_expression: str) -> str:
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", path, "-m", marker_expression],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def test_pure_audio_manifest_test_is_collected_without_media_marker():
+    output = _collect(
+        "tests/test_audio_mixing.py::test_selected_bgm_id_and_bgm_only_without_track_block_manifest",
+        "not media_e2e",
+    )
+    assert "test_selected_bgm_id_and_bgm_only_without_track_block_manifest" in output
+
+
+def test_pure_color_candidate_test_is_collected_without_media_marker():
+    output = _collect(
+        "tests/test_color_consistency.py::test_frame_in_disabled_project_segment_is_not_a_reference_candidate",
+        "not media_e2e",
+    )
+    assert "test_frame_in_disabled_project_segment_is_not_a_reference_candidate" in output
+
+
+def test_real_ffmpeg_e2e_test_keeps_media_marker():
+    output = _collect(
+        "tests/test_color_consistency.py::test_real_ffmpeg_color_preview_writes_before_after",
+        "media_e2e",
+    )
+    assert "test_real_ffmpeg_color_preview_writes_before_after" in output
