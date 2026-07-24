@@ -87,11 +87,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install FFmpeg on Windows
-        if: github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.suite == 'media' || inputs.suite == 'full'))
+        if: runner.os == 'Windows' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.suite == 'media' || inputs.suite == 'full')))
         shell: pwsh
         run: choco install ffmpeg -y --no-progress
       - name: Install FFmpeg on Ubuntu
-        if: github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.suite == 'media' || inputs.suite == 'full'))
+        if: runner.os == 'Linux' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.suite == 'media' || inputs.suite == 'full')))
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
