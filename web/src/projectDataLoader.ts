@@ -15,6 +15,7 @@ type PendingRequest = {
   generation: number;
   promise: Promise<Job[]>;
   errorReported: boolean;
+  hasThrowingCaller: boolean;
 };
 
 export class ProjectDataLoader {
@@ -66,6 +67,7 @@ export class ProjectDataLoader {
       generation,
       promise,
       errorReported: false,
+      hasThrowingCaller: false,
     };
     this.pending = request;
     void promise.then(
@@ -80,10 +82,13 @@ export class ProjectDataLoader {
   }
 
   private settle(request: PendingRequest, options: ProjectDataLoadOptions): Promise<Job[]> {
+    const throwOnError = options.throwOnError === true;
+    if (throwOnError) request.hasThrowingCaller = true;
     return request.promise.catch((error) => {
-      if (options.throwOnError === true) throw error;
+      if (throwOnError) throw error;
       if (
-        !request.errorReported
+        !request.hasThrowingCaller
+        && !request.errorReported
         && this.isMounted()
         && request.generation === this.generation
         && this.isCurrentProject(request.projectId)
