@@ -141,6 +141,14 @@ def build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
         group["clips"] = _dedupe(group["clips"])
         group["story_context"] = _dedupe_story_context(group["story_context"])
         group["segments"].sort(key=lambda s: (s["clip_id"], float(s["start_seconds"] or 0)) if itinerary or project_info_is_travel(row) else (-float(s["score"] or 0), s["clip_id"], float(s["start_seconds"] or 0)))
+    story_context_usage = _dedupe_story_context(
+        [
+            context
+            for group in ordered
+            for context in group.get("story_context", [])
+            if context.get("user_summary")
+        ]
+    )
     project_info = dict(row)
     pipeline = pipeline_for_project(project_info)
     bgm_recommendations = recommend_bgm_for_groups(cfg, db, project_id, project_info, ordered)
@@ -162,10 +170,7 @@ def build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
         "status": "needs_review",
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "clips": [_clip_summary(c) for c in clips],
-        "story_context_usage": [
-            _story_context_usage(c, story_context(c["user_summary"], c["ai_visual_summary"], "其他"))
-            for c in clips if c.get("user_summary")
-        ],
+        "story_context_usage": story_context_usage,
         "groups": ordered,
         "bgm": bgm,
         "bgm_recommendations": bgm_recommendations,
@@ -173,10 +178,8 @@ def build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
         "revision_notes": revision_notes,
         "feedback_applied": [
             f"{item['clip_id']} 使用 user_summary 指引故事分組"
-            for item in [
-                _story_context_usage(c, story_context(c["user_summary"], c["ai_visual_summary"], "其他"))
-                for c in clips if c.get("user_summary")
-            ]
+            for item in story_context_usage
+            if item.get("guidance_applied")
         ],
         "feedback_unresolved": ["已記錄審核備註；自動重排片段留到 segment review 階段。"] if revision_notes else [],
     }
