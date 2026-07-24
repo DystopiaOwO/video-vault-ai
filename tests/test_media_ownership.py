@@ -19,7 +19,7 @@ from video_vault.database import (
     videos,
 )
 from video_vault.naming import rename_after_perception
-from video_vault.project import build_project_plan, create_project
+from video_vault.project import build_project_plan, create_project, project_detail
 from video_vault.segment_state_migration import migrate_segment_state_for_video
 
 
@@ -105,6 +105,10 @@ def test_project_naming_is_local_and_shared_source_is_immutable(tmp_path, monkey
     assert b_after["perception_revision"] == 0
     assert b_after["current_path"] == str(source)
 
+    cfg = {"library_root": str(tmp_path)}
+    assert project_detail(cfg, db, project_a)["clips"][0]["filename"] == expected
+    assert project_detail(cfg, db, project_b)["clips"][0]["filename"] == "clip.mp4"
+
 
 def test_summary_edit_is_project_local_and_legacy_shared_write_fails_closed(tmp_path):
     db = tmp_path / "db.sqlite3"
@@ -124,9 +128,15 @@ def test_summary_edit_is_project_local_and_legacy_shared_write_fails_closed(tmp_
     assert b["project_summary"] == "global summary"
     assert str(frames(db, video_id)[0]["vision_summary"]) == "global summary"
 
+    cfg = {"library_root": str(tmp_path)}
+    assert project_detail(cfg, db, project_a)["clips"][0]["visual_summary"] == "A-only summary"
+    assert project_detail(cfg, db, project_b)["clips"][0]["visual_summary"] == "global summary"
+
     assert update_video_summary(db, video_id, "A second edit", project_id=project_a) is True
     assert dict(project_videos(db, project_a)[0])["project_summary"] == "A second edit"
     assert dict(project_videos(db, project_b)[0])["project_summary"] == "global summary"
+    assert project_detail(cfg, db, project_a)["clips"][0]["visual_summary"] == "A second edit"
+    assert project_detail(cfg, db, project_b)["clips"][0]["visual_summary"] == "global summary"
 
 
 def test_reanalysis_of_shared_effective_input_invalidates_every_linked_project(tmp_path):
