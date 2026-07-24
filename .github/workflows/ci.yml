@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+  schedule:
+    - cron: "0 18 * * *"
   workflow_dispatch:
     inputs:
       suite:
@@ -63,7 +65,7 @@ jobs:
           fi
 
   python:
-    name: ${{ github.event_name == 'pull_request' && 'PR Core/Targeted' || github.event_name == 'push' && 'Core Full' || inputs.suite }} / ${{ matrix.os }} ${{ matrix.python-version }}
+    name: ${{ github.event_name == 'pull_request' && 'PR Core/Targeted' || github.event_name == 'push' && 'Core Full' || github.event_name == 'schedule' && 'Scheduled Full' || inputs.suite }} / ${{ matrix.os }} ${{ matrix.python-version }}
     needs: select
     if: github.event_name != 'workflow_dispatch' || inputs.suite != 'media-smoke'
     runs-on: ${{ matrix.os }}
@@ -85,18 +87,18 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install FFmpeg on Windows
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.suite == 'media' || inputs.suite == 'full'))
+        if: github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.suite == 'media' || inputs.suite == 'full'))
         shell: pwsh
         run: choco install ffmpeg -y --no-progress
       - name: Install FFmpeg on Ubuntu
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.suite == 'media' || inputs.suite == 'full'))
+        if: github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.suite == 'media' || inputs.suite == 'full'))
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
       - name: Install Python package
         run: python -m pip install -e ".[dev]"
       - name: Verify media tools
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.suite == 'media' || inputs.suite == 'full'))
+        if: github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.suite == 'media' || inputs.suite == 'full'))
         run: |
           ffmpeg -version
           ffprobe -version
@@ -104,7 +106,7 @@ jobs:
         run: python -c "import video_vault.ui"
 
       - name: Run PR Core
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && (runner.os == 'Windows' || needs.select.outputs.fallback_non_media != 'true')
         run: pytest -q -m "pr_core and not media_smoke and not media_e2e"
       - name: Run PR Targeted fallback
         if: github.event_name == 'pull_request' && runner.os == 'Linux' && needs.select.outputs.fallback_non_media == 'true'
@@ -114,7 +116,7 @@ jobs:
         shell: bash
         env:
           TARGETED_TESTS: ${{ needs.select.outputs.targeted_tests }}
-        run: pytest -q -m "not media_smoke and not media_e2e" $TARGETED_TESTS
+        run: pytest -q -m "not pr_core and not media_smoke and not media_e2e" $TARGETED_TESTS
 
       - name: Run selected manual core suite
         if: github.event_name == 'workflow_dispatch' && inputs.suite == 'core'
@@ -126,7 +128,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.suite == 'media'
         run: pytest -q -m media_e2e
       - name: Run full suite
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.suite == 'full')
+        if: github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.suite == 'full')
         run: pytest -q
 
       - name: Check source encoding
@@ -185,6 +187,7 @@ jobs:
 
   frontend:
     name: Frontend
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.suite == 'full')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
