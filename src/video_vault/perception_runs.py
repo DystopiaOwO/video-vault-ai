@@ -5,7 +5,6 @@ from pathlib import Path
 from uuid import uuid4
 import hashlib
 import json
-import math
 import shutil
 
 from .database import _replace_segments_in_connection, connect, init_db
@@ -189,6 +188,12 @@ def create_perception_run(
             set current_analysis_run_uuid=?, analysis_generation=?, analysis_status='analyzing'
             where video_id=?""",
             (run_uuid, generation, video_id),
+        )
+        con.execute(
+            """update projects
+            set status='needs_review', updated_at=current_timestamp
+            where id in (select project_id from project_videos where video_id=?)""",
+            (video_id,),
         )
     return analysis_run(db, run_uuid)
 
@@ -469,10 +474,11 @@ def perception_jobs(db: Path, project_id: int, limit: int = 20) -> list[dict]:
     ensure_perception_schema(db)
     with connect(db) as con:
         rows = con.execute(
-            """select * from analysis_runs
+            """select distinct analysis_runs.* from analysis_runs
             where project_id=?
+               or video_id in (select video_id from project_videos where project_id=?)
             order by id desc limit ?""",
-            (int(project_id), int(limit)),
+            (int(project_id), int(project_id), int(limit)),
         ).fetchall()
     jobs = []
     for row in rows:

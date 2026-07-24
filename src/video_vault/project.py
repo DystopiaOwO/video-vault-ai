@@ -182,10 +182,14 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
             )
         })
 
-    public_plan = _public_plan_bgm(plan)
     clips = sync_project_files(cfg, db, project_id)
+    publishing = any(
+        str(clip.get("perception_run", {}).get("current_status") or "") == "publishing"
+        for clip in clips
+    )
+    public_plan = {} if publishing else _public_plan_bgm(plan)
     public_segments = []
-    for segment in project_segments(cfg, project_id, plan, db=db):
+    for segment in ([] if publishing else project_segments(cfg, project_id, plan, db=db)):
         public_segment = dict(segment)
         source = public_segment.get("source_file", "")
         public_segment["source_filename"] = Path(str(source)).name if source else ""
@@ -201,7 +205,7 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
         "review": _read_json(folder / "review_status.json"),
         "can_render": ok,
         "render_gate_reason": reason,
-        "script": (folder / "project_script.md").read_text(encoding="utf-8") if (folder / "project_script.md").exists() else "",
+        "script": "" if publishing else ((folder / "project_script.md").read_text(encoding="utf-8") if (folder / "project_script.md").exists() else ""),
         "folder": str(folder),
         "color": color_state_for_api(cfg, project_id, load_project_color_state(cfg, project_id)),
         "audio": audio_state_for_api(cfg, project_id, db),
@@ -464,6 +468,9 @@ def can_project_render(cfg: dict, db: Path, project_id: int) -> tuple[bool, str]
         return False, f"找不到專案 #{project_id}"
     if row["status"] != "approved":
         return False, f"專案狀態是 {row['status']}，尚未核准"
+    clips = sync_project_files(cfg, db, project_id)
+    if clips and not all(clip.get("analysis_current") for clip in clips):
+        return False, "目前感知 generation 尚未成功發布"
     folder = project_dir(cfg, project_id)
     review_path = folder / "review_status.json"
     if not review_path.exists():

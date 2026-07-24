@@ -4,7 +4,7 @@ from pathlib import Path
 import json
 
 from .analyzer.vision_pipeline import AnalysisCancelled, analyze_frame_manifest
-from .database import project_videos
+from .database import project_ids_for_video, project_videos
 from .ffmpeg_tools import extract_frames
 from .naming import rename_after_perception
 from .perception_runs import (
@@ -25,7 +25,7 @@ from .perception_runs import (
     validate_run_inputs,
 )
 from .planner import draft_plan, perceive_output, video_dir, write_plan_files
-from .project import build_project_plan, project_dir
+from .project import build_project_plan, mark_project_needs_review, project_dir
 from .segment_state_migration import migrate_segment_state_for_video
 
 
@@ -46,6 +46,11 @@ def run_project_perception(
     """
     run = create_perception_run(db, cfg, project_id, video)
     run_uuid = str(run["run_uuid"])
+    linked_project_ids = project_ids_for_video(db, int(video["id"]))
+    if project_id not in linked_project_ids:
+        linked_project_ids.append(project_id)
+    for linked_project_id in linked_project_ids:
+        mark_project_needs_review(cfg, db, linked_project_id)
     staging = run_staging_dir(cfg, run_uuid)
     published_snapshot: dict | None = None
     metadata_snapshot: list[dict] = []
@@ -78,7 +83,7 @@ def run_project_perception(
 
         published_snapshot = capture_live_results(db, int(video["id"]))
         metadata_snapshot = snapshot_metadata_paths(
-            _metadata_paths(cfg, project_id, int(video["id"])),
+            _metadata_paths(cfg, linked_project_ids, int(video["id"])),
             staging / "rollback_metadata",
         )
         migration = publish_staged_results(
@@ -109,7 +114,8 @@ def run_project_perception(
         current_video = rename_after_perception(cfg, db, current_video)
         perceive_output(cfg, db, current_video)
         write_plan_files(cfg, draft_plan(cfg, db, current_video))
-        build_project_plan(cfg, db, project_id)
+        for linked_project_id in linked_project_ids:
+            build_project_plan(cfg, db, linked_project_id)
         completed = finalize_perception_run(db, run_uuid)
         return {
             **result,
@@ -144,15 +150,19 @@ def _raise_if_cancelled(should_cancel) -> None:
         raise PerceptionCancelled("perception cancelled by user")
 
 
-def _metadata_paths(cfg: dict, project_id: int, video_id: int) -> list[Path]:
-    project_root = project_dir(cfg, project_id)
-    return [
-        video_dir(cfg, video_id),
-        project_root / "project_plan.json",
-        project_root / "project_script.md",
-        project_root / "review_status.json",
-        project_root / "plans",
-        project_root / "clips",
-        project_root / "decisions",
-        project_root / "checkpoints",
-    ]
+def _metadata_paths(cfg: dict, project_ids: list[int], video_id: int) -> list[Path]:
+    paths = [video_dir(cfg, video_id)]
+    for project_id in project_ids:
+        project_root = project_dir(cfg, project_id)
+        paths.extend(
+            [
+                project_root / "project_plan.json",
+                project_root / "project_script.md",
+                project_root / "review_status.json",
+                project_root / "plans",
+                project_root / "clips",
+                project_root / "decisions",
+                project_root / "checkpoints",
+            ]
+        )
+    return paths
