@@ -39,5 +39,5 @@ def analyze_video_frames(db: Path, video: dict, cfg: dict, progress=None) -> dic
         if progress:
             progress(index, len(frame_rows), frame)
     segments = merge_frames_to_segments(analyzed, float(cfg["frame_interval_seconds"]))
-    replace_segments(db, int(video["id"]), segments)
-    return {"frames": analyzed, "segments": segments}
+    migration = replace_segments(db, int(video["id"]), segments)
+    return {"frames": analyzed, "segments": segments, "segment_identity_migration": migration}
