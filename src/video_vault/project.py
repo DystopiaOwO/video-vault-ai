@@ -595,11 +595,11 @@ def write_project_files(cfg: dict, plan: dict) -> tuple[Path, Path]:
     latest_path = plans_dir / "latest.json"
     script = project_script(plan)
     payload = json.dumps(plan, ensure_ascii=False, indent=2)
-    plan_path.write_text(payload, encoding="utf-8")
-    script_path.write_text(script, encoding="utf-8")
-    version_path.write_text(payload, encoding="utf-8")
-    version_script_path.write_text(script, encoding="utf-8")
-    latest_path.write_text(json.dumps({"plan_id": plan_id, "path": str(version_path), "script_path": str(version_script_path)}, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_text(plan_path, payload)
+    _atomic_write_text(script_path, script)
+    _atomic_write_text(version_path, payload)
+    _atomic_write_text(version_script_path, script)
+    _atomic_write_text(latest_path, json.dumps({"plan_id": plan_id, "path": str(version_path), "script_path": str(version_script_path)}, ensure_ascii=False, indent=2))
     return plan_path, script_path
 
 
@@ -856,6 +856,13 @@ def _activity(tags: str, category: str) -> str:
 def _time(seconds: float) -> str:
     seconds = int(seconds or 0)
     return f"{seconds // 3600:02}:{seconds % 3600 // 60:02}:{seconds % 60:02}"
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.tmp")
+    temp.write_text(text, encoding="utf-8")
+    temp.replace(path)
 
 
 def _read_json(path: Path) -> dict:

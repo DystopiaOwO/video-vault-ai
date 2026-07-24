@@ -153,7 +153,6 @@ def create_perception_run(
     run_uuid = str(uuid4())
     created = _now()
     staging = run_staging_dir(cfg, run_uuid)
-    input_snapshot = build_input_snapshot(video, cfg)
     video_id = int(video["id"])
     project_media_uuid = str(video.get("project_media_uuid") or "")
     with connect(db) as con:
@@ -174,7 +173,7 @@ def create_perception_run(
                     video_id, provider, model, status, raw_output_path, run_uuid, project_id,
                     project_media_uuid, generation, requested_at, started_at,
                     input_snapshot_json, staging_path, previous_success_run_uuid
-                ) values(?, ?, ?, 'running', '', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ) values(?, ?, ?, 'running', '', ?, ?, ?, ?, ?, ?, '{}', ?, ?)""",
                 (
                     video_id,
                     str(cfg.get("ai", {}).get("provider", "mock")),
@@ -185,12 +184,12 @@ def create_perception_run(
                     generation,
                     created,
                     created,
-                    json.dumps(input_snapshot, ensure_ascii=False, sort_keys=True),
                     str(staging),
                     previous_uuid,
                 ),
             )
         except sqlite3.IntegrityError as exc:
+            shutil.rmtree(staging, ignore_errors=True)
             raise RuntimeError(f"video {video_id} already has an active perception run") from exc
         con.execute(
             """update project_videos
@@ -203,6 +202,16 @@ def create_perception_run(
             set status='needs_review', updated_at=current_timestamp
             where id in (select project_id from project_videos where video_id=?)""",
             (video_id,),
+        )
+    try:
+        input_snapshot = build_input_snapshot(video, cfg)
+    except Exception as exc:
+        mark_perception_run_terminal(db, run_uuid, "failed", str(exc))
+        raise
+    with connect(db) as con:
+        con.execute(
+            "update analysis_runs set input_snapshot_json=? where run_uuid=?",
+            (json.dumps(input_snapshot, ensure_ascii=False, sort_keys=True), run_uuid),
         )
     return analysis_run(db, run_uuid)
 

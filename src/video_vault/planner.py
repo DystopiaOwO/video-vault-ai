@@ -9,6 +9,13 @@ from .database import frames, segments, videos
 STATUSES = {"new", "ingested", "perceived", "plan_drafted", "needs_review", "approved", "rejected", "rendered", "needs_revision"}
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.tmp")
+    temp.write_text(text, encoding="utf-8")
+    temp.replace(path)
+
+
 def video_dir(cfg: dict, video_id: int) -> Path:
     path = Path(cfg["library_root"]) / "05_index" / f"video_{video_id}"
     path.mkdir(parents=True, exist_ok=True)
@@ -40,7 +47,7 @@ def perceive_output(cfg: dict, db: Path, video: dict) -> Path:
         "timeline_observations": observations,
     }
     out = video_dir(cfg, int(video["id"])) / "perception.json"
-    out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_text(out, json.dumps(data, ensure_ascii=False, indent=2))
     return out
 
 
@@ -79,11 +86,11 @@ def write_plan_files(cfg: dict, plan: dict) -> tuple[Path, Path, Path]:
     plan_path = folder / "edit_plan.json"
     script_path = folder / "edit_script.md"
     status_path = folder / "review_status.json"
-    plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
-    script_path.write_text(edit_script(plan), encoding="utf-8")
-    status_path.write_text(
+    _atomic_write_text(plan_path, json.dumps(plan, ensure_ascii=False, indent=2))
+    _atomic_write_text(script_path, edit_script(plan))
+    _atomic_write_text(
+        status_path,
         json.dumps({"video_id": plan["video_id"], "status": plan["status"], "created_at": now, "updated_at": now, "approved_by_user": False, "notes": ""}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
     )
     return plan_path, script_path, status_path
 
@@ -102,8 +109,8 @@ def set_plan_status(cfg: dict, video_id: int, status: str, notes: str = "") -> t
     review = json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {"video_id": video_id, "created_at": datetime.now().isoformat(timespec="seconds")}
     plan["status"] = status
     review.update({"status": status, "updated_at": datetime.now().isoformat(timespec="seconds"), "approved_by_user": status == "approved", "notes": notes})
-    plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
-    status_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_text(plan_path, json.dumps(plan, ensure_ascii=False, indent=2))
+    _atomic_write_text(status_path, json.dumps(review, ensure_ascii=False, indent=2))
     return plan_path, status_path
 
 
@@ -117,7 +124,7 @@ def revise_plan(cfg: dict, video_id: int) -> tuple[Path, Path]:
     notes = notes_path.read_text(encoding="utf-8") if notes_path.exists() else ""
     plan_path, status_path = set_plan_status(cfg, video_id, "needs_review", notes)
     plan = load_plan(cfg, video_id)
-    (folder / "edit_script.md").write_text(edit_script(plan) + f"\n\n## 修改備註\n{notes}\n", encoding="utf-8")
+    _atomic_write_text(folder / "edit_script.md", edit_script(plan) + f"\n\n## 修改備註\n{notes}\n")
     return plan_path, status_path
 
 
