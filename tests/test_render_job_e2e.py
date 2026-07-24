@@ -19,9 +19,6 @@ from video_vault.render_job_manager import RenderJobManager
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
 
-pytestmark = pytest.mark.media_e2e
-
-
 def _run(command):
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False)
     assert result.returncode == 0, result.stderr
@@ -64,6 +61,7 @@ def _create_approved_project(tmp_path: Path) -> tuple[dict, Path]:
     return {"cfg": cfg, "db": db, "project_id": project_id, "sources": sources}, library
 
 
+@pytest.mark.media_e2e
 @pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed")
 def test_background_render_job_reports_real_stages_and_final_cache(tmp_path: Path):
     setup, library = _create_approved_project(tmp_path)
@@ -114,6 +112,7 @@ def test_background_render_job_reports_real_stages_and_final_cache(tmp_path: Pat
         manager.shutdown()
 
 
+@pytest.mark.pr_core
 def test_background_cancel_uses_real_process_and_preserves_source(tmp_path: Path, monkeypatch):
     import video_vault.render_job_manager as manager_module
     from video_vault.project import project_dir
@@ -157,6 +156,7 @@ def test_background_cancel_uses_real_process_and_preserves_source(tmp_path: Path
         manager.shutdown()
 
 
+@pytest.mark.media_e2e
 @pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed")
 def test_cancel_after_publish_started_still_succeeds(tmp_path: Path, monkeypatch):
     setup, library = _create_approved_project(tmp_path)

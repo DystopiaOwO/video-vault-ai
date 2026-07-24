@@ -15,9 +15,7 @@ from video_vault.timeline_assembler import build_timeline_command
 
 from test_render_manifest import _project
 
-pytestmark = pytest.mark.media_e2e
-
-
+@pytest.mark.media_e2e
 def test_audio_state_is_compiled_into_manifest_and_bgm_is_single_selected_track(tmp_path: Path):
     cfg, db, project_id = _project(tmp_path, count=1)
     first = tmp_path / "one.mp3"
@@ -42,6 +40,7 @@ def test_audio_state_is_compiled_into_manifest_and_bgm_is_single_selected_track(
     assert manifest["settings"]["audio"]["normalization"]["target_lufs"] == -14
 
 
+@pytest.mark.media_e2e
 def test_disabled_audio_state_uses_legacy_segment_audio_and_no_selected_bgm(tmp_path: Path):
     cfg, db, project_id = _project(tmp_path, count=1)
     source = tmp_path / "disabled.mp3"
@@ -69,6 +68,7 @@ def test_disabled_audio_state_uses_legacy_segment_audio_and_no_selected_bgm(tmp_
     assert enabled["settings"]["audio"]["normalization"]["enabled"] is True
 
 
+@pytest.mark.media_e2e
 def test_selected_bgm_id_and_bgm_only_without_track_block_manifest(tmp_path: Path):
     cfg, db, project_id = _project(tmp_path, count=1)
     state = default_audio_state()
@@ -85,6 +85,7 @@ def test_selected_bgm_id_and_bgm_only_without_track_block_manifest(tmp_path: Pat
         build_render_manifest(cfg, db, project_id)
 
 
+@pytest.mark.media_e2e
 def test_new_audio_state_resolves_unattached_global_bgm_without_legacy_relation(tmp_path: Path):
     cfg, db, project_id = _project(tmp_path, count=1)
     with connect(db) as connection:
@@ -104,6 +105,7 @@ def test_new_audio_state_resolves_unattached_global_bgm_without_legacy_relation(
     assert "file_path" not in json.dumps(api_state, ensure_ascii=False)
 
 
+@pytest.mark.media_e2e
 def test_enabled_audio_state_without_bgm_does_not_fallback_to_legacy_relation(tmp_path: Path):
     cfg, db, project_id = _project(tmp_path, count=1)
     legacy = tmp_path / "legacy-active-state.mp3"
@@ -118,6 +120,7 @@ def test_enabled_audio_state_without_bgm_does_not_fallback_to_legacy_relation(tm
     assert build_render_manifest(cfg, db, project_id)["bgm"] == []
 
 
+@pytest.mark.media_e2e
 def test_changing_selected_bgm_does_not_accumulate_legacy_rows(tmp_path: Path):
     cfg, db, project_id = _project(tmp_path, count=1)
     with connect(db) as connection:
@@ -134,6 +137,7 @@ def test_changing_selected_bgm_does_not_accumulate_legacy_rows(tmp_path: Path):
     assert build_render_manifest(cfg, db, project_id)["bgm"][0]["track_id"] == second_id
 
 
+@pytest.mark.media_e2e
 def test_disabling_audio_state_restores_only_original_legacy_bgm(tmp_path: Path):
     cfg, db, project_id = _project(tmp_path, count=1)
     with connect(db) as connection:
@@ -150,6 +154,7 @@ def test_disabling_audio_state_restores_only_original_legacy_bgm(tmp_path: Path)
     assert [item["track_id"] for item in build_render_manifest(cfg, db, project_id)["bgm"]] == [legacy_id]
 
 
+@pytest.mark.pr_core
 def test_normalization_without_bgm_reencodes_and_disabled_uses_fast_path():
     profile = {"audio_codec": "aac", "audio_sample_rate": 48000, "audio_channels": 2}
     normalized = build_timeline_command(
@@ -167,6 +172,7 @@ def test_normalization_without_bgm_reencodes_and_disabled_uses_fast_path():
     assert "loudnorm" not in " ".join(fast)
 
 
+@pytest.mark.media_e2e
 def test_audio_api_state_does_not_expose_local_bgm_path(tmp_path: Path):
     cfg, db, project_id = _project(tmp_path, count=1)
     private = tmp_path / "private.mp3"
