@@ -192,4 +192,50 @@ describe("ProjectDataLoader", () => {
 
     await expect(Promise.all([first, second])).resolves.toEqual([[], []]);
   });
+
+  it("keeps an ordinary polling caller non-throwing when it joins a strict refresh", async () => {
+    const { client, requests } = createClient();
+    const reportError = vi.fn();
+    const loader = new ProjectDataLoader(client, () => true, () => true, vi.fn(), reportError);
+    const error = new Error("shared request failed");
+
+    const strictRefresh = loader.load(7, { throwOnError: true });
+    const polling = loader.load(7);
+    const strictResult = expect(strictRefresh).rejects.toBe(error);
+    const pollingResult = expect(polling).resolves.toEqual([]);
+
+    requests[0].project.reject(error);
+    requests[0].jobs.resolve([]);
+
+    await strictResult;
+    await pollingResult;
+    expect(reportError).toHaveBeenCalledTimes(1);
+    expect(reportError).toHaveBeenCalledWith(error);
+
+    const nextPolling = loader.load(7);
+    expect(requests).toHaveLength(2);
+    requests[1].project.resolve(detail(7));
+    requests[1].jobs.resolve([]);
+    await expect(nextPolling).resolves.toEqual([]);
+  });
+
+  it("preserves strict rejection when it joins an ordinary pending poll", async () => {
+    const { client, requests } = createClient();
+    const reportError = vi.fn();
+    const loader = new ProjectDataLoader(client, () => true, () => true, vi.fn(), reportError);
+    const error = new Error("coalesced poll failed");
+
+    const polling = loader.load(7);
+    const strictRefresh = loader.load(7, { throwOnError: true });
+    const pollingResult = expect(polling).resolves.toEqual([]);
+    const strictResult = expect(strictRefresh).rejects.toBe(error);
+
+    requests[0].project.reject(error);
+    requests[0].jobs.resolve([]);
+
+    await pollingResult;
+    await strictResult;
+    expect(reportError).toHaveBeenCalledTimes(1);
+    expect(reportError).toHaveBeenCalledWith(error);
+  });
 });
