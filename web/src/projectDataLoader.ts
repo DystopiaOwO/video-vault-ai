@@ -12,7 +12,9 @@ export type ProjectDataClient = {
 
 type PendingRequest = {
   projectId: number;
+  generation: number;
   promise: Promise<Job[]>;
+  errorReported: boolean;
 };
 
 export class ProjectDataLoader {
@@ -30,41 +32,42 @@ export class ProjectDataLoader {
   load(projectId: number, options: ProjectDataLoadOptions = {}): Promise<Job[]> {
     if (!projectId) return Promise.resolve([]);
     const pending = this.pending;
-    const requiresFreshRequest = options.forceFresh === true;
-    if (requiresFreshRequest && pending?.projectId === projectId) {
+    if (options.forceFresh === true && pending?.projectId === projectId) {
       this.generation += 1;
       return pending.promise.then(
-        () => this.start(projectId, options),
-        () => this.start(projectId, options),
+        () => this.loadFresh(projectId, options),
+        () => this.loadFresh(projectId, options),
       );
     }
-    if (pending?.projectId === projectId) return pending.promise;
-    return this.start(projectId, options);
+    if (pending?.projectId === projectId) return this.settle(pending, options);
+    return this.loadFresh(projectId, options);
   }
 
   invalidate(): void {
     this.generation += 1;
   }
 
-  private start(projectId: number, options: ProjectDataLoadOptions = {}): Promise<Job[]> {
+  private loadFresh(projectId: number, options: ProjectDataLoadOptions): Promise<Job[]> {
+    return this.settle(this.start(projectId), options);
+  }
+
+  private start(projectId: number): PendingRequest {
     const generation = ++this.generation;
-    const throwOnError = options.throwOnError === true;
     const promise = (async () => {
-      try {
-        const [project, jobs] = await Promise.all([this.client.project(projectId), this.client.jobs(projectId)]);
-        if (this.isMounted() && generation === this.generation && this.isCurrentProject(projectId)) {
-          this.apply(project, jobs);
-          return jobs;
-        }
-      } catch (error) {
-        if (throwOnError) throw error;
-        if (this.isMounted() && generation === this.generation && this.isCurrentProject(projectId)) {
-          this.reportError(error);
-        }
+      const [project, jobs] = await Promise.all([this.client.project(projectId), this.client.jobs(projectId)]);
+      if (this.isMounted() && generation === this.generation && this.isCurrentProject(projectId)) {
+        this.apply(project, jobs);
+        return jobs;
       }
       return [];
     })();
-    this.pending = { projectId, promise };
+    const request: PendingRequest = {
+      projectId,
+      generation,
+      promise,
+      errorReported: false,
+    };
+    this.pending = request;
     void promise.then(
       () => {
         if (this.pending?.promise === promise) this.pending = null;
@@ -73,6 +76,22 @@ export class ProjectDataLoader {
         if (this.pending?.promise === promise) this.pending = null;
       },
     );
-    return promise;
+    return request;
+  }
+
+  private settle(request: PendingRequest, options: ProjectDataLoadOptions): Promise<Job[]> {
+    return request.promise.catch((error) => {
+      if (options.throwOnError === true) throw error;
+      if (
+        !request.errorReported
+        && this.isMounted()
+        && request.generation === this.generation
+        && this.isCurrentProject(request.projectId)
+      ) {
+        request.errorReported = true;
+        this.reportError(error);
+      }
+      return [];
+    });
   }
 }
