@@ -1,0 +1,119 @@
+name: Apply Issue 37 rollback patch
+
+on:
+  push:
+    branches:
+      - codex/issue-37-project-media-ownership
+    paths:
+      - .github/workflows/issue-37-apply-rollback-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/issue-37-project-media-ownership
+      - name: Preserve full project media rows during rollback
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("src/video_vault/ui.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''def _restore_project_registration(
+              db: Path,
+              project_id: int,
+              previous_video_ids: list[int],
+              new_video_ids: list[int],
+              previous_status: str | None,
+              previous_updated_at: str | None,
+          ) -> None:
+              """Restore the project relation and remove only rows created by this request."""
+              with connect(db) as con:
+                  con.execute("delete from project_videos where project_id=?", (project_id,))
+                  for order, video_id in enumerate(previous_video_ids, 1):
+                      con.execute(
+                          "insert into project_videos(project_id, video_id, sort_order) values(?, ?, ?)",
+                          (project_id, video_id, order),
+                      )
+                  if previous_status is not None:
+                      if previous_updated_at is None:
+                          con.execute("update projects set status=? where id=?", (previous_status, project_id))
+                      else:
+                          con.execute("update projects set status=?, updated_at=? where id=?", (previous_status, previous_updated_at, project_id))
+                  for video_id in new_video_ids:
+                      con.execute("delete from project_videos where video_id=?", (video_id,))
+                      con.execute("delete from segments where video_id=?", (video_id,))
+                      con.execute("delete from frames where video_id=?", (video_id,))
+                      con.execute("delete from analysis_runs where video_id=?", (video_id,))
+                      con.execute("delete from videos where id=?", (video_id,))
+          '''
+          new = '''def _restore_project_registration(
+              db: Path,
+              project_id: int,
+              previous_video_ids: list[int],
+              new_video_ids: list[int],
+              previous_status: str | None,
+              previous_updated_at: str | None,
+          ) -> None:
+              """Restore complete project-media rows and remove only request-created rows."""
+              with connect(db) as con:
+                  previous_rows = {
+                      int(row["video_id"]): dict(row)
+                      for row in con.execute(
+                          "select * from project_videos where project_id=?",
+                          (project_id,),
+                      ).fetchall()
+                  }
+                  con.execute("delete from project_videos where project_id=?", (project_id,))
+                  for order, video_id in enumerate(previous_video_ids, 1):
+                      snapshot = previous_rows.get(int(video_id))
+                      if snapshot is None:
+                          con.execute(
+                              "insert into project_videos(project_id, video_id, sort_order) values(?, ?, ?)",
+                              (project_id, video_id, order),
+                          )
+                          continue
+                      snapshot["project_id"] = project_id
+                      snapshot["video_id"] = int(video_id)
+                      snapshot["sort_order"] = order
+                      columns = list(snapshot)
+                      con.execute(
+                          f"insert into project_videos({', '.join(columns)}) values({', '.join('?' for _ in columns)})",
+                          tuple(snapshot[column] for column in columns),
+                      )
+                  if previous_status is not None:
+                      if previous_updated_at is None:
+                          con.execute("update projects set status=? where id=?", (previous_status, project_id))
+                      else:
+                          con.execute("update projects set status=?, updated_at=? where id=?", (previous_status, previous_updated_at, project_id))
+                  for video_id in new_video_ids:
+                      con.execute("delete from project_videos where video_id=?", (video_id,))
+                      con.execute("delete from segments where video_id=?", (video_id,))
+                      con.execute("delete from frames where video_id=?", (video_id,))
+                      con.execute("delete from analysis_runs where video_id=?", (video_id,))
+                      con.execute("delete from videos where id=?", (video_id,))
+          '''
+          if old not in text:
+              if new in text:
+                  print("rollback patch already applied")
+              else:
+                  raise SystemExit("expected rollback function was not found")
+          else:
+              path.write_text(text.replace(old, new, 1), encoding="utf-8")
+      - name: Commit patch and remove temporary workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/issue-37-apply-rollback-patch.yml
+          git add src/video_vault/ui.py
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "fix: preserve project media metadata on upload rollback"
+          git push
