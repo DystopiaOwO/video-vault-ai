@@ -1,5 +1,11 @@
-1ëa¡Ñ1qêmŠ‰ËŠw¶{g©Ê×±¶×±µ©•§r«×œ…ªõÑÈZ¯]jyèµÊ'½êíj¸.™éí¢WB…ªðŠØoj[ž~ŠÑz™Zqëh·*^K+-z`¡j°šžz-r‰ïz»oj[ž¶‹r¥ä²²×¦
-«ºè­+kŠx&ºË[yìZrÙr¢wœ…ªÚr×«–‰àimport re
+MethodException: 
+Line |
+   2 |  â€¦ _e2e.py')); $text = $text.Replace(([char]13 + [char]10), [char]10); [ â€¦
+     |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | Cannot convert argument "oldChar", with value: "
+", for "Replace" to type "System.Char": "Cannot convert value "
+" to type "System.Char". Error: "String must be exactly one character long.""
+import re
 import os
 import shutil
 import subprocess

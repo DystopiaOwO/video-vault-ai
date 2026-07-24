@@ -1,1 +1,30 @@
-1ëa¡Ñ1qêmŠ‰ËŠw¶rÛhš[^Æ
+MethodException: 
+Line |
+   2 |  â€¦ ct.toml')); $text = $text.Replace(([char]13 + [char]10), [char]10); [ â€¦
+     |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | Cannot convert argument "oldChar", with value: "
+", for "Replace" to type "System.Char": "Cannot convert value "
+" to type "System.Char". Error: "String must be exactly one character long.""
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video-vault-ai"
+version = "0.1.0"
+description = "Local Windows video asset vault with metadata, proxies, frames, and mock AI analysis."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+markers = [
+    "media_e2e: tests that invoke real FFmpeg/FFprobe media pipelines",
+]
