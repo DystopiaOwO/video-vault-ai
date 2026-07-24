@@ -201,6 +201,16 @@ def test_reanalysis_migrates_user_state_and_preserves_unmatched_orphans(tmp_path
     reports = migrate_segment_state_for_video(cfg, db, first_video, identity_report)
 
     assert str(segments(db, first_video)[0]["segment_uuid"]) == stable_id
+    upgraded_plan = json.loads((root / "project_plan.json").read_text(encoding="utf-8"))
+    upgraded_first = next(
+        item
+        for group in upgraded_plan["groups"]
+        for item in group["segments"]
+        if int(item["video_id"]) == first_video
+    )
+    assert upgraded_first["segment_id"] == stable_id
+    assert upgraded_first["segment_revision"] == 2
+
     review = json.loads((root / "feedback" / "segment_review.json").read_text(encoding="utf-8"))
     storyboard = json.loads((root / "storyboard.json").read_text(encoding="utf-8"))
     audio = json.loads((root / "audio_settings.json").read_text(encoding="utf-8"))
@@ -214,7 +224,9 @@ def test_reanalysis_migrates_user_state_and_preserves_unmatched_orphans(tmp_path
     assert other_id in audio["segments"]
     assert other_id in color["segments"]
     assert ghost_id in audio["segments"]
-    assert any(item["segment_id"] == ghost_id for item in reports[0]["orphaned"])
+    orphan_ids = {item["segment_id"] for item in reports[0]["orphaned"]}
+    assert ghost_id in orphan_ids
+    assert other_id not in orphan_ids
     assert reports[0]["requires_review"] is True
     assert dict(project(db, project_id))["status"] == "needs_review"
     assert (root / "validation" / "segment_identity_migration_latest.json").is_file()
