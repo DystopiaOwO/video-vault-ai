@@ -130,3 +130,11 @@ python -m video_vault doctor --dev
 文字輸出使用 `[OK]`、`[WARN]`、`[FAIL]`；JSON 輸出不含 API key 或環境變數內容。必要檢查失敗時 doctor 返回 exit code 1。健檢不會初始化資料庫、建立素材庫目錄，也不會寫入原始素材。
 
 Release 前請依照 [docs/release-checklist.md](docs/release-checklist.md) 執行完整驗證。
+
+## License
+
+本專案自行開發的原始碼採用 [MIT License](LICENSE)。
+
+第三方軟體、套件、外部工具與 runtime-loaded libraries 仍適用各自的授權條款，詳見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+使用者自行匯入或指定的影片、音樂、音效、LUT、字型、模型及其他素材，不包含在本專案 MIT License 的授權範圍內；使用者須自行確認其使用與散布權利。
