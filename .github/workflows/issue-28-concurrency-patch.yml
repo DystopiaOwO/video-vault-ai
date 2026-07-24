@@ -1,0 +1,32 @@
+name: Apply Issue 28 concurrency patch
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - synchronize
+      - reopened
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.pull_request.head.ref == 'codex/issue-28-perception-runs'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/issue-28-perception-runs
+      - name: Apply concurrency patch
+        run: python .github/scripts/apply_issue28_concurrency.py
+      - name: Commit patch and remove temporary files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/scripts/apply_issue28_concurrency.py
+          git rm .github/workflows/issue-28-concurrency-patch.yml
+          git add src/video_vault/perception_runs.py
+          git commit -m "fix: isolate active runs and migration rollback"
+          git push
