@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { isCommittedEnter } from "../../keyboard";
 import type { AudioSegmentSettings } from "../../api";
 import {
   type StoryboardSegmentEdit,
@@ -34,6 +35,7 @@ export type StoryboardReviewWorkspaceProps = {
   thumbnailing?: boolean;
   timingDrafts?: Record<string, { startSeconds: number; endSeconds: number; speed: number }>;
   timingDirty?: Record<string, boolean>;
+  hasUnsavedTiming?: boolean;
   previewItems?: StoryboardPreviewItem[];
   onSelect: (segmentId: string) => void;
   onStoryboardChange: (segmentId: string, patch: Partial<StoryboardSegmentEdit>) => void;
@@ -65,6 +67,7 @@ export function StoryboardReviewWorkspace({
   thumbnailing = false,
   timingDrafts = {},
   timingDirty = {},
+  hasUnsavedTiming = false,
   previewItems = [],
   onSelect,
   onStoryboardChange,
@@ -92,6 +95,8 @@ export function StoryboardReviewWorkspace({
   const previousSelectedId = useRef<string | undefined>(undefined);
   const selected = model.segments.find((segment) => segment.id === selectedId) || model.segments[0];
   const timingDirtyCount = Object.values(timingDirty).filter(Boolean).length;
+  const groupReorderBlocked = query.trim().length > 0 || visibility !== "all";
+  const groupReorderHint = "搜尋或篩選期間無法安全調整分組順序，請先清除篩選。";
 
   const visibleGroups = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -108,7 +113,6 @@ export function StoryboardReviewWorkspace({
       }))
       .filter((group) => group.segments.length > 0 || (!normalizedQuery && visibility === "all"));
   }, [model.groups, query, visibility]);
-
   const visibleSegments = useMemo(
     () => visibleGroups.flatMap((group) => collapsedGroupIds.includes(group.id) ? [] : group.segments),
     [collapsedGroupIds, visibleGroups],
@@ -205,16 +209,18 @@ export function StoryboardReviewWorkspace({
             onClick={() => setCollapsedGroupIds(collapsedGroupIds.length ? [] : model.groups.map((group) => group.id))}
           >{collapsedGroupIds.length ? "全部展開" : "全部收合"}</button>
         </div>
+        {groupReorderBlocked && <span className="review-filter-hint" role="status">{groupReorderHint}</span>}
       </div>
 
       {onAddGroup && <div className="review-add-group">
-        <input aria-label="新增分組名稱" disabled={busy} value={newGroupTitle} onChange={(event) => setNewGroupTitle(event.target.value)} placeholder="新增自訂分組" onKeyDown={(event) => { if (event.key === "Enter") addGroup(); }} />
+        <input aria-label="新增分組名稱" disabled={busy} value={newGroupTitle} onChange={(event) => setNewGroupTitle(event.target.value)} placeholder="新增自訂分組" onKeyDown={(event) => { if (isCommittedEnter(event)) { event.preventDefault(); addGroup(); } }} />
         <button type="button" disabled={busy || !newGroupTitle.trim()} onClick={addGroup}>新增分組</button>
       </div>}
 
       <div className="review-groups">
-        {visibleGroups.map((group, groupIndex) => {
+        {visibleGroups.map((group) => {
           const collapsed = collapsedGroupIds.includes(group.id);
+          const fullGroupIndex = model.groups.findIndex((candidate) => candidate.id === group.id);
           return <section className="review-group" key={group.id}>
             <header>
               <button type="button" className="review-group-toggle" aria-expanded={!collapsed} aria-label={`${group.title} ${collapsed ? "展開" : "收合"}`} onClick={() => toggleGroup(group.id)}>
@@ -228,8 +234,8 @@ export function StoryboardReviewWorkspace({
               </div>
               <div className="review-group-actions">
                 <span>{group.category}</span>
-                {onMoveGroup && <button type="button" aria-label={`${group.title} 分組上移`} disabled={busy || groupIndex === 0} onClick={() => onMoveGroup(group.id, -1)}>↑</button>}
-                {onMoveGroup && <button type="button" aria-label={`${group.title} 分組下移`} disabled={busy || groupIndex === visibleGroups.length - 1} onClick={() => onMoveGroup(group.id, 1)}>↓</button>}
+                {onMoveGroup && <button type="button" aria-label={`${group.title} 分組上移`} title={groupReorderBlocked ? groupReorderHint : undefined} disabled={busy || groupReorderBlocked || fullGroupIndex <= 0} onClick={() => onMoveGroup(group.id, -1)}>↑</button>}
+                {onMoveGroup && <button type="button" aria-label={`${group.title} 分組下移`} title={groupReorderBlocked ? groupReorderHint : undefined} disabled={busy || groupReorderBlocked || fullGroupIndex < 0 || fullGroupIndex >= model.groups.length - 1} onClick={() => onMoveGroup(group.id, 1)}>↓</button>}
                 {onDeleteGroup && group.segments.length === 0 && <button type="button" disabled={busy} onClick={() => onDeleteGroup(group.id)}>刪除</button>}
               </div>
             </header>
@@ -260,6 +266,7 @@ export function StoryboardReviewWorkspace({
       groups={model.groups.map((group) => ({ id: group.id, title: group.title }))}
       timingDraft={timingDrafts[selected.id]}
       timingDirty={Boolean(timingDirty[selected.id])}
+      hasUnsavedTiming={hasUnsavedTiming}
       busy={busy}
       previewing={previewing}
       thumbnailing={thumbnailing}
@@ -325,6 +332,7 @@ function SegmentInspector({
   groups,
   timingDraft,
   timingDirty,
+  hasUnsavedTiming,
   busy,
   previewing,
   thumbnailing,
@@ -347,6 +355,7 @@ function SegmentInspector({
   groups: Array<{ id: string; title: string }>;
   timingDraft?: { startSeconds: number; endSeconds: number; speed: number };
   timingDirty: boolean;
+  hasUnsavedTiming: boolean;
   busy: boolean;
   previewing: boolean;
   thumbnailing: boolean;
@@ -372,7 +381,12 @@ function SegmentInspector({
   };
   const timingErrors = validateSegmentTiming(timing.startSeconds, timing.endSeconds, timing.speed);
   const outputDuration = Math.max(0, timing.endSeconds - timing.startSeconds) / Math.max(0.25, timing.speed);
-  const previewBlocked = timingDirty;
+  const previewBlocked = timingDirty || hasUnsavedTiming || !segment.included;
+  const previewHint = !segment.included
+    ? "此片段已排除，不會進入正式輸出；請先納入成片後再預覽。"
+    : timingDirty || hasUnsavedTiming
+      ? "請先儲存所有未完成的片段剪點，再產生預覽。"
+      : "先看短預覽，再決定是否正式輸出";
 
   return <aside ref={asideRef} className="review-inspector" aria-label="片段設定">
     <header>
@@ -437,7 +451,7 @@ function SegmentInspector({
     </section>
 
     <section className="review-inspector-section">
-      <div className="review-section-title"><b>預覽</b><span>{previewBlocked ? "請先儲存剪點，避免預覽與目前設定不一致" : "先看短預覽，再決定是否正式輸出"}</span></div>
+      <div className="review-section-title"><b>預覽</b><span>{previewHint}</span></div>
       <div className="review-preview-actions">
         <button type="button" disabled={busy || previewing || previewBlocked} onClick={() => onPreview(segment.id, "transition", ignoreCache)}>預覽前後銜接</button>
         <button type="button" disabled={busy || previewing || previewBlocked} onClick={() => onPreview(segment.id, "range", ignoreCache)}>從此片段預覽 8 秒</button>

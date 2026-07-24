@@ -160,6 +160,7 @@
 .review-list-meta { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .review-list-meta span { color: #7c899b; font-size: 10px; font-weight: 700; }
 .review-list-meta button { min-height: 30px; padding: 0 10px; }
+.review-filter-hint { grid-column: 1 / -1; color: #8b651e; font-size: 10px; line-height: 1.4; }
 
 .review-add-group { margin-bottom: 18px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .review-groups { display: grid; gap: 18px; }

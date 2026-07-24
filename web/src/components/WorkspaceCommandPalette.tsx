@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { isCommittedEnter } from "../keyboard";
 import { focusProjectSearch, navigateToWorkspace } from "../workspaceNavigationEnhancements";
 import "./workspace-command-palette.css";
 
@@ -65,7 +66,7 @@ export function WorkspaceCommandPalette() {
       } else if (event.key === "ArrowUp") {
         event.preventDefault();
         setActiveIndex((index) => filtered.length ? (index - 1 + filtered.length) % filtered.length : 0);
-      } else if (event.key === "Enter" && filtered[activeIndex]) {
+      } else if (isCommittedEnter(event) && filtered[activeIndex]) {
         event.preventDefault();
         filtered[activeIndex].run();
       } else if (event.key === "Tab") {

@@ -178,6 +178,19 @@ describe("StoryboardWorkspaceController", () => {
     expect(screen.queryByText("有未儲存變更")).toBeNull();
   });
 
+  it("keeps mutation success separate when storyboard refresh fails", async () => {
+    vi.spyOn(api, "updateStoryboard").mockResolvedValue({ ok: true, storyboard: storyboard("已儲存") });
+    const setMessage = vi.fn();
+    const refreshProject = vi.fn().mockRejectedValue(new Error("GET failed"));
+    render(<StoryboardWorkspaceController detail={detail()} setMessage={setMessage} refreshProject={refreshProject} />);
+
+    fireEvent.change(screen.getByLabelText("分鏡備註"), { target: { value: "只改備註" } });
+    fireEvent.click(screen.getByRole("button", { name: "儲存分鏡" }));
+
+    await waitFor(() => expect(setMessage).toHaveBeenLastCalledWith("分鏡已儲存，這次未修改輸出內容，既有核准仍有效。 但畫面更新失敗：GET failed"));
+    expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true, throwOnError: true });
+  });
+
   it("uses create mode for an empty storyboard and does not create a fake dirty state", async () => {
     vi.spyOn(api, "generateStoryboard").mockResolvedValue({ ok: true, storyboard: storyboard() });
     render(<StoryboardWorkspaceController detail={detail(1, emptyStoryboard())} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
@@ -202,6 +215,46 @@ describe("StoryboardWorkspaceController", () => {
     await waitFor(() => expect(saveTiming).toHaveBeenCalledWith(1, "a", { start_seconds: 0, end_seconds: 8, speed: 2 }));
     await waitFor(() => expect(screen.queryByText("剪點未儲存")).toBeNull());
     expect(updateStoryboard).not.toHaveBeenCalled();
+  });
+
+  it("uses the committed timing snapshot for range preview after timing save", async () => {
+    const saveTiming = vi.spyOn(api, "saveSegmentTiming").mockResolvedValue({ ok: true, path: "segment_review.json" });
+    const storyboardPreview = vi.spyOn(api, "storyboardPreview").mockResolvedValue({ ok: true, url: "/preview.mp4", duration_seconds: 8 });
+    render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
+
+    fireEvent.change(screen.getByLabelText("片段終點"), { target: { value: "8" } });
+    fireEvent.change(screen.getByLabelText("片段速度"), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: "儲存剪點" }));
+    await waitFor(() => expect(saveTiming).toHaveBeenCalledWith(1, "a", { start_seconds: 0, end_seconds: 8, speed: 2 }));
+
+    fireEvent.click(screen.getByRole("button", { name: /巷弄散步/ }));
+    fireEvent.click(screen.getByRole("button", { name: "從此片段預覽 8 秒" }));
+    await waitFor(() => expect(storyboardPreview).toHaveBeenCalledWith(1, expect.objectContaining({
+      mode: "range",
+      segmentId: "b",
+      timelineStartSeconds: 4,
+    })));
+  });
+
+  it("keeps the newly committed timing when refresh returns a stale detail", async () => {
+    const saveTiming = vi.spyOn(api, "saveSegmentTiming").mockResolvedValue({ ok: true, path: "segment_review.json" });
+    const storyboardPreview = vi.spyOn(api, "storyboardPreview").mockResolvedValue({ ok: true, url: "/preview.mp4", duration_seconds: 8 });
+    const refreshProject = vi.fn().mockRejectedValue(new Error("GET failed"));
+    const view = render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={refreshProject} />);
+
+    fireEvent.change(screen.getByLabelText("片段終點"), { target: { value: "8" } });
+    fireEvent.change(screen.getByLabelText("片段速度"), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: "儲存剪點" }));
+    await waitFor(() => expect(saveTiming).toHaveBeenCalled());
+
+    view.rerender(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={refreshProject} />);
+    fireEvent.click(screen.getByRole("button", { name: /巷弄散步/ }));
+    fireEvent.click(screen.getByRole("button", { name: "從此片段預覽 8 秒" }));
+    await waitFor(() => expect(storyboardPreview).toHaveBeenCalledWith(1, expect.objectContaining({
+      mode: "range",
+      segmentId: "b",
+      timelineStartSeconds: 4,
+    })));
   });
 
   it("maps audio role changes to the existing audio settings API", async () => {

@@ -1,3 +1,5 @@
+import { isCommittedEnter } from "./keyboard";
+
 const PROJECT_SWITCH_SELECTOR = ".project-list button.project:not(.active)";
 const NEW_PROJECT_BUTTON_SELECTOR = ".new-project button";
 const NEW_PROJECT_INPUT_SELECTOR = "#new-project-name";
@@ -43,7 +45,7 @@ export function installUnsavedNavigationGuard(
   };
 
   const handleKeyDown = (event: KeyboardEvent) => {
-    if (event.key !== "Enter") return;
+    if (!isCommittedEnter(event)) return;
     const target = event.target instanceof Element ? event.target : null;
     if (!target?.matches(NEW_PROJECT_INPUT_SELECTOR) || allowNavigation()) return;
 

@@ -25,11 +25,14 @@ import {
   updateStoryboardSegment,
   type StoryboardSegmentEdit,
 } from "./storyboardViewModel";
+import type { ProjectDataLoadOptions } from "../../projectDataLoader";
+import { createProjectMutationControls, mutationLabel, ProjectMutationCoordinator, type ProjectMutationControls, type ProjectMutation } from "../../projectMutation";
 
 export type StoryboardWorkspaceControllerProps = {
   detail: ProjectDetail;
   setMessage: (message: string) => void;
-  refreshProject: (options?: { forceFresh?: boolean; jobs?: boolean }) => Promise<unknown>;
+  refreshProject: (options?: ProjectDataLoadOptions) => Promise<unknown>;
+  mutationControls?: ProjectMutationControls;
 };
 
 type TimingDraft = { startSeconds: number; endSeconds: number; speed: number };
@@ -39,18 +42,37 @@ export function StoryboardWorkspaceController({
   detail,
   setMessage,
   refreshProject,
+  mutationControls,
 }: StoryboardWorkspaceControllerProps) {
   const [state, setState] = useState<StoryboardState>(() => editableStoryboardState(detail));
   const [selectedId, setSelectedId] = useState(() => firstSegmentId(detail));
   const [timingDrafts, setTimingDrafts] = useState<Record<string, TimingDraft>>(() => timingFromDetail(detail));
   const [timingDirty, setTimingDirty] = useState<Record<string, boolean>>({});
+  const committedTimingsRef = useRef<Record<string, TimingDraft>>(timingFromDetail(detail));
+  const serverTimingSnapshotRef = useRef<Record<string, TimingDraft>>(timingFromDetail(detail));
+  const awaitingTimingAckRef = useRef<Set<string>>(new Set());
   const [previewItems, setPreviewItems] = useState<StoryboardPreviewItem[]>([]);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<BusyAction>("");
   const dirtyRef = useRef(false);
   const timingDirtyRef = useRef<Record<string, boolean>>({});
   const projectIdRef = useRef(detail.project.id);
+  const fallbackControlsRef = useRef<ProjectMutationControls | null>(null);
+  if (!fallbackControlsRef.current) fallbackControlsRef.current = createProjectMutationControls(new ProjectMutationCoordinator());
+  const controls = mutationControls || fallbackControlsRef.current;
   const hasUnsavedTiming = Object.values(timingDirty).some(Boolean);
+  const projectMutationBusy = controls.isProjectMutationBusy(detail.project.id);
+  const workspaceBusy = Boolean(busy) || projectMutationBusy;
+
+  function setProjectMessage(message: string) {
+    if (controls.isCurrentProject(detail.project.id)) setMessage(message);
+  }
+
+  function beginMutation(mutation: ProjectMutation) {
+    const token = controls.beginProjectMutation(detail.project.id, mutation);
+    if (!token) setProjectMessage(`目前正在${mutationLabel(mutation)}，請完成後再執行其他操作。`);
+    return token;
+  }
 
   useEffect(() => {
     dirtyRef.current = dirty;
@@ -80,6 +102,9 @@ export function StoryboardWorkspaceController({
       setTimingDirty({});
       setState(editableStoryboardState(detail));
       setTimingDrafts(timingFromDetail(detail));
+      committedTimingsRef.current = timingFromDetail(detail);
+      serverTimingSnapshotRef.current = timingFromDetail(detail);
+      awaitingTimingAckRef.current = new Set();
       setSelectedId(firstSegmentId(detail));
       setPreviewItems([]);
       setBusy("");
@@ -87,7 +112,32 @@ export function StoryboardWorkspaceController({
     }
 
     if (!dirtyRef.current) setState(editableStoryboardState(detail));
-    setTimingDrafts((current) => syncServerTiming(current, detail, timingDirtyRef.current));
+    const incomingTimings = timingFromDetail(detail);
+    const previousServerTimings = serverTimingSnapshotRef.current;
+    const nextCommittedTimings = { ...committedTimingsRef.current };
+    for (const segment of detail.segments) {
+      const id = segment.segment_id;
+      const incoming = incomingTimings[id];
+      const previousServer = previousServerTimings[id];
+      const awaitingAck = awaitingTimingAckRef.current.has(id);
+      if (timingDirtyRef.current[id]) {
+        if (!awaitingAck && (!previousServer || !sameTiming(incoming, previousServer))) {
+          nextCommittedTimings[id] = incoming;
+        }
+        continue;
+      }
+      // Preserve a just-saved local commit when a stale GET arrives. A real
+      // server change is accepted once it differs from the last server snapshot.
+      if (!previousServer || !sameTiming(incoming, previousServer)) {
+        nextCommittedTimings[id] = incoming;
+        awaitingTimingAckRef.current.delete(id);
+      } else if (!nextCommittedTimings[id] && !awaitingAck) {
+        nextCommittedTimings[id] = incoming;
+      }
+    }
+    committedTimingsRef.current = nextCommittedTimings;
+    serverTimingSnapshotRef.current = incomingTimings;
+    setTimingDrafts((current) => syncServerTiming(current, detail, timingDirtyRef.current, nextCommittedTimings));
     setSelectedId((current) => current && detail.segments.some((segment) => segment.segment_id === current)
       ? current
       : firstSegmentId(detail));
@@ -124,18 +174,22 @@ export function StoryboardWorkspaceController({
   }
 
   function changeTiming(segmentId: string, patch: SegmentTimingPatch) {
-    const source = timingDrafts[segmentId] || timingForSegment(detail, segmentId);
+    const source = timingDrafts[segmentId] || committedTimingForSegment(committedTimingsRef.current, detail, segmentId);
     const next = { ...source, ...patch };
     setTimingDrafts((current) => ({ ...current, [segmentId]: { ...(current[segmentId] || source), ...patch } }));
-    setSegmentTimingDirty(segmentId, !sameTiming(next, timingForSegment(detail, segmentId)));
+    setSegmentTimingDirty(segmentId, !sameTiming(next, committedTimingForSegment(committedTimingsRef.current, detail, segmentId)));
     setPreviewItems([]);
   }
 
   function resetTiming(segmentId: string) {
-    setTimingDrafts((current) => ({ ...current, [segmentId]: timingForSegment(detail, segmentId) }));
+    const committed = awaitingTimingAckRef.current.has(segmentId)
+      ? committedTimingForSegment(committedTimingsRef.current, detail, segmentId)
+      : serverTimingSnapshotRef.current[segmentId]
+        || committedTimingForSegment(committedTimingsRef.current, detail, segmentId);
+    setTimingDrafts((current) => ({ ...current, [segmentId]: committed }));
     setSegmentTimingDirty(segmentId, false);
     setPreviewItems([]);
-    setMessage("已放棄此片段尚未儲存的剪點變更。");
+    setProjectMessage("已放棄此片段尚未儲存的剪點變更。");
   }
 
   function selectSegment(segmentId: string) {
@@ -145,36 +199,42 @@ export function StoryboardWorkspaceController({
 
   async function saveStoryboard() {
     if (!dirty || busy) return;
+    const mutation = beginMutation("storyboard");
+    if (!mutation) return;
     const normalized = normalizeStoryboardState(state);
     setBusy("save");
-    setMessage("正在儲存分鏡…");
+    setProjectMessage("正在儲存分鏡…");
     try {
       const result = await api.updateStoryboard(detail.project.id, normalized);
       if (!result.ok || !result.storyboard) {
-        setMessage(`分鏡儲存失敗：${result.error || "未知錯誤"}`);
+        setProjectMessage(`分鏡儲存失敗：${result.error || "未知錯誤"}`);
         return;
       }
       setState(editableStoryboardState({ ...detail, storyboard: result.storyboard }));
       setStoryboardDirty(false);
-      setMessage(result.approval_invalidated
+      const successMessage = result.approval_invalidated
         ? "分鏡已儲存，輸出內容有變更，請重新核准後再正式輸出。"
-        : "分鏡已儲存，這次未修改輸出內容，既有核准仍有效。");
-      await refreshProject({ forceFresh: true });
+        : "分鏡已儲存，這次未修改輸出內容，既有核准仍有效。";
+      setProjectMessage(successMessage);
+      await refreshAfterMutation(successMessage);
     } catch (error) {
-      setMessage(`分鏡儲存失敗：${errorMessage(error)}`);
+      setProjectMessage(`分鏡儲存失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 
   async function regenerateStoryboard() {
     if (dirty || hasUnsavedTiming || busy) return;
+    const mutation = beginMutation("storyboard");
+    if (!mutation) return;
     setBusy("regenerate");
-    setMessage(model.exists ? "正在重新產生分鏡…" : "正在建立分鏡…");
+    setProjectMessage(model.exists ? "正在重新產生分鏡…" : "正在建立分鏡…");
     try {
       const result = await api.generateStoryboard(detail.project.id, model.exists);
       if (!result.ok || !result.storyboard) {
-        setMessage(`分鏡產生失敗：${result.error || "未知錯誤"}`);
+        setProjectMessage(`分鏡產生失敗：${result.error || "未知錯誤"}`);
         return;
       }
       const generated = editableStoryboardState({ ...detail, storyboard: result.storyboard });
@@ -185,22 +245,26 @@ export function StoryboardWorkspaceController({
       setSelectedId(firstStoryboardSegmentId(generated) || firstSegmentId(detail));
       setPreviewItems([]);
       setStoryboardDirty(false);
-      setMessage(model.exists
+      const successMessage = model.exists
         ? "分鏡已重新產生，鎖定片段、人工排序、備註與自訂群組已保留。"
-        : "分鏡已建立，請開始審核與排序。");
-      await refreshProject({ forceFresh: true });
+        : "分鏡已建立，請開始審核與排序。";
+      setProjectMessage(successMessage);
+      await refreshAfterMutation(successMessage);
     } catch (error) {
-      setMessage(`分鏡產生失敗：${errorMessage(error)}`);
+      setProjectMessage(`分鏡產生失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 
   async function saveTiming(segmentId: string) {
     if (busy || !timingDirtyRef.current[segmentId]) return;
-    const timing = timingDrafts[segmentId] || timingForSegment(detail, segmentId);
+    const mutation = beginMutation("timing");
+    if (!mutation) return;
+    const timing = timingDrafts[segmentId] || committedTimingForSegment(committedTimingsRef.current, detail, segmentId);
     setBusy("timing");
-    setMessage("正在儲存片段剪點…");
+    setProjectMessage("正在儲存片段剪點…");
     try {
       const result = await api.saveSegmentTiming(detail.project.id, segmentId, {
         start_seconds: timing.startSeconds,
@@ -208,28 +272,37 @@ export function StoryboardWorkspaceController({
         speed: timing.speed,
       });
       if (!result.ok) {
-        setMessage(`剪點儲存失敗：${result.error || "未知錯誤"}`);
+        setProjectMessage(`剪點儲存失敗：${result.error || "未知錯誤"}`);
         return;
       }
       setSegmentTimingDirty(segmentId, false);
+      committedTimingsRef.current = { ...committedTimingsRef.current, [segmentId]: { ...timing } };
+      awaitingTimingAckRef.current.add(segmentId);
       setPreviewItems([]);
-      setMessage("片段剪點已儲存，輸出內容有變更，請重新核准。");
-      await refreshProject({ forceFresh: true });
+      const successMessage = "片段剪點已儲存，輸出內容有變更，請重新核准。";
+      setProjectMessage(successMessage);
+      await refreshAfterMutation(successMessage);
     } catch (error) {
-      setMessage(`剪點儲存失敗：${errorMessage(error)}`);
+      setProjectMessage(`剪點儲存失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 
   async function preview(segmentId: string, mode: StoryboardPreviewMode, force = false) {
     if (busy) return;
-    if (timingDirtyRef.current[segmentId]) {
-      setMessage("請先儲存此片段剪點，再產生預覽。");
+    const selectedSegment = model.segments.find((item) => item.id === segmentId);
+    if (!selectedSegment?.included) {
+      setProjectMessage("此片段已排除，預覽已停用，不會進入正式輸出。請先納入成片後再預覽。");
+      return;
+    }
+    if (Object.values(timingDirtyRef.current).some(Boolean)) {
+      setProjectMessage("請先儲存所有未完成的片段剪點，再產生預覽。");
       return;
     }
     setBusy("preview");
-    setMessage(force
+    setProjectMessage(force
       ? "正在忽略快取並重新產生分鏡預覽…"
       : mode === "segment"
         ? "正在產生片段短預覽…"
@@ -241,12 +314,12 @@ export function StoryboardWorkspaceController({
         mode,
         segmentId,
         durationSeconds: mode === "segment" ? 5 : 8,
-        timelineStartSeconds: mode === "range" ? timelineStartForSegment(state, detail, segmentId, timingDrafts) : 0,
+        timelineStartSeconds: mode === "range" ? timelineStartForSegment(state, detail, segmentId, committedTimingsRef.current) : 0,
         storyboardState: state,
         force,
       });
       if (!result.ok) {
-        setMessage(`預覽產生失敗：${result.error || "未知錯誤"}`);
+        setProjectMessage(`預覽產生失敗：${result.error || "未知錯誤"}`);
         return;
       }
       const items = result.previews?.map((item) => ({
@@ -259,13 +332,13 @@ export function StoryboardWorkspaceController({
         durationSeconds: Number(result.duration_seconds || 0),
       }] : []);
       setPreviewItems(items);
-      setMessage(force
+      setProjectMessage(force
         ? `${previewModeLabel(mode)}已忽略快取重新產生，共 ${items.length} 個預覽。`
         : result.cache_hit
           ? `${previewModeLabel(mode)}已從快取載入，共 ${items.length} 個預覽。`
           : `${previewModeLabel(mode)}已完成，共 ${items.length} 個預覽。`);
     } catch (error) {
-      setMessage(`預覽產生失敗：${errorMessage(error)}`);
+      setProjectMessage(`預覽產生失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
     }
@@ -273,12 +346,14 @@ export function StoryboardWorkspaceController({
 
   async function generateThumbnail(segmentId: string, ratio: number, force = false) {
     if (busy) return;
+    const mutation = beginMutation("storyboard");
+    if (!mutation) return;
     setBusy("thumbnail");
-    setMessage(force ? "正在忽略快取並重新產生代表畫格…" : "正在產生代表畫格…");
+    setProjectMessage(force ? "正在忽略快取並重新產生代表畫格…" : "正在產生代表畫格…");
     try {
       const result = await api.storyboardThumbnail(detail.project.id, segmentId, ratio, force);
       if (!result.ok) {
-        setMessage(`代表畫格產生失敗：${result.error || "未知錯誤"}`);
+        setProjectMessage(`代表畫格產生失敗：${result.error || "未知錯誤"}`);
         return;
       }
       setState((current) => updateStoryboardSegment(current, segmentId, {
@@ -287,20 +362,23 @@ export function StoryboardWorkspaceController({
       }));
       setStoryboardDirty(true);
       setPreviewItems([]);
-      setMessage(force
+      setProjectMessage(force
         ? "代表畫格已忽略快取重新產生，請儲存分鏡。"
         : result.cache_hit
           ? "代表畫格已從快取載入，請儲存分鏡。"
           : "代表畫格已產生，請儲存分鏡以保留位置。");
     } catch (error) {
-      setMessage(`代表畫格產生失敗：${errorMessage(error)}`);
+      setProjectMessage(`代表畫格產生失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 
   async function changeAudioRole(segmentId: string, role: AudioSegmentSettings["role"] | "default") {
     if (busy) return;
+    const mutation = beginMutation("audio");
+    if (!mutation) return;
     setBusy("audio");
     try {
       const existing = detail.audio.segments[segmentId];
@@ -309,16 +387,18 @@ export function StoryboardWorkspaceController({
         : { ...(existing && typeof existing === "object" ? existing : {}), role };
       const result = await api.audioSettings(detail.project.id, { segments: { [segmentId]: segmentPatch } });
       if (!result.ok) {
-        setMessage(`原音角色更新失敗：${result.error || "未知錯誤"}`);
+        setProjectMessage(`原音角色更新失敗：${result.error || "未知錯誤"}`);
         return;
       }
       setPreviewItems([]);
-      setMessage(role === "default" ? "片段已改回專案音訊預設。" : "片段原音角色已更新，請重新確認預覽。");
-      await refreshProject({ forceFresh: true });
+      const successMessage = role === "default" ? "片段已改回專案音訊預設。" : "片段原音角色已更新，請重新確認預覽。";
+      setProjectMessage(successMessage);
+      await refreshAfterMutation(successMessage);
     } catch (error) {
-      setMessage(`原音角色更新失敗：${errorMessage(error)}`);
+      setProjectMessage(`原音角色更新失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 
@@ -326,6 +406,8 @@ export function StoryboardWorkspaceController({
     if (busy) return;
     const segment = model.segments.find((item) => item.id === segmentId);
     if (!segment) return;
+    const mutation = beginMutation("color");
+    if (!mutation) return;
     setBusy("color");
     try {
       const existing = detail.color.segments[segmentId];
@@ -342,21 +424,25 @@ export function StoryboardWorkspaceController({
         segments: { [segmentId]: patch },
       });
       if (!result.ok) {
-        setMessage(`片段調色更新失敗：${result.error || "未知錯誤"}`);
+        setProjectMessage(`片段調色更新失敗：${result.error || "未知錯誤"}`);
         return;
       }
       setPreviewItems([]);
-      setMessage(!segment.colorEnabled ? "已啟用此片段調色。" : "已停用此片段調色。");
-      await refreshProject({ forceFresh: true });
+      const successMessage = !segment.colorEnabled ? "已啟用此片段調色。" : "已停用此片段調色。";
+      setProjectMessage(successMessage);
+      await refreshAfterMutation(successMessage);
     } catch (error) {
-      setMessage(`片段調色更新失敗：${errorMessage(error)}`);
+      setProjectMessage(`片段調色更新失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 
   async function resetColor(segmentId: string) {
     if (busy) return;
+    const mutation = beginMutation("color");
+    if (!mutation) return;
     setBusy("color");
     try {
       const result = await api.colorSettings(detail.project.id, {
@@ -366,16 +452,18 @@ export function StoryboardWorkspaceController({
         segments: { [segmentId]: null },
       });
       if (!result.ok) {
-        setMessage(`恢復調色預設失敗：${result.error || "未知錯誤"}`);
+        setProjectMessage(`恢復調色預設失敗：${result.error || "未知錯誤"}`);
         return;
       }
       setPreviewItems([]);
-      setMessage("已恢復此片段的專案調色預設。");
-      await refreshProject({ forceFresh: true });
+      const successMessage = "已恢復此片段的專案調色預設。";
+      setProjectMessage(successMessage);
+      await refreshAfterMutation(successMessage);
     } catch (error) {
-      setMessage(`恢復調色預設失敗：${errorMessage(error)}`);
+      setProjectMessage(`恢復調色預設失敗：${errorMessage(error)}`);
     } finally {
       setBusy("");
+      controls.finishProjectMutation(mutation);
     }
   }
 
@@ -383,13 +471,14 @@ export function StoryboardWorkspaceController({
     model={model}
     selectedId={selectedId}
     dirty={dirty}
-    busy={Boolean(busy)}
+    busy={workspaceBusy}
     saving={busy === "save"}
     regenerating={busy === "regenerate"}
     previewing={busy === "preview"}
     thumbnailing={busy === "thumbnail"}
     timingDrafts={timingDrafts}
     timingDirty={timingDirty}
+    hasUnsavedTiming={hasUnsavedTiming}
     previewItems={previewItems}
     onSelect={selectSegment}
     onStoryboardChange={changeStoryboard}
@@ -409,6 +498,14 @@ export function StoryboardWorkspaceController({
     onMoveGroup={(groupId, delta) => replaceLocalState(moveStoryboardGroup(state, groupId, delta))}
     onDeleteGroup={(groupId) => replaceLocalState(deleteEmptyStoryboardGroup(state, groupId))}
   />;
+
+  async function refreshAfterMutation(successMessage: string) {
+    try {
+      await refreshProject({ forceFresh: true, throwOnError: true });
+    } catch (error) {
+      setProjectMessage(successMessage + " 但畫面更新失敗：" + errorMessage(error));
+    }
+  }
 }
 
 function timingFromDetail(detail: ProjectDetail): Record<string, TimingDraft> {
@@ -423,13 +520,22 @@ function syncServerTiming(
   current: Record<string, TimingDraft>,
   detail: ProjectDetail,
   dirty: Record<string, boolean>,
+  committed: Record<string, TimingDraft>,
 ): Record<string, TimingDraft> {
   return Object.fromEntries(detail.segments.map((segment) => {
     const server = timingForSegment(detail, segment.segment_id);
     return [segment.segment_id, dirty[segment.segment_id] && current[segment.segment_id]
       ? current[segment.segment_id]
-      : server];
+      : committed[segment.segment_id] || server];
   }));
+}
+
+function committedTimingForSegment(
+  committed: Record<string, TimingDraft>,
+  detail: ProjectDetail,
+  segmentId: string,
+): TimingDraft {
+  return committed[segmentId] || timingForSegment(detail, segmentId);
 }
 
 function timingForSegment(detail: ProjectDetail, segmentId: string): TimingDraft {

@@ -8,6 +8,7 @@ import {
   moveStoryboardGroup,
   moveStoryboardSegment,
   moveStoryboardSegmentToGroup,
+  migrateStoryboardGroupIds,
   renameStoryboardGroup,
   timelineStartForSegment,
   updateStoryboardSegment,
@@ -204,6 +205,33 @@ describe("storyboard production view model", () => {
     const deleted = deleteEmptyStoryboardGroup(moved, "night");
     expect(deleted.groups.map((group) => group.group_id)).toEqual(["morning", "afternoon"]);
     expect(deleteEmptyStoryboardGroup(deleted, "morning")).toBe(deleted);
+  });
+
+  it("migrates legacy same-title groups to stable ids without using their array index", () => {
+    const legacy = {
+      ...storyboard(),
+      groups: [
+        { title: "同名分組", category: "travel", order: 1, key: "morning-legacy" },
+        { title: "同名分組", category: "travel", order: 2, key: "night-legacy" },
+      ],
+      segments: {
+        a: { ...storyboard().segments.a, group_id: "morning-legacy" },
+        b: { ...storyboard().segments.b, group_id: "night-legacy" },
+      },
+    } as unknown as StoryboardState;
+
+    const first = migrateStoryboardGroupIds(legacy);
+    const firstIds = first.groups.map((group) => group.group_id);
+    expect(new Set(firstIds).size).toBe(2);
+    expect(first.segments.a.group_id).toBe(firstIds[0]);
+    expect(first.segments.b.group_id).toBe(firstIds[1]);
+
+    const renamedAndReordered = {
+      ...first,
+      groups: [...first.groups].reverse().map((group, index) => ({ ...group, title: "改名後", order: index + 1 })),
+    };
+    const reloaded = migrateStoryboardGroupIds(renamedAndReordered);
+    expect(reloaded.groups.map((group) => group.group_id).sort()).toEqual([...firstIds].sort());
   });
 
   it("calculates range preview start from included ordered output duration", () => {

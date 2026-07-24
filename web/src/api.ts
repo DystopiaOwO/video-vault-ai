@@ -206,10 +206,10 @@ export const api = {
   bgm: () => json<BgmTrack[]>("/api/bgm"),
   createProject: (name: string) =>
     json<{ ok: boolean; id: number }>("/api/projects", post({ name, video_ids: [], category: "unknown", content_type: "diary_montage", platform: "YouTube" })),
-  uploadProject: (projectId: number, files: FileList) => {
+  uploadProject: (projectId: number, files: ReadonlyArray<File>) => {
     const body = new FormData();
     body.append("project_id", String(projectId));
-    Array.from(files).forEach((file) => body.append("file", file));
+    files.forEach((file) => body.append("file", file));
     return json<{ ok: boolean; files?: string[]; error?: string }>("/api/project/upload", { method: "POST", body });
   },
   analyzeJob: (projectId: number, force = false) =>

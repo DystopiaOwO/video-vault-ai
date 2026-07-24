@@ -42,6 +42,82 @@ function createClient() {
 }
 
 describe("ProjectDataLoader", () => {
+  it("keeps ordinary polling errors resolved and reported", async () => {
+    const { client, requests } = createClient();
+    const reportError = vi.fn();
+    const loader = new ProjectDataLoader(client, () => true, () => true, vi.fn(), reportError);
+    const error = new Error("project unavailable");
+
+    const request = loader.load(7);
+    requests[0].project.reject(error);
+    requests[0].jobs.resolve([]);
+
+    await expect(request).resolves.toEqual([]);
+    expect(reportError).toHaveBeenCalledWith(error);
+  });
+
+  it("rejects mutation refresh failures without reporting a duplicate UI error", async () => {
+    const { client, requests } = createClient();
+    const reportError = vi.fn();
+    const loader = new ProjectDataLoader(client, () => true, () => true, vi.fn(), reportError);
+    const error = new Error("jobs unavailable");
+
+    const request = loader.load(7, { forceFresh: true, throwOnError: true });
+    requests[0].project.resolve(detail(7));
+    requests[0].jobs.reject(error);
+
+    await expect(request).rejects.toBe(error);
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it("keeps a forceFresh refresh non-throwing unless throwOnError is explicit", async () => {
+    const { client, requests } = createClient();
+    const reportError = vi.fn();
+    const loader = new ProjectDataLoader(client, () => true, () => true, vi.fn(), reportError);
+    const error = new Error("fresh refresh unavailable");
+
+    const request = loader.load(7, { forceFresh: true });
+    requests[0].project.resolve(detail(7));
+    requests[0].jobs.reject(error);
+
+    await expect(request).resolves.toEqual([]);
+    expect(reportError).toHaveBeenCalledWith(error);
+  });
+
+  it("rejects an explicit throwOnError request", async () => {
+    const { client, requests } = createClient();
+    const reportError = vi.fn();
+    const loader = new ProjectDataLoader(client, () => true, () => true, vi.fn(), reportError);
+    const error = new Error("project unavailable");
+
+    const request = loader.load(7, { throwOnError: true });
+    requests[0].project.reject(error);
+    requests[0].jobs.resolve([]);
+
+    await expect(request).rejects.toBe(error);
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it("starts a throwing fresh request after a pending request fails", async () => {
+    const { client, requests } = createClient();
+    const reportError = vi.fn();
+    const loader = new ProjectDataLoader(client, () => true, () => true, vi.fn(), reportError);
+    const oldError = new Error("old request failed");
+    const freshError = new Error("fresh request failed");
+
+    const requestA = loader.load(7);
+    const requestB = loader.load(7, { forceFresh: true, throwOnError: true });
+    requests[0].project.reject(oldError);
+    requests[0].jobs.resolve([]);
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    requests[1].project.reject(freshError);
+    requests[1].jobs.resolve([]);
+
+    await expect(requestA).resolves.toEqual([]);
+    await expect(requestB).rejects.toBe(freshError);
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
   it("waits for request A, then starts fresh request B after a mutation", async () => {
     const { client, requests } = createClient();
     const applied: Job[][] = [];
@@ -115,5 +191,49 @@ describe("ProjectDataLoader", () => {
     requests[0].jobs.resolve([]);
 
     await expect(Promise.all([first, second])).resolves.toEqual([[], []]);
+  });
+
+  it("keeps an ordinary polling caller non-throwing when it joins a strict refresh", async () => {
+    const { client, requests } = createClient();
+    const reportError = vi.fn();
+    const loader = new ProjectDataLoader(client, () => true, () => true, vi.fn(), reportError);
+    const error = new Error("shared request failed");
+
+    const strictRefresh = loader.load(7, { throwOnError: true });
+    const polling = loader.load(7);
+    const strictResult = expect(strictRefresh).rejects.toBe(error);
+    const pollingResult = expect(polling).resolves.toEqual([]);
+
+    requests[0].project.reject(error);
+    requests[0].jobs.resolve([]);
+
+    await strictResult;
+    await pollingResult;
+    expect(reportError).not.toHaveBeenCalled();
+
+    const nextPolling = loader.load(7);
+    expect(requests).toHaveLength(2);
+    requests[1].project.resolve(detail(7));
+    requests[1].jobs.resolve([]);
+    await expect(nextPolling).resolves.toEqual([]);
+  });
+
+  it("preserves strict rejection when it joins an ordinary pending poll", async () => {
+    const { client, requests } = createClient();
+    const reportError = vi.fn();
+    const loader = new ProjectDataLoader(client, () => true, () => true, vi.fn(), reportError);
+    const error = new Error("coalesced poll failed");
+
+    const polling = loader.load(7);
+    const strictRefresh = loader.load(7, { throwOnError: true });
+    const pollingResult = expect(polling).resolves.toEqual([]);
+    const strictResult = expect(strictRefresh).rejects.toBe(error);
+
+    requests[0].project.reject(error);
+    requests[0].jobs.resolve([]);
+
+    await pollingResult;
+    await strictResult;
+    expect(reportError).not.toHaveBeenCalled();
   });
 });

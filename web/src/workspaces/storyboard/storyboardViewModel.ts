@@ -71,7 +71,7 @@ const AUDIO_LABELS: Record<AudioSegmentSettings["role"], string> = {
 };
 
 export function buildStoryboardViewModel(detail: ProjectDetail): StoryboardViewModel {
-  const state = detail.storyboard || emptyStoryboard();
+  const state = migrateStoryboardGroupIds(detail.storyboard || emptyStoryboard());
   const declared = [...(state.groups || [])].sort(compareOrder);
   const declaredById = new Map(declared.map((group) => [group.group_id, group]));
   const fallbackIds: string[] = [];
@@ -125,7 +125,7 @@ export function editableStoryboardState(detail: ProjectDetail): StoryboardState 
   const source = detail.storyboard || emptyStoryboard();
   if (!source.exists && !source.groups?.length && !Object.keys(source.segments || {}).length) return emptyStoryboard();
 
-  const next = cloneStoryboardState(source);
+  const next = migrateStoryboardGroupIds(source);
   const groupIds = new Set(next.groups.map((group) => group.group_id));
   for (const [index, segment] of detail.segments.entries()) {
     const groupId = next.segments[segment.segment_id]?.group_id
@@ -177,16 +177,64 @@ export function updateStoryboardSegment(
 }
 
 export function normalizeStoryboardState(state: StoryboardState): StoryboardState {
-  const groups = [...(state.groups || [])]
+  const migrated = migrateStoryboardGroupIds(state);
+  const groups = [...(migrated.groups || [])]
     .sort(compareOrder)
     .map((group, index) => ({ ...group, order: index + 1 }));
-  const segments = Object.fromEntries(Object.entries(state.segments || {}).map(([id, segment]) => [id, { ...segment }]));
+  const segments = Object.fromEntries(Object.entries(migrated.segments || {}).map(([id, segment]) => [id, { ...segment }]));
   for (const group of groups) {
     segmentIdsForGroup({ ...state, groups, segments }, group.group_id).forEach((id, index) => {
       segments[id] = { ...segments[id], order: index + 1 };
     });
   }
-  return { ...state, groups, segments };
+  return { ...migrated, groups, segments };
+}
+
+/**
+ * Migrate old storyboard groups that did not persist an id. The fallback is
+ * derived from stable group data and member segment ids, never from the
+ * mutable display title alone or the current array index.
+ */
+export function migrateStoryboardGroupIds(state: StoryboardState): StoryboardState {
+  const sourceGroups = Array.isArray(state.groups) ? state.groups : [];
+  const sourceSegments = state.segments || {};
+  const usedIds = new Set<string>();
+  const aliases = new Map<string, string>();
+  const migratedGroups = sourceGroups.map((sourceGroup) => {
+    const raw = sourceGroup as unknown as Record<string, unknown>;
+    const explicitId = stringValue(raw.group_id) || stringValue(raw.id);
+    const title = stringValue(raw.title) || "未命名分組";
+    const category = stringValue(raw.category) || "other";
+    const legacyKeys = [
+      stringValue(raw.group),
+      stringValue(raw.key),
+      stringValue(raw.slug),
+      stringValue(raw.legacy_key),
+      title,
+      category,
+    ].filter(Boolean) as string[];
+    const memberIds = Object.entries(sourceSegments)
+      .filter(([, segment]) => legacyKeys.includes(stringValue((segment as unknown as Record<string, unknown>).group_id) || ""))
+      .map(([id]) => id)
+      .sort();
+    const fingerprint = stableLegacyGroupFingerprint(raw, memberIds);
+    const baseId = explicitId || `legacy_${fnv1a(fingerprint)}`;
+    const groupId = uniqueMigratedGroupId(baseId, fingerprint, usedIds);
+    usedIds.add(groupId);
+    for (const alias of legacyKeys) {
+      if (!aliases.has(alias)) aliases.set(alias, groupId);
+    }
+    return { ...sourceGroup, group_id: groupId, title, category };
+  });
+
+  const migratedSegments = Object.fromEntries(Object.entries(sourceSegments).map(([id, segment]) => {
+    const currentGroupId = stringValue((segment as unknown as Record<string, unknown>).group_id);
+    const groupId = currentGroupId && migratedGroups.some((group) => group.group_id === currentGroupId)
+      ? currentGroupId
+      : (aliases.get(currentGroupId || "") || currentGroupId || "ungrouped");
+    return [id, { ...segment, group_id: groupId }];
+  }));
+  return { ...state, groups: migratedGroups, segments: migratedSegments };
 }
 
 export function reorderStoryboardSegments(
@@ -242,11 +290,12 @@ export function moveStoryboardSegmentToGroup(state: StoryboardState, segmentId: 
   return normalizeStoryboardState(next);
 }
 
-export function addStoryboardGroup(state: StoryboardState, title: string, groupId = `custom_${Date.now()}`): StoryboardState {
+export function addStoryboardGroup(state: StoryboardState, title: string, groupId?: string): StoryboardState {
   const trimmed = title.trim();
-  if (!trimmed || state.groups.some((group) => group.group_id === groupId)) return state;
+  const resolvedGroupId = groupId || createCustomGroupId();
+  if (!trimmed || state.groups.some((group) => group.group_id === resolvedGroupId)) return state;
   const next = cloneStoryboardState(state);
-  next.groups.push({ group_id: groupId, title: trimmed, category: "custom", order: next.groups.length + 1 });
+  next.groups.push({ group_id: resolvedGroupId, title: trimmed, category: "custom", order: next.groups.length + 1 });
   return normalizeStoryboardState(next);
 }
 
@@ -378,6 +427,45 @@ function segmentIdsForGroup(state: StoryboardState, groupId: string): string[] {
 
 function emptyStoryboard(): StoryboardState {
   return { schema_version: 1, exists: false, groups: [], segments: {} };
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function stableLegacyGroupFingerprint(group: Record<string, unknown>, memberIds: string[]): string {
+  const stableFields = Object.entries(group)
+    // Legacy groups have no durable id. Exclude display and ordering fields so
+    // renaming or reordering the migrated group cannot create a new identity.
+    .filter(([key]) => !["group_id", "id", "order", "title", "category"].includes(key))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => [key, value]);
+  return JSON.stringify({ fields: stableFields, members: memberIds });
+}
+
+function fnv1a(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function uniqueMigratedGroupId(baseId: string, fingerprint: string, usedIds: Set<string>): string {
+  if (!usedIds.has(baseId)) return baseId;
+  const disambiguated = `${baseId}_${fnv1a(`${fingerprint}|duplicate`)}`;
+  if (!usedIds.has(disambiguated)) return disambiguated;
+  let suffix = 2;
+  while (usedIds.has(`${disambiguated}_${suffix}`)) suffix += 1;
+  return `${disambiguated}_${suffix}`;
+}
+
+function createCustomGroupId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `custom_${crypto.randomUUID()}`;
+  }
+  return `custom_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function compareOrder<T extends { order: number; title?: string }>(left: T, right: T): number {

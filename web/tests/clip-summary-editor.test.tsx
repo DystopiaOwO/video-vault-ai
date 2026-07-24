@@ -66,7 +66,7 @@ describe("ClipSummaryEditor", () => {
     fireEvent.click(screen.getByRole("button", { name: "儲存描述" }));
 
     await waitFor(() => expect(save).toHaveBeenCalledWith(1, 1, "抵達博多站後走出月台"));
-    await waitFor(() => expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true }));
+    await waitFor(() => expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true, throwOnError: true }));
     expect(textarea.value).toBe("抵達博多站後走出月台");
     expect(screen.queryByText("有未儲存變更")).toBeNull();
     expect(setMessage).toHaveBeenCalledWith("內容感知描述已儲存，專案已回到待審。");

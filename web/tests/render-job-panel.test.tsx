@@ -81,7 +81,7 @@ describe("RenderJobPanel", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "立即更新" }));
 
-    await waitFor(() => expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true }));
+    await waitFor(() => expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true, throwOnError: true }));
     expect(setMessage).toHaveBeenCalledWith("工作狀態已更新。");
   });
 
@@ -111,7 +111,7 @@ describe("RenderJobPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "停止此 Render" }));
 
     await waitFor(() => expect(cancel).toHaveBeenCalledWith("render-1"));
-    await waitFor(() => expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true }));
+    await waitFor(() => expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true, throwOnError: true }));
     expect(setMessage).toHaveBeenCalledWith("已送出取消");
   });
 });

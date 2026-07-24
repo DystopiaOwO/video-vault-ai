@@ -39,6 +39,41 @@ def test_application_shell_is_linked_and_scoped_to_root_layout():
     assert "section {" not in stripped_lines
 
 
+def test_shell_form_controls_use_low_specificity_scope_for_nested_workspaces():
+    shell = (WEB_SRC / "app-shell.css").read_text(encoding="utf-8")
+    legacy = (WEB_SRC / "styles.css").read_text(encoding="utf-8")
+
+    # The shell may provide a baseline for the page, but workspace components
+    # must be able to own their input/button/select/textarea states.
+    assert ":where(#root > main > section) button" in shell
+    assert ":where(#root > main > section) input" in shell
+    assert ":where(#root > main > section) select" in shell
+    assert ":where(#root > main > section) textarea" in shell
+    assert "#root > main > section button," not in shell
+    assert "#root > main > section input," not in shell
+    assert "#root > main > section select," not in shell
+    assert "#root > main > section textarea," not in shell
+
+    assert ":where(#root > main) button" in legacy
+    assert ":where(#root > main) progress" in legacy
+    assert "\nbutton, input, select, textarea" not in legacy
+    assert "\nprogress {" not in legacy
+    assert "\ntextarea {" not in legacy
+
+    # These are the component-owned control rules that the shell must not
+    # outrank through its page-layout selector.
+    stylesheet_paths = {
+        WEB_SRC / "workspaces" / "storyboard" / "storyboard-review.css": (".review-toolbar button", ".review-form-grid input"),
+        WEB_SRC / "workspaces" / "audio" / "audio-mixing-workspace.css": (".audio-workspace button", ".audio-form-grid input"),
+        WEB_SRC / "workspaces" / "color" / "color-consistency-workspace.css": (".color-workspace button", ".color-form-grid input"),
+        WEB_SRC / "components" / "render" / "render-job-panel.css": ("#root .job-file-row button", "#root .render-job-heading-actions select"),
+    }
+    for path, selectors in stylesheet_paths.items():
+        content = path.read_text(encoding="utf-8")
+        for selector in selectors:
+            assert selector in content
+
+
 def test_project_workspace_exposes_search_loading_and_anchor_navigation():
     source = APP_SOURCE.read_text(encoding="utf-8")
 

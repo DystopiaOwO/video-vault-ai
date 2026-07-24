@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, type ProjectDetail } from "../src/api";
 import { App } from "../src/main";
@@ -27,6 +27,12 @@ function setup() {
   vi.spyOn(api, "bgm").mockResolvedValue([]);
   vi.spyOn(api, "jobs").mockResolvedValue([]);
   vi.spyOn(api, "project").mockImplementation(async (projectId) => detail(projectId));
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
 }
 
 afterEach(() => {
@@ -70,6 +76,75 @@ describe("project navigation", () => {
     fireEvent.click(screen.getByRole("button", { name: "新增專案" }));
     expect(await screen.findByText("已有同名專案，請使用不同名稱。")).toBeTruthy();
     expect(create).not.toHaveBeenCalled();
+  });
+
+  it("does not create twice when Enter is re-entered before the first request settles", async () => {
+    setup();
+    const request = deferred<{ id: number }>();
+    const create = vi.spyOn(api, "createProject").mockReturnValue(request.promise);
+    render(<App />);
+    await screen.findByRole("heading", { name: "福岡旅行" });
+
+    const input = screen.getByLabelText("建立專案");
+    fireEvent.change(input, { target: { value: "新旅程" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(create).toHaveBeenCalledTimes(1);
+    request.resolve({ id: 9 });
+    await waitFor(() => expect(screen.getByText("專案已建立，下一步請匯入素材。")).toBeTruthy());
+  });
+
+  it("can create another project after the first request fails", async () => {
+    setup();
+    const create = vi.spyOn(api, "createProject")
+      .mockRejectedValueOnce(new Error("server unavailable"))
+      .mockResolvedValueOnce({ ok: true, id: 9 });
+    render(<App />);
+    await screen.findByRole("heading", { name: "福岡旅行" });
+
+    const input = screen.getByLabelText("建立專案");
+    fireEvent.change(input, { target: { value: "重試旅程" } });
+    fireEvent.click(screen.getByRole("button", { name: "新增專案" }));
+    await screen.findByText("專案建立失敗：server unavailable");
+
+    fireEvent.click(screen.getByRole("button", { name: "新增專案" }));
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByText("專案已建立，下一步請匯入素材。")).toBeTruthy());
+  });
+
+  it("does not submit a project while an IME composition is being confirmed", async () => {
+    setup();
+    const create = vi.spyOn(api, "createProject").mockResolvedValue({ ok: true, id: 9 });
+    render(<App />);
+    await screen.findByRole("heading", { name: "福岡旅行" });
+
+    const input = screen.getByLabelText("建立專案");
+    fireEvent.change(input, { target: { value: "中文旅程" } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229, which: 229 });
+    expect(create).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+  });
+
+  it("does not let a delayed create response switch away from a project selected meanwhile", async () => {
+    setup();
+    const createRequest = deferred<{ id: number }>();
+    vi.spyOn(api, "createProject").mockReturnValue(createRequest.promise);
+    render(<App />);
+    await screen.findByRole("heading", { name: "福岡旅行" });
+
+    const input = screen.getByLabelText("建立專案");
+    fireEvent.change(input, { target: { value: "延遲專案" } });
+    fireEvent.click(screen.getByRole("button", { name: "新增專案" }));
+    fireEvent.click(screen.getByRole("button", { name: /手沖日記/ }));
+    await screen.findByRole("heading", { name: "手沖日記" });
+
+    createRequest.resolve({ id: 9 });
+    await waitFor(() => expect(screen.getByRole("heading", { name: "手沖日記" })).toBeTruthy());
+    expect(screen.queryByRole("heading", { name: "延遲專案" })).toBeNull();
   });
 
   it("switches projects through the filtered list and exposes workspace anchors", async () => {

@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { api, type Job } from "../../api";
 import type { ProjectDataLoadOptions } from "../../projectDataLoader";
+import { createProjectMutationControls, mutationLabel, ProjectMutationCoordinator, type ProjectMutationControls } from "../../projectMutation";
 import { copyText } from "../../utils/clipboard";
 import "./render-job-panel.css";
 
@@ -40,6 +41,7 @@ type Props = {
   projectId: number;
   setMessage: (value: string) => void;
   refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]>;
+  mutationControls?: ProjectMutationControls;
 };
 
 function updatedTimestamp(job: Job): number {
@@ -66,53 +68,97 @@ export function filterRenderJobs(jobs: Job[], filter: JobFilter): Job[] {
   return jobs;
 }
 
-export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject }: Props) {
+export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject, mutationControls }: Props) {
   const [cancelling, setCancelling] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<JobFilter>("all");
   const [expanded, setExpanded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const pendingCancelsRef = useRef<Job[]>([]);
+  const fallbackControlsRef = useRef<ProjectMutationControls | null>(null);
+  if (!fallbackControlsRef.current) fallbackControlsRef.current = createProjectMutationControls(new ProjectMutationCoordinator());
+  const controls = mutationControls || fallbackControlsRef.current;
   const sortedJobs = useMemo(() => sortRenderJobs(jobs), [jobs]);
   const filteredJobs = useMemo(() => filterRenderJobs(sortedJobs, filter), [filter, sortedJobs]);
   const displayedJobs = expanded ? filteredJobs : filteredJobs.slice(0, DEFAULT_VISIBLE_JOBS);
   const activeJobs = jobs.filter((job) => ACTIVE_STATUSES.has(job.status));
   const hasFormalJob = jobs.some((job) => Boolean(job.job_id));
   const hiddenJobCount = Math.max(0, filteredJobs.length - displayedJobs.length);
+  const projectMutationBusy = controls.isProjectMutationBusy(projectId);
+  const renderCancelBlocked = projectMutationBusy
+    && controls.currentProjectMutation(projectId)?.mutation !== "render-cancel";
+
+  function setProjectMessage(message: string) {
+    if (controls.isCurrentProject(projectId)) setMessage(message);
+  }
 
   async function cancel(job: Job) {
     const key = jobKey(job, projectId);
+    const mutation = controls.beginProjectMutation(projectId, "render-cancel");
+    if (!mutation) {
+      const current = controls.currentProjectMutation(projectId);
+      if (current?.mutation === "render-cancel" && !cancelling.has(key)) {
+        setCancelling((value) => new Set(value).add(key));
+        pendingCancelsRef.current.push(job);
+        setProjectMessage("停止要求已排入目前工作之後。 ");
+        return;
+      }
+      if (controls.isCurrentProject(projectId)) {
+        setProjectMessage(`目前正在${mutationLabel("render-cancel")}，請完成後再執行其他操作。`);
+      }
+      return;
+    }
     setCancelling((current) => new Set(current).add(key));
-    setMessage("正在停止指定工作...");
+    setProjectMessage("正在停止指定工作...");
     try {
       const result = job.job_id
         ? await api.cancelRenderJob(job.job_id)
         : await api.cancelLegacyJob(projectId, job.legacy_job_key || job.kind);
       if (!result.ok) {
         const error = ("error" in result && result.error) || ("reason" in result && result.reason) || "停止要求未成功";
-        await refreshProject({ forceFresh: true });
-        setMessage(`停止失敗：${error}`);
+        try {
+          await refreshProject({ forceFresh: true, throwOnError: true });
+          setProjectMessage(`停止失敗：${error}`);
+        } catch (refreshError) {
+          if (controls.isCurrentProject(projectId)) {
+            setProjectMessage(`停止失敗：${error}；但畫面更新失敗：${refreshError instanceof Error ? refreshError.message : "未知錯誤"}`);
+          }
+        }
         return;
       }
-      await refreshProject({ forceFresh: true });
-      const message = "message" in result ? result.message : ("reason" in result ? result.reason : undefined);
-      setMessage(message || "停止要求已送出");
+      const successMessage = ("message" in result ? result.message : ("reason" in result ? result.reason : undefined)) || "停止要求已送出";
+      try {
+        await refreshProject({ forceFresh: true, throwOnError: true });
+        setProjectMessage(successMessage);
+      } catch (refreshError) {
+        if (controls.isCurrentProject(projectId)) {
+          setProjectMessage(`${successMessage}，但畫面更新失敗：${refreshError instanceof Error ? refreshError.message : "未知錯誤"}`);
+        }
+      }
     } catch (error) {
-      setMessage(`停止失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (controls.isCurrentProject(projectId)) {
+        setProjectMessage(`停止失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
     } finally {
       setCancelling((current) => {
         const next = new Set(current);
         next.delete(key);
         return next;
       });
+      controls.finishProjectMutation(mutation);
+      const next = pendingCancelsRef.current.shift();
+      if (next && controls.isCurrentProject(projectId)) void cancel(next);
     }
   }
 
   async function refresh() {
     setRefreshing(true);
     try {
-      await refreshProject({ forceFresh: true });
-      setMessage("工作狀態已更新。");
+      await refreshProject({ forceFresh: true, throwOnError: true });
+      setProjectMessage("工作狀態已更新。");
     } catch (error) {
-      setMessage(`工作狀態更新失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (controls.isCurrentProject(projectId)) {
+        setProjectMessage(`工作狀態更新失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
     } finally {
       setRefreshing(false);
     }
@@ -120,7 +166,7 @@ export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject }: 
 
   async function copyPath(path: string, label: string) {
     const copied = await copyText(path);
-    setMessage(copied ? `${label}路徑已複製。` : `無法複製${label}路徑，請展開後手動複製。`);
+    setProjectMessage(copied ? `${label}路徑已複製。` : `無法複製${label}路徑，請展開後手動複製。`);
   }
 
   return <section className="render-job-panel" aria-live="polite">
@@ -186,7 +232,7 @@ export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject }: 
             type="button"
             className="danger compact"
             onClick={() => void cancel(job)}
-            disabled={cancellingJob}
+            disabled={cancellingJob || renderCancelBlocked}
           >{cancellingJob ? "停止中..." : job.job_id ? "停止此 Render" : "停止此工作"}</button>}
         </article>;
       })}

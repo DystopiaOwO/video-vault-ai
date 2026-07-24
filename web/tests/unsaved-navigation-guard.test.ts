@@ -132,4 +132,18 @@ describe("unsaved navigation guard", () => {
     expect(confirmNavigation).toHaveBeenCalledOnce();
     expect(reactHandler).not.toHaveBeenCalled();
   });
+
+  it("ignores IME keyCode 229 when guarding Enter-based project creation", () => {
+    document.body.innerHTML = '<div class="new-project"><input id="new-project-name" /><button>新增專案</button></div>';
+    markWorkspaceDirty();
+    const confirmNavigation = vi.fn(() => false);
+    cleanupGuard = installUnsavedNavigationGuard(confirmNavigation);
+    const input = document.querySelector("input") as HTMLInputElement;
+    const event = new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, bubbles: true, cancelable: true });
+
+    input.dispatchEvent(event);
+
+    expect(confirmNavigation).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
 });

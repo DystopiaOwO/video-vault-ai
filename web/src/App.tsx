@@ -6,6 +6,16 @@ import { ProjectLocation } from "./components/project/ProjectLocation";
 import { ProjectWorkflow, projectWorkflowSteps } from "./components/project/ProjectWorkflow";
 import { RenderJobPanel } from "./components/render/RenderJobPanel";
 import { type ProjectDataLoadOptions, ProjectDataLoader } from "./projectDataLoader";
+import { ProjectNavigationIdentity, type ProjectOperationToken } from "./projectNavigationIdentity";
+import { isCommittedEnter } from "./keyboard";
+import {
+  ProjectMutationCoordinator,
+  type ProjectMutationControls,
+  type ProjectMutation,
+  type ProjectMutationToken,
+  refreshFailureMessage,
+  mutationLabel,
+} from "./projectMutation";
 import { AudioMixingWorkspace } from "./workspaces/audio/AudioMixingWorkspace";
 import { ColorConsistencyWorkspace } from "./workspaces/color/ColorConsistencyWorkspace";
 import { StoryboardWorkspaceController } from "./workspaces/storyboard/StoryboardWorkspaceController";
@@ -21,12 +31,17 @@ export function App() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [bgmTracks, setBgmTracks] = useState<BgmTrack[]>([]);
   const [notes, setNotes] = useState("");
+  const notesRef = useRef("");
   const [message, setMessage] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
   const [creatingProject, setCreatingProject] = useState(false);
   const currentIdRef = useRef(0);
   const mountedRef = useRef(true);
   const loaderRef = useRef<ProjectDataLoader | null>(null);
+  const navigationIdentityRef = useRef(new ProjectNavigationIdentity());
+  const mutationCoordinatorRef = useRef(new ProjectMutationCoordinator());
+  const [mutationBusy, setMutationBusy] = useState<ProjectMutationToken | null>(null);
+  const creatingProjectRef = useRef(false);
   const normalizedProjectQuery = projectQuery.trim().toLocaleLowerCase();
   const filteredProjects = useMemo(() => projects.filter((project) => {
     if (!normalizedProjectQuery) return true;
@@ -52,7 +67,7 @@ export function App() {
     api.bgm().then(setBgmTracks).catch((error) => setMessage(`BGM 載入失敗：${error instanceof Error ? error.message : "未知錯誤"}`));
   }, []);
 
-  async function loadProjects() {
+  async function loadProjects(options: { throwOnError?: boolean } = {}) {
     setProjectsLoading(true);
     try {
       const rows = await api.projects();
@@ -60,6 +75,7 @@ export function App() {
       setCurrentId((id) => id || rows[0]?.id || 0);
       return rows;
     } catch (error) {
+      if (options.throwOnError) throw error;
       setMessage(`專案載入失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
       return [];
     } finally {
@@ -72,6 +88,10 @@ export function App() {
   }, [currentId]);
 
   useEffect(() => {
+    notesRef.current = notes;
+  }, [notes]);
+
+  useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
@@ -81,6 +101,16 @@ export function App() {
 
   function loadProjectData(requestedProjectId: number, options: ProjectDataLoadOptions = {}): Promise<Job[]> {
     return loaderRef.current?.load(requestedProjectId, options) || Promise.resolve([]);
+  }
+
+  async function refreshProjectAfterMutation(projectId: number, operation?: ProjectOperationToken): Promise<Job[]> {
+    loaderRef.current?.invalidate();
+    const [nextDetail, nextJobs] = await Promise.all([api.project(projectId), api.jobs(projectId)]);
+    if (mountedRef.current && currentIdRef.current === projectId && (!operation || isCurrentProjectOperation(operation))) {
+      setDetail(nextDetail);
+      setJobs(nextJobs);
+    }
+    return nextJobs;
   }
 
   useEffect(() => {
@@ -102,31 +132,64 @@ export function App() {
 
   async function review(action: "approve" | "reject") {
     if (!detail) return;
+    const requestedProjectId = detail.project.id;
+    const submittedNotes = notes;
+    const mutation = beginProjectMutation(requestedProjectId, action);
+    if (!mutation) return;
+    const operation = beginProjectOperation(requestedProjectId);
     setMessage("送出中...");
     try {
-      action === "approve" ? await api.approve(detail.project.id, notes) : await api.reject(detail.project.id, notes);
-      setNotes("");
-      setMessage(action === "approve" ? "已核准專案" : "已退回修改");
-      setDetail(await api.project(detail.project.id));
+      const result = action === "approve" ? await api.approve(requestedProjectId, submittedNotes) : await api.reject(requestedProjectId, submittedNotes);
+      if (result.ok === false) {
+        if (isCurrentProjectOperation(operation)) setMessage(`${action === "approve" ? "核准" : "退回"}失敗：操作未成功`);
+        return;
+      }
+      if (isCurrentProjectOperation(operation) && notesRef.current === submittedNotes) setNotes("");
+      const successMessage = action === "approve" ? "專案已核准" : "專案已退回修改";
+      try {
+        await refreshProjectAfterMutation(requestedProjectId, operation);
+        if (isCurrentProjectOperation(operation)) setMessage(successMessage);
+      } catch (error) {
+        if (isCurrentProjectOperation(operation)) setMessage(refreshFailureMessage(successMessage, error));
+      }
     } catch (error) {
-      setMessage(`審核操作失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (isCurrentProjectOperation(operation)) setMessage(`審核操作失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+    } finally {
+      finishProjectMutation(mutation);
     }
   }
 
   async function revise() {
     if (!detail) return;
+    const requestedProjectId = detail.project.id;
+    const submittedNotes = notes;
+    const mutation = beginProjectMutation(requestedProjectId, "revise");
+    if (!mutation) return;
+    const operation = beginProjectOperation(requestedProjectId);
     setMessage("正在依備註重建故事...");
     try {
-      await api.revise(detail.project.id, notes);
-      setNotes("");
-      setMessage("故事整理已依備註重建");
-      setDetail(await api.project(detail.project.id));
+      const result = await api.revise(requestedProjectId, submittedNotes);
+      if (result.ok === false) {
+        if (isCurrentProjectOperation(operation)) setMessage("故事重建失敗：操作未成功");
+        return;
+      }
+      if (isCurrentProjectOperation(operation) && notesRef.current === submittedNotes) setNotes("");
+      const successMessage = "故事整理已依備註重建";
+      try {
+        await refreshProjectAfterMutation(requestedProjectId, operation);
+        if (isCurrentProjectOperation(operation)) setMessage(successMessage);
+      } catch (error) {
+        if (isCurrentProjectOperation(operation)) setMessage(refreshFailureMessage(successMessage, error));
+      }
     } catch (error) {
-      setMessage(`故事重建失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (isCurrentProjectOperation(operation)) setMessage(`故事重建失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+    } finally {
+      finishProjectMutation(mutation);
     }
   }
 
   async function createProject() {
+    if (creatingProjectRef.current) return;
     const name = newProjectName.trim();
     if (!name) {
       setMessage("請先輸入專案名稱。");
@@ -136,29 +199,87 @@ export function App() {
       setMessage("已有同名專案，請使用不同名稱。");
       return;
     }
+    const operation = navigationIdentityRef.current.begin(currentIdRef.current);
+    creatingProjectRef.current = true;
     setCreatingProject(true);
     setMessage("正在建立專案...");
     try {
       const result = await api.createProject(name);
+      if (result.ok === false) {
+        if (navigationIdentityRef.current.isCurrent(operation, currentIdRef.current)) setMessage("專案建立失敗：操作未成功");
+        return;
+      }
+      try {
+        await loadProjects({ throwOnError: true });
+      } catch (error) {
+        if (navigationIdentityRef.current.isCurrent(operation, currentIdRef.current)) {
+          setMessage(refreshFailureMessage("專案已建立", error));
+        }
+        return;
+      }
+      if (!navigationIdentityRef.current.isCurrent(operation, currentIdRef.current)) return;
       setNewProjectName("");
-      await loadProjects();
       selectProject(result.id);
       setMessage("專案已建立，下一步請匯入素材。");
     } catch (error) {
-      setMessage(`專案建立失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (navigationIdentityRef.current.isCurrent(operation, currentIdRef.current)) {
+        setMessage(`專案建立失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
     } finally {
+      creatingProjectRef.current = false;
       setCreatingProject(false);
     }
   }
 
   function selectProject(projectId: number) {
     if (projectId === currentId) return;
+    currentIdRef.current = projectId;
+    navigationIdentityRef.current.switchProject();
+    mutationCoordinatorRef.current.switchProject();
+    setMutationBusy(null);
     loaderRef.current?.invalidate();
     setCurrentId(projectId);
     setDetail(null);
     setJobs([]);
     setNotes("");
     setMessage("");
+  }
+
+  function beginProjectOperation(projectId: number): ProjectOperationToken {
+    return navigationIdentityRef.current.begin(projectId);
+  }
+
+  function beginProjectMutation(projectId: number, mutation: ProjectMutation): ProjectMutationToken | null {
+    if (currentIdRef.current !== projectId) return null;
+    const token = mutationCoordinatorRef.current.begin(projectId, mutation);
+    if (!token) {
+      if (currentIdRef.current === projectId) {
+        setMessage(`目前正在${mutationLabel(mutation)}，請完成後再執行其他操作。`);
+      }
+      return null;
+    }
+    setMutationBusy(token);
+    return token;
+  }
+
+  function finishProjectMutation(token: ProjectMutationToken): void {
+    mutationCoordinatorRef.current.finish(token);
+    setMutationBusy(mutationCoordinatorRef.current.current());
+  }
+
+  const mutationControls: ProjectMutationControls = {
+    beginProjectMutation,
+    finishProjectMutation,
+    isCurrentProject: (projectId) => currentIdRef.current === projectId,
+    isProjectMutationBusy: (projectId) => mutationCoordinatorRef.current.isBusy(projectId),
+    currentProjectMutation: (projectId) => {
+      const current = mutationCoordinatorRef.current.current();
+      return !current || projectId === undefined || current.projectId === projectId ? current : null;
+    },
+  };
+
+  function isCurrentProjectOperation(operation: ProjectOperationToken): boolean {
+    return navigationIdentityRef.current.isCurrent(operation, currentIdRef.current);
   }
 
   async function refreshProject(projectId: number, options: ProjectDataLoadOptions = {}): Promise<Job[]> {
@@ -171,7 +292,7 @@ export function App() {
       ? <WorkspaceEmpty title="尚未建立專案" detail="從左側輸入名稱建立第一個專案，再匯入多支影片素材。" />
       : !detail || detail.project.id !== currentId
         ? <WorkspaceLoading title="正在開啟專案" detail="載入素材、分鏡、調色、音訊與輸出狀態…" />
-        : <ProjectView key={detail.project.id} detail={detail} jobs={jobs} bgmTracks={bgmTracks} notes={notes} setNotes={setNotes} setMessage={setMessage} refreshProject={refreshProject} review={review} revise={revise} />;
+        : <ProjectView key={detail.project.id} detail={detail} jobs={jobs} bgmTracks={bgmTracks} notes={notes} setNotes={setNotes} setMessage={setMessage} refreshProject={refreshProject} refreshProjectAfterMutation={refreshProjectAfterMutation} review={review} revise={revise} beginProjectOperation={beginProjectOperation} isCurrentProjectOperation={isCurrentProjectOperation} mutationControls={mutationControls} mutationBusy={mutationBusy} />;
 
   return <main>
     <aside>
@@ -183,7 +304,7 @@ export function App() {
       </nav>
       <div className="new-project">
         <label htmlFor="new-project-name">建立專案</label>
-        <input id="new-project-name" value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void createProject(); }} placeholder="例如：福岡旅行 2026" maxLength={80} />
+        <input id="new-project-name" value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} onKeyDown={(event) => { if (isCommittedEnter(event)) { event.preventDefault(); void createProject(); } }} placeholder="例如：福岡旅行 2026" maxLength={80} />
         <button disabled={creatingProject || !newProjectName.trim()} onClick={() => void createProject()}>{creatingProject ? "建立中…" : "新增專案"}</button>
       </div>
       <div className="sidebar-section-heading">
@@ -241,7 +362,7 @@ function BgmPage() {
   </main>;
 }
 
-function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, refreshProject, review, revise }: {
+function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, refreshProject, refreshProjectAfterMutation, review, revise, beginProjectOperation, isCurrentProjectOperation, mutationControls, mutationBusy }: {
   detail: ProjectDetail;
   jobs: Job[];
   bgmTracks: BgmTrack[];
@@ -249,8 +370,13 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   setNotes: (value: string) => void;
   setMessage: (value: string) => void;
   refreshProject: (projectId: number, options?: ProjectDataLoadOptions) => Promise<Job[]>;
+  refreshProjectAfterMutation: (projectId: number, operation?: ProjectOperationToken) => Promise<Job[]>;
   review: (action: "approve" | "reject") => void;
   revise: () => void;
+  beginProjectOperation: (projectId: number) => ProjectOperationToken;
+  isCurrentProjectOperation: (operation: ProjectOperationToken) => boolean;
+  mutationControls: ProjectMutationControls;
+  mutationBusy: ProjectMutationToken | null;
 }) {
   const [submitting, setSubmitting] = useState(false);
   const refreshCurrentProject = (options: ProjectDataLoadOptions = {}) => refreshProject(detail.project.id, options);
@@ -260,6 +386,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   const workflowSteps = projectWorkflowSteps(detail, jobs);
   const outputDone = workflowSteps[workflowSteps.length - 1]?.done ?? false;
   const renderRunning = jobs.some((job) => Boolean(job.job_id) && ["queued", "running", "cancelling"].includes(job.status));
+  const projectMutationBusy = Boolean(mutationBusy) || mutationControls.isProjectMutationBusy(detail.project.id);
 
   return <>
     <div className="hero">
@@ -278,13 +405,13 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
     <WorkspaceNavigation />
 
     <div className="workspace-section" id="workspace-overview" tabIndex={-1}>
-      <RenderJobPanel jobs={jobs} projectId={detail.project.id} setMessage={setMessage} refreshProject={refreshCurrentProject} />
+      <RenderJobPanel jobs={jobs} projectId={detail.project.id} setMessage={setMessage} refreshProject={refreshCurrentProject} mutationControls={mutationControls} />
       <ProjectWorkflow detail={detail} jobs={jobs} />
       <WorkflowSkeleton detail={detail} />
     </div>
 
     <div className="workspace-section" id="workspace-storyboard" tabIndex={-1}>
-      <StoryboardWorkspaceController detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} />
+      <StoryboardWorkspaceController detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} mutationControls={mutationControls} />
     </div>
 
     <div className="workspace-section" id="workspace-review" tabIndex={-1}>
@@ -298,18 +425,18 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
           <textarea id="review-notes" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="記錄核准理由、退回項目或重建故事需求" />
           <div className="row">
             <button type="button" disabled={!notes} onClick={() => setNotes("")}>清除備註</button>
-            <button type="button" className="good" onClick={() => review("approve")}>核准專案</button>
-            <button type="button" className="danger" onClick={() => review("reject")}>退回修改</button>
-            <button type="button" disabled={!notes.trim()} onClick={revise}>依備註重建故事</button>
+            <button type="button" className="good" disabled={projectMutationBusy} onClick={() => review("approve")}>核准專案</button>
+            <button type="button" className="danger" disabled={projectMutationBusy} onClick={() => review("reject")}>退回修改</button>
+            <button type="button" disabled={projectMutationBusy || !notes.trim()} onClick={revise}>依備註重建故事</button>
           </div>
         </Card>
         <Card title="輸出">
           <div className="output-actions">
-            <button type="button" onClick={() => void exportProject("hyperframes")}>產生初剪專案</button>
-            <button type="button" disabled={!detail.can_render} onClick={() => void exportProject("hyperframes-render")}>快速輸出 MP4</button>
-            <button type="button" className="good" disabled={submitting || !detail.can_render || renderRunning} onClick={() => void startFormalRender()}>{submitting ? "正在建立正式輸出…" : renderRunning ? "正式輸出進行中" : "正式輸出（Render Job）"}</button>
-            <button type="button" onClick={() => void exportProject("opencut")}>OpenCut 素材包</button>
-            <button type="button" disabled={!detail.can_render} onClick={() => void exportProject("opencut-render")}>OpenCut 調色片段</button>
+            <button type="button" disabled={projectMutationBusy} onClick={() => void exportProject("hyperframes")}>產生初剪專案</button>
+            <button type="button" disabled={projectMutationBusy || !detail.can_render} onClick={() => void exportProject("hyperframes-render")}>快速輸出 MP4</button>
+            <button type="button" className="good" disabled={projectMutationBusy || submitting || !detail.can_render || renderRunning} onClick={() => void startFormalRender()}>{submitting ? "正在建立正式輸出…" : renderRunning ? "正式輸出進行中" : "正式輸出（Render Job）"}</button>
+            <button type="button" disabled={projectMutationBusy} onClick={() => void exportProject("opencut")}>OpenCut 素材包</button>
+            <button type="button" disabled={projectMutationBusy || !detail.can_render} onClick={() => void exportProject("opencut-render")}>OpenCut 調色片段</button>
           </div>
         </Card>
       </div>
@@ -319,27 +446,27 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
       <div className="grid">
         <Card title="素材">
           <div className="row">
-            <input type="file" multiple accept="video/*" onChange={uploadFiles} />
-            <button type="button" onClick={() => void analyze(true)}>全部重跑感知</button>
-            <button type="button" disabled={!detail.clips.length} onClick={() => void buildPlan()}>產生故事整理</button>
+            <input type="file" multiple accept="video/*" disabled={projectMutationBusy} onChange={uploadFiles} />
+            <button type="button" disabled={projectMutationBusy} onClick={() => void analyze(true)}>全部重跑感知</button>
+            <button type="button" disabled={projectMutationBusy || !detail.clips.length} onClick={() => void buildPlan()}>產生故事整理</button>
           </div>
           {detail.clips.map((clip) => <div className="item" key={clip.clip_id}>
             <div className="row">
               <b>{clip.clip_id}</b>
-              <button type="button" onClick={() => void analyzeOne(clip.video_id)}>重跑感知</button>
+              <button type="button" disabled={projectMutationBusy} onClick={() => void analyzeOne(clip.video_id)}>重跑感知</button>
             </div>
             {clip.filename}
             <span>{projectStatusLabel(clip.status)} · {clip.segment_count} 段 · {Math.round(clip.duration_seconds || 0)} 秒 · {clip.time_of_day || "未分類時段"}</span>
-            <ClipSummaryEditor projectId={detail.project.id} clip={clip} setMessage={setMessage} refreshProject={refreshCurrentProject} />
+            <ClipSummaryEditor projectId={detail.project.id} clip={clip} setMessage={setMessage} refreshProject={refreshCurrentProject} mutationControls={mutationControls} />
           </div>)}
           {!detail.clips.length && <div className="inline-empty">尚無素材。先選擇多支影片匯入，再進行內容感知。</div>}
         </Card>
-        <ColorConsistencyWorkspace detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} />
+        <ColorConsistencyWorkspace detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} mutationControls={mutationControls} />
       </div>
     </div>
 
     <div className="workspace-section" id="workspace-audio" tabIndex={-1}>
-      <AudioMixingWorkspace detail={detail} bgmTracks={bgmTracks} setMessage={setMessage} refreshProject={refreshCurrentProject} />
+      <AudioMixingWorkspace detail={detail} bgmTracks={bgmTracks} setMessage={setMessage} refreshProject={refreshCurrentProject} mutationControls={mutationControls} />
     </div>
 
     <div className="workspace-section" id="workspace-script" tabIndex={-1}>
@@ -348,19 +475,31 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   </>;
 
   async function exportProject(kind: "hyperframes" | "hyperframes-render" | "opencut" | "opencut-render") {
+    const mutation = mutationControls.beginProjectMutation(detail.project.id, "export");
+    if (!mutation) return;
+    const operation = beginProjectOperation(detail.project.id);
     try {
       setMessage("工作已送出，請看 Render Job 狀態與進度。");
       const result = kind.startsWith("hyperframes")
         ? await api.hyperframesJob(detail.project.id, kind === "hyperframes-render")
         : await api.opencutJob(detail.project.id, kind === "opencut-render");
-      await refreshCurrentProject({ forceFresh: true });
       if (!result.ok) {
-        setMessage(`工作啟動失敗：${result.error || result.message || "工作未成功送出"}`);
+        if (isCurrentProjectOperation(operation)) setMessage(`工作啟動失敗：${result.error || result.message || "工作未成功送出"}`);
         return;
       }
-      setMessage(result.message || "工作已開始");
+      const successMessage = result.message || "工作已開始";
+      try {
+        await refreshProjectAfterMutation(detail.project.id, operation);
+        if (isCurrentProjectOperation(operation)) setMessage(successMessage);
+      } catch (error) {
+        if (isCurrentProjectOperation(operation)) setMessage(refreshFailureMessage(successMessage, error, "工作狀態"));
+      }
     } catch (error) {
-      setMessage(`工作啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (isCurrentProjectOperation(operation)) {
+        setMessage(`工作啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
+    } finally {
+      mutationControls.finishProjectMutation(mutation);
     }
   }
 
@@ -370,68 +509,144 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
       return;
     }
     const requestedProjectId = detail.project.id;
+    const mutation = mutationControls.beginProjectMutation(requestedProjectId, "render");
+    if (!mutation) return;
+    const operation = beginProjectOperation(requestedProjectId);
     try {
       setSubmitting(true);
       setMessage("正在建立正式輸出…");
       const result = await api.createRenderJob(requestedProjectId);
       if (!result.ok) {
+        if (!isCurrentProjectOperation(operation)) return;
         setMessage(`正式輸出失敗：${result.error || "建立 Render Job 未成功"}`);
         return;
       }
-      await refreshProject(requestedProjectId, { forceFresh: true });
-      setMessage(result.created ? "正式輸出已排入佇列" : "正式輸出工作已在執行中");
+      const successMessage = result.created ? "正式輸出已排入佇列" : "正式輸出工作已在執行中";
+      try {
+        await refreshProjectAfterMutation(requestedProjectId, operation);
+        if (isCurrentProjectOperation(operation)) setMessage(successMessage);
+      } catch (error) {
+        if (isCurrentProjectOperation(operation)) setMessage(refreshFailureMessage(successMessage, error, "工作狀態"));
+      }
     } catch (error) {
-      setMessage(`正式輸出啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (isCurrentProjectOperation(operation)) {
+        setMessage(`正式輸出啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
     } finally {
       setSubmitting(false);
+      mutationControls.finishProjectMutation(mutation);
     }
   }
 
   async function uploadFiles(event: ChangeEvent<HTMLInputElement>) {
-    const files = event.target.files;
+    const input = event.currentTarget;
+    const files = Array.from(input.files || []);
+    input.value = "";
     if (!files?.length) return;
+    const mutation = mutationControls.beginProjectMutation(detail.project.id, "upload");
+    if (!mutation) return;
+    const operation = beginProjectOperation(detail.project.id);
     setMessage("正在匯入素材...");
     try {
       const result = await api.uploadProject(detail.project.id, files);
-      event.target.value = "";
-      setMessage(result.ok ? `已匯入 ${result.files?.length || 0} 支素材，下一步請跑內容感知。` : result.error || "匯入失敗");
-      await refreshCurrentProject({ forceFresh: true });
+      if (!result.ok) {
+        if (isCurrentProjectOperation(operation)) setMessage(`素材匯入失敗：${result.error || "操作未成功"}`);
+        return;
+      }
+      const successMessage = `已匯入 ${result.files?.length || 0} 支素材`;
+      try {
+        await refreshProjectAfterMutation(detail.project.id, operation);
+        if (isCurrentProjectOperation(operation)) setMessage(`${successMessage}，下一步請跑內容感知。`);
+      } catch (error) {
+        if (isCurrentProjectOperation(operation)) setMessage(refreshFailureMessage(successMessage, error));
+      }
     } catch (error) {
-      event.target.value = "";
-      setMessage(`素材匯入失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (isCurrentProjectOperation(operation)) {
+        setMessage(`素材匯入失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
+    } finally {
+      mutationControls.finishProjectMutation(mutation);
     }
   }
 
   async function analyze(force: boolean) {
+    const mutation = mutationControls.beginProjectMutation(detail.project.id, "analyze");
+    if (!mutation) return;
+    const operation = beginProjectOperation(detail.project.id);
     setMessage(force ? "已送出全部重跑感知。" : "已送出待感知素材。");
     try {
       const result = await api.analyzeJob(detail.project.id, force);
-      setMessage(result.message || "內容感知工作已開始");
-      await refreshCurrentProject();
+      if (!result.ok) {
+        if (isCurrentProjectOperation(operation)) setMessage(`內容感知啟動失敗：${result.message || "操作未成功"}`);
+        return;
+      }
+      const successMessage = result.message || "內容感知工作已開始";
+      try {
+        await refreshProjectAfterMutation(detail.project.id, operation);
+        if (isCurrentProjectOperation(operation)) setMessage(successMessage);
+      } catch (error) {
+        if (isCurrentProjectOperation(operation)) setMessage(refreshFailureMessage(successMessage, error));
+      }
     } catch (error) {
-      setMessage(`內容感知啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (isCurrentProjectOperation(operation)) {
+        setMessage(`內容感知啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
+    } finally {
+      mutationControls.finishProjectMutation(mutation);
     }
   }
 
   async function analyzeOne(videoId: number) {
+    const mutation = mutationControls.beginProjectMutation(detail.project.id, "analyze");
+    if (!mutation) return;
+    const operation = beginProjectOperation(detail.project.id);
     setMessage("已送出單支素材感知，請看工作狀態百分比。");
     try {
       const result = await api.analyzeVideo(detail.project.id, videoId);
-      setMessage(result.message || "單支素材感知已開始");
-      await refreshCurrentProject();
+      if (!result.ok) {
+        if (isCurrentProjectOperation(operation)) setMessage(`單支素材感知啟動失敗：${result.message || "操作未成功"}`);
+        return;
+      }
+      const successMessage = result.message || "單支素材感知已開始";
+      try {
+        await refreshProjectAfterMutation(detail.project.id, operation);
+        if (isCurrentProjectOperation(operation)) setMessage(successMessage);
+      } catch (error) {
+        if (isCurrentProjectOperation(operation)) setMessage(refreshFailureMessage(successMessage, error));
+      }
     } catch (error) {
-      setMessage(`單支素材感知啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (isCurrentProjectOperation(operation)) {
+        setMessage(`單支素材感知啟動失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
+    } finally {
+      mutationControls.finishProjectMutation(mutation);
     }
   }
 
   async function buildPlan() {
+    const mutation = mutationControls.beginProjectMutation(detail.project.id, "revise");
+    if (!mutation) return;
+    const operation = beginProjectOperation(detail.project.id);
     setMessage("正在產生故事整理...");
     try {
-      await api.buildPlan(detail.project.id);
-      setMessage("故事整理已更新，請審核片段。");
-      await refreshCurrentProject({ forceFresh: true });
+      const result = await api.buildPlan(detail.project.id);
+      if (!result.ok) {
+        if (isCurrentProjectOperation(operation)) setMessage("故事整理失敗：操作未成功");
+        return;
+      }
+      const successMessage = "故事整理已更新，請審核片段。";
+      try {
+        await refreshProjectAfterMutation(detail.project.id, operation);
+        if (isCurrentProjectOperation(operation)) setMessage(successMessage);
+      } catch (error) {
+        if (isCurrentProjectOperation(operation)) setMessage(refreshFailureMessage(successMessage, error));
+      }
     } catch (error) {
-      setMessage(`故事整理失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      if (isCurrentProjectOperation(operation)) {
+        setMessage(`故事整理失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+      }
+    } finally {
+      mutationControls.finishProjectMutation(mutation);
     }
   }
 }

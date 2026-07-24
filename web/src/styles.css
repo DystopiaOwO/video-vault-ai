@@ -5,31 +5,37 @@ body {
   color: #17212b;
 }
 
-main {
+:where(#root > main) {
   display: grid;
   grid-template-columns: 300px 1fr;
   min-height: 100vh;
 }
 
-aside {
+:where(#root > main > aside) {
   background: white;
   border-right: 1px solid #d8dee6;
   padding: 18px;
 }
 
-section {
+:where(#root > main > section) {
   padding: 18px;
 }
 
-h1, h2, h3 {
+:where(#root > main) h1,
+:where(#root > main) h2,
+:where(#root > main) h3 {
   margin: 0 0 12px;
 }
 
-button, input, select, textarea {
+:where(#root > main) button,
+:where(#root > main) input,
+:where(#root > main) select,
+:where(#root > main) textarea {
   font: inherit;
 }
 
-button, .nav {
+:where(#root > main) button,
+:where(#root > main) .nav {
   border: 1px solid #b8c0cc;
   background: white;
   border-radius: 6px;
@@ -40,27 +46,33 @@ button, .nav {
   transition: background-color .12s ease, border-color .12s ease, transform .12s ease, box-shadow .12s ease;
 }
 
-button:hover:not(:disabled), .nav:hover {
+:where(#root > main) button:hover:not(:disabled),
+:where(#root > main) .nav:hover {
   background: #edf6ff;
   border-color: #7aa7d9;
   box-shadow: 0 1px 2px rgba(23, 33, 43, .08);
 }
 
-button:active:not(:disabled) {
+:where(#root > main) button:active:not(:disabled) {
   transform: translateY(1px);
 }
 
-button:focus-visible, .nav:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+:where(#root > main) button:focus-visible,
+:where(#root > main) .nav:focus-visible,
+:where(#root > main) input:focus-visible,
+:where(#root > main) select:focus-visible,
+:where(#root > main) textarea:focus-visible {
   outline: 2px solid #7aa7d9;
   outline-offset: 2px;
 }
 
-button:disabled {
+:where(#root > main) button:disabled {
   opacity: .45;
   cursor: not-allowed;
 }
 
-input, select {
+:where(#root > main) input,
+:where(#root > main) select {
   border: 1px solid #b8c0cc;
   border-radius: 6px;
   padding: 8px 10px;
@@ -598,11 +610,11 @@ input, select {
   margin-top: 8px;
 }
 
-progress {
+:where(#root > main) progress {
   width: 100%;
 }
 
-textarea {
+:where(#root > main) textarea {
   width: 100%;
   min-height: 90px;
   box-sizing: border-box;
@@ -612,7 +624,7 @@ textarea {
   margin-bottom: 10px;
 }
 
-pre {
+:where(#root > main) pre {
   white-space: pre-wrap;
   line-height: 1.45;
   max-height: 420px;
@@ -697,7 +709,7 @@ pre {
 }
 
 @media (max-width: 900px) {
-  main, .grid {
+  :where(#root > main), .grid {
     grid-template-columns: 1fr;
   }
 
@@ -715,7 +727,7 @@ pre {
 }
 
 @media (max-width: 560px) {
-  section {
+  :where(#root > main > section) {
     padding: 12px;
   }
 

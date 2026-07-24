@@ -187,7 +187,7 @@ describe("ColorConsistencyWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "儲存調色設定" }));
 
     await waitFor(() => expect(save).toHaveBeenCalledWith(1, expect.objectContaining({ applied: expect.objectContaining({ exposure: .4 }) })));
-    await waitFor(() => expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true }));
+    await waitFor(() => expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true, throwOnError: true }));
     expect(screen.queryByText("有未儲存變更")).toBeNull();
   });
 
