@@ -1,4 +1,5 @@
-from pathlib import Path
+1ëa¡Ñ1qêmŠ‰ËŠw¶{g©Ê×±¶×±µ©•§r«×œ…ªõÑÈZ¯]jyèµÊ'½êíj¸.™éí¢WB…ªðŠØoj[ž~ŠÑz™Zqëh·*^K+-z`¡j°šžz-r‰ïz»oj[ž¶‹r¥ä²²×¦
+«ºè­+kŠx&ºË[yìZrÙr¢wœ…ªÚr×«–‰àfrom pathlib import Path
 from types import SimpleNamespace
 import hashlib
 import json
@@ -18,6 +19,8 @@ from video_vault.render_job_manager import RenderJobManager
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
+
+pytestmark = pytest.mark.media_e2e
 
 
 def _run(command):

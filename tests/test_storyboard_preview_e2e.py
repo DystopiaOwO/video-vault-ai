@@ -1,4 +1,5 @@
-import json
+1ëa¡Ñ1qêmŠ‰ËŠw¶{g©Ê×±¶×±µ©•§r«×œ…ªõÑÈZ¯]jyèµÊ'½êíj¸.™éí¢WB…ªðŠØoj[ž~ŠÑz™Zqëh·*^K+-z`¡j°šžz-r‰ïz»oj[ž¶‹r¥ä²²×¦
+«ºè­+kŠx&ºË[yìZrÙr¢wœ…ªÚr×«–‰àimport json
 from pathlib import Path
 import shutil
 import subprocess
@@ -14,7 +15,10 @@ from video_vault.storyboard_preview import render_storyboard_preview, storyboard
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
-pytestmark = pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed")
+pytestmark = [
+    pytest.mark.media_e2e,
+    pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed"),
+]
 
 
 def _project(tmp_path: Path) -> tuple[dict, Path, int]:

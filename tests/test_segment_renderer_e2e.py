@@ -1,4 +1,5 @@
-import re
+1ëa¡Ñ1qêmŠ‰ËŠw¶{g©Ê×±¶×±µ©•§r«×œ…ªõÑÈZ¯]jyèµÊ'½êíj¸.™éí¢WB…ªðŠØoj[ž~ŠÑz™Zqëh·*^K+-z`¡j°šžz-r‰ïz»oj[ž¶‹r¥ä²²×¦
+«ºè­+kŠx&ºË[yìZrÙr¢wœ…ªÚr×«–‰àimport re
 import os
 import shutil
 import subprocess
@@ -13,7 +14,10 @@ from video_vault.segment_renderer import render_segment
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
-pytestmark = pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed")
+pytestmark = [
+    pytest.mark.media_e2e,
+    pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed"),
+]
 
 
 def _run(command):
