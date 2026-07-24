@@ -90,7 +90,7 @@
 ## 明日開始指令
 
 ```powershell
-Set-Location 'C:\Users\b3b3b\Documents\Codex\AI剪片助手-render-jobs'
+Set-Location '<repo-root>'
 git checkout codex/render-v2-render-jobs
 git status
 git log --oneline -5
