@@ -38,7 +38,23 @@ function color(): ColorState {
 function detail(projectId = 1, canRender = true): ProjectDetail {
   return {
     project: { id: projectId, name: `專案-${projectId}`, status: "needs_review" },
-    clips: [{ clip_id: "clip-1", video_id: 1, filename: "clip-1.mp4", status: "perceived", segment_count: 1, duration_seconds: 12, detected_category: "travel", time_of_day: "morning", visual_summary: "車站入口" }],
+    clips: [{
+      clip_id: "clip-1",
+      video_id: 1,
+      filename: "clip-1.mp4",
+      status: "perceived",
+      segment_count: 1,
+      duration_seconds: 12,
+      detected_category: "travel",
+      time_of_day: "morning",
+      visual_summary: "車站入口",
+      ai_visual_summary: "車站入口",
+      user_summary: "",
+      user_summary_updated_at: null,
+      user_summary_migration_state: "native",
+      effective_summary: "車站入口",
+      effective_summary_source: "ai",
+    }],
     segments: [{ segment_id: "segment-1", clip_id: "clip-1", title: "抵達車站", group: "travel", start_seconds: 0, end_seconds: 5, score: .9, suggested_use: "main", scene_role: "arrival", story_position: "opening", manual_order: 1, audio_role: "lower", speed: 1, include: true, user_notes: "" }],
     bgm: [],
     plan: {},
@@ -199,8 +215,8 @@ describe("PR #52 Gate 1 final behavior contracts", () => {
       await waitFor(() => expect(api.colorSettings).toHaveBeenCalled());
     } else {
       vi.spyOn(api, "saveClipSummary").mockReturnValue(save.promise);
-      fireEvent.change(screen.getByLabelText("clip-1.mp4 內容感知描述"), { target: { value: "新的內容感知描述" } });
-      fireEvent.click(screen.getByRole("button", { name: "儲存描述" }));
+      fireEvent.change(screen.getByLabelText("clip-1.mp4 使用者故事備註"), { target: { value: "新的使用者故事備註" } });
+      fireEvent.click(screen.getByRole("button", { name: "儲存故事備註" }));
       await waitFor(() => expect(api.saveClipSummary).toHaveBeenCalled());
     }
 
