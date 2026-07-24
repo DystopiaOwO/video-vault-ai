@@ -63,11 +63,11 @@ def migrate_project_segment_state(
         return {}
 
     current_by_video: dict[int, list[dict[str, Any]]] = {}
+    media_ids: dict[int, str] = {}
     for video in project_videos(db, int(project_id)):
         current_video_id = int(video["id"])
-        if video_id is not None and current_video_id != int(video_id):
-            continue
         current_by_video[current_video_id] = [dict(row) for row in segments(db, current_video_id)]
+        media_ids[current_video_id] = str(video["project_media_uuid"] or "")
 
     alias_map: dict[str, str] = {}
     current_ids = {
@@ -77,6 +77,7 @@ def migrate_project_segment_state(
         if str(row.get("segment_uuid") or "")
     }
     plan_matches = []
+    plan_changed = False
     for group in plan.get("groups", []) or []:
         if not isinstance(group, Mapping):
             continue
@@ -104,6 +105,18 @@ def migrate_project_segment_state(
             aliases.discard("")
             for alias in aliases:
                 alias_map[alias] = stable_id
+            if isinstance(raw, dict):
+                revision = int(target.get("revision") or 1)
+                project_media_id = media_ids.get(item_video_id, "")
+                if str(raw.get("segment_id") or "") != stable_id:
+                    raw["segment_id"] = stable_id
+                    plan_changed = True
+                if int(raw.get("segment_revision") or 0) != revision:
+                    raw["segment_revision"] = revision
+                    plan_changed = True
+                if project_media_id and str(raw.get("project_media_id") or "") != project_media_id:
+                    raw["project_media_id"] = project_media_id
+                    plan_changed = True
             plan_matches.append(
                 {
                     "video_id": item_video_id,
@@ -113,6 +126,9 @@ def migrate_project_segment_state(
                 }
             )
 
+    if plan_changed:
+        _atomic_write(plan_path, json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
+
     files = [
         (root / "feedback" / "segment_review.json", "list"),
         (root / "segment_review.json", "list"),
@@ -120,7 +136,7 @@ def migrate_project_segment_state(
         (root / "audio_settings.json", "segments"),
         (root / "color_consistency.json", "segments"),
     ]
-    migrated_files = []
+    migrated_files = ["project_plan.json"] if plan_changed else []
     orphaned = []
     conflicts = []
     migrated_keys = []
@@ -134,11 +150,21 @@ def migrate_project_segment_state(
         migrated_keys.extend({"file": str(path.relative_to(root)), **item} for item in result["migrated"])
 
     upstream = dict(identity_report or {})
+    identity_changed = bool(
+        upstream.get("matched")
+        or upstream.get("new")
+        or upstream.get("removed")
+        or upstream.get("splits")
+        or upstream.get("merges")
+        or upstream.get("ambiguous")
+    )
     requires_review = bool(
-        upstream.get("requires_review")
+        identity_changed
+        or upstream.get("requires_review")
         or orphaned
         or conflicts
         or migrated_keys
+        or plan_changed
     )
     report = {
         "schema_version": 1,
@@ -147,6 +173,7 @@ def migrate_project_segment_state(
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "alias_map": alias_map,
         "plan_matches": plan_matches,
+        "migrated_files": migrated_files,
         "migrated": migrated_keys,
         "orphaned": orphaned,
         "conflicts": conflicts,
