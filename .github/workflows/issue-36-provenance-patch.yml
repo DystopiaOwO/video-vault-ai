@@ -1,0 +1,33 @@
+name: Apply Issue 36 provenance patch
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.pull_request.head.ref == 'codex/issue-36-user-summary-provenance'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/issue-36-user-summary-provenance
+      - name: Apply provenance patch
+        run: python .github/scripts/apply_issue36_provenance.py
+      - name: Commit patch and remove temporary files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/scripts/apply_issue36_provenance.py
+          git rm .github/workflows/issue-36-provenance-patch.yml
+          git add src/video_vault/database.py src/video_vault/project.py src/video_vault/ui.py web/src/api.ts
+          git commit -m "feat: separate user story context from AI perception"
+          git push
