@@ -30,6 +30,8 @@ from .opencut import OPENCUT_URL, export_opencut_handoff, opencut_status, start_
 from .paths import db_path
 from .planner import draft_plan, perceive_output, review_text, revise_plan, set_plan_status, video_dir, write_plan_files
 from .project import build_project_plan, can_project_render, create_project, list_projects, mark_project_needs_review, project_detail, project_dir, save_revision_notes, save_segment_review, set_review_status, sync_project_files, update_segment_timing
+from .project_perception import run_project_perception
+from .perception_runs import PerceptionCancelled, ensure_perception_schema, perception_jobs, recover_interrupted_perception_runs
 from .render_job_api import RenderJobAPI
 from .render_job_manager import RenderJobManager
 from .renderer import render_approved
@@ -229,6 +231,8 @@ def _form_value(form: dict[str, list[_UploadPart]], name: str) -> str:
 def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
     db = db_path(cfg)
     init_db(db)
+    ensure_perception_schema(db)
+    recover_interrupted_perception_runs(db)
     render_manager = RenderJobManager(cfg, db)
     render_manager.start()
     render_api = RenderJobAPI(render_manager)
@@ -258,7 +262,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json(list_bgm(db))
             elif parsed.path == "/api/jobs":
                 project_id = int(query.get("project_id", ["0"])[0] or 0)
-                self._json(project_jobs(project_id, render_manager) if project_id else project_jobs(0, render_manager))
+                self._json(project_jobs(project_id, render_manager, db) if project_id else project_jobs(0, render_manager, db))
             elif parsed.path == "/api/render-job":
                 self._json(render_api.get(query.get("id", [""])[0]))
             elif parsed.path == "/api/render-jobs":
@@ -713,7 +717,7 @@ def render_page(cfg: dict, db: Path, project_id: int = 0, message: str = "", ren
         project_id = int(projects[0]["id"])
     detail = project_detail(cfg, db, project_id) if project_id else {}
     bgm = list_bgm(db)
-    jobs = project_jobs(project_id, render_manager) if project_id else []
+    jobs = project_jobs(project_id, render_manager, db) if project_id else []
     refresh = '<meta http-equiv="refresh" content="3">' if any(j.get("status") in {"running", "queued"} for j in jobs) else ""
     return f"""<!doctype html>
 <html lang="zh-Hant">
@@ -845,7 +849,7 @@ def start_hyperframes_job(cfg: dict, db: Path, project_id: int, render: bool, ma
     return True
 
 
-def project_jobs(project_id: int, render_manager: RenderJobManager | None = None) -> list[dict]:
+def project_jobs(project_id: int, render_manager: RenderJobManager | None = None, db: Path | None = None) -> list[dict]:
     with JOBS_LOCK:
         legacy = [
             dict(job, project_id=pid, legacy_job_key=name)
@@ -853,8 +857,15 @@ def project_jobs(project_id: int, render_manager: RenderJobManager | None = None
             if project_id == 0 or pid == project_id
         ]
     persistent = []
+    if db is not None and project_id:
+        persistent.extend(perception_jobs(db, project_id))
     if render_manager is not None:
-        persistent = [dict(job, kind="正式輸出") for job in render_manager.list(None if project_id == 0 else project_id)]
+        persistent.extend(
+            dict(job, kind="正式輸出")
+            for job in render_manager.list(None if project_id == 0 else project_id)
+        )
+    if any(job.get("kind") == "內容感知" for job in persistent):
+        legacy = [job for job in legacy if job.get("legacy_job_key") != "analyze"]
     return legacy + persistent
 
 
@@ -912,15 +923,21 @@ def _analyze_job(cfg: dict, db: Path, project_id: int, force: bool) -> None:
             if _job_stopped(project_id, "analyze"):
                 return
             _set_job(project_id, "analyze", message=f"正在分析 {video.get('filename', '')}", done=index - 1)
-            analyze_ui_video(cfg, db, video, _analyze_progress(project_id, video.get("filename", ""), index - 1, max(len(todo), 1)))
-            video = rename_after_perception(cfg, db, video)
-            perceive_output(cfg, db, video)
-            write_plan_files(cfg, draft_plan(cfg, db, video))
-            set_video_status(db, int(video["id"]), "perceived")
-            processed.append({"id": video["id"], "filename": video["filename"]})
+            result = run_project_perception(
+                cfg,
+                db,
+                project_id,
+                video,
+                _analyze_progress(project_id, video.get("filename", ""), index - 1, max(len(todo), 1)),
+                should_cancel=lambda: _job_stopped(project_id, "analyze"),
+            )
+            processed.extend(result.get("processed", []))
             _set_job(project_id, "analyze", message=f"已完成 {video.get('filename', '')}", done=index)
-        build_project_plan(cfg, db, project_id)
+        if todo:
+            build_project_plan(cfg, db, project_id)
         _set_job(project_id, "analyze", status="done", message=f"內容感知完成：{len(processed)} 支", processed=processed, percent=100)
+    except PerceptionCancelled:
+        _set_job(project_id, "analyze", status="stopped", message="內容感知已由使用者停止")
     except Exception as exc:
         _set_job(project_id, "analyze", status="failed", message=f"內容感知失敗：{exc}")
 
@@ -932,8 +949,17 @@ def _analyze_video_job(cfg: dict, db: Path, project_id: int, video_id: int) -> N
             _set_job(project_id, "analyze", status="failed", message="找不到這支素材", percent=100)
             return
         _set_job(project_id, "analyze", status="running", message=f"正在分析 {video.get('filename', '')}", done=0, total=1, percent=0)
-        analyze_project_video(cfg, db, project_id, video_id, _analyze_progress(project_id, video.get("filename", ""), 0, 1))
+        analyze_project_video(
+            cfg,
+            db,
+            project_id,
+            video_id,
+            _analyze_progress(project_id, video.get("filename", ""), 0, 1),
+            should_cancel=lambda: _job_stopped(project_id, "analyze"),
+        )
         _set_job(project_id, "analyze", status="done", message=f"單支素材感知完成：{video.get('filename', '')}", done=1, total=1, percent=100)
+    except PerceptionCancelled:
+        _set_job(project_id, "analyze", status="stopped", message="單支素材感知已由使用者停止")
     except Exception as exc:
         _set_job(project_id, "analyze", status="failed", message=f"單支素材感知失敗：{exc}")
 
@@ -1582,33 +1608,25 @@ def analyze_project(cfg: dict, db: Path, project_id: int, force: bool = False) -
         video = dict(row)
         if not force and video.get("status") == "perceived":
             continue
-        analyze_ui_video(cfg, db, video)
-        video = rename_after_perception(cfg, db, video)
-        perceive_output(cfg, db, video)
-        write_plan_files(cfg, draft_plan(cfg, db, video))
-        set_video_status(db, int(video["id"]), "perceived")
-        processed.append({"id": video["id"], "filename": video["filename"]})
-    build_project_plan(cfg, db, project_id)
+        result = run_project_perception(cfg, db, project_id, video)
+        processed.extend(result.get("processed", []))
+    if processed:
+        build_project_plan(cfg, db, project_id)
     return {"ok": True, "processed": processed}
 
 
-def analyze_project_video(cfg: dict, db: Path, project_id: int, video_id: int, progress=None) -> dict:
+def analyze_project_video(cfg: dict, db: Path, project_id: int, video_id: int, progress=None, should_cancel=None) -> dict:
     video = next((dict(v) for v in project_videos(db, project_id) if int(v["id"]) == video_id), None)
     if not video:
         return {"ok": False, "error": "video not found in project"}
-    analyze_ui_video(cfg, db, video, progress)
-    video = rename_after_perception(cfg, db, video)
-    perceive_output(cfg, db, video)
-    write_plan_files(cfg, draft_plan(cfg, db, video))
-    set_video_status(db, video_id, "perceived")
-    build_project_plan(cfg, db, project_id)
-    return {"ok": True, "processed": [{"id": video_id, "filename": video["filename"]}]}
+    result = run_project_perception(cfg, db, project_id, video, progress, should_cancel)
+    return {"ok": True, **result}
 
 
 def update_clip_summary(cfg: dict, db: Path, project_id: int, video_id: int, summary: str) -> bool:
     if not any(int(v["id"]) == video_id for v in project_videos(db, project_id)):
         return False
-    ok = update_video_summary(db, video_id, summary.strip())
+    ok = update_video_summary(db, video_id, summary.strip(), project_id=project_id)
     if ok:
         mark_project_needs_review(cfg, db, project_id)
     return ok

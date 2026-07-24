@@ -26,7 +26,10 @@ def list_projects(db: Path) -> list[dict]:
 
 def sync_project_files(cfg: dict, db: Path, project_id: int) -> list[dict]:
     # ponytail: copy-once project source files; hardlinks can come later if disk usage matters.
+    from .perception_runs import perception_states_for_project
+
     rows = [dict(v) for v in project_videos(db, project_id)]
+    perception_states = perception_states_for_project(db, project_id)
     source_dir = project_dir(cfg, project_id) / "source"
     clips_dir = project_dir(cfg, project_id) / "clips"
     result = []
@@ -43,6 +46,7 @@ def sync_project_files(cfg: dict, db: Path, project_id: int) -> list[dict]:
         stable_clip_dir.mkdir(parents=True, exist_ok=True)
         display_clip_dir.mkdir(parents=True, exist_ok=True)
         display_name = str(video.get("filename") or src.name)
+        perception_state = perception_states.get(int(video["id"]), {})
         project_summary = video.get("project_summary")
         visual_summary = str(project_summary) if project_summary is not None else _visual_summary(db, int(video["id"]))
         data = {
@@ -60,9 +64,11 @@ def sync_project_files(cfg: dict, db: Path, project_id: int) -> list[dict]:
             "duration_seconds": video["duration_seconds"],
             "detected_category": video["category"],
             "time_of_day": _time_label({**video, "filename": display_name}),
-            "status": video.get("status") or "uploaded",
+            "status": perception_state.get("current_status") or video.get("status") or "uploaded",
             "segment_count": len(list(segments(db, int(video["id"])))),
             "visual_summary": visual_summary,
+            "analysis_current": bool(perception_state.get("analysis_current")),
+            "perception_run": perception_state,
         }
         payload = json.dumps(data, ensure_ascii=False, indent=2)
         (stable_clip_dir / "clip.json").write_text(payload, encoding="utf-8")
@@ -177,6 +183,7 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
         })
 
     public_plan = _public_plan_bgm(plan)
+    clips = sync_project_files(cfg, db, project_id)
     public_segments = []
     for segment in project_segments(cfg, project_id, plan, db=db):
         public_segment = dict(segment)
@@ -185,7 +192,8 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
         public_segments.append(public_segment)
     return {
         "project": dict(row),
-        "clips": sync_project_files(cfg, db, project_id),
+        "clips": clips,
+        "perception_runs": [clip.get("perception_run", {}) for clip in clips],
         "bgm": public_bgm,
         "plan": public_plan,
         "workflow": project_workflow(cfg, db, project_id, plan),
@@ -210,7 +218,7 @@ def project_workflow(cfg: dict, db: Path, project_id: int, plan: dict | None = N
     outputs = folder / "output"
     stages = [
         _stage("import", "匯入素材", bool(clips), [folder / "source"]),
-        _stage("perception", "內容感知", any(c.get("segment_count", 0) for c in clips), [folder / "clips"]),
+        _stage("perception", "內容感知", bool(clips) and all(c.get("analysis_current") for c in clips), [folder / "clips"]),
         _stage("story", "故事整理", bool(plan.get("groups")), [folder / "project_plan.json", folder / "project_script.md"]),
         _stage("review", "人工審核", review.get("approved_by_user") is True, [folder / "feedback", folder / "review_status.json"]),
         _stage("handoff", "剪輯交接", (outputs / "opencut_handoff").exists() or (outputs / "hyperframes").exists(), [outputs / "opencut_handoff", outputs / "hyperframes"]),
@@ -722,7 +730,7 @@ def project_info_is_travel(row) -> bool:
 
 
 def _clip_summary(clip: dict) -> dict:
-    return {k: clip[k] for k in ("clip_id", "project_media_id", "video_id", "filename", "source_path", "order", "duration_seconds", "detected_category", "time_of_day", "status", "segment_count", "visual_summary")}
+    return {k: clip[k] for k in ("clip_id", "project_media_id", "video_id", "filename", "source_path", "order", "duration_seconds", "detected_category", "time_of_day", "status", "segment_count", "visual_summary", "analysis_current", "perception_run")}
 
 
 def _project_segment_identity_rows(db: Path, project_id: int) -> dict[int, list[dict]]:
