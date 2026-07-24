@@ -10,6 +10,7 @@ import shutil
 
 from .bgm import recommend_bgm_for_groups
 from .database import create_project_row, frames, init_db, project, project_bgm_tracks, project_videos, projects, segments, set_project_status, set_project_videos
+from .story_context import story_context
 
 
 def create_project(db: Path, name: str, video_ids: list[int], kind: str = "auto", category: str = "unknown", content_type: str = "diary_montage", platform: str = "YouTube", target_duration_seconds: float = 0) -> int:
@@ -47,8 +48,10 @@ def sync_project_files(cfg: dict, db: Path, project_id: int) -> list[dict]:
         display_clip_dir.mkdir(parents=True, exist_ok=True)
         display_name = str(video.get("filename") or src.name)
         perception_state = perception_states.get(int(video["id"]), {})
-        project_summary = video.get("project_summary")
-        visual_summary = str(project_summary) if project_summary is not None else _visual_summary(db, int(video["id"]))
+        ai_visual_summary = _visual_summary(db, int(video["id"]))
+        user_summary = str(video.get("user_summary") or "").strip()
+        effective_summary = user_summary or ai_visual_summary
+        effective_summary_source = "user" if user_summary else ("ai" if ai_visual_summary else "none")
         data = {
             "clip_id": clip_id,
             "project_media_id": project_media_id,
@@ -66,14 +69,20 @@ def sync_project_files(cfg: dict, db: Path, project_id: int) -> list[dict]:
             "time_of_day": _time_label({**video, "filename": display_name}),
             "status": perception_state.get("current_status") or video.get("status") or "uploaded",
             "segment_count": len(list(segments(db, int(video["id"])))),
-            "visual_summary": visual_summary,
+            "visual_summary": ai_visual_summary,
+            "ai_visual_summary": ai_visual_summary,
+            "user_summary": user_summary,
+            "user_summary_updated_at": video.get("user_summary_updated_at"),
+            "user_summary_migration_state": video.get("user_summary_migration_state") or "none",
+            "effective_summary": effective_summary,
+            "effective_summary_source": effective_summary_source,
             "analysis_current": bool(perception_state.get("analysis_current")),
             "perception_run": perception_state,
         }
         payload = json.dumps(data, ensure_ascii=False, indent=2)
-        (stable_clip_dir / "clip.json").write_text(payload, encoding="utf-8")
+        _atomic_write_text(stable_clip_dir / "clip.json", payload)
         # clip_001 remains a display alias for compatibility; stable references use project_media_id.
-        (display_clip_dir / "clip.json").write_text(payload, encoding="utf-8")
+        _atomic_write_text(display_clip_dir / "clip.json", payload)
         result.append(data)
     return result
 
@@ -93,16 +102,23 @@ def build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
         video_segments = [dict(seg) for seg in segments(db, int(video["id"]))]
         if not video_segments:
             chapter = _chapter_for(itinerary, clip["clip_id"]) if itinerary else None
-            activity = chapter["label"] if chapter else ("已感知但無推薦片段" if clip["status"] == "perceived" else "未分析")
-            label = activity if chapter else f"{clip['time_of_day']} / {activity}"
-            groups.setdefault(label, _group(label, clip["time_of_day"], activity, chapter.get("order", 999) if chapter else 999))["clips"].append(_clip_summary(clip))
+            fallback_activity = chapter["label"] if chapter else ("已感知但無推薦片段" if clip["status"] == "perceived" else "未分析")
+            context = story_context(clip["user_summary"], clip["ai_visual_summary"], fallback_activity)
+            activity = context["activity"]
+            label = activity if chapter or context["guidance_applied"] else f"{clip['time_of_day']} / {activity}"
+            group = groups.setdefault(label, _group(label, clip["time_of_day"], activity, chapter.get("order", 999) if chapter else 999))
+            group["clips"].append(_clip_summary(clip))
+            group["story_context"].append(_story_context_usage(clip, context))
             continue
         for seg in video_segments:
             chapter = _chapter_for(itinerary, clip["clip_id"]) if itinerary else None
-            activity = chapter["label"] if chapter else _activity(seg.get("tags", ""), video.get("category", ""))
-            label = activity if chapter else f"{clip['time_of_day']} / {activity}"
+            fallback_activity = chapter["label"] if chapter else _activity(seg.get("tags", ""), video.get("category", ""))
+            context = story_context(clip["user_summary"], clip["ai_visual_summary"], fallback_activity)
+            activity = context["activity"]
+            label = activity if chapter or context["guidance_applied"] else f"{clip['time_of_day']} / {activity}"
             group = groups.setdefault(label, _group(label, clip["time_of_day"], activity, chapter.get("order", 999) if chapter else 999))
             group["clips"].append(_clip_summary(clip))
+            group["story_context"].append(_story_context_usage(clip, context))
             group["segments"].append(
                 {
                     "segment_id": str(seg.get("segment_uuid") or ""),
@@ -117,11 +133,13 @@ def build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
                     "suggested_use": seg["suggested_use"],
                     "tags": [tag for tag in (seg.get("tags") or "").split(",") if tag],
                     "score": seg["score"],
+                    "story_context": context,
                 }
             )
     ordered = sorted(groups.values(), key=lambda g: (int(g.get("order", 999)), _time_rank(g["time_of_day"]), g["activity"], g["label"]))
     for group in ordered:
         group["clips"] = _dedupe(group["clips"])
+        group["story_context"] = _dedupe_story_context(group["story_context"])
         group["segments"].sort(key=lambda s: (s["clip_id"], float(s["start_seconds"] or 0)) if itinerary or project_info_is_travel(row) else (-float(s["score"] or 0), s["clip_id"], float(s["start_seconds"] or 0)))
     project_info = dict(row)
     pipeline = pipeline_for_project(project_info)
@@ -144,12 +162,22 @@ def build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
         "status": "needs_review",
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "clips": [_clip_summary(c) for c in clips],
+        "story_context_usage": [
+            _story_context_usage(c, story_context(c["user_summary"], c["ai_visual_summary"], "其他"))
+            for c in clips if c.get("user_summary")
+        ],
         "groups": ordered,
         "bgm": bgm,
         "bgm_recommendations": bgm_recommendations,
         "title_cards": _title_cards(project_info, ordered),
         "revision_notes": revision_notes,
-        "feedback_applied": [],
+        "feedback_applied": [
+            f"{item['clip_id']} 使用 user_summary 指引故事分組"
+            for item in [
+                _story_context_usage(c, story_context(c["user_summary"], c["ai_visual_summary"], "其他"))
+                for c in clips if c.get("user_summary")
+            ]
+        ],
         "feedback_unresolved": ["已記錄審核備註；自動重排片段留到 segment review 階段。"] if revision_notes else [],
     }
     write_project_files(cfg, plan)
@@ -618,6 +646,12 @@ def project_script(plan: dict) -> str:
         lines += ["", "## 審核備註", plan["revision_notes"]]
         for item in plan.get("feedback_unresolved", []):
             lines.append(f"- 尚未自動處理：{item}")
+    if plan.get("story_context_usage"):
+        lines += ["", "## 使用者故事脈絡"]
+        for item in plan["story_context_usage"]:
+            avoided = "、".join(item.get("avoided_activities", []))
+            suffix = f"；排除：{avoided}" if avoided else ""
+            lines.append(f"- {item['clip_id']}｜{item['user_summary']}｜分組：{item['activity']}（來源：user_summary）{suffix}")
     lines += ["", "## 自動字卡"]
     for card in plan.get("title_cards", []):
         lines.append(f"- {card['where']}｜{card['text']}｜{card['style']}")
@@ -725,7 +759,35 @@ def project_dir(cfg: dict, project_id: int) -> Path:
 
 
 def _group(label: str, time_of_day: str, activity: str, order: int = 999) -> dict:
-    return {"label": label, "time_of_day": time_of_day, "activity": activity, "order": order, "clips": [], "segments": []}
+    return {"label": label, "time_of_day": time_of_day, "activity": activity, "order": order, "clips": [], "segments": [], "story_context": []}
+
+
+def _story_context_usage(clip: dict, context: dict) -> dict:
+    return {
+        "clip_id": clip["clip_id"],
+        "project_media_id": clip["project_media_id"],
+        "video_id": clip["video_id"],
+        "filename": clip["filename"],
+        "user_summary": context["user_summary"],
+        "ai_visual_summary": context["ai_visual_summary"],
+        "effective_summary": context["effective_summary"],
+        "effective_summary_source": context["effective_summary_source"],
+        "activity": context["activity"],
+        "activity_source": context["activity_source"],
+        "avoided_activities": context["avoided_activities"],
+        "guidance_applied": context["guidance_applied"],
+    }
+
+
+def _dedupe_story_context(items: list[dict]) -> list[dict]:
+    result = []
+    seen = set()
+    for item in items:
+        key = item.get("project_media_id") or item.get("clip_id")
+        if key not in seen:
+            seen.add(key)
+            result.append(item)
+    return result
 
 
 def _chapter_for(chapters: list[dict], clip_id: str) -> dict | None:
@@ -737,7 +799,13 @@ def project_info_is_travel(row) -> bool:
 
 
 def _clip_summary(clip: dict) -> dict:
-    return {k: clip[k] for k in ("clip_id", "project_media_id", "video_id", "filename", "source_path", "order", "duration_seconds", "detected_category", "time_of_day", "status", "segment_count", "visual_summary", "analysis_current", "perception_run")}
+    return {k: clip[k] for k in (
+        "clip_id", "project_media_id", "video_id", "filename", "source_path", "order",
+        "duration_seconds", "detected_category", "time_of_day", "status", "segment_count",
+        "visual_summary", "ai_visual_summary", "user_summary", "user_summary_updated_at",
+        "user_summary_migration_state", "effective_summary", "effective_summary_source",
+        "analysis_current", "perception_run",
+    )}
 
 
 def _project_segment_identity_rows(db: Path, project_id: int) -> dict[int, list[dict]]:

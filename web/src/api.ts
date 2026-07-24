@@ -17,6 +17,12 @@ export type Clip = {
   detected_category: string;
   time_of_day: string;
   visual_summary: string;
+  ai_visual_summary: string;
+  user_summary: string;
+  user_summary_updated_at?: string | null;
+  user_summary_migration_state?: string;
+  effective_summary: string;
+  effective_summary_source: "user" | "ai" | "none";
 };
 
 export type BgmTrack = {
@@ -216,8 +222,8 @@ export const api = {
     json<{ ok: boolean; message?: string }>("/api/project/analyze-job", post({ project_id: projectId, force })),
   analyzeVideo: (projectId: number, videoId: number) =>
     json<{ ok: boolean; message?: string }>("/api/project/analyze-video", post({ project_id: projectId, video_id: videoId })),
-  saveClipSummary: (projectId: number, videoId: number, summary: string) =>
-    json<{ ok: boolean }>("/api/project/clip-summary", post({ project_id: projectId, video_id: videoId, summary })),
+  saveClipSummary: (projectId: number, videoId: number, userSummary: string) =>
+    json<{ ok: boolean; plan_rebuilt?: boolean }>("/api/project/clip-summary", post({ project_id: projectId, video_id: videoId, user_summary: userSummary })),
   colorAnalyze: (projectId: number, force = false) =>
     json<{ ok: boolean; state?: ColorState; error?: string }>("/api/project/color-analyze", post({ project_id: projectId, force })),
   colorSettings: (projectId: number, state: ColorStatePatch) =>
