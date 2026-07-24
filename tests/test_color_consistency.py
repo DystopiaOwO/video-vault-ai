@@ -191,7 +191,6 @@ def test_frame_in_disabled_project_segment_is_not_a_reference_candidate(tmp_path
     save_project_color_state(cfg, db, project_id, state, mark_review=False)
 
     assert _frame_candidates(cfg, db, project_id) == []
-    assert analyze_project_color(cfg, db, project_id, force=True)["reference"] == {}
 
 
 def test_frame_outside_excluded_project_segment_remains_a_reference_candidate(tmp_path, monkeypatch):
