@@ -51,3 +51,15 @@ def test_ci_workflow_change_uses_safe_non_media_fallback():
     selection = select_changed_files([".github/workflows/ci.yml"])
     assert selection.fallback_non_media is True
     assert any("fallback" in reason for reason in selection.reasons)
+
+
+def test_conftest_change_uses_safe_non_media_fallback():
+    selection = select_changed_files(["tests/conftest.py"])
+    assert selection.fallback_non_media is True
+    assert selection.targeted_tests == []
+
+
+def test_media_smoke_test_change_enables_media_smoke():
+    selection = select_changed_files(["tests/test_media_smoke.py"])
+    assert selection.media_smoke is True
+    assert selection.targeted_tests == []

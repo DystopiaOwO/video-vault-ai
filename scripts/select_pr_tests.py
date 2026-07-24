@@ -75,6 +75,7 @@ FALLBACK_PATHS = (
     "package.json",
     "package-lock.json",
     "scripts/select_pr_tests.py",
+    "tests/conftest.py",
 )
 
 
@@ -110,7 +111,10 @@ def select_changed_files(paths: Iterable[str]) -> Selection:
         if path.startswith("web/"):
             result.reasons.append("frontend change is covered by the Frontend job")
         if path.startswith("tests/") and path.endswith(".py"):
-            if "e2e" not in Path(path).stem and path != "tests/test_media_smoke.py":
+            if path == "tests/test_media_smoke.py":
+                result.media_smoke = True
+                result.reasons.append("changed media smoke test enables Media Smoke")
+            elif "e2e" not in Path(path).stem and path != "tests/conftest.py":
                 targeted.add(path)
                 result.reasons.append(f"changed test selected: {path}")
             else:
