@@ -6,6 +6,7 @@ from uuid import uuid4
 import hashlib
 import json
 import shutil
+import sqlite3
 
 from .database import _replace_segments_in_connection, connect, init_db
 
@@ -56,6 +57,11 @@ def ensure_perception_schema(db: Path) -> None:
         )
         con.execute(
             "create index if not exists idx_analysis_runs_project on analysis_runs(project_id, id desc)"
+        )
+        con.execute(
+            """create unique index if not exists idx_analysis_runs_active_video
+            on analysis_runs(video_id)
+            where status in ('queued','running','publishing')"""
         )
         con.execute("update analysis_runs set status='succeeded' where status='done'")
         for row in con.execute(
@@ -162,27 +168,30 @@ def create_perception_run(
             (video_id,),
         ).fetchone()
         previous_uuid = str(previous["run_uuid"]) if previous else ""
-        con.execute(
-            """insert into analysis_runs(
-                video_id, provider, model, status, raw_output_path, run_uuid, project_id,
-                project_media_uuid, generation, requested_at, started_at,
-                input_snapshot_json, staging_path, previous_success_run_uuid
-            ) values(?, ?, ?, 'running', '', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                video_id,
-                str(cfg.get("ai", {}).get("provider", "mock")),
-                str(cfg.get("ai", {}).get("model", "")),
-                run_uuid,
-                int(project_id),
-                project_media_uuid,
-                generation,
-                created,
-                created,
-                json.dumps(input_snapshot, ensure_ascii=False, sort_keys=True),
-                str(staging),
-                previous_uuid,
-            ),
-        )
+        try:
+            con.execute(
+                """insert into analysis_runs(
+                    video_id, provider, model, status, raw_output_path, run_uuid, project_id,
+                    project_media_uuid, generation, requested_at, started_at,
+                    input_snapshot_json, staging_path, previous_success_run_uuid
+                ) values(?, ?, ?, 'running', '', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    video_id,
+                    str(cfg.get("ai", {}).get("provider", "mock")),
+                    str(cfg.get("ai", {}).get("model", "")),
+                    run_uuid,
+                    int(project_id),
+                    project_media_uuid,
+                    generation,
+                    created,
+                    created,
+                    json.dumps(input_snapshot, ensure_ascii=False, sort_keys=True),
+                    str(staging),
+                    previous_uuid,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise RuntimeError(f"video {video_id} already has an active perception run") from exc
         con.execute(
             """update project_videos
             set current_analysis_run_uuid=?, analysis_generation=?, analysis_status='analyzing'
@@ -281,9 +290,13 @@ def validate_run_inputs(run: dict, video: dict, cfg: dict, manifest: list[dict])
 def capture_live_results(db: Path, video_id: int) -> dict:
     ensure_perception_schema(db)
     with connect(db) as con:
-        migration = con.execute(
-            "select coalesce(max(id), 0) as max_id from segment_identity_migrations"
-        ).fetchone()
+        migration_ids = [
+            int(row["id"])
+            for row in con.execute(
+                "select id from segment_identity_migrations where video_id=? order by id",
+                (int(video_id),),
+            ).fetchall()
+        ]
         video = con.execute("select status from videos where id=?", (int(video_id),)).fetchone()
         return {
             "video_id": int(video_id),
@@ -291,7 +304,7 @@ def capture_live_results(db: Path, video_id: int) -> dict:
             "frames": [dict(row) for row in con.execute("select * from frames where video_id=? order by id", (int(video_id),)).fetchall()],
             "segments": [dict(row) for row in con.execute("select * from segments where video_id=? order by id", (int(video_id),)).fetchall()],
             "project_videos": [dict(row) for row in con.execute("select * from project_videos where video_id=? order by project_id", (int(video_id),)).fetchall()],
-            "migration_max_id": int(migration["max_id"]),
+            "migration_ids": migration_ids,
         }
 
 
@@ -391,10 +404,18 @@ def restore_live_results(
         _restore_rows(con, "frames", snapshot.get("frames", []))
         con.execute("delete from segments where video_id=?", (video_id,))
         _restore_rows(con, "segments", snapshot.get("segments", []))
-        con.execute(
-            "delete from segment_identity_migrations where id>?",
-            (int(snapshot.get("migration_max_id") or 0),),
-        )
+        migration_ids = [int(value) for value in snapshot.get("migration_ids", [])]
+        if migration_ids:
+            placeholders = ",".join("?" for _ in migration_ids)
+            con.execute(
+                f"delete from segment_identity_migrations where video_id=? and id not in ({placeholders})",
+                (video_id, *migration_ids),
+            )
+        else:
+            con.execute(
+                "delete from segment_identity_migrations where video_id=?",
+                (video_id,),
+            )
         con.execute(
             "update videos set status=? where id=?",
             (str(snapshot.get("video_status") or ""), video_id),
