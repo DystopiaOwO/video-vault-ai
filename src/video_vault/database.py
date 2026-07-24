@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 import json
+import re
 import sqlite3
 
 SCHEMA = """
@@ -34,6 +37,8 @@ create table if not exists frames (
 );
 create table if not exists segments (
   id integer primary key,
+  segment_uuid text,
+  revision integer default 1,
   video_id integer,
   start_seconds real,
   end_seconds real,
@@ -52,6 +57,12 @@ create table if not exists analysis_runs (
   created_at text default current_timestamp,
   status text,
   raw_output_path text
+);
+create table if not exists segment_identity_migrations (
+  id integer primary key,
+  video_id integer not null,
+  created_at text default current_timestamp,
+  report_json text not null
 );
 create table if not exists bgm_tracks (
   id integer primary key,
@@ -82,6 +93,7 @@ create table if not exists projects (
 create table if not exists project_videos (
   project_id integer not null,
   video_id integer not null,
+  project_media_uuid text,
   sort_order integer default 0,
   primary key(project_id, video_id)
 );
@@ -91,6 +103,8 @@ create table if not exists project_bgm (
   primary key(project_id, bgm_id)
 );
 """
+
+IDENTITY_NAMESPACE = uuid5(NAMESPACE_URL, "video-vault-ai/stable-identities/v1")
 
 
 def connect(db: Path) -> sqlite3.Connection:
@@ -103,15 +117,64 @@ def connect(db: Path) -> sqlite3.Connection:
 def init_db(db: Path) -> None:
     with connect(db) as con:
         con.executescript(SCHEMA)
-        existing = {row["name"] for row in con.execute("pragma table_info(projects)").fetchall()}
-        for name, spec in {
-            "category": "text default 'unknown'",
-            "content_type": "text default 'diary_montage'",
-            "platform": "text default 'YouTube'",
-            "target_duration_seconds": "real default 0",
-        }.items():
-            if name not in existing:
-                con.execute(f"alter table projects add column {name} {spec}")
+        _ensure_columns(
+            con,
+            "projects",
+            {
+                "category": "text default 'unknown'",
+                "content_type": "text default 'diary_montage'",
+                "platform": "text default 'YouTube'",
+                "target_duration_seconds": "real default 0",
+            },
+        )
+        _ensure_columns(
+            con,
+            "segments",
+            {
+                "segment_uuid": "text",
+                "revision": "integer default 1",
+            },
+        )
+        _ensure_columns(con, "project_videos", {"project_media_uuid": "text"})
+        for row in con.execute(
+            "select id, video_id from segments where segment_uuid is null or segment_uuid=''"
+        ).fetchall():
+            con.execute(
+                "update segments set segment_uuid=?, revision=coalesce(revision, 1) where id=?",
+                (_legacy_segment_uuid(int(row["video_id"]), int(row["id"])), int(row["id"])),
+            )
+        for row in con.execute(
+            "select project_id, video_id from project_videos where project_media_uuid is null or project_media_uuid=''"
+        ).fetchall():
+            con.execute(
+                "update project_videos set project_media_uuid=? where project_id=? and video_id=?",
+                (
+                    _project_media_uuid(int(row["project_id"]), int(row["video_id"])),
+                    int(row["project_id"]),
+                    int(row["video_id"]),
+                ),
+            )
+        con.execute(
+            "create unique index if not exists idx_segments_segment_uuid on segments(segment_uuid)"
+        )
+        con.execute(
+            "create unique index if not exists idx_project_videos_media_uuid on project_videos(project_id, project_media_uuid)"
+        )
+
+
+def _ensure_columns(con: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing = {row["name"] for row in con.execute(f"pragma table_info({table})").fetchall()}
+    for name, spec in columns.items():
+        if name not in existing:
+            con.execute(f"alter table {table} add column {name} {spec}")
+
+
+def _legacy_segment_uuid(video_id: int, row_id: int) -> str:
+    return str(uuid5(IDENTITY_NAMESPACE, f"video:{video_id}:legacy-segment-row:{row_id}"))
+
+
+def _project_media_uuid(project_id: int, video_id: int) -> str:
+    return str(uuid5(IDENTITY_NAMESPACE, f"project:{project_id}:video:{video_id}"))
 
 
 def upsert_video(db: Path, row: dict) -> int:
@@ -154,54 +217,297 @@ def update_frame_analysis(db: Path, frame_id: int, result: dict) -> None:
         )
 
 
-def add_analysis(db: Path, video_id: int, provider: str, model: str, result: dict, raw_path: Path) -> None:
+def add_analysis(db: Path, video_id: int, provider: str, model: str, result: dict, raw_path: Path) -> dict:
+    init_db(db)
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     raw_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     with connect(db) as con:
-        con.execute("delete from segments where video_id=?", (video_id,))
-        for seg in result["segments"]:
-            con.execute(
-                """insert into segments(video_id,start_seconds,end_seconds,segment_type,title,reason,tags,score,suggested_use)
-                values(?,?,?,?,?,?,?,?,?)""",
-                (
-                    video_id,
-                    seg["start_seconds"],
-                    seg["end_seconds"],
-                    seg["segment_type"],
-                    seg["title"],
-                    seg["reason"],
-                    ",".join(seg["tags"]),
-                    seg["score"],
-                    seg["suggested_use"],
-                ),
-            )
+        report = _replace_segments_in_connection(con, video_id, result["segments"])
         con.execute(
             "insert into analysis_runs(video_id,provider,model,status,raw_output_path) values(?,?,?,?,?)",
             (video_id, provider, model, "done", str(raw_path)),
         )
         con.execute("update videos set status='analyzed' where id=?", (video_id,))
+        return report
 
 
-def replace_segments(db: Path, video_id: int, segments: list[dict]) -> None:
+def replace_segments(db: Path, video_id: int, incoming_segments: list[dict]) -> dict:
+    init_db(db)
     with connect(db) as con:
-        con.execute("delete from segments where video_id=?", (video_id,))
-        for seg in segments:
-            con.execute(
-                """insert into segments(video_id,start_seconds,end_seconds,segment_type,title,reason,tags,score,suggested_use)
-                values(?,?,?,?,?,?,?,?,?)""",
-                (
-                    video_id,
-                    seg["start_seconds"],
-                    seg["end_seconds"],
-                    seg["segment_type"],
-                    seg["title"],
-                    seg["reason"],
-                    ",".join(seg["tags"]),
-                    seg["score"],
-                    seg["suggested_use"],
-                ),
-            )
+        report = _replace_segments_in_connection(con, video_id, incoming_segments)
         con.execute("update videos set status='analyzed' where id=?", (video_id,))
+        return report
+
+
+def _replace_segments_in_connection(
+    con: sqlite3.Connection,
+    video_id: int,
+    incoming_segments: list[dict],
+) -> dict:
+    previous = [dict(row) for row in con.execute(
+        "select * from segments where video_id=? order by start_seconds, id",
+        (video_id,),
+    ).fetchall()]
+    incoming = [_normalize_segment(row) for row in incoming_segments]
+    assigned, report = _assign_segment_identities(video_id, previous, incoming)
+    con.execute("delete from segments where video_id=?", (video_id,))
+    for seg in assigned:
+        con.execute(
+            """insert into segments(
+                segment_uuid,revision,video_id,start_seconds,end_seconds,segment_type,title,reason,tags,score,suggested_use
+            ) values(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                seg["segment_uuid"],
+                seg["revision"],
+                video_id,
+                seg["start_seconds"],
+                seg["end_seconds"],
+                seg["segment_type"],
+                seg["title"],
+                seg["reason"],
+                seg["tags"],
+                seg["score"],
+                seg["suggested_use"],
+            ),
+        )
+    con.execute(
+        "insert into segment_identity_migrations(video_id, report_json) values(?, ?)",
+        (video_id, json.dumps(report, ensure_ascii=False, sort_keys=True)),
+    )
+    return report
+
+
+def _normalize_segment(row: dict) -> dict:
+    tags = row.get("tags") or []
+    if isinstance(tags, str):
+        tag_text = ",".join(part.strip() for part in tags.split(",") if part.strip())
+    else:
+        tag_text = ",".join(str(part).strip() for part in tags if str(part).strip())
+    start = round(float(row.get("start_seconds") or 0), 6)
+    end = round(max(start, float(row.get("end_seconds") or start)), 6)
+    return {
+        "start_seconds": start,
+        "end_seconds": end,
+        "segment_type": str(row.get("segment_type") or ""),
+        "title": str(row.get("title") or ""),
+        "reason": str(row.get("reason") or ""),
+        "tags": tag_text,
+        "score": float(row.get("score") or 0),
+        "suggested_use": str(row.get("suggested_use") or ""),
+    }
+
+
+def _assign_segment_identities(
+    video_id: int,
+    previous: list[dict],
+    incoming: list[dict],
+) -> tuple[list[dict], dict]:
+    pair_scores: list[tuple[float, int, int]] = []
+    overlap_old: dict[int, list[int]] = {index: [] for index in range(len(previous))}
+    overlap_new: dict[int, list[int]] = {index: [] for index in range(len(incoming))}
+    scored_by_new: dict[int, list[tuple[float, int]]] = {index: [] for index in range(len(incoming))}
+    for old_index, old in enumerate(previous):
+        for new_index, new in enumerate(incoming):
+            overlap = _overlap_seconds(old, new)
+            iou = _temporal_iou(old, new)
+            if overlap > 0 and iou >= 0.12:
+                overlap_old[old_index].append(new_index)
+                overlap_new[new_index].append(old_index)
+            score = _identity_score(old, new)
+            if score >= 0.45 and (iou >= 0.2 or overlap > 0):
+                pair_scores.append((score, old_index, new_index))
+                scored_by_new[new_index].append((score, old_index))
+
+    matched_old: set[int] = set()
+    matched_new: set[int] = set()
+    matches: dict[int, tuple[int, float]] = {}
+    for score, old_index, new_index in sorted(pair_scores, reverse=True):
+        if old_index in matched_old or new_index in matched_new:
+            continue
+        matched_old.add(old_index)
+        matched_new.add(new_index)
+        matches[new_index] = (old_index, score)
+
+    split_old = {index for index, children in overlap_old.items() if len(children) > 1}
+    merge_new = {index for index, parents in overlap_new.items() if len(parents) > 1}
+    ambiguous = []
+    for new_index, candidates in scored_by_new.items():
+        ranked = sorted(candidates, reverse=True)
+        if len(ranked) > 1 and ranked[0][0] - ranked[1][0] < 0.08:
+            ambiguous.append(
+                {
+                    "incoming_index": new_index,
+                    "candidate_segment_uuids": [
+                        str(previous[old_index].get("segment_uuid") or "")
+                        for _, old_index in ranked[:3]
+                    ],
+                    "scores": [round(score, 6) for score, _ in ranked[:3]],
+                }
+            )
+
+    assigned: list[dict] = []
+    matched_report = []
+    new_report = []
+    child_rank: dict[int, int] = {}
+    for new_index, new in enumerate(incoming):
+        item = dict(new)
+        if new_index in matches:
+            old_index, score = matches[new_index]
+            old = previous[old_index]
+            item["segment_uuid"] = str(old["segment_uuid"])
+            item["revision"] = int(old.get("revision") or 1) + 1
+            kind = "one_to_one"
+            if old_index in split_old:
+                kind = "split_primary"
+            if new_index in merge_new:
+                kind = "merge_primary" if kind == "one_to_one" else "split_merge_primary"
+            matched_report.append(
+                {
+                    "segment_uuid": item["segment_uuid"],
+                    "kind": kind,
+                    "score": round(score, 6),
+                    "previous": _segment_snapshot(old),
+                    "current": _segment_snapshot(item),
+                }
+            )
+        else:
+            split_parents = overlap_new.get(new_index, [])
+            if len(split_parents) == 1 and split_parents[0] in split_old:
+                parent_index = split_parents[0]
+                child_rank[parent_index] = child_rank.get(parent_index, 0) + 1
+                parent_uuid = str(previous[parent_index]["segment_uuid"])
+                item["segment_uuid"] = _split_child_uuid(
+                    parent_uuid,
+                    child_rank[parent_index],
+                    item,
+                )
+                reason = "split_child"
+            else:
+                item["segment_uuid"] = str(uuid4())
+                reason = "new_segment"
+            item["revision"] = 1
+            new_report.append({"reason": reason, **_segment_snapshot(item)})
+        assigned.append(item)
+
+    assigned_by_index = {index: row for index, row in enumerate(assigned)}
+    splits = []
+    for old_index in sorted(split_old):
+        children = overlap_old[old_index]
+        splits.append(
+            {
+                "previous_segment_uuid": str(previous[old_index]["segment_uuid"]),
+                "current_segment_uuids": [
+                    str(assigned_by_index[index]["segment_uuid"]) for index in children
+                ],
+                "requires_review": True,
+            }
+        )
+    merges = []
+    for new_index in sorted(merge_new):
+        merges.append(
+            {
+                "previous_segment_uuids": [
+                    str(previous[index]["segment_uuid"])
+                    for index in overlap_new[new_index]
+                ],
+                "current_segment_uuid": str(assigned_by_index[new_index]["segment_uuid"]),
+                "requires_review": True,
+            }
+        )
+
+    assigned_uuids = {str(row["segment_uuid"]) for row in assigned}
+    removed = [
+        _segment_snapshot(row)
+        for row in previous
+        if str(row.get("segment_uuid") or "") not in assigned_uuids
+    ]
+    report = {
+        "schema_version": 1,
+        "video_id": video_id,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "matched": matched_report,
+        "new": new_report,
+        "removed": removed,
+        "splits": splits,
+        "merges": merges,
+        "ambiguous": ambiguous,
+        "requires_review": bool(splits or merges or ambiguous or removed),
+    }
+    return assigned, report
+
+
+def _split_child_uuid(parent_uuid: str, rank: int, segment: dict) -> str:
+    namespace = UUID(parent_uuid)
+    key = (
+        f"split:{rank}:"
+        f"{float(segment.get('start_seconds') or 0):.3f}:"
+        f"{float(segment.get('end_seconds') or 0):.3f}"
+    )
+    return str(uuid5(namespace, key))
+
+
+def _segment_snapshot(row: dict) -> dict:
+    return {
+        "segment_uuid": str(row.get("segment_uuid") or ""),
+        "revision": int(row.get("revision") or 1),
+        "start_seconds": round(float(row.get("start_seconds") or 0), 6),
+        "end_seconds": round(float(row.get("end_seconds") or 0), 6),
+        "segment_type": str(row.get("segment_type") or ""),
+        "title": str(row.get("title") or ""),
+        "tags": str(row.get("tags") or ""),
+    }
+
+
+def _identity_score(old: dict, new: dict) -> float:
+    iou = _temporal_iou(old, new)
+    old_duration = max(0.001, float(old.get("end_seconds") or 0) - float(old.get("start_seconds") or 0))
+    new_duration = max(0.001, float(new.get("end_seconds") or 0) - float(new.get("start_seconds") or 0))
+    old_midpoint = (float(old.get("start_seconds") or 0) + float(old.get("end_seconds") or 0)) / 2
+    new_midpoint = (float(new.get("start_seconds") or 0) + float(new.get("end_seconds") or 0)) / 2
+    midpoint_scale = max(1.0, old_duration, new_duration)
+    midpoint_similarity = max(0.0, 1.0 - abs(old_midpoint - new_midpoint) / midpoint_scale)
+    old_tokens = _segment_tokens(old)
+    new_tokens = _segment_tokens(new)
+    union = old_tokens | new_tokens
+    semantic = len(old_tokens & new_tokens) / len(union) if union else 1.0
+    return 0.75 * iou + 0.2 * midpoint_similarity + 0.05 * semantic
+
+
+def _segment_tokens(row: dict) -> set[str]:
+    text = " ".join(
+        [
+            str(row.get("segment_type") or ""),
+            str(row.get("title") or ""),
+            str(row.get("tags") or "").replace(",", " "),
+        ]
+    ).lower()
+    return {token for token in re.findall(r"[\w\u4e00-\u9fff]+", text) if token}
+
+
+def _overlap_seconds(left: dict, right: dict) -> float:
+    start = max(float(left.get("start_seconds") or 0), float(right.get("start_seconds") or 0))
+    end = min(float(left.get("end_seconds") or 0), float(right.get("end_seconds") or 0))
+    return max(0.0, end - start)
+
+
+def _temporal_iou(left: dict, right: dict) -> float:
+    overlap = _overlap_seconds(left, right)
+    if overlap <= 0:
+        return 0.0
+    start = min(float(left.get("start_seconds") or 0), float(right.get("start_seconds") or 0))
+    end = max(float(left.get("end_seconds") or 0), float(right.get("end_seconds") or 0))
+    union = max(0.001, end - start)
+    return overlap / union
+
+
+def latest_segment_identity_migration(db: Path, video_id: int) -> dict:
+    init_db(db)
+    with connect(db) as con:
+        row = con.execute(
+            "select report_json from segment_identity_migrations where video_id=? order by id desc limit 1",
+            (video_id,),
+        ).fetchone()
+    return json.loads(row["report_json"]) if row else {}
 
 
 def videos(db: Path) -> list[sqlite3.Row]:
@@ -291,12 +597,33 @@ def create_project_row(db: Path, name: str, kind: str = "auto", category: str = 
 
 
 def set_project_videos(db: Path, project_id: int, video_ids: list[int]) -> None:
+    init_db(db)
+    ordered_ids = [int(video_id) for video_id in video_ids]
     with connect(db) as con:
-        con.execute("delete from project_videos where project_id=?", (project_id,))
-        for order, video_id in enumerate(video_ids, 1):
+        existing = {
+            int(row["video_id"]): str(row["project_media_uuid"] or "")
+            for row in con.execute(
+                "select video_id, project_media_uuid from project_videos where project_id=?",
+                (project_id,),
+            ).fetchall()
+        }
+        if ordered_ids:
+            placeholders = ",".join("?" for _ in ordered_ids)
             con.execute(
-                "insert into project_videos(project_id, video_id, sort_order) values(?, ?, ?)",
-                (project_id, video_id, order),
+                f"delete from project_videos where project_id=? and video_id not in ({placeholders})",
+                (project_id, *ordered_ids),
+            )
+        else:
+            con.execute("delete from project_videos where project_id=?", (project_id,))
+        for order, video_id in enumerate(ordered_ids, 1):
+            media_uuid = existing.get(video_id) or _project_media_uuid(project_id, video_id)
+            con.execute(
+                """insert into project_videos(project_id, video_id, project_media_uuid, sort_order)
+                values(?, ?, ?, ?)
+                on conflict(project_id, video_id) do update set
+                  sort_order=excluded.sort_order,
+                  project_media_uuid=coalesce(nullif(project_videos.project_media_uuid, ''), excluded.project_media_uuid)""",
+                (project_id, video_id, media_uuid, order),
             )
         con.execute("update projects set updated_at=current_timestamp where id=?", (project_id,))
 
@@ -320,7 +647,7 @@ def project(db: Path, project_id: int) -> sqlite3.Row | None:
 def project_videos(db: Path, project_id: int) -> list[sqlite3.Row]:
     with connect(db) as con:
         return con.execute(
-            """select v.*
+            """select v.*, pv.project_media_uuid, pv.sort_order
             from project_videos pv
             join videos v on v.id=pv.video_id
             where pv.project_id=?

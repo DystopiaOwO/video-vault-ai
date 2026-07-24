@@ -8,6 +8,7 @@ from .frame_analysis import PROMPT_VERSION, cache_key, merge_frames_to_segments
 from .mock_provider import MockProvider
 from .local_provider import LocalProvider
 from ..database import frames as db_frames, replace_segments, update_frame_analysis
+from ..segment_state_migration import migrate_segment_state_for_video
 
 
 def provider_from_config(cfg: dict):
@@ -38,6 +39,17 @@ def analyze_video_frames(db: Path, video: dict, cfg: dict, progress=None) -> dic
         analyzed.append({"timestamp_seconds": float(frame["timestamp_seconds"]), **result})
         if progress:
             progress(index, len(frame_rows), frame)
-    segments = merge_frames_to_segments(analyzed, float(cfg["frame_interval_seconds"]))
-    replace_segments(db, int(video["id"]), segments)
-    return {"frames": analyzed, "segments": segments}
+    perceived_segments = merge_frames_to_segments(analyzed, float(cfg["frame_interval_seconds"]))
+    migration = replace_segments(db, int(video["id"]), perceived_segments)
+    project_migrations = migrate_segment_state_for_video(
+        cfg,
+        db,
+        int(video["id"]),
+        migration,
+    )
+    return {
+        "frames": analyzed,
+        "segments": perceived_segments,
+        "segment_identity_migration": migration,
+        "project_segment_state_migrations": project_migrations,
+    }
