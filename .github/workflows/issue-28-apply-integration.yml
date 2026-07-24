@@ -1,0 +1,291 @@
+name: Apply Issue 28 integration patch
+
+on:
+  push:
+    branches:
+      - codex/issue-28-perception-runs
+    paths:
+      - .github/workflows/issue-28-apply-integration.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/issue-28-perception-runs
+      - name: Patch WebUI and project contracts
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              if old not in text:
+                  if new in text:
+                      return text
+                  raise SystemExit(f"missing patch target: {label}")
+              return text.replace(old, new, 1)
+
+          ui_path = Path("src/video_vault/ui.py")
+          ui = ui_path.read_text(encoding="utf-8")
+          ui = replace_once(
+              ui,
+              "from .project import build_project_plan, can_project_render, create_project, list_projects, mark_project_needs_review, project_detail, project_dir, save_revision_notes, save_segment_review, set_review_status, sync_project_files, update_segment_timing\n",
+              "from .project import build_project_plan, can_project_render, create_project, list_projects, mark_project_needs_review, project_detail, project_dir, save_revision_notes, save_segment_review, set_review_status, sync_project_files, update_segment_timing\nfrom .project_perception import run_project_perception\nfrom .perception_runs import PerceptionCancelled, ensure_perception_schema, perception_jobs, recover_interrupted_perception_runs\n",
+              "ui imports",
+          )
+          ui = replace_once(
+              ui,
+              "    init_db(db)\n    render_manager = RenderJobManager(cfg, db)\n",
+              "    init_db(db)\n    ensure_perception_schema(db)\n    recover_interrupted_perception_runs(db)\n    render_manager = RenderJobManager(cfg, db)\n",
+              "run_ui recovery",
+          )
+          ui = replace_once(
+              ui,
+              "                self._json(project_jobs(project_id, render_manager) if project_id else project_jobs(0, render_manager))\n",
+              "                self._json(project_jobs(project_id, render_manager, db) if project_id else project_jobs(0, render_manager, db))\n",
+              "api jobs",
+          )
+          ui = replace_once(
+              ui,
+              "    jobs = project_jobs(project_id, render_manager) if project_id else []\n",
+              "    jobs = project_jobs(project_id, render_manager, db) if project_id else []\n",
+              "classic jobs",
+          )
+          ui = replace_once(
+              ui,
+              '''def project_jobs(project_id: int, render_manager: RenderJobManager | None = None) -> list[dict]:
+              with JOBS_LOCK:
+                  legacy = [
+                      dict(job, project_id=pid, legacy_job_key=name)
+                      for (pid, name), job in JOBS.items()
+                      if project_id == 0 or pid == project_id
+                  ]
+              persistent = []
+              if render_manager is not None:
+                  persistent = [dict(job, kind="正式輸出") for job in render_manager.list(None if project_id == 0 else project_id)]
+              return legacy + persistent
+              ''',
+              '''def project_jobs(project_id: int, render_manager: RenderJobManager | None = None, db: Path | None = None) -> list[dict]:
+              with JOBS_LOCK:
+                  legacy = [
+                      dict(job, project_id=pid, legacy_job_key=name)
+                      for (pid, name), job in JOBS.items()
+                      if project_id == 0 or pid == project_id
+                  ]
+              persistent = []
+              if db is not None and project_id:
+                  persistent.extend(perception_jobs(db, project_id))
+              if render_manager is not None:
+                  persistent.extend(dict(job, kind="正式輸出") for job in render_manager.list(None if project_id == 0 else project_id))
+              active_persistent = any(job.get("status") in {"queued", "running", "publishing"} for job in persistent if job.get("kind") == "內容感知")
+              if active_persistent:
+                  legacy = [job for job in legacy if job.get("legacy_job_key") != "analyze"]
+              return legacy + persistent
+              ''',
+              "project_jobs",
+          )
+          ui = replace_once(
+              ui,
+              '''            analyze_ui_video(cfg, db, video, _analyze_progress(project_id, video.get("filename", ""), index - 1, max(len(todo), 1)))
+                          video = rename_after_perception(cfg, db, video)
+                          perceive_output(cfg, db, video)
+                          write_plan_files(cfg, draft_plan(cfg, db, video))
+                          set_video_status(db, int(video["id"]), "perceived")
+                          processed.append({"id": video["id"], "filename": video["filename"]})
+              ''',
+              '''            result = run_project_perception(
+                              cfg,
+                              db,
+                              project_id,
+                              video,
+                              _analyze_progress(project_id, video.get("filename", ""), index - 1, max(len(todo), 1)),
+                              should_cancel=lambda: _job_stopped(project_id, "analyze"),
+                          )
+                          processed.extend(result.get("processed", []))
+              ''',
+              "bulk analyze body",
+          )
+          ui = replace_once(
+              ui,
+              '''        build_project_plan(cfg, db, project_id)
+                      _set_job(project_id, "analyze", status="done", message=f"內容感知完成：{len(processed)} 支", processed=processed, percent=100)
+                  except Exception as exc:
+                      _set_job(project_id, "analyze", status="failed", message=f"內容感知失敗：{exc}")
+              ''',
+              '''        build_project_plan(cfg, db, project_id)
+                      _set_job(project_id, "analyze", status="done", message=f"內容感知完成：{len(processed)} 支", processed=processed, percent=100)
+                  except PerceptionCancelled:
+                      _set_job(project_id, "analyze", status="stopped", message="內容感知已由使用者停止")
+                  except Exception as exc:
+                      _set_job(project_id, "analyze", status="failed", message=f"內容感知失敗：{exc}")
+              ''',
+              "bulk cancel",
+          )
+          ui = replace_once(
+              ui,
+              '''        analyze_project_video(cfg, db, project_id, video_id, _analyze_progress(project_id, video.get("filename", ""), 0, 1))
+                      _set_job(project_id, "analyze", status="done", message=f"單支素材感知完成：{video.get('filename', '')}", done=1, total=1, percent=100)
+                  except Exception as exc:
+                      _set_job(project_id, "analyze", status="failed", message=f"單支素材感知失敗：{exc}")
+              ''',
+              '''        analyze_project_video(cfg, db, project_id, video_id, _analyze_progress(project_id, video.get("filename", ""), 0, 1), should_cancel=lambda: _job_stopped(project_id, "analyze"))
+                      _set_job(project_id, "analyze", status="done", message=f"單支素材感知完成：{video.get('filename', '')}", done=1, total=1, percent=100)
+                  except PerceptionCancelled:
+                      _set_job(project_id, "analyze", status="stopped", message="單支素材感知已由使用者停止")
+                  except Exception as exc:
+                      _set_job(project_id, "analyze", status="failed", message=f"單支素材感知失敗：{exc}")
+              ''',
+              "single cancel",
+          )
+          ui = replace_once(
+              ui,
+              '''def analyze_project(cfg: dict, db: Path, project_id: int, force: bool = False) -> dict:
+                  processed = []
+                  for row in project_videos(db, project_id):
+                      video = dict(row)
+                      if not force and video.get("status") == "perceived":
+                          continue
+                      analyze_ui_video(cfg, db, video)
+                      video = rename_after_perception(cfg, db, video)
+                      perceive_output(cfg, db, video)
+                      write_plan_files(cfg, draft_plan(cfg, db, video))
+                      set_video_status(db, int(video["id"]), "perceived")
+                      processed.append({"id": video["id"], "filename": video["filename"]})
+                  build_project_plan(cfg, db, project_id)
+                  return {"ok": True, "processed": processed}
+              ''',
+              '''def analyze_project(cfg: dict, db: Path, project_id: int, force: bool = False) -> dict:
+                  processed = []
+                  for row in project_videos(db, project_id):
+                      video = dict(row)
+                      if not force and video.get("status") == "perceived":
+                          continue
+                      result = run_project_perception(cfg, db, project_id, video)
+                      processed.extend(result.get("processed", []))
+                  build_project_plan(cfg, db, project_id)
+                  return {"ok": True, "processed": processed}
+              ''',
+              "analyze_project",
+          )
+          ui = replace_once(
+              ui,
+              '''def analyze_project_video(cfg: dict, db: Path, project_id: int, video_id: int, progress=None) -> dict:
+                  video = next((dict(v) for v in project_videos(db, project_id) if int(v["id"]) == video_id), None)
+                  if not video:
+                      return {"ok": False, "error": "video not found in project"}
+                  analyze_ui_video(cfg, db, video, progress)
+                  video = rename_after_perception(cfg, db, video)
+                  perceive_output(cfg, db, video)
+                  write_plan_files(cfg, draft_plan(cfg, db, video))
+                  set_video_status(db, video_id, "perceived")
+                  build_project_plan(cfg, db, project_id)
+                  return {"ok": True, "processed": [{"id": video_id, "filename": video["filename"]}]}
+              ''',
+              '''def analyze_project_video(cfg: dict, db: Path, project_id: int, video_id: int, progress=None, should_cancel=None) -> dict:
+                  video = next((dict(v) for v in project_videos(db, project_id) if int(v["id"]) == video_id), None)
+                  if not video:
+                      return {"ok": False, "error": "video not found in project"}
+                  result = run_project_perception(cfg, db, project_id, video, progress, should_cancel)
+                  return {"ok": True, **result}
+              ''',
+              "analyze_project_video",
+          )
+          ui = replace_once(
+              ui,
+              "    ok = update_video_summary(db, video_id, summary.strip())\n",
+              "    ok = update_video_summary(db, video_id, summary.strip(), project_id=project_id)\n",
+              "project summary ownership",
+          )
+          ui_path.write_text(ui, encoding="utf-8")
+
+          project_path = Path("src/video_vault/project.py")
+          project = project_path.read_text(encoding="utf-8")
+          project = replace_once(
+              project,
+              '''    rows = [dict(v) for v in project_videos(db, project_id)]
+                  source_dir = project_dir(cfg, project_id) / "source"
+              ''',
+              '''    rows = [dict(v) for v in project_videos(db, project_id)]
+                  from .perception_runs import perception_states_for_project
+
+                  perception_states = perception_states_for_project(db, project_id)
+                  source_dir = project_dir(cfg, project_id) / "source"
+              ''',
+              "project perception states",
+          )
+          project = replace_once(
+              project,
+              '''        display_name = str(video.get("filename") or src.name)
+                      project_summary = video.get("project_summary")
+              ''',
+              '''        display_name = str(video.get("filename") or src.name)
+                      perception_state = perception_states.get(int(video["id"]), {})
+                      project_summary = video.get("project_summary")
+              ''',
+              "clip state lookup",
+          )
+          project = replace_once(
+              project,
+              '''            "status": video.get("status") or "uploaded",
+                          "segment_count": len(list(segments(db, int(video["id"])))),
+                          "visual_summary": visual_summary,
+              ''',
+              '''            "status": perception_state.get("current_status") or video.get("status") or "uploaded",
+                          "segment_count": len(list(segments(db, int(video["id"])))),
+                          "visual_summary": visual_summary,
+                          "analysis_current": bool(perception_state.get("analysis_current")),
+                          "perception_run": perception_state,
+              ''',
+              "clip contract",
+          )
+          project = replace_once(
+              project,
+              '''        "perception": any(c.get("segment_count", 0) for c in clips),
+              ''',
+              '''        "perception": bool(clips) and all(c.get("analysis_current") for c in clips),
+              ''',
+              "workflow perception dict",
+          ) if '        "perception": any(c.get("segment_count", 0) for c in clips),' in project else project
+          project = replace_once(
+              project,
+              '''        _stage("perception", "內容感知", any(c.get("segment_count", 0) for c in clips), [folder / "clips"]),
+              ''',
+              '''        _stage("perception", "內容感知", bool(clips) and all(c.get("analysis_current") for c in clips), [folder / "clips"]),
+              ''',
+              "workflow perception stage",
+          )
+          project = replace_once(
+              project,
+              '''        "clips": sync_project_files(cfg, db, project_id),
+                      "bgm": public_bgm,
+              ''',
+              '''        "clips": sync_project_files(cfg, db, project_id),
+                      "perception_runs": [clip.get("perception_run", {}) for clip in sync_project_files(cfg, db, project_id)],
+                      "bgm": public_bgm,
+              ''',
+              "project detail perception runs",
+          )
+          project = replace_once(
+              project,
+              '''def _clip_summary(clip: dict) -> dict:
+                  return {k: clip[k] for k in ("clip_id", "project_media_id", "video_id", "filename", "source_path", "order", "duration_seconds", "detected_category", "time_of_day", "status", "segment_count", "visual_summary")}
+              ''',
+              '''def _clip_summary(clip: dict) -> dict:
+                  return {k: clip[k] for k in ("clip_id", "project_media_id", "video_id", "filename", "source_path", "order", "duration_seconds", "detected_category", "time_of_day", "status", "segment_count", "visual_summary", "analysis_current", "perception_run")}
+              ''',
+              "clip summary",
+          )
+          project_path.write_text(project, encoding="utf-8")
+      - name: Commit patch and remove temporary workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/issue-28-apply-integration.yml
+          git add src/video_vault/ui.py src/video_vault/project.py
+          git commit -m "feat: integrate persistent project perception runs"
+          git push
