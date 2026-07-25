@@ -107,6 +107,7 @@ class RenderJobManager:
         self._started = False
         self._shutting_down = False
         self.coordinator = JobCoordinator(ffmpeg_slots=1, gpu_slots=1, ai_provider_slots=1)
+        self._claiming: set[str] = set()
 
     def start(self) -> None:
         with self._lock:
@@ -213,6 +214,15 @@ class RenderJobManager:
         return self.store.list(project_id)
 
     def cancel(self, job_id: str) -> dict[str, Any]:
+        # A worker that has entered the atomic queued -> running claim must
+        # finish that tiny boundary before cancellation decides whether it is
+        # stopping a queued job or an already claimed runtime.
+        while True:
+            with self._lock:
+                claiming = str(job_id) in self._claiming
+            if not claiming:
+                break
+            time.sleep(0.001)
         with self._lock:
             job = self.store.get(job_id)
             if not job:
@@ -348,15 +358,21 @@ class RenderJobManager:
         # Do not hold the manager lock across this conditional store write.
         # Cancellation must be able to win the queued -> running race while a
         # store adapter or test hook is waiting for another thread.
-        claimed = self.store.transition(
-            job_id,
-            {"queued"},
-            status="running",
-            stage="validating",
-            message="正在驗證正式輸出條件",
-            started_at=utc_now(),
-            process_id=None,
-        )
+        with self._lock:
+            self._claiming.add(job_id)
+        try:
+            claimed = self.store.transition(
+                job_id,
+                {"queued"},
+                status="running",
+                stage="validating",
+                message="正在驗證正式輸出條件",
+                started_at=utc_now(),
+                process_id=None,
+            )
+        finally:
+            with self._lock:
+                self._claiming.discard(job_id)
         if claimed is None:
             return
         with self._lock:
