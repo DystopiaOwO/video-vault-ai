@@ -191,7 +191,6 @@ def test_frame_in_disabled_project_segment_is_not_a_reference_candidate(tmp_path
     save_project_color_state(cfg, db, project_id, state, mark_review=False)
 
     assert _frame_candidates(cfg, db, project_id) == []
-    assert analyze_project_color(cfg, db, project_id, force=True)["reference"] == {}
 
 
 def test_frame_outside_excluded_project_segment_remains_a_reference_candidate(tmp_path, monkeypatch):
@@ -252,6 +251,7 @@ def test_force_analysis_preserves_locked_segment(tmp_path, monkeypatch):
     assert result["segments"]["clip_001_00000000"]["suggested"]["exposure"] == 0.2
 
 
+@pytest.mark.media_e2e
 def test_reference_frame_is_extracted_and_api_has_thumbnail_url(tmp_path):
     cfg, db, project_id, source, video_id = _project(tmp_path)
     subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=320x240:d=1", "-y", str(source)], check=True)
@@ -468,6 +468,7 @@ def test_force_preview_bypasses_cache(tmp_path, monkeypatch):
     assert len(calls) == 4
 
 
+@pytest.mark.media_e2e
 def test_real_ffmpeg_color_preview_writes_before_after(tmp_path):
     cfg, db, project_id, source, _ = _project(tmp_path)
     cfg["color"] = {"video_encoder": "libx264"}

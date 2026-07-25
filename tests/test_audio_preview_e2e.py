@@ -14,7 +14,10 @@ from video_vault.project import build_project_plan, create_project, project_dir
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
-pytestmark = pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed")
+pytestmark = [
+    pytest.mark.media_e2e,
+    pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed"),
+]
 
 
 def _run(command: list[str]) -> None:

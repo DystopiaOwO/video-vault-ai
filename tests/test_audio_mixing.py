@@ -1,7 +1,5 @@
 import json
 from pathlib import Path
-import shutil
-import subprocess
 
 import pytest
 
@@ -14,6 +12,15 @@ from video_vault.project import project_detail
 from video_vault.timeline_assembler import build_timeline_command
 
 from test_render_manifest import _project
+
+
+@pytest.fixture(autouse=True)
+def _stub_bgm_probe(monkeypatch):
+    """Keep manifest state tests independent from FFmpeg media probing."""
+    monkeypatch.setattr(
+        "video_vault.render_manifest.validate_bgm_track",
+        lambda track, ffprobe_path="ffprobe": object(),
+    )
 
 
 def test_audio_state_is_compiled_into_manifest_and_bgm_is_single_selected_track(tmp_path: Path):
@@ -148,6 +155,7 @@ def test_disabling_audio_state_restores_only_original_legacy_bgm(tmp_path: Path)
     assert [item["track_id"] for item in build_render_manifest(cfg, db, project_id)["bgm"]] == [legacy_id]
 
 
+@pytest.mark.pr_core
 def test_normalization_without_bgm_reencodes_and_disabled_uses_fast_path():
     profile = {"audio_codec": "aac", "audio_sample_rate": 48000, "audio_channels": 2}
     normalized = build_timeline_command(
@@ -209,6 +217,4 @@ def test_bgm_command_uses_global_timeline_phase_for_later_preview():
 
 
 def _make_audio(path: Path) -> None:
-    ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
-    result = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:a", "libmp3lame", str(path)], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
+    path.write_bytes(b"test-audio-placeholder")
