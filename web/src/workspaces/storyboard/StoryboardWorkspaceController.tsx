@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  formatApiError,
   type AudioSegmentSettings,
   type ColorSegmentPatch,
   type ProjectDetail,
@@ -205,7 +206,9 @@ export function StoryboardWorkspaceController({
     setBusy("save");
     setProjectMessage("正在儲存分鏡…");
     try {
-      const result = await api.updateStoryboard(detail.project.id, normalized);
+      const result = await (detail.project_revision === undefined
+        ? api.updateStoryboard(detail.project.id, normalized)
+        : api.updateStoryboard(detail.project.id, normalized, detail.project_revision));
       if (!result.ok || !result.storyboard) {
         setProjectMessage(`分鏡儲存失敗：${result.error || "未知錯誤"}`);
         return;
@@ -266,11 +269,14 @@ export function StoryboardWorkspaceController({
     setBusy("timing");
     setProjectMessage("正在儲存片段剪點…");
     try {
-      const result = await api.saveSegmentTiming(detail.project.id, segmentId, {
+      const timingPatch = {
         start_seconds: timing.startSeconds,
         end_seconds: timing.endSeconds,
         speed: timing.speed,
-      });
+      };
+      const result = await (detail.project_revision === undefined
+        ? api.saveSegmentTiming(detail.project.id, segmentId, timingPatch)
+        : api.saveSegmentTiming(detail.project.id, segmentId, timingPatch, detail.project_revision));
       if (!result.ok) {
         setProjectMessage(`剪點儲存失敗：${result.error || "未知錯誤"}`);
         return;
@@ -385,7 +391,9 @@ export function StoryboardWorkspaceController({
       const segmentPatch = role === "default"
         ? null
         : { ...(existing && typeof existing === "object" ? existing : {}), role };
-      const result = await api.audioSettings(detail.project.id, { segments: { [segmentId]: segmentPatch } });
+      const result = await (detail.project_revision === undefined
+        ? api.audioSettings(detail.project.id, { segments: { [segmentId]: segmentPatch } })
+        : api.audioSettings(detail.project.id, { segments: { [segmentId]: segmentPatch } }, detail.project_revision));
       if (!result.ok) {
         setProjectMessage(`原音角色更新失敗：${result.error || "未知錯誤"}`);
         return;
@@ -417,12 +425,15 @@ export function StoryboardWorkspaceController({
         excluded: false,
         ...(existing?.applied ? { applied: { ...existing.applied } } : {}),
       };
-      const result = await api.colorSettings(detail.project.id, {
+      const colorPatch = {
         schema_version: detail.color.schema_version,
         enabled: detail.color.enabled,
         applied: { ...detail.color.applied },
         segments: { [segmentId]: patch },
-      });
+      };
+      const result = await (detail.project_revision === undefined
+        ? api.colorSettings(detail.project.id, colorPatch)
+        : api.colorSettings(detail.project.id, colorPatch, detail.project_revision));
       if (!result.ok) {
         setProjectMessage(`片段調色更新失敗：${result.error || "未知錯誤"}`);
         return;
@@ -445,12 +456,15 @@ export function StoryboardWorkspaceController({
     if (!mutation) return;
     setBusy("color");
     try {
-      const result = await api.colorSettings(detail.project.id, {
+      const colorPatch = {
         schema_version: detail.color.schema_version,
         enabled: detail.color.enabled,
         applied: { ...detail.color.applied },
         segments: { [segmentId]: null },
-      });
+      };
+      const result = await (detail.project_revision === undefined
+        ? api.colorSettings(detail.project.id, colorPatch)
+        : api.colorSettings(detail.project.id, colorPatch, detail.project_revision));
       if (!result.ok) {
         setProjectMessage(`恢復調色預設失敗：${result.error || "未知錯誤"}`);
         return;
@@ -575,5 +589,5 @@ function previewModeLabel(mode: StoryboardPreviewMode): string {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "網路或服務錯誤";
+  return formatApiError(error);
 }

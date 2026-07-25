@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  formatApiError,
   type ColorAdjustment,
   type ColorSegmentState,
   type ColorState,
@@ -249,7 +250,9 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
     setBusy("reference");
     setProjectMessage("正在更新色彩基準…");
     try {
-      const result = await api.colorReference(detail.project.id, referenceId);
+      const result = await (detail.project_revision === undefined
+        ? api.colorReference(detail.project.id, referenceId)
+        : api.colorReference(detail.project.id, referenceId, detail.project_revision));
       if (!result.ok || !result.state) {
         setProjectMessage(`色彩基準更新失敗：${result.error || "未知錯誤"}`);
         return;
@@ -285,7 +288,9 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
     setBusy("save");
     setProjectMessage("正在儲存調色設定…");
     try {
-      const result = await api.colorSettings(detail.project.id, toColorStatePatch(state));
+      const result = await (detail.project_revision === undefined
+        ? api.colorSettings(detail.project.id, toColorStatePatch(state))
+        : api.colorSettings(detail.project.id, toColorStatePatch(state), detail.project_revision));
       if (!result.ok || !result.state) {
         setProjectMessage(`色彩設定儲存失敗：${result.error || "未知錯誤"}`);
         return;
@@ -543,5 +548,5 @@ function adjustmentLabel(field: keyof ColorAdjustment): string {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "網路或服務錯誤";
+  return formatApiError(error);
 }

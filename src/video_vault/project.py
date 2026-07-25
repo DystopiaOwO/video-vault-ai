@@ -11,6 +11,7 @@ import shutil
 from .bgm import recommend_bgm_for_groups
 from .database import create_project_row, frames, init_db, project, project_bgm_tracks, project_videos, projects, segments, set_project_status, set_project_videos
 from .story_context import story_context
+from .project_lifecycle import current_revision, project_commit
 
 
 def create_project(db: Path, name: str, video_ids: list[int], kind: str = "auto", category: str = "unknown", content_type: str = "diary_montage", platform: str = "YouTube", target_duration_seconds: float = 0) -> int:
@@ -87,7 +88,14 @@ def sync_project_files(cfg: dict, db: Path, project_id: int) -> list[dict]:
     return result
 
 
-def build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
+def build_project_plan(cfg: dict, db: Path, project_id: int, *, base_revision: int | None = None) -> dict:
+    with project_commit(db, project_id, base_revision) as commit:
+        result = _build_project_plan(cfg, db, project_id)
+        commit.changed = True
+        return result
+
+
+def _build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
     init_db(db)
     row = project(db, project_id)
     if not row:
@@ -227,6 +235,7 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
         public_segments.append(public_segment)
     return {
         "project": dict(row),
+        "project_revision": int(row["project_revision"] or 1),
         "clips": clips,
         "perception_runs": [clip.get("perception_run", {}) for clip in clips],
         "bgm": public_bgm,
@@ -341,7 +350,14 @@ def _stage(stage_id: str, label: str, done: bool, artifacts: list[Path]) -> dict
     return {"id": stage_id, "label": label, "status": "done" if done else "pending", "artifacts": [str(path) for path in artifacts]}
 
 
-def save_segment_review(cfg: dict, db: Path, project_id: int, rows: list[dict]) -> Path:
+def save_segment_review(cfg: dict, db: Path, project_id: int, rows: list[dict], *, base_revision: int | None = None) -> Path:
+    with project_commit(db, project_id, base_revision) as commit:
+        path = _save_segment_review(cfg, db, project_id, rows)
+        commit.changed = True
+        return path
+
+
+def _save_segment_review(cfg: dict, db: Path, project_id: int, rows: list[dict]) -> Path:
     allowed = {"segment_id", "include", "user_notes", "manual_order", "scene_role", "story_position", "audio_role", "speed", "start_seconds", "end_seconds"}
     current = {str(row.get("segment_id")): row for row in project_segments(cfg, project_id, _read_json(project_dir(cfg, project_id) / "project_plan.json"), apply_storyboard=False, db=db)}
     videos = {int(row["id"]): dict(row) for row in project_videos(db, project_id)}
@@ -373,6 +389,24 @@ def save_segment_review(cfg: dict, db: Path, project_id: int, rows: list[dict]) 
 
 
 def update_segment_timing(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    segment_id: str,
+    start_seconds: float,
+    end_seconds: float,
+    speed: float,
+    *,
+    base_revision: int | None = None,
+) -> Path:
+    """Patch only one segment's timing without copying storyboard metadata."""
+    with project_commit(db, project_id, base_revision) as commit:
+        path = _update_segment_timing(cfg, db, project_id, segment_id, start_seconds, end_seconds, speed)
+        commit.changed = True
+        return path
+
+
+def _update_segment_timing(
     cfg: dict,
     db: Path,
     project_id: int,
@@ -432,7 +466,14 @@ def _clean_segment_review(row: dict, allowed: set[str]) -> dict:
     return data
 
 
-def set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes: str = "") -> Path:
+def set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes: str = "", *, base_revision: int | None = None) -> Path:
+    with project_commit(db, project_id, base_revision) as commit:
+        path = _set_review_status(cfg, db, project_id, status, notes)
+        commit.changed = True
+        return path
+
+
+def _set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes: str = "") -> Path:
     folder = project_dir(cfg, project_id)
     path = folder / "review_status.json"
     snapshot = {}
@@ -446,6 +487,7 @@ def set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes: 
         snapshot = {
             "approved_manifest_hash": manifest["manifest_hash"],
             "approved_plan_id": manifest.get("plan_id", ""),
+            "approved_project_revision": current_revision(db, project_id) + 1,
             "approved_at": datetime.now().isoformat(timespec="seconds"),
         }
     data = {"project_id": project_id, "status": status, "approved_by_user": status == "approved", "notes": notes, "updated_at": datetime.now().isoformat(timespec="seconds"), **snapshot}
@@ -475,14 +517,20 @@ def save_revision_notes(cfg: dict, project_id: int, notes: str) -> Path | None:
     return latest
 
 
-def mark_project_needs_review(cfg: dict, db: Path, project_id: int) -> None:
+def mark_project_needs_review(cfg: dict, db: Path, project_id: int, *, base_revision: int | None = None) -> None:
+    with project_commit(db, project_id, base_revision) as commit:
+        _mark_project_needs_review(cfg, db, project_id)
+        commit.changed = True
+
+
+def _mark_project_needs_review(cfg: dict, db: Path, project_id: int) -> None:
     folder = project_dir(cfg, project_id)
     set_project_status(db, project_id, "needs_review")
     review_path = folder / "review_status.json"
     if review_path.exists():
         review = _read_json(review_path)
         review.update({"status": "needs_review", "approved_by_user": False, "updated_at": datetime.now().isoformat(timespec="seconds")})
-        for key in ("approved_manifest_hash", "approved_plan_id", "approved_at"):
+        for key in ("approved_manifest_hash", "approved_plan_id", "approved_project_revision", "approved_at"):
             review.pop(key, None)
         review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
     plan_path = folder / "project_plan.json"
@@ -530,6 +578,9 @@ def can_project_render(cfg: dict, db: Path, project_id: int) -> tuple[bool, str]
     approved_hash = review.get("approved_manifest_hash")
     if not approved_hash:
         return False, "review_status.json 缺少 approved_manifest_hash"
+    approved_revision = review.get("approved_project_revision")
+    if approved_revision not in (None, "") and int(approved_revision) != current_revision(db, project_id):
+        return False, "approved_project_revision 已失效"
     manifest_path = folder / "render_manifest.json"
     if not manifest_path.exists():
         return False, "缺少 render_manifest.json"
@@ -931,9 +982,19 @@ def _time(seconds: float) -> str:
 
 def _atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_file():
+        try:
+            if path.read_text(encoding="utf-8") == text:
+                return
+        except (OSError, UnicodeError):
+            pass
     temp = path.with_name(f".{path.name}.tmp")
-    temp.write_text(text, encoding="utf-8")
-    temp.replace(path)
+    try:
+        temp.write_text(text, encoding="utf-8")
+        temp.replace(path)
+    finally:
+        if temp.exists():
+            temp.unlink(missing_ok=True)
 
 
 def _read_json(path: Path) -> dict:

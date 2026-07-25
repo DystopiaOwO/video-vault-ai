@@ -183,7 +183,16 @@ def ensure_storyboard(cfg: dict, db: Path, project_id: int) -> dict[str, Any]:
     return state
 
 
-def save_storyboard(cfg: dict, db: Path, project_id: int, state: Mapping[str, Any], *, mark_review: bool = True) -> Path:
+def save_storyboard(cfg: dict, db: Path, project_id: int, state: Mapping[str, Any], *, mark_review: bool = True, base_revision: int | None = None) -> Path:
+    from .project_lifecycle import project_commit
+
+    with project_commit(db, project_id, base_revision) as commit:
+        path = _save_storyboard(cfg, db, project_id, state, mark_review=mark_review)
+        commit.changed = True
+        return path
+
+
+def _save_storyboard(cfg: dict, db: Path, project_id: int, state: Mapping[str, Any], *, mark_review: bool = True) -> Path:
     from .project import mark_project_needs_review
 
     normalized = normalize_storyboard(state)
@@ -197,7 +206,16 @@ def save_storyboard(cfg: dict, db: Path, project_id: int, state: Mapping[str, An
     return path
 
 
-def update_storyboard(cfg: dict, db: Path, project_id: int, patch: Mapping[str, Any], *, return_result: bool = False) -> dict[str, Any]:
+def update_storyboard(cfg: dict, db: Path, project_id: int, patch: Mapping[str, Any], *, return_result: bool = False, base_revision: int | None = None) -> dict[str, Any]:
+    from .project_lifecycle import project_commit
+
+    with project_commit(db, project_id, base_revision) as commit:
+        result = _update_storyboard(cfg, db, project_id, patch, return_result=True)
+        commit.changed = bool(result.get("render_changed"))
+        return result if return_result else result["state"]
+
+
+def _update_storyboard(cfg: dict, db: Path, project_id: int, patch: Mapping[str, Any], *, return_result: bool = False) -> dict[str, Any]:
     current = load_storyboard(cfg, project_id) or generate_storyboard(cfg, db, project_id, force=False)
     incoming = patch.get("state") if isinstance(patch.get("state"), Mapping) else patch
     updated = normalize_storyboard({

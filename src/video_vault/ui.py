@@ -30,6 +30,8 @@ from .opencut import OPENCUT_URL, export_opencut_handoff, opencut_status, start_
 from .paths import db_path
 from .planner import draft_plan, perceive_output, review_text, revise_plan, set_plan_status, video_dir, write_plan_files
 from .project import build_project_plan, can_project_render, create_project, list_projects, mark_project_needs_review, project_detail, project_dir, save_revision_notes, save_segment_review, set_review_status, sync_project_files, update_segment_timing
+from .project_lifecycle import CancellationRequested, CancellationToken, ProjectRevisionConflict, current_revision, project_commit
+from .job_coordinator import DEFAULT_COORDINATOR, JobState
 from .project_perception import run_project_perception
 from .perception_runs import PerceptionCancelled, ensure_perception_schema, perception_jobs, recover_interrupted_perception_runs
 from .render_job_api import RenderJobAPI
@@ -42,6 +44,8 @@ from .storyboard_preview import StoryboardPreviewError, render_storyboard_previe
 
 JOBS: dict[tuple[int, str], dict] = {}
 JOBS_LOCK = threading.Lock()
+JOB_COORDINATOR = DEFAULT_COORDINATOR
+JOB_TOKENS: dict[tuple[int, str], CancellationToken] = {}
 
 
 class MultipartFormError(ValueError):
@@ -52,6 +56,16 @@ UPLOAD_READ_CHUNK = 64 * 1024
 UPLOAD_SPOOL_THRESHOLD = 8 * 1024 * 1024
 MAX_MULTIPART_HEADER = 64 * 1024
 MAX_TEXT_FIELD = 1024 * 1024
+
+
+def _base_revision(data: dict) -> int | None:
+    value = data.get("base_revision", data.get("project_revision"))
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("base_revision 必須是整數") from exc
 
 
 class _UploadPart:
@@ -234,6 +248,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
     ensure_perception_schema(db)
     recover_interrupted_perception_runs(db)
     render_manager = RenderJobManager(cfg, db)
+    render_manager.coordinator = JOB_COORDINATOR
     render_manager.start()
     render_api = RenderJobAPI(render_manager)
 
@@ -262,7 +277,12 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json(list_bgm(db))
             elif parsed.path == "/api/jobs":
                 project_id = int(query.get("project_id", ["0"])[0] or 0)
-                self._json(project_jobs(project_id, render_manager, db) if project_id else project_jobs(0, render_manager, db))
+                jobs = project_jobs(project_id, render_manager, db) if project_id else project_jobs(0, render_manager, db)
+                if query.get("meta", ["0"])[0] == "1":
+                    row = db_project(db, project_id) if project_id else None
+                    self._json({"jobs": jobs, "project_revision": int(row["project_revision"] or 1) if row else None, "project_changed": False})
+                else:
+                    self._json(jobs)
             elif parsed.path == "/api/render-job":
                 self._json(render_api.get(query.get("id", [""])[0]))
             elif parsed.path == "/api/render-jobs":
@@ -319,7 +339,16 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json(upload_bgm(self, cfg, db))
                 return
             data = self._json_body()
-            self._api_post(parsed.path, data)
+            try:
+                self._api_post(parsed.path, data)
+            except ProjectRevisionConflict as exc:
+                self._json({
+                    "ok": False,
+                    "code": exc.code,
+                    "error": str(exc),
+                    "project_revision": exc.current,
+                    "current_revision": exc.current,
+                }, status=409)
 
         def _ui_post(self, path: str) -> None:
             if path in {"/ui/upload-project", "/ui/upload-bgm"}:
@@ -409,34 +438,35 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             if path == "/api/process-inbox":
                 self._json(process_inbox(cfg, db))
             elif path == "/api/project/analyze":
-                self._json(analyze_project(cfg, db, int(data.get("project_id", 0)), bool(data.get("force"))))
+                self._json(analyze_project(cfg, db, int(data.get("project_id", 0)), bool(data.get("force")), base_revision=_base_revision(data)))
             elif path == "/api/project/analyze-job":
                 project_id = int(data.get("project_id", 0))
-                started = start_analyze_job(cfg, db, project_id, bool(data.get("force")))
+                started = start_analyze_job(cfg, db, project_id, bool(data.get("force")), base_revision=_base_revision(data))
                 self._json({"ok": started, "message": "內容感知已開始" if started else "內容感知已在執行中"})
             elif path == "/api/project/analyze-video":
                 project_id = int(data.get("project_id", 0))
-                started = start_analyze_video_job(cfg, db, project_id, int(data.get("video_id", 0)))
+                started = start_analyze_video_job(cfg, db, project_id, int(data.get("video_id", 0)), base_revision=_base_revision(data))
                 self._json({"ok": started, "message": "單支素材感知已開始" if started else "內容感知已在執行中"})
             elif path == "/api/project/clip-summary":
                 project_id = int(data.get("project_id", 0))
                 user_summary = data.get("user_summary", data.get("summary", ""))
-                ok = update_clip_summary(cfg, db, project_id, int(data.get("video_id", 0)), str(user_summary))
+                ok = update_clip_summary(cfg, db, project_id, int(data.get("video_id", 0)), str(user_summary), base_revision=_base_revision(data))
                 self._json({"ok": ok, "plan_rebuilt": ok})
             elif path == "/api/projects":
                 project_id = create_project(db, data.get("name", ""), [int(v) for v in data.get("video_ids", [])], category=data.get("category", "unknown"), content_type=data.get("content_type", "diary_montage"), platform=data.get("platform", "YouTube"), target_duration_seconds=float(data.get("target_duration_seconds") or 0))
                 sync_project_files(cfg, db, project_id)
                 self._json({"ok": True, "id": project_id})
             elif path == "/api/project/build-plan":
-                self._json({"ok": True, "plan": build_project_plan(cfg, db, int(data.get("project_id", 0)))})
+                project_id = int(data.get("project_id", 0))
+                self._json({"ok": True, "plan": build_project_plan(cfg, db, project_id, base_revision=_base_revision(data))})
             elif path == "/api/project/revise":
                 project_id = int(data.get("project_id", 0))
                 save_revision_notes(cfg, project_id, data.get("notes", ""))
-                self._json({"ok": True, "plan": build_project_plan(cfg, db, project_id)})
+                self._json({"ok": True, "plan": build_project_plan(cfg, db, project_id, base_revision=_base_revision(data))})
             elif path == "/api/project/segments":
                 try:
                     project_id = int(data.get("project_id", 0))
-                    self._json({"ok": True, "path": str(save_segment_review(cfg, db, project_id, data.get("segments", [])))})
+                    self._json({"ok": True, "path": str(save_segment_review(cfg, db, project_id, data.get("segments", []), base_revision=_base_revision(data)))})
                 except (OSError, TypeError, ValueError) as exc:
                     self._json({"ok": False, "code": "invalid_segment_review", "error": str(exc)})
             elif path == "/api/project/segment-timing":
@@ -450,6 +480,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                         float(data.get("start_seconds")),
                         float(data.get("end_seconds")),
                         float(data.get("speed")),
+                        base_revision=_base_revision(data),
                     )
                     self._json({"ok": True, "path": str(output_path)})
                 except (OSError, TypeError, ValueError) as exc:
@@ -457,7 +488,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif path == "/api/project/storyboard":
                 try:
                     project_id = int(data.get("project_id", 0))
-                    result = update_storyboard(cfg, db, project_id, data.get("state", data), return_result=True)
+                    result = update_storyboard(cfg, db, project_id, data.get("state", data), return_result=True, base_revision=_base_revision(data))
                     self._json({"ok": True, "storyboard": result["state"], "render_changed": result["render_changed"], "approval_invalidated": result["approval_invalidated"]})
                 except (TypeError, ValueError) as exc:
                     self._json({"ok": False, "code": "invalid_storyboard", "error": str(exc)})
@@ -508,7 +539,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                         if not track:
                             raise ValueError("找不到指定 BGM")
                         validate_bgm_track({"source_path": track.get("file_path")}, str(cfg.get("ffprobe_path") or "ffprobe"))
-                    state = update_audio_state(cfg, db, project_id, patch if isinstance(patch, dict) else {})
+                    state = update_audio_state(cfg, db, project_id, patch if isinstance(patch, dict) else {}, base_revision=_base_revision(data))
                     self._json({"ok": True, "state": audio_state_for_api(cfg, project_id, db)})
                 except BgmPipelineError as exc:
                     self._json({"ok": False, "code": "bgm_file_missing", "error": "所選 BGM 檔案不存在或無法讀取，請重新匯入或選擇其他音樂。"})
@@ -516,6 +547,8 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     message = "找不到指定 BGM，請重新選擇。" if "找不到指定 BGM" in str(exc) else "音訊設定格式無效。"
                     self._json({"ok": False, "code": "bgm_not_found" if "找不到指定 BGM" in str(exc) else "invalid_audio_settings", "error": message})
                 except Exception as exc:
+                    if isinstance(exc, ProjectRevisionConflict):
+                        raise
                     self._json({"ok": False, "error": f"音訊設定儲存失敗：{exc}"})
             elif path == "/api/project/audio-preview":
                 try:
@@ -538,43 +571,53 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     else:
                         self._json({"ok": False, "code": "audio_preview_failed", "error": "音訊預覽無法產生，請檢查素材與音訊設定。"})
             elif path == "/api/project/bgm":
-                add_project_bgm(db, int(data.get("project_id", 0)), int(data.get("bgm_id", 0)))
-                mark_project_needs_review(cfg, db, int(data.get("project_id", 0)))
+                project_id = int(data.get("project_id", 0))
+                with project_commit(db, project_id, _base_revision(data)):
+                    add_project_bgm(db, project_id, int(data.get("bgm_id", 0)))
+                    mark_project_needs_review(cfg, db, project_id)
                 self._json({"ok": True})
             elif path == "/api/project/color-preview":
                 try:
-                    self._json(color_preview_project(cfg, db, int(data.get("project_id", 0)), data.get("mode") or cfg.get("color", {}).get("default_mode", "safe_restore"), force=bool(data.get("force"))))
+                    self._json(color_preview_project(cfg, db, int(data.get("project_id", 0)), data.get("mode") or cfg.get("color", {}).get("default_mode", "safe_restore"), force=bool(data.get("force")), base_revision=_base_revision(data)))
                 except ColorPipelineError as exc:
                     self._json({"ok": False, "code": "missing_lut" if "LUT file does not exist" in str(exc) else "color_pipeline_error", "error": str(exc)})
                 except Exception as exc:
+                    if isinstance(exc, ProjectRevisionConflict):
+                        raise
                     self._json({"ok": False, "error": f"調色預覽失敗：{exc}"})
             elif path == "/api/project/color-job":
                 project_id = int(data.get("project_id", 0))
-                started = start_color_job(cfg, db, project_id, data.get("mode") or cfg.get("color", {}).get("default_mode", "safe_restore"))
+                started = start_color_job(cfg, db, project_id, data.get("mode") or cfg.get("color", {}).get("default_mode", "safe_restore"), base_revision=_base_revision(data))
                 self._json({"ok": started, "message": "調色預覽已開始" if started else "調色預覽已在執行中"})
             elif path == "/api/project/color-analyze":
                 try:
-                    state = analyze_project_color(cfg, db, int(data.get("project_id", 0)), force=bool(data.get("force")))
+                    state = analyze_project_color(cfg, db, int(data.get("project_id", 0)), force=bool(data.get("force")), base_revision=_base_revision(data))
                     self._json({"ok": True, "state": color_state_for_api(cfg, int(data.get("project_id", 0)), state)})
                 except ColorReferenceError as exc:
                     self._json({"ok": False, "code": exc.code, "error": str(exc), "warnings": [str(exc)]})
                 except Exception as exc:
+                    if isinstance(exc, ProjectRevisionConflict):
+                        raise
                     self._json({"ok": False, "error": f"色彩分析失敗：{exc}"})
             elif path == "/api/project/color-settings":
                 try:
                     project_id = int(data.get("project_id", 0))
                     patch = data.get("state") if isinstance(data.get("state"), dict) else data.get("patch", {})
-                    state = update_color_state(cfg, db, project_id, patch if isinstance(patch, dict) else {})
+                    state = update_color_state(cfg, db, project_id, patch if isinstance(patch, dict) else {}, base_revision=_base_revision(data))
                     self._json({"ok": True, "state": color_state_for_api(cfg, int(data.get("project_id", 0)), state)})
                 except Exception as exc:
+                    if isinstance(exc, ProjectRevisionConflict):
+                        raise
                     self._json({"ok": False, "error": f"色彩設定儲存失敗：{exc}"})
             elif path == "/api/project/color-reference":
                 try:
-                    state = set_color_reference(cfg, db, int(data.get("project_id", 0)), str(data.get("reference_id", "")))
+                    state = set_color_reference(cfg, db, int(data.get("project_id", 0)), str(data.get("reference_id", "")), base_revision=_base_revision(data))
                     self._json({"ok": True, "state": color_state_for_api(cfg, int(data.get("project_id", 0)), state)})
                 except ColorReferenceError as exc:
                     self._json({"ok": False, "code": exc.code, "error": str(exc)})
                 except Exception as exc:
+                    if isinstance(exc, ProjectRevisionConflict):
+                        raise
                     self._json({"ok": False, "error": f"色彩基準更新失敗：{exc}"})
             elif path == "/api/project/opencut-export":
                 project_id = int(data.get("project_id", 0))
@@ -617,10 +660,10 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif path == "/api/render-job/cancel":
                 self._json(render_api.cancel(str(data.get("job_id", ""))))
             elif path == "/api/project/approve":
-                set_review_status(cfg, db, int(data.get("project_id", 0)), "approved", data.get("notes", ""))
+                set_review_status(cfg, db, int(data.get("project_id", 0)), "approved", data.get("notes", ""), base_revision=_base_revision(data))
                 self._json({"ok": True})
             elif path == "/api/project/reject":
-                set_review_status(cfg, db, int(data.get("project_id", 0)), "rejected", data.get("notes", ""))
+                set_review_status(cfg, db, int(data.get("project_id", 0)), "rejected", data.get("notes", ""), base_revision=_base_revision(data))
                 self._json({"ok": True})
             elif path == "/api/project/render-dry-run":
                 ok, reason = can_project_render(cfg, db, int(data.get("project_id", 0)))
@@ -668,9 +711,9 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             self.send_header("location", "/" + ("?" + urlencode(query) if query else ""))
             self.end_headers()
 
-        def _json(self, data: object) -> None:
+        def _json(self, data: object, *, status: int = 200) -> None:
             body = json.dumps(data, ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
+            self.send_response(status)
             self.send_header("content-type", "application/json; charset=utf-8")
             self.send_header("cache-control", "no-store")
             self.send_header("content-length", str(len(body)))
@@ -772,6 +815,57 @@ def _nav() -> str:
     return '<div class="card"><h3>導覽</h3><a class="item" href="/">專案工作台</a><a class="item" href="/bgm">BGM 資料庫</a></div>'
 
 
+def _enqueue_legacy_job(db: Path, project_id: int, kind: str, label: str, capabilities: set[str], resources: set[str], base_revision: int | None = None):
+    coordinated = JOB_COORDINATOR.submit(project_id, kind, capabilities, current_revision(db, project_id) if base_revision is None else int(base_revision), resources=resources)
+    JOB_TOKENS[(int(project_id), kind)] = CancellationToken()
+    return coordinated
+
+
+def _wait_for_coordinated_job(project_id: int, kind: str) -> bool:
+    key = (int(project_id), str(kind))
+    while True:
+        with JOBS_LOCK:
+            job = JOBS.get(key, {})
+            coordinator_id = job.get("coordinator_job_id")
+            token = JOB_TOKENS.get(key)
+        if token is None or token.cancelled or _job_stopped(project_id, kind):
+            return False
+        coordinated = JOB_COORDINATOR.get(str(coordinator_id)) if coordinator_id else None
+        if coordinated is None:
+            return True
+        if coordinated.state == JobState.QUEUED:
+            with JOBS_LOCK:
+                if key in JOBS:
+                    JOBS[key].update(state=coordinated.state.value, queue_reason=coordinated.queue_reason, message=coordinated.queue_reason or "等待開始")
+            time.sleep(0.1)
+            try:
+                JOB_COORDINATOR.start(coordinated.job_id)
+            except RuntimeError:
+                continue
+            continue
+        if coordinated.state == JobState.CANCELLED:
+            return False
+        with JOBS_LOCK:
+            if key in JOBS:
+                JOBS[key].update(state=coordinated.state.value, queue_reason="")
+        return coordinated.state == JobState.RUNNING
+
+
+def _finish_coordinated_job(project_id: int, kind: str, status: str, error: str = "") -> None:
+    with JOBS_LOCK:
+        coordinator_id = JOBS.get((int(project_id), str(kind)), {}).get("coordinator_job_id")
+    if not coordinator_id:
+        return
+    if status in {"stopped", "cancelled", "cancelling"}:
+        JOB_COORDINATOR.cancel(str(coordinator_id))
+    elif status in {"done", "succeeded", "completed"}:
+        JOB_COORDINATOR.complete(str(coordinator_id))
+    elif status == "superseded":
+        JOB_COORDINATOR.supersede(str(coordinator_id), error)
+    elif status in {"failed", "failed_qc"}:
+        JOB_COORDINATOR.fail(str(coordinator_id), error)
+
+
 def _css() -> str:
     return """
     body{margin:0;font-family:Segoe UI,'Microsoft JhengHei',sans-serif;background:#f5f7fa;color:#17212b}
@@ -790,37 +884,40 @@ def _css() -> str:
   """
 
 
-def start_analyze_job(cfg: dict, db: Path, project_id: int, force: bool) -> bool:
+def start_analyze_job(cfg: dict, db: Path, project_id: int, force: bool, *, base_revision: int | None = None) -> bool:
     key = (project_id, "analyze")
     with JOBS_LOCK:
         current = JOBS.get(key)
         if current and current.get("status") in {"queued", "running"}:
             return False
-        JOBS[key] = {"kind": "內容感知", "status": "queued", "message": "等待開始", "done": 0, "total": 0, "percent": 0, "updated_at": time.time()}
+        coordinated = _enqueue_legacy_job(db, project_id, "analyze", "內容感知", {"source_analysis_writer"}, {"ai_provider"}, base_revision)
+        JOBS[key] = {"kind": "內容感知", "status": "queued", "state": coordinated.state.value, "queue_reason": coordinated.queue_reason, "coordinator_job_id": coordinated.job_id, "base_revision": coordinated.base_revision, "message": coordinated.queue_reason or "等待開始", "done": 0, "total": 0, "percent": 0, "updated_at": time.time()}
     thread = threading.Thread(target=_analyze_job, args=(cfg, db, project_id, force), daemon=True)
     thread.start()
     return True
 
 
-def start_analyze_video_job(cfg: dict, db: Path, project_id: int, video_id: int) -> bool:
+def start_analyze_video_job(cfg: dict, db: Path, project_id: int, video_id: int, *, base_revision: int | None = None) -> bool:
     key = (project_id, "analyze")
     with JOBS_LOCK:
         current = JOBS.get(key)
         if current and current.get("status") in {"queued", "running"}:
             return False
-        JOBS[key] = {"kind": "內容感知", "status": "queued", "message": "等待開始", "done": 0, "total": 1, "percent": 0, "updated_at": time.time()}
+        coordinated = _enqueue_legacy_job(db, project_id, "analyze", "內容感知", {"source_analysis_writer"}, {"ai_provider"}, base_revision)
+        JOBS[key] = {"kind": "內容感知", "status": "queued", "state": coordinated.state.value, "queue_reason": coordinated.queue_reason, "coordinator_job_id": coordinated.job_id, "base_revision": coordinated.base_revision, "message": coordinated.queue_reason or "等待開始", "done": 0, "total": 1, "percent": 0, "updated_at": time.time()}
     thread = threading.Thread(target=_analyze_video_job, args=(cfg, db, project_id, video_id), daemon=True)
     thread.start()
     return True
 
 
-def start_color_job(cfg: dict, db: Path, project_id: int, mode: str) -> bool:
+def start_color_job(cfg: dict, db: Path, project_id: int, mode: str, *, base_revision: int | None = None) -> bool:
     key = (project_id, "color")
     with JOBS_LOCK:
         current = JOBS.get(key)
         if current and current.get("status") in {"queued", "running"}:
             return False
-        JOBS[key] = {"kind": "調色預覽", "status": "queued", "message": "等待開始", "done": 0, "total": 0, "percent": 0, "updated_at": time.time()}
+        coordinated = _enqueue_legacy_job(db, project_id, "color", "調色預覽", {"project_state_writer", "gpu_heavy"}, {"gpu_heavy", "ffmpeg_heavy"}, base_revision)
+        JOBS[key] = {"kind": "調色預覽", "status": "queued", "state": coordinated.state.value, "queue_reason": coordinated.queue_reason, "coordinator_job_id": coordinated.job_id, "base_revision": coordinated.base_revision, "message": coordinated.queue_reason or "等待開始", "done": 0, "total": 0, "percent": 0, "updated_at": time.time()}
     thread = threading.Thread(target=_color_job, args=(cfg, db, project_id, mode), daemon=True)
     thread.start()
     return True
@@ -832,7 +929,10 @@ def start_opencut_job(cfg: dict, db: Path, project_id: int, render_clips: bool, 
         current = JOBS.get(key)
         if current and current.get("status") in {"queued", "running"}:
             return False
-        JOBS[key] = {"kind": "OpenCut 交接", "status": "queued", "message": "等待開始", "done": 0, "total": 3, "percent": 0, "updated_at": time.time()}
+        caps = {"external_handoff"} | ({"ffmpeg_heavy", "gpu_heavy"} if render_clips else set())
+        resources = {"ffmpeg_heavy", "gpu_heavy"} if render_clips else set()
+        coordinated = _enqueue_legacy_job(db, project_id, "opencut", "OpenCut 交接", caps, resources)
+        JOBS[key] = {"kind": "OpenCut 交接", "status": "queued", "state": coordinated.state.value, "queue_reason": coordinated.queue_reason, "coordinator_job_id": coordinated.job_id, "base_revision": coordinated.base_revision, "message": coordinated.queue_reason or "等待開始", "done": 0, "total": 3, "percent": 0, "updated_at": time.time()}
     thread = threading.Thread(target=_opencut_job, args=(cfg, db, project_id, render_clips, max_segments), daemon=True)
     thread.start()
     return True
@@ -844,7 +944,10 @@ def start_hyperframes_job(cfg: dict, db: Path, project_id: int, render: bool, ma
         current = JOBS.get(key)
         if current and current.get("status") in {"queued", "running"}:
             return False
-        JOBS[key] = {"kind": "HyperFrames 初剪", "status": "queued", "message": "等待開始", "done": 0, "total": 3 if render else 2, "percent": 0, "updated_at": time.time()}
+        caps = {"external_handoff"} | ({"ffmpeg_heavy", "gpu_heavy"} if render else set())
+        resources = {"ffmpeg_heavy", "gpu_heavy"} if render else set()
+        coordinated = _enqueue_legacy_job(db, project_id, "hyperframes", "HyperFrames 初剪", caps, resources)
+        JOBS[key] = {"kind": "HyperFrames 初剪", "status": "queued", "state": coordinated.state.value, "queue_reason": coordinated.queue_reason, "coordinator_job_id": coordinated.job_id, "base_revision": coordinated.base_revision, "message": coordinated.queue_reason or "等待開始", "done": 0, "total": 3 if render else 2, "percent": 0, "updated_at": time.time()}
     thread = threading.Thread(target=_hyperframes_job, args=(cfg, db, project_id, render, max_segments), daemon=True)
     thread.start()
     return True
@@ -872,9 +975,14 @@ def project_jobs(project_id: int, render_manager: RenderJobManager | None = None
 
 def stop_project_jobs(project_id: int, render_manager: RenderJobManager | None = None) -> None:
     with JOBS_LOCK:
-        for (pid, _), job in JOBS.items():
+        for (pid, name), job in JOBS.items():
             if pid == project_id and job.get("status") in {"queued", "running"}:
-                job.update(status="stopped", message="已由使用者停止", updated_at=time.time())
+                job.update(status="stopped", state="cancelled", message="已由使用者停止", updated_at=time.time())
+                token = JOB_TOKENS.get((pid, name))
+                if token:
+                    token.cancel()
+                if job.get("coordinator_job_id"):
+                    JOB_COORDINATOR.cancel(str(job["coordinator_job_id"]))
     if render_manager is not None:
         render_manager.cancel_project(project_id)
 
@@ -889,7 +997,12 @@ def cancel_legacy_job(project_id: int, legacy_job_key: str) -> dict:
         if job is None:
             return {"ok": False, "error": "找不到指定背景工作"}
         if job.get("status") in {"queued", "running"}:
-            job.update(status="stopped", message="已由使用者停止", updated_at=time.time())
+            job.update(status="stopped", state="cancelled", message="已由使用者停止", updated_at=time.time())
+            token = JOB_TOKENS.get(key)
+            if token:
+                token.cancel()
+            if job.get("coordinator_job_id"):
+                JOB_COORDINATOR.cancel(str(job["coordinator_job_id"]))
         return {
             "ok": True,
             "message": "已停止指定背景工作" if job.get("status") == "stopped" else "工作已結束",
@@ -903,6 +1016,8 @@ def _kill_video_vault_processes() -> None:
 
 
 def _set_job(project_id: int, name: str, **changes: object) -> None:
+    terminal_status = str(changes.get("status") or "")
+    terminal_message = str(changes.get("message") or "")
     with JOBS_LOCK:
         job = JOBS.setdefault((project_id, name), {})
         job.update(changes)
@@ -911,12 +1026,27 @@ def _set_job(project_id: int, name: str, **changes: object) -> None:
             total = int(job.get("total") or 0)
             if total:
                 job["percent"] = min(100, int(done * 100 / total))
+        if terminal_status == "done":
+            job["state"] = JobState.SUCCEEDED.value
+        elif terminal_status == "failed":
+            job["state"] = JobState.FAILED.value
+        elif terminal_status == "superseded":
+            job["state"] = JobState.SUPERSEDED.value
+        elif terminal_status == "stopped":
+            job["state"] = JobState.CANCELLED.value
         job["updated_at"] = time.time()
+    if terminal_status in {"done", "failed", "stopped"}:
+        _finish_coordinated_job(project_id, name, terminal_status, terminal_message)
 
 
 def _analyze_job(cfg: dict, db: Path, project_id: int, force: bool) -> None:
     try:
+        if not _wait_for_coordinated_job(project_id, "analyze"):
+            _set_job(project_id, "analyze", status="stopped", message="內容感知已由使用者停止")
+            return
         rows = [dict(row) for row in project_videos(db, project_id)]
+        with JOBS_LOCK:
+            base_revision = JOBS.get((project_id, "analyze"), {}).get("base_revision")
         todo = [row for row in rows if force or row.get("status") != "perceived"]
         _set_job(project_id, "analyze", status="running", message="正在準備內容感知", done=0, total=len(todo), percent=0)
         processed = []
@@ -931,7 +1061,9 @@ def _analyze_job(cfg: dict, db: Path, project_id: int, force: bool) -> None:
                 video,
                 _analyze_progress(project_id, video.get("filename", ""), index - 1, max(len(todo), 1)),
                 should_cancel=lambda: _job_stopped(project_id, "analyze"),
+                base_revision=base_revision,
             )
+            base_revision = current_revision(db, project_id)
             processed.extend(result.get("processed", []))
             _set_job(project_id, "analyze", message=f"已完成 {video.get('filename', '')}", done=index)
         if todo:
@@ -939,17 +1071,24 @@ def _analyze_job(cfg: dict, db: Path, project_id: int, force: bool) -> None:
         _set_job(project_id, "analyze", status="done", message=f"內容感知完成：{len(processed)} 支", processed=processed, percent=100)
     except PerceptionCancelled:
         _set_job(project_id, "analyze", status="stopped", message="內容感知已由使用者停止")
+    except ProjectRevisionConflict as exc:
+        _set_job(project_id, "analyze", status="superseded", message=f"內容感知未發布：{exc}")
     except Exception as exc:
         _set_job(project_id, "analyze", status="failed", message=f"內容感知失敗：{exc}")
 
 
 def _analyze_video_job(cfg: dict, db: Path, project_id: int, video_id: int) -> None:
     try:
+        if not _wait_for_coordinated_job(project_id, "analyze"):
+            _set_job(project_id, "analyze", status="stopped", message="單支素材感知已由使用者停止")
+            return
         video = next((dict(v) for v in project_videos(db, project_id) if int(v["id"]) == video_id), None)
         if not video:
             _set_job(project_id, "analyze", status="failed", message="找不到這支素材", percent=100)
             return
         _set_job(project_id, "analyze", status="running", message=f"正在分析 {video.get('filename', '')}", done=0, total=1, percent=0)
+        with JOBS_LOCK:
+            base_revision = JOBS.get((project_id, "analyze"), {}).get("base_revision")
         analyze_project_video(
             cfg,
             db,
@@ -957,10 +1096,13 @@ def _analyze_video_job(cfg: dict, db: Path, project_id: int, video_id: int) -> N
             video_id,
             _analyze_progress(project_id, video.get("filename", ""), 0, 1),
             should_cancel=lambda: _job_stopped(project_id, "analyze"),
+            base_revision=base_revision,
         )
         _set_job(project_id, "analyze", status="done", message=f"單支素材感知完成：{video.get('filename', '')}", done=1, total=1, percent=100)
     except PerceptionCancelled:
         _set_job(project_id, "analyze", status="stopped", message="單支素材感知已由使用者停止")
+    except ProjectRevisionConflict as exc:
+        _set_job(project_id, "analyze", status="superseded", message=f"單支素材感知未發布：{exc}")
     except Exception as exc:
         _set_job(project_id, "analyze", status="failed", message=f"單支素材感知失敗：{exc}")
 
@@ -977,8 +1119,13 @@ def _analyze_progress(project_id: int, filename: str, base: int, total_videos: i
 
 def _color_job(cfg: dict, db: Path, project_id: int, mode: str) -> None:
     try:
+        if not _wait_for_coordinated_job(project_id, "color"):
+            _set_job(project_id, "color", status="stopped", message="調色預覽已由使用者停止")
+            return
         _set_job(project_id, "color", status="running", message="正在分析色彩基準並產生 Before/After 預覽", done=0, total=1, percent=5)
-        result = render_project_color_previews(cfg, db, project_id)
+        with JOBS_LOCK:
+            base_revision = JOBS.get((project_id, "color"), {}).get("base_revision")
+        result = render_project_color_previews(cfg, db, project_id, base_revision=base_revision)
         if _job_stopped(project_id, "color"):
             return
         files = result.get("files", [])
@@ -991,6 +1138,9 @@ def _color_job(cfg: dict, db: Path, project_id: int, mode: str) -> None:
 
 def _opencut_job(cfg: dict, db: Path, project_id: int, render_clips: bool, max_segments: int) -> None:
     try:
+        if not _wait_for_coordinated_job(project_id, "opencut"):
+            _set_job(project_id, "opencut", status="stopped", message="OpenCut 工作已由使用者停止")
+            return
         if render_clips:
             ok, reason = can_project_render(cfg, db, project_id)
             if not ok:
@@ -1020,6 +1170,9 @@ def _opencut_job(cfg: dict, db: Path, project_id: int, render_clips: bool, max_s
 
 def _hyperframes_job(cfg: dict, db: Path, project_id: int, render: bool, max_segments: int) -> None:
     try:
+        if not _wait_for_coordinated_job(project_id, "hyperframes"):
+            _set_job(project_id, "hyperframes", status="stopped", message="HyperFrames 工作已由使用者停止")
+            return
         if render:
             ok, reason = can_project_render(cfg, db, project_id)
             if not ok:
@@ -1603,38 +1756,41 @@ def process_inbox(cfg: dict, db: Path) -> dict:
     return {"ok": True, "processed": processed}
 
 
-def analyze_project(cfg: dict, db: Path, project_id: int, force: bool = False) -> dict:
+def analyze_project(cfg: dict, db: Path, project_id: int, force: bool = False, *, base_revision: int | None = None) -> dict:
     processed = []
     for row in project_videos(db, project_id):
         video = dict(row)
         if not force and video.get("status") == "perceived":
             continue
-        result = run_project_perception(cfg, db, project_id, video)
+        result = run_project_perception(cfg, db, project_id, video, base_revision=base_revision)
         processed.extend(result.get("processed", []))
+        base_revision = current_revision(db, project_id)
     if processed:
         build_project_plan(cfg, db, project_id)
     return {"ok": True, "processed": processed}
 
 
-def analyze_project_video(cfg: dict, db: Path, project_id: int, video_id: int, progress=None, should_cancel=None) -> dict:
+def analyze_project_video(cfg: dict, db: Path, project_id: int, video_id: int, progress=None, should_cancel=None, *, base_revision: int | None = None) -> dict:
     video = next((dict(v) for v in project_videos(db, project_id) if int(v["id"]) == video_id), None)
     if not video:
         return {"ok": False, "error": "video not found in project"}
-    result = run_project_perception(cfg, db, project_id, video, progress, should_cancel)
+    result = run_project_perception(cfg, db, project_id, video, progress, should_cancel, base_revision=base_revision)
     return {"ok": True, **result}
 
 
-def update_clip_summary(cfg: dict, db: Path, project_id: int, video_id: int, summary: str) -> bool:
+def update_clip_summary(cfg: dict, db: Path, project_id: int, video_id: int, summary: str, *, base_revision: int | None = None) -> bool:
     if not any(int(v["id"]) == video_id for v in project_videos(db, project_id)):
         return False
-    ok = update_video_summary(db, video_id, summary.strip(), project_id=project_id)
-    if ok:
-        build_project_plan(cfg, db, project_id)
+    with project_commit(db, project_id, base_revision) as commit:
+        ok = update_video_summary(db, video_id, summary.strip(), project_id=project_id)
+        if ok:
+            build_project_plan(cfg, db, project_id)
+        commit.changed = bool(ok)
     return ok
 
 
-def color_preview_project(cfg: dict, db: Path, project_id: int, mode: str, *, force: bool = False) -> dict:
-    result = render_project_color_previews(cfg, db, project_id, force=force)
+def color_preview_project(cfg: dict, db: Path, project_id: int, mode: str, *, force: bool = False, base_revision: int | None = None) -> dict:
+    result = render_project_color_previews(cfg, db, project_id, force=force, base_revision=base_revision)
     return {**result, "state": color_state_for_api(cfg, project_id, result.get("state", {})), "mode": mode}
 
 

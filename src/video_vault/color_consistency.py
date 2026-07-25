@@ -13,6 +13,7 @@ import subprocess
 from typing import Any, Mapping
 
 from .project import mark_project_needs_review, project_dir
+from .project_lifecycle import project_commit
 from .render_settings import load_render_settings
 
 
@@ -120,7 +121,14 @@ def normalize_color_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
     return result
 
 
-def save_project_color_state(cfg: dict, db: Path, project_id: int, state: Mapping[str, Any], *, mark_review: bool = True) -> Path:
+def save_project_color_state(cfg: dict, db: Path, project_id: int, state: Mapping[str, Any], *, mark_review: bool = True, base_revision: int | None = None) -> Path:
+    with project_commit(db, project_id, base_revision) as commit:
+        path = _save_project_color_state(cfg, db, project_id, state, mark_review=mark_review)
+        commit.changed = True
+        return path
+
+
+def _save_project_color_state(cfg: dict, db: Path, project_id: int, state: Mapping[str, Any], *, mark_review: bool = True) -> Path:
     normalized = normalize_color_state(state)
     path = color_state_path(cfg, project_id)
     temp = path.with_name(f".{path.name}.tmp")
@@ -144,7 +152,14 @@ def effective_color_settings(state: Mapping[str, Any], segment_id: str | None = 
     return result
 
 
-def analyze_project_color(cfg: dict, db: Path, project_id: int, *, force: bool = False) -> dict[str, Any]:
+def analyze_project_color(cfg: dict, db: Path, project_id: int, *, force: bool = False, base_revision: int | None = None) -> dict[str, Any]:
+    with project_commit(db, project_id, base_revision) as commit:
+        state = _analyze_project_color(cfg, db, project_id, force=force)
+        commit.changed = True
+        return state
+
+
+def _analyze_project_color(cfg: dict, db: Path, project_id: int, *, force: bool = False) -> dict[str, Any]:
     existing = load_project_color_state(cfg, project_id)
     if existing.get("analysis") and not force:
         return existing
@@ -190,7 +205,14 @@ def analyze_project_color(cfg: dict, db: Path, project_id: int, *, force: bool =
     return state
 
 
-def set_color_reference(cfg: dict, db: Path, project_id: int, reference_id: str) -> dict[str, Any]:
+def set_color_reference(cfg: dict, db: Path, project_id: int, reference_id: str, *, base_revision: int | None = None) -> dict[str, Any]:
+    with project_commit(db, project_id, base_revision) as commit:
+        state = _set_color_reference(cfg, db, project_id, reference_id)
+        commit.changed = True
+        return state
+
+
+def _set_color_reference(cfg: dict, db: Path, project_id: int, reference_id: str) -> dict[str, Any]:
     state = load_project_color_state(cfg, project_id)
     selected = next((item for item in state["references"] if str(item.get("id")) == str(reference_id)), None)
     if not selected:
@@ -222,7 +244,29 @@ def set_color_reference(cfg: dict, db: Path, project_id: int, reference_id: str)
     return state
 
 
-def update_color_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str, Any]) -> dict[str, Any]:
+def update_color_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str, Any], *, base_revision: int | None = None) -> dict[str, Any]:
+    with project_commit(db, project_id, base_revision) as commit:
+        current = load_project_color_state(cfg, project_id)
+        editable_patch = _user_editable_color_patch(patch)
+        segment_patch = editable_patch.pop("segments", None)
+        updated = _merge(current, editable_patch)
+        if isinstance(segment_patch, Mapping):
+            segments = deepcopy(dict(current.get("segments") or {}))
+            for segment_id, value in segment_patch.items():
+                key = str(segment_id)
+                if value is None:
+                    segments.pop(key, None)
+                elif isinstance(value, Mapping):
+                    segments[key] = _merge(dict(segments.get(key) or {}), dict(value))
+            updated["segments"] = segments
+        state = normalize_color_state(updated)
+        commit.changed = state != normalize_color_state(current)
+        if commit.changed:
+            _save_project_color_state(cfg, db, project_id, state)
+        return state
+
+
+def _update_color_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str, Any]) -> dict[str, Any]:
     current = load_project_color_state(cfg, project_id)
     editable_patch = _user_editable_color_patch(patch)
     segment_patch = editable_patch.pop("segments", None)
@@ -265,14 +309,14 @@ def preview_cache_key(source: Path, state: Mapping[str, Any], settings: Mapping[
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def render_project_color_previews(cfg: dict, db: Path, project_id: int, *, force: bool = False, seconds: int = 4) -> dict[str, Any]:
+def render_project_color_previews(cfg: dict, db: Path, project_id: int, *, force: bool = False, seconds: int = 4, base_revision: int | None = None) -> dict[str, Any]:
     from .color import render_color_preview
     from .database import project_videos
     from .project import project_segments
 
     state = load_project_color_state(cfg, project_id)
     if not state.get("analysis"):
-        state = analyze_project_color(cfg, db, project_id)
+        state = analyze_project_color(cfg, db, project_id, base_revision=base_revision)
     out_dir = project_dir(cfg, project_id) / "output" / "color_previews"
     out_dir.mkdir(parents=True, exist_ok=True)
     previews = []

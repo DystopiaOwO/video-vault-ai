@@ -25,7 +25,8 @@ from .perception_runs import (
     validate_run_inputs,
 )
 from .planner import draft_plan, perceive_output, video_dir, write_plan_files
-from .project import build_project_plan, mark_project_needs_review, project_dir
+from .project import build_project_plan, project_dir
+from .project_lifecycle import ProjectRevisionConflict, current_revision
 from .segment_state_migration import migrate_segment_state_for_video
 
 
@@ -36,6 +37,7 @@ def run_project_perception(
     video: dict,
     progress=None,
     should_cancel=None,
+    base_revision: int | None = None,
 ) -> dict:
     """Run one project perception generation and publish it coherently.
 
@@ -44,13 +46,15 @@ def run_project_perception(
     artifact generation, or plan rebuild fails, the prior published state is
     restored while the newest run remains persistently failed/cancelled.
     """
-    run = create_perception_run(db, cfg, project_id, video)
-    run_uuid = str(run["run_uuid"])
+    _raise_if_cancelled(should_cancel)
     linked_project_ids = project_ids_for_video(db, int(video["id"]))
     if project_id not in linked_project_ids:
         linked_project_ids.append(project_id)
-    for linked_project_id in linked_project_ids:
-        mark_project_needs_review(cfg, db, linked_project_id)
+    captured_revisions = {int(item): current_revision(db, int(item)) for item in linked_project_ids}
+    if base_revision is not None and int(base_revision) != captured_revisions[int(project_id)]:
+        raise ProjectRevisionConflict(project_id, int(base_revision), captured_revisions[int(project_id)])
+    run = create_perception_run(db, cfg, project_id, video)
+    run_uuid = str(run["run_uuid"])
     staging = run_staging_dir(cfg, run_uuid)
     published_snapshot: dict | None = None
     metadata_snapshot: list[dict] = []
@@ -80,6 +84,10 @@ def run_project_perception(
         )
         set_run_output_path(db, run_uuid, result_path)
         _raise_if_cancelled(should_cancel)
+
+        for linked_project_id in linked_project_ids:
+            if current_revision(db, linked_project_id) != captured_revisions[linked_project_id]:
+                raise PerceptionCancelled("專案版本已更新，這次感知結果不再發布")
 
         published_snapshot = capture_live_results(db, int(video["id"]))
         metadata_snapshot = snapshot_metadata_paths(
@@ -115,7 +123,7 @@ def run_project_perception(
         perceive_output(cfg, db, current_video)
         write_plan_files(cfg, draft_plan(cfg, db, current_video))
         for linked_project_id in linked_project_ids:
-            build_project_plan(cfg, db, linked_project_id)
+            build_project_plan(cfg, db, linked_project_id, base_revision=captured_revisions[linked_project_id])
         completed = finalize_perception_run(db, run_uuid)
         return {
             **result,

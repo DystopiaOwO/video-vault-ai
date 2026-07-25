@@ -47,6 +47,12 @@ class RenderJob:
     started_at: str | None = None
     updated_at: str = ""
     finished_at: str | None = None
+    generation: int = 1
+    base_revision: int = 0
+    capabilities: list[str] | None = None
+    resources: list[str] | None = None
+    queue_reason: str = ""
+    cancellation_mode: str = "cooperative"
 
     @classmethod
     def create(
@@ -58,6 +64,10 @@ class RenderJob:
         requested_output_path: str = "",
         segment_count: int = 0,
         log_path: str = "",
+        base_revision: int = 0,
+        capabilities: list[str] | None = None,
+        resources: list[str] | None = None,
+        queue_reason: str = "",
     ) -> "RenderJob":
         now = utc_now()
         return cls(
@@ -70,6 +80,10 @@ class RenderJob:
             log_path=str(log_path or ""),
             created_at=now,
             updated_at=now,
+            base_revision=int(base_revision or 0),
+            capabilities=list(capabilities or []),
+            resources=list(resources or []),
+            queue_reason=str(queue_reason or ""),
         )
 
     def to_dict(self) -> dict[str, Any]:

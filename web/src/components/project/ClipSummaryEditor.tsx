@@ -5,13 +5,14 @@ import { createProjectMutationControls, mutationLabel, ProjectMutationCoordinato
 
 export type ClipSummaryEditorProps = {
   projectId: number;
+  projectRevision?: number;
   clip: Pick<Clip, "video_id" | "filename" | "ai_visual_summary" | "user_summary" | "user_summary_migration_state">;
   setMessage: (value: string) => void;
   refreshProject: (options?: ProjectDataLoadOptions) => Promise<Job[]>;
   mutationControls?: ProjectMutationControls;
 };
 
-export function ClipSummaryEditor({ projectId, clip, setMessage, refreshProject, mutationControls }: ClipSummaryEditorProps) {
+export function ClipSummaryEditor({ projectId, projectRevision, clip, setMessage, refreshProject, mutationControls }: ClipSummaryEditorProps) {
   const incomingSummary = clip.user_summary || "";
   const aiSummary = clip.ai_visual_summary || "";
   const [text, setText] = useState(incomingSummary);
@@ -65,7 +66,9 @@ export function ClipSummaryEditor({ projectId, clip, setMessage, refreshProject,
     setSaving(true);
     setProjectMessage("正在儲存使用者故事備註並重建故事整理...");
     try {
-      const result = await api.saveClipSummary(projectId, clip.video_id, summary);
+      const result = await (projectRevision === undefined
+        ? api.saveClipSummary(projectId, clip.video_id, summary)
+        : api.saveClipSummary(projectId, clip.video_id, summary, projectRevision));
       if (!result.ok) {
         setProjectMessage("使用者故事備註儲存失敗：找不到素材。");
         return;

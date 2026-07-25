@@ -112,7 +112,13 @@ def build_render_manifest(
 def compile_render_manifest(cfg: dict, db: Path, project_id: int, profile_id: str | None = None) -> dict[str, Any]:
     manifest = build_render_manifest(cfg, db, project_id, profile_id)
     path = project_dir(cfg, project_id) / "render_manifest.json"
-    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.tmp")
+    try:
+        temp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
     return manifest
 
 

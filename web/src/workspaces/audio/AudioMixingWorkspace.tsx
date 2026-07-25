@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  formatApiError,
   type AudioSegmentOverride,
   type AudioSegmentSettings,
   type AudioState,
@@ -167,13 +168,16 @@ export function AudioMixingWorkspace({ detail, bgmTracks, setMessage, refreshPro
     setBusy("save");
     setProjectMessage("正在儲存音訊設定…");
     try {
-      const result = await api.audioSettings(detail.project.id, {
+      const audioPatch = {
         enabled: state.enabled,
         bgm: state.bgm,
         original_audio: state.original_audio,
         normalization: state.normalization,
         segments: state.segments,
-      });
+      };
+      const result = await (detail.project_revision === undefined
+        ? api.audioSettings(detail.project.id, audioPatch)
+        : api.audioSettings(detail.project.id, audioPatch, detail.project_revision));
       if (!result.ok) {
         setProjectMessage(`音訊設定儲存失敗：${result.error || "未知錯誤"}`);
         return;
@@ -378,5 +382,5 @@ function audioSignature(state: AudioState): string {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "網路或服務錯誤";
+  return formatApiError(error);
 }

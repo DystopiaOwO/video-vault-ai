@@ -112,6 +112,7 @@ export type Job = {
 
 export type ProjectDetail = {
   project: Project;
+  project_revision?: number;
   clips: Clip[];
   segments: Segment[];
   bgm: BgmTrack[];
@@ -199,16 +200,37 @@ export type WorkflowStage = {
   artifacts: string[];
 };
 
+export class ApiError extends Error {
+  readonly status: number;
+  readonly payload: Record<string, unknown>;
+
+  constructor(status: number, payload: Record<string, unknown>) {
+    super(String(payload.error || payload.message || `${status} request failed`));
+    this.name = "ApiError";
+    this.status = status;
+    this.payload = payload;
+  }
+}
+
+export function formatApiError(error: unknown): string {
+  if (error instanceof ApiError && error.status === 409) {
+    const revision = typeof error.payload.project_revision === "number" ? `目前版本 ${error.payload.project_revision}` : "目前版本已更新";
+    return `${revision}，請重新載入後再儲存，未套用這次舊內容。`;
+  }
+  return error instanceof Error ? error.message : "網路或服務錯誤";
+}
+
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) throw new ApiError(res.status, payload && typeof payload === "object" ? payload : {});
+  return payload as T;
 }
 
 export const api = {
   projects: () => json<Project[]>("/api/projects"),
-  project: (id: number) => json<ProjectDetail>(`/api/project?id=${id}`),
-  jobs: (projectId: number) => json<Job[]>(`/api/jobs?project_id=${projectId}`),
+  project: (id: number, signal?: AbortSignal) => json<ProjectDetail>(`/api/project?id=${id}`, { signal }),
+  jobs: (projectId: number, signal?: AbortSignal) => json<Job[] | { jobs: Job[] }>(`/api/jobs?project_id=${projectId}&meta=1`, { signal }).then((result) => Array.isArray(result) ? result : result.jobs),
   bgm: () => json<BgmTrack[]>("/api/bgm"),
   createProject: (name: string) =>
     json<{ ok: boolean; id: number }>("/api/projects", post({ name, video_ids: [], category: "unknown", content_type: "diary_montage", platform: "YouTube" })),
@@ -222,41 +244,41 @@ export const api = {
     json<{ ok: boolean; message?: string }>("/api/project/analyze-job", post({ project_id: projectId, force })),
   analyzeVideo: (projectId: number, videoId: number) =>
     json<{ ok: boolean; message?: string }>("/api/project/analyze-video", post({ project_id: projectId, video_id: videoId })),
-  saveClipSummary: (projectId: number, videoId: number, userSummary: string) =>
-    json<{ ok: boolean; plan_rebuilt?: boolean }>("/api/project/clip-summary", post({ project_id: projectId, video_id: videoId, user_summary: userSummary })),
-  colorAnalyze: (projectId: number, force = false) =>
-    json<{ ok: boolean; state?: ColorState; error?: string }>("/api/project/color-analyze", post({ project_id: projectId, force })),
-  colorSettings: (projectId: number, state: ColorStatePatch) =>
-    json<{ ok: boolean; state?: ColorState; error?: string }>("/api/project/color-settings", post({ project_id: projectId, state })),
-  colorReference: (projectId: number, referenceId: string) =>
-    json<{ ok: boolean; state?: ColorState; error?: string }>("/api/project/color-reference", post({ project_id: projectId, reference_id: referenceId })),
+  saveClipSummary: (projectId: number, videoId: number, userSummary: string, baseRevision?: number) =>
+    json<{ ok: boolean; plan_rebuilt?: boolean; error?: string; code?: string; project_revision?: number }>("/api/project/clip-summary", post({ project_id: projectId, video_id: videoId, user_summary: userSummary, base_revision: baseRevision })),
+  colorAnalyze: (projectId: number, force = false, baseRevision?: number) =>
+    json<{ ok: boolean; state?: ColorState; error?: string }>("/api/project/color-analyze", post({ project_id: projectId, force, base_revision: baseRevision })),
+  colorSettings: (projectId: number, state: ColorStatePatch, baseRevision?: number) =>
+    json<{ ok: boolean; state?: ColorState; error?: string; code?: string; project_revision?: number }>("/api/project/color-settings", post({ project_id: projectId, state, base_revision: baseRevision })),
+  colorReference: (projectId: number, referenceId: string, baseRevision?: number) =>
+    json<{ ok: boolean; state?: ColorState; error?: string; code?: string; project_revision?: number }>("/api/project/color-reference", post({ project_id: projectId, reference_id: referenceId, base_revision: baseRevision })),
   colorPreview: (projectId: number, mode = "") =>
     json<{ ok: boolean; message?: string; previews?: Array<{ video_id: number; segment_id: string; before_url: string; after_url: string; cache_hit: boolean }>; error?: string }>("/api/project/color-job", post({ project_id: projectId, mode })),
   colorPreviewDirect: (projectId: number, force = false) =>
     json<{ ok: boolean; previews?: Array<{ video_id: number; segment_id: string; before_url: string; after_url: string; cache_hit: boolean; confidence?: number; warnings?: string[] }>; error?: string }>("/api/project/color-preview", post({ project_id: projectId, force })),
-  buildPlan: (projectId: number) =>
-    json<{ ok: boolean }>("/api/project/build-plan", post({ project_id: projectId })),
-  assignBgm: (projectId: number, bgmId: number) =>
-    json<{ ok: boolean }>("/api/project/bgm", post({ project_id: projectId, bgm_id: bgmId })),
-  audioSettings: (projectId: number, patch: Partial<AudioState>) =>
-    json<{ ok: boolean; state?: AudioState; error?: string }>("/api/project/audio-settings", post({ project_id: projectId, patch })),
+  buildPlan: (projectId: number, baseRevision?: number) =>
+    json<{ ok: boolean; error?: string; code?: string; project_revision?: number }>("/api/project/build-plan", post({ project_id: projectId, base_revision: baseRevision })),
+  assignBgm: (projectId: number, bgmId: number, baseRevision?: number) =>
+    json<{ ok: boolean; error?: string; code?: string; project_revision?: number }>("/api/project/bgm", post({ project_id: projectId, bgm_id: bgmId, base_revision: baseRevision })),
+  audioSettings: (projectId: number, patch: Partial<AudioState>, baseRevision?: number) =>
+    json<{ ok: boolean; state?: AudioState; error?: string; code?: string; project_revision?: number }>("/api/project/audio-settings", post({ project_id: projectId, patch, base_revision: baseRevision })),
   audioPreview: (projectId: number, options: { segmentId?: string; timelineStartSeconds?: number; durationSeconds?: number; patch?: Partial<AudioState>; force?: boolean } = {}) =>
     json<{ ok: boolean; file?: string; url?: string; cache_hit?: boolean; duration_seconds?: number; timeline_start_seconds?: number; error?: string }>("/api/project/audio-preview", post({ project_id: projectId, segment_id: options.segmentId || null, timeline_start_seconds: options.timelineStartSeconds ?? 0, duration_seconds: options.durationSeconds ?? 12, patch: options.patch, force: options.force ?? false })),
-  approve: (projectId: number, notes: string) =>
-    json<{ ok: boolean }>("/api/project/approve", post({ project_id: projectId, notes })),
-  reject: (projectId: number, notes: string) =>
-    json<{ ok: boolean }>("/api/project/reject", post({ project_id: projectId, notes })),
-  revise: (projectId: number, notes: string) =>
-    json<{ ok: boolean }>("/api/project/revise", post({ project_id: projectId, notes })),
-  saveSegments: (projectId: number, segments: Segment[]) =>
-    json<{ ok: boolean; path?: string; error?: string }>("/api/project/segments", post({ project_id: projectId, segments })),
-  saveSegmentTiming: (projectId: number, segmentId: string, timing: { start_seconds: number; end_seconds: number; speed: number }) =>
-    json<{ ok: boolean; path?: string; error?: string }>("/api/project/segment-timing", post({ project_id: projectId, segment_id: segmentId, ...timing })),
+  approve: (projectId: number, notes: string, baseRevision?: number) =>
+    json<{ ok: boolean; error?: string; code?: string; project_revision?: number }>("/api/project/approve", post({ project_id: projectId, notes, base_revision: baseRevision })),
+  reject: (projectId: number, notes: string, baseRevision?: number) =>
+    json<{ ok: boolean; error?: string; code?: string; project_revision?: number }>("/api/project/reject", post({ project_id: projectId, notes, base_revision: baseRevision })),
+  revise: (projectId: number, notes: string, baseRevision?: number) =>
+    json<{ ok: boolean; error?: string; code?: string; project_revision?: number }>("/api/project/revise", post({ project_id: projectId, notes, base_revision: baseRevision })),
+  saveSegments: (projectId: number, segments: Segment[], baseRevision?: number) =>
+    json<{ ok: boolean; path?: string; error?: string }>("/api/project/segments", post({ project_id: projectId, segments, base_revision: baseRevision })),
+  saveSegmentTiming: (projectId: number, segmentId: string, timing: { start_seconds: number; end_seconds: number; speed: number }, baseRevision?: number) =>
+    json<{ ok: boolean; path?: string; error?: string }>("/api/project/segment-timing", post({ project_id: projectId, segment_id: segmentId, ...timing, base_revision: baseRevision })),
   storyboard: (projectId: number) => json<StoryboardState>(`/api/project/storyboard?project_id=${projectId}`),
   generateStoryboard: (projectId: number, force = false) =>
     json<{ ok: boolean; storyboard?: StoryboardState; error?: string }>("/api/project/storyboard/generate", post({ project_id: projectId, force })),
-  updateStoryboard: (projectId: number, state: StoryboardState) =>
-    json<{ ok: boolean; storyboard?: StoryboardState; render_changed?: boolean; approval_invalidated?: boolean; error?: string }>("/api/project/storyboard", post({ project_id: projectId, state })),
+  updateStoryboard: (projectId: number, state: StoryboardState, baseRevision?: number) =>
+    json<{ ok: boolean; storyboard?: StoryboardState; render_changed?: boolean; approval_invalidated?: boolean; error?: string }>("/api/project/storyboard", post({ project_id: projectId, state, base_revision: baseRevision })),
   storyboardThumbnail: (projectId: number, segmentId: string, ratio = 0.5, force = false) =>
     json<{ ok: boolean; file?: string; url?: string; cache_hit?: boolean; error?: string }>("/api/project/storyboard/thumbnail", post({ project_id: projectId, segment_id: segmentId, ratio, force })),
   storyboardPreview: (projectId: number, options: { mode: "segment" | "transition" | "range"; segmentId?: string; durationSeconds?: number; timelineStartSeconds?: number; storyboardState?: StoryboardState; force?: boolean }) =>

@@ -13,6 +13,8 @@ from typing import Any, Callable
 
 from .ffmpeg_process_runner import ManagedFFmpegRunner
 from .project import can_project_render, project_dir
+from .database import project_revision
+from .job_coordinator import JobCoordinator, JobState
 from .project_renderer import render_project
 from .render_job_models import ACTIVE_JOB_STATUSES, RenderCancelled, utc_now
 from .render_job_store import RenderJobStore
@@ -104,6 +106,7 @@ class RenderJobManager:
         self._stop = threading.Event()
         self._started = False
         self._shutting_down = False
+        self.coordinator = JobCoordinator(ffmpeg_slots=1, gpu_slots=1, ai_provider_slots=1)
 
     def start(self) -> None:
         with self._lock:
@@ -174,13 +177,32 @@ class RenderJobManager:
             folder = project_dir(self.cfg, int(project_id))
             manifest = _read_json(folder / "render_manifest.json")
             review = _read_json(folder / "review_status.json")
+            try:
+                base_revision = project_revision(self.db, int(project_id))
+            except ValueError:
+                # Keep the existing HTTP-neutral manager tests and legacy
+                # callers usable when they provide a mocked render gate.
+                base_revision = 1
+            coordinated = self.coordinator.submit(
+                int(project_id),
+                "formal_render",
+                {"approval_snapshot_reader", "ffmpeg_heavy", "gpu_heavy"},
+                base_revision,
+                resources={"ffmpeg_heavy", "gpu_heavy"},
+            )
             job = self.store.create(
                 project_id=int(project_id),
                 manifest_hash=str(manifest.get("manifest_hash") or ""),
                 approved_manifest_hash=str(review.get("approved_manifest_hash") or ""),
                 requested_output_path=str(output_path or ""),
                 segment_count=len(manifest.get("segments") or []),
+                base_revision=base_revision,
+                capabilities=sorted(coordinated.capabilities),
+                resources=sorted(coordinated.resources),
+                queue_reason=coordinated.queue_reason,
             )
+            job["coordinator_job_id"] = coordinated.job_id
+            self.store.update(str(job["job_id"]), coordinator_job_id=coordinated.job_id)
             self._queue.put(str(job["job_id"]))
             return {"created": True, "ok": True, "job": job}
 
@@ -197,6 +219,9 @@ class RenderJobManager:
                 return {"ok": False, "reason": "job not found"}
             status = str(job.get("status"))
             if status == "queued":
+                coordinator_id = str(job.get("coordinator_job_id") or "")
+                if coordinator_id:
+                    self.coordinator.cancel(coordinator_id)
                 updated = self.store.transition(
                     job_id,
                     {"queued"},
@@ -291,6 +316,21 @@ class RenderJobManager:
         context = RenderExecutionContext(job_id, runner, cancel_event, lambda **changes: self._progress_update(job_id, **changes))
         runner.on_progress = context._on_runner_progress
         with self._lock:
+            queued = self.store.get(job_id)
+            coordinator_id = str((queued or {}).get("coordinator_job_id") or "")
+            while coordinator_id:
+                coordinated = self.coordinator.get(coordinator_id)
+                if not coordinated or coordinated.state == JobState.RUNNING:
+                    break
+                if coordinated.state in {JobState.CANCELLED, JobState.SUPERSEDED}:
+                    self.store.transition(job_id, {"queued"}, status="cancelled", stage="done", message="正式輸出未開始前已取消", finished_at=utc_now())
+                    return
+                try:
+                    self.coordinator.start(coordinator_id)
+                except RuntimeError:
+                    self._lock.release()
+                    time.sleep(0.1)
+                    self._lock.acquire()
             claimed = self.store.transition(
                 job_id,
                 {"queued"},
@@ -316,17 +356,25 @@ class RenderJobManager:
                 execution=context,
             )
         except RenderCancelled:
+            if coordinator_id:
+                self.coordinator.cancel(coordinator_id)
             self.store.append_log(job_id, "result: cancelled")
             self.store.update(job_id, status="cancelled", stage="done", message="正式輸出已取消", error="", process_id=None, finished_at=utc_now())
         except Exception as exc:
             if cancel_event.is_set():
+                if coordinator_id:
+                    self.coordinator.cancel(coordinator_id)
                 self.store.append_log(job_id, "result: cancelled\n" + traceback.format_exc())
                 self.store.update(job_id, status="cancelled", stage="done", message="正式輸出已取消", error="", process_id=None, finished_at=utc_now())
             else:
+                if coordinator_id:
+                    self.coordinator.fail(coordinator_id, str(exc))
                 error = str(exc) or exc.__class__.__name__
                 self.store.append_log(job_id, "result: failed\n" + traceback.format_exc())
                 self.store.update(job_id, status="failed", stage="done", message="正式輸出失敗", error=error, process_id=None, finished_at=utc_now())
         else:
+            if coordinator_id:
+                self.coordinator.complete(coordinator_id)
             self.store.append_log(job_id, f"result: succeeded\noutput: {result.output_path}")
             self.store.update(job_id, status="succeeded", stage="done", percent=100, message="正式輸出完成", output_path=str(result.output_path), cache_hit=bool(result.cache_hit), error="", process_id=None, finished_at=utc_now())
         finally:
