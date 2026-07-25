@@ -273,7 +273,7 @@ export function AudioMixingWorkspace({ detail, bgmTracks, setMessage, refreshPro
           <h4>BGM</h4>
           <div className="audio-form-grid">
             <label className="wide">音樂<select disabled={workspaceBusy} value={state.bgm.bgm_id ?? ""} onChange={(event) => patchState({ bgm: { ...state.bgm, bgm_id: event.target.value ? Number(event.target.value) : null, enabled: Boolean(event.target.value) } })}><option value="">不使用</option>{bgmTracks.map((track) => <option key={track.id} value={track.id}>{track.title}</option>)}</select></label>
-            <label>音量 dB<input disabled={workspaceBusy} type="number" min={-60} max={12} step={1} value={state.bgm.volume_db} onChange={(event) => patchState({ bgm: { ...state.bgm, volume_db: Number(event.target.value) } })} /></label>
+            <label>音量 dB<input aria-label="BGM 音量 dB" disabled={workspaceBusy} type="number" min={-60} max={12} step={1} value={state.bgm.volume_db} onChange={(event) => patchState({ bgm: { ...state.bgm, volume_db: Number(event.target.value) } })} /></label>
             <label>起始秒數<input disabled={workspaceBusy} type="number" min={0} step={0.1} value={state.bgm.start_seconds} onChange={(event) => patchState({ bgm: { ...state.bgm, start_seconds: Number(event.target.value) } })} /></label>
             <label>淡入秒數<input disabled={workspaceBusy} type="number" min={0} step={0.1} value={state.bgm.fade_in_seconds} onChange={(event) => patchState({ bgm: { ...state.bgm, fade_in_seconds: Number(event.target.value) } })} /></label>
             <label>淡出秒數<input disabled={workspaceBusy} type="number" min={0} step={0.1} value={state.bgm.fade_out_seconds} onChange={(event) => patchState({ bgm: { ...state.bgm, fade_out_seconds: Number(event.target.value) } })} /></label>

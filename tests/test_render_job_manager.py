@@ -121,12 +121,14 @@ def test_queued_cancel_wins_before_worker_claim(manager: RenderJobManager, monke
 
 def test_worker_claim_wins_and_running_job_has_runtime(manager: RenderJobManager, monkeypatch):
     claim_barrier = threading.Barrier(2)
+    claim_started = threading.Event()
     cancel_started = threading.Event()
     release_render = threading.Event()
     original_transition = manager.store.transition
 
     def synchronized_transition(job_id, expected_statuses, **changes):
         if expected_statuses == {"queued"} and changes.get("status") == "running":
+            claim_started.set()
             claim_barrier.wait(timeout=5)
         return original_transition(job_id, expected_statuses, **changes)
 
@@ -150,6 +152,7 @@ def test_worker_claim_wins_and_running_job_has_runtime(manager: RenderJobManager
         cancel_result.update(manager.cancel(job_id))
 
     cancel_thread = threading.Thread(target=cancel_later)
+    assert claim_started.wait(timeout=5)
     cancel_thread.start()
     assert cancel_started.wait(timeout=5)
     claim_barrier.wait(timeout=5)

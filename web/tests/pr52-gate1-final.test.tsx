@@ -201,21 +201,25 @@ describe("PR #52 Gate 1 final behavior contracts", () => {
     if (workspace === "storyboard") {
       vi.spyOn(api, "updateStoryboard").mockReturnValue(save.promise);
       fireEvent.change(screen.getByLabelText("分鏡備註"), { target: { value: "新的分鏡備註" } });
+      await waitFor(() => expect((screen.getByRole("button", { name: "儲存分鏡" }) as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(screen.getByRole("button", { name: "儲存分鏡" }));
       await waitFor(() => expect(api.updateStoryboard).toHaveBeenCalled());
     } else if (workspace === "audio") {
       vi.spyOn(api, "audioSettings").mockReturnValue(save.promise);
-      fireEvent.change(screen.getAllByLabelText("音量 dB")[0], { target: { value: "-12" } });
+      fireEvent.change(screen.getByLabelText("BGM 音量 dB"), { target: { value: "-12" } });
+      await waitFor(() => expect((screen.getByRole("button", { name: "儲存音訊設定" }) as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(screen.getByRole("button", { name: "儲存音訊設定" }));
       await waitFor(() => expect(api.audioSettings).toHaveBeenCalled());
     } else if (workspace === "color") {
       vi.spyOn(api, "colorSettings").mockReturnValue(save.promise);
       fireEvent.change(screen.getByLabelText("專案曝光"), { target: { value: ".5" } });
+      await waitFor(() => expect((screen.getByRole("button", { name: "儲存調色設定" }) as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(screen.getByRole("button", { name: "儲存調色設定" }));
       await waitFor(() => expect(api.colorSettings).toHaveBeenCalled());
     } else {
       vi.spyOn(api, "saveClipSummary").mockReturnValue(save.promise);
       fireEvent.change(screen.getByLabelText("clip-1.mp4 使用者故事備註"), { target: { value: "新的使用者故事備註" } });
+      await waitFor(() => expect((screen.getByRole("button", { name: "儲存故事備註" }) as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(screen.getByRole("button", { name: "儲存故事備註" }));
       await waitFor(() => expect(api.saveClipSummary).toHaveBeenCalled());
     }
