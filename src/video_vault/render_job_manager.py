@@ -265,6 +265,23 @@ class RenderJobManager:
                         )
                 if updated is None:
                     return {"ok": False, "reason": "job state changed", "job": self.store.get(job_id)}
+                # The worker claims the persistent state before registering its
+                # runtime. In that narrow window there is no process to stop;
+                # complete cancellation now so callers never observe a
+                # transient cancelling job with no runtime behind it.
+                if job_id not in self._active:
+                    completed = self.store.transition(
+                        job_id,
+                        {"cancelling"},
+                        status="cancelled",
+                        stage="done",
+                        message="正式輸出已取消",
+                        cancel_requested=True,
+                        process_id=None,
+                        finished_at=utc_now(),
+                    )
+                    if completed is not None:
+                        updated = completed
             else:
                 updated = job
         if runtime is not None:
@@ -315,33 +332,38 @@ class RenderJobManager:
         )
         context = RenderExecutionContext(job_id, runner, cancel_event, lambda **changes: self._progress_update(job_id, **changes))
         runner.on_progress = context._on_runner_progress
-        with self._lock:
-            queued = self.store.get(job_id)
-            coordinator_id = str((queued or {}).get("coordinator_job_id") or "")
-            while coordinator_id:
-                coordinated = self.coordinator.get(coordinator_id)
-                if not coordinated or coordinated.state == JobState.RUNNING:
-                    break
-                if coordinated.state in {JobState.CANCELLED, JobState.SUPERSEDED}:
-                    self.store.transition(job_id, {"queued"}, status="cancelled", stage="done", message="正式輸出未開始前已取消", finished_at=utc_now())
-                    return
-                try:
-                    self.coordinator.start(coordinator_id)
-                except RuntimeError:
-                    self._lock.release()
-                    time.sleep(0.1)
-                    self._lock.acquire()
-            claimed = self.store.transition(
-                job_id,
-                {"queued"},
-                status="running",
-                stage="validating",
-                message="正在驗證正式輸出條件",
-                started_at=utc_now(),
-                process_id=None,
-            )
-            if claimed is None:
+        queued = self.store.get(job_id)
+        coordinator_id = str((queued or {}).get("coordinator_job_id") or "")
+        while coordinator_id:
+            coordinated = self.coordinator.get(coordinator_id)
+            if not coordinated or coordinated.state == JobState.RUNNING:
+                break
+            if coordinated.state in {JobState.CANCELLED, JobState.SUPERSEDED}:
+                self.store.transition(job_id, {"queued"}, status="cancelled", stage="done", message="正式輸出未開始前已取消", finished_at=utc_now())
                 return
+            try:
+                self.coordinator.start(coordinator_id)
+            except RuntimeError:
+                time.sleep(0.1)
+        # Do not hold the manager lock across this conditional store write.
+        # Cancellation must be able to win the queued -> running race while a
+        # store adapter or test hook is waiting for another thread.
+        claimed = self.store.transition(
+            job_id,
+            {"queued"},
+            status="running",
+            stage="validating",
+            message="正在驗證正式輸出條件",
+            started_at=utc_now(),
+            process_id=None,
+        )
+        if claimed is None:
+            return
+        with self._lock:
+            latest = self.store.get(job_id)
+            if latest and (latest.get("status") == "cancelling" or latest.get("cancel_requested")):
+                cancel_event.set()
+                runner.request_cancel()
             self._active[job_id] = _Runtime(cancel_event, runner)
         try:
             current = claimed
