@@ -254,6 +254,23 @@ describe("ColorConsistencyWorkspace", () => {
     expect(screen.getByText("巷弄散步")).toBeTruthy();
   });
 
+  it("shows analysis-only segments as project sourced until the user applies a suggestion", () => {
+    const analysisOnly = color(0.1);
+    analysisOnly.segment_overrides = {};
+    analysisOnly.segment_analysis = {
+      a: { suggested: adjustment(0.75), confidence: 0.9, warnings: [] },
+      b: { suggested: adjustment(-0.2), confidence: 0.8, warnings: [] },
+    };
+    renderWorkspace(detail(1, analysisOnly));
+
+    expect((screen.getByLabelText("抵達車站 曝光") as HTMLInputElement).value).toBe("0.1");
+    expect(screen.getAllByText(/繼承專案套用值（分析建議未套用）/)).toHaveLength(2);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "套用分析建議" })[1]);
+    expect((screen.getByLabelText("抵達車站 曝光") as HTMLInputElement).value).toBe("0.75");
+    expect(screen.getByText(/片段手動覆寫/)).toBeTruthy();
+  });
+
   it("resets draft and search on project switch", async () => {
     const view = renderWorkspace();
 

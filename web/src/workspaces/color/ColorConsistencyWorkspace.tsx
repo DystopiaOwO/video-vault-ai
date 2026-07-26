@@ -461,9 +461,10 @@ function ColorSegmentRow({ segment, state, item, customized, busy, onToggle, onA
   onReset: () => void;
 }) {
   const disabled = item.excluded || !item.enabled;
+  const effectiveSource = effectiveSourceForSegment(state, segment.segment_id);
   return <article className={`color-segment-row${disabled ? " disabled" : ""}`}>
     <header>
-      <div><b>{segment.title || segment.segment_id}</b><span>{segment.clip_id} · {customized ? "片段手動覆寫" : "繼承專案套用值"} · 分析信心 {Number(item.confidence || 0).toFixed(2)}</span></div>
+      <div><b>{segment.title || segment.segment_id}</b><span>{segment.clip_id} · {effectiveSourceLabel(effectiveSource)} · 分析信心 {Number(item.confidence || 0).toFixed(2)}</span></div>
       <div className="color-segment-toggles">
         <label><input type="checkbox" disabled={busy} checked={item.enabled} onChange={(event) => onToggle({ enabled: event.target.checked })} />啟用</label>
         <label><input type="checkbox" disabled={busy} checked={item.locked} onChange={(event) => onToggle({ locked: event.target.checked })} />鎖定</label>
@@ -503,6 +504,23 @@ function effectiveSegment(state: ColorState, segmentId: string): EffectiveColorS
     confidence: analysis.confidence ?? legacy.confidence ?? 0,
     warnings: analysis.warnings ?? legacy.warnings ?? [],
   };
+}
+
+export type EffectiveColorSource = "project" | "manual" | "disabled";
+
+export function effectiveSourceForSegment(state: ColorState, segmentId: string): EffectiveColorSource {
+  const override = segmentOverride(state, segmentId);
+  const item = effectiveSegment(state, segmentId);
+  if (item.excluded || !item.enabled || (!state.enabled && override?.enabled !== true)) return "disabled";
+  return override?.applied ? "manual" : "project";
+}
+
+function effectiveSourceLabel(source: EffectiveColorSource): string {
+  return source === "manual"
+    ? "片段手動覆寫"
+    : source === "disabled"
+      ? "調色未套用"
+      : "繼承專案套用值（分析建議未套用）";
 }
 
 function toColorStatePatch(state: ColorState): ColorStatePatch {

@@ -90,7 +90,7 @@ def test_effective_color_settings_respects_enable_and_exclude():
     assert effective_color_settings(state, "seg-1")["mode"] == "none"
 
 
-def test_analysis_only_segment_uses_project_applied_and_auto_source():
+def test_analysis_only_segment_uses_project_applied_and_project_source():
     state = default_color_state()
     state["applied"].update({"mode": "warm_food", "exposure": -0.3})
     state["segment_analysis"]["seg-1"] = {
@@ -104,7 +104,7 @@ def test_analysis_only_segment_uses_project_applied_and_auto_source():
 
     assert effective["mode"] == "warm_food"
     assert effective["exposure"] == -0.3
-    assert effective["effective_source"] == "auto"
+    assert effective["effective_source"] == "project"
     assert "applied" not in normalize_color_state(state)["segment_overrides"]["seg-1"]
 
 
@@ -165,7 +165,7 @@ def test_force_reanalysis_keeps_analysis_only_segment_out_of_manual_overrides(tm
     assert "applied" not in result["segment_overrides"][segment_id]
     assert result["segments"][segment_id]["applied"]["exposure"] == 0.25
     assert effective_color_settings(result, segment_id)["exposure"] == 0.25
-    assert effective_color_settings(result, segment_id)["effective_source"] == "auto"
+    assert effective_color_settings(result, segment_id)["effective_source"] == "project"
 
 
 def test_color_api_separates_analysis_and_manual_override_without_paths(tmp_path):

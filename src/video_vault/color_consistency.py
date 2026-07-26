@@ -247,7 +247,6 @@ def effective_color_settings(state: Mapping[str, Any], segment_id: str | None = 
     normalized = normalize_color_state(state)
     result = deepcopy(normalized["applied"])
     override = normalized["segment_overrides"].get(str(segment_id), {}) if segment_id else {}
-    analysis = normalized["segment_analysis"].get(str(segment_id), {}) if segment_id else {}
     source = "project"
     if not normalized["enabled"] and not (segment_id and "enabled" in override and _as_bool(override.get("enabled"))):
         return {**result, "mode": "none", "effective_source": "disabled"}
@@ -257,8 +256,8 @@ def effective_color_settings(state: Mapping[str, Any], segment_id: str | None = 
     elif isinstance(override.get("applied"), Mapping):
         result.update(override["applied"])
         source = "manual"
-    elif isinstance(analysis.get("suggested"), Mapping):
-        source = "auto"
+    # Analysis suggestions are advisory until a user creates an explicit
+    # segment override.  There is no automatic apply policy in this workflow.
     return {**result, "effective_source": source}
 
 
