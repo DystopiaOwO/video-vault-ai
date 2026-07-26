@@ -61,6 +61,7 @@ function color(): ColorState {
 function detail(projectId = 1, state = storyboard()): ProjectDetail {
   return {
     project: { id: projectId, name: `project-${projectId}`, status: "needs_review" },
+    project_revision: 7,
     clips: [],
     segments: [
       {
@@ -197,7 +198,7 @@ describe("StoryboardWorkspaceController", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "建立分鏡" }));
 
-    await waitFor(() => expect(api.generateStoryboard).toHaveBeenCalledWith(1, false));
+    await waitFor(() => expect(api.generateStoryboard).toHaveBeenCalledWith(1, false, 7));
     expect(screen.queryByText("有未儲存變更")).toBeNull();
   });
 
@@ -212,7 +213,7 @@ describe("StoryboardWorkspaceController", () => {
     expect((screen.getByRole("button", { name: "儲存剪點" }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "儲存剪點" }));
 
-    await waitFor(() => expect(saveTiming).toHaveBeenCalledWith(1, "a", { start_seconds: 0, end_seconds: 8, speed: 2 }));
+    await waitFor(() => expect(saveTiming).toHaveBeenCalledWith(1, "a", { start_seconds: 0, end_seconds: 8, speed: 2 }, 7));
     await waitFor(() => expect(screen.queryByText("剪點未儲存")).toBeNull());
     expect(updateStoryboard).not.toHaveBeenCalled();
   });
@@ -225,7 +226,7 @@ describe("StoryboardWorkspaceController", () => {
     fireEvent.change(screen.getByLabelText("片段終點"), { target: { value: "8" } });
     fireEvent.change(screen.getByLabelText("片段速度"), { target: { value: "2" } });
     fireEvent.click(screen.getByRole("button", { name: "儲存剪點" }));
-    await waitFor(() => expect(saveTiming).toHaveBeenCalledWith(1, "a", { start_seconds: 0, end_seconds: 8, speed: 2 }));
+    await waitFor(() => expect(saveTiming).toHaveBeenCalledWith(1, "a", { start_seconds: 0, end_seconds: 8, speed: 2 }, 7));
 
     fireEvent.click(screen.getByRole("button", { name: /巷弄散步/ }));
     fireEvent.click(screen.getByRole("button", { name: "從此片段預覽 8 秒" }));
@@ -262,7 +263,7 @@ describe("StoryboardWorkspaceController", () => {
     render(<StoryboardWorkspaceController detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
 
     fireEvent.change(screen.getByLabelText("原音角色"), { target: { value: "keep" } });
-    await waitFor(() => expect(audioSettings).toHaveBeenCalledWith(1, { segments: { a: { role: "keep" } } }));
+    await waitFor(() => expect(audioSettings).toHaveBeenCalledWith(1, { segments: { a: { role: "keep" } } }, 7));
   });
 
   it("maps effective color toggles and reset to the existing color settings API", async () => {
@@ -278,7 +279,7 @@ describe("StoryboardWorkspaceController", () => {
     colorSettings.mockClear();
     view.rerender(<StoryboardWorkspaceController detail={input} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} />);
     fireEvent.click(screen.getByRole("button", { name: "恢復專案預設" }));
-    await waitFor(() => expect(colorSettings).toHaveBeenCalledWith(1, expect.objectContaining({ segments: { a: null } })));
+    await waitFor(() => expect(colorSettings).toHaveBeenCalledWith(1, expect.objectContaining({ segments: { a: null } }), 7));
   });
 
   it("generates representative frames with normal and forced cache behavior", async () => {

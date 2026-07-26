@@ -22,4 +22,5 @@ markers = [
     "pr_core: high-signal tests required on every pull request",
     "media_smoke: tiny real FFmpeg pipeline checks",
     "media_e2e: tests that invoke real FFmpeg/FFprobe media pipelines",
+    "windows_process: Windows-specific process tree integration checks",
 ]

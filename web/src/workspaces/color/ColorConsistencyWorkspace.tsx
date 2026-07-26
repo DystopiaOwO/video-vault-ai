@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  formatApiError,
   type ColorAdjustment,
   type ColorSegmentState,
   type ColorState,
@@ -64,6 +65,12 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
 
   function setProjectMessage(message: string) {
     if (controls.isCurrentProject(detail.project.id)) setMessage(message);
+  }
+
+  function requireProjectRevision(): number | null {
+    if (typeof detail.project_revision === "number") return detail.project_revision;
+    setProjectMessage("專案版本資料遺失，請重新載入後再進行調色操作。");
+    return null;
   }
   const selectedReferenceId = isColorReference(state.reference) ? state.reference.id : "";
   const requiresLutPath = state.enabled && state.applied.mode === "dji_lut" && !state.applied.lut_path.trim();
@@ -202,6 +209,8 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
       if (dirty) setProjectMessage("請先儲存或放棄調色變更，再重新分析核心畫面。");
       return;
     }
+    const baseRevision = requireProjectRevision();
+    if (baseRevision === null) return;
     const mutation = controls.beginProjectMutation(detail.project.id, "color");
     if (!mutation) {
       setProjectMessage(`目前正在${mutationLabel("color")}，請完成後再執行其他操作。`);
@@ -210,7 +219,7 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
     setBusy("analyze");
     setProjectMessage(force ? "正在忽略快取並重跑色彩分析…" : "正在分析核心畫面色彩…");
     try {
-      const result = await api.colorAnalyze(detail.project.id, force);
+      const result = await api.colorAnalyze(detail.project.id, force, baseRevision);
       if (!result.ok || !result.state) {
         setProjectMessage(`色彩分析失敗：${result.error || "未知錯誤"}`);
         return;
@@ -241,6 +250,8 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
       if (dirty) setProjectMessage("請先儲存或放棄調色變更，再切換色彩基準。");
       return;
     }
+    const baseRevision = requireProjectRevision();
+    if (baseRevision === null) return;
     const mutation = controls.beginProjectMutation(detail.project.id, "color");
     if (!mutation) {
       setProjectMessage(`目前正在${mutationLabel("color")}，請完成後再執行其他操作。`);
@@ -249,7 +260,7 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
     setBusy("reference");
     setProjectMessage("正在更新色彩基準…");
     try {
-      const result = await api.colorReference(detail.project.id, referenceId);
+      const result = await api.colorReference(detail.project.id, referenceId, baseRevision);
       if (!result.ok || !result.state) {
         setProjectMessage(`色彩基準更新失敗：${result.error || "未知錯誤"}`);
         return;
@@ -277,6 +288,8 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
 
   async function save() {
     if (!dirty || busy || requiresLutPath) return;
+    const baseRevision = requireProjectRevision();
+    if (baseRevision === null) return;
     const mutation = controls.beginProjectMutation(detail.project.id, "color");
     if (!mutation) {
       setProjectMessage(`目前正在${mutationLabel("color")}，請完成後再執行其他操作。`);
@@ -285,7 +298,7 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
     setBusy("save");
     setProjectMessage("正在儲存調色設定…");
     try {
-      const result = await api.colorSettings(detail.project.id, toColorStatePatch(state));
+      const result = await api.colorSettings(detail.project.id, toColorStatePatch(state), baseRevision);
       if (!result.ok || !result.state) {
         setProjectMessage(`色彩設定儲存失敗：${result.error || "未知錯誤"}`);
         return;
@@ -316,10 +329,12 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
       if (dirty) setProjectMessage("調色預覽目前使用已儲存設定；請先儲存或放棄草稿。");
       return;
     }
+    const baseRevision = requireProjectRevision();
+    if (baseRevision === null) return;
     setBusy("preview");
     setProjectMessage(force ? "正在忽略快取並重新產生調色預覽…" : "正在產生 Before / After 調色預覽…");
     try {
-      const result = await api.colorPreviewDirect(detail.project.id, force);
+      const result = await api.colorPreviewDirect(detail.project.id, force, baseRevision);
       if (!result.ok) {
         setPreviews([]);
         setProjectMessage(`調色預覽失敗：${result.error || "未知錯誤"}`);
@@ -543,5 +558,5 @@ function adjustmentLabel(field: keyof ColorAdjustment): string {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "網路或服務錯誤";
+  return formatApiError(error);
 }

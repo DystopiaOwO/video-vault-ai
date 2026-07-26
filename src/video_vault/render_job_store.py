@@ -42,6 +42,10 @@ class RenderJobStore:
         approved_manifest_hash: str,
         requested_output_path: str = "",
         segment_count: int = 0,
+        base_revision: int = 0,
+        capabilities: list[str] | None = None,
+        resources: list[str] | None = None,
+        queue_reason: str = "",
     ) -> dict[str, Any]:
         with _STORE_LOCK:
             directory = self.jobs_dir(project_id)
@@ -53,6 +57,10 @@ class RenderJobStore:
                 requested_output_path=requested_output_path,
                 segment_count=segment_count,
                 log_path=str((directory / "PLACEHOLDER.log").resolve()),
+                base_revision=base_revision,
+                capabilities=capabilities,
+                resources=resources,
+                queue_reason=queue_reason,
             )
             log_path = directory / f"{job.job_id}.log"
             job.log_path = str(log_path.resolve())

@@ -89,6 +89,7 @@ create table if not exists projects (
   platform text default 'YouTube',
   target_duration_seconds real default 0,
   status text default 'draft',
+  project_revision integer not null default 1,
   created_at text default current_timestamp,
   updated_at text default current_timestamp
 );
@@ -136,8 +137,10 @@ def init_db(db: Path) -> None:
                 "content_type": "text default 'diary_montage'",
                 "platform": "text default 'YouTube'",
                 "target_duration_seconds": "real default 0",
+                "project_revision": "integer not null default 1",
             },
         )
+        con.execute("update projects set project_revision=1 where project_revision is null or project_revision < 1")
         _ensure_columns(
             con,
             "videos",
@@ -909,3 +912,13 @@ def project_videos(db: Path, project_id: int) -> list[sqlite3.Row]:
 def set_project_status(db: Path, project_id: int, status: str) -> None:
     with connect(db) as con:
         con.execute("update projects set status=?, updated_at=current_timestamp where id=?", (status, project_id))
+
+
+def project_revision(db: Path, project_id: int) -> int:
+    """Return the persisted monotonic revision for a project."""
+    init_db(db)
+    with connect(db) as con:
+        row = con.execute("select project_revision from projects where id=?", (int(project_id),)).fetchone()
+    if not row:
+        raise ValueError(f"project not found: {project_id}")
+    return max(1, int(row["project_revision"] or 1))

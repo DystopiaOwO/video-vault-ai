@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .project import mark_project_needs_review, project_dir
+from .project_lifecycle import project_commit
 
 
 AUDIO_STATE_VERSION = 1
@@ -156,7 +157,21 @@ def resolve_legacy_project_bgm(db: Path, project_id: int, settings: Mapping[str,
     return rows
 
 
-def save_audio_state(cfg: dict, db: Path, project_id: int, state: Mapping[str, Any], *, mark_review: bool = True) -> Path:
+def save_audio_state(cfg: dict, db: Path, project_id: int, state: Mapping[str, Any], *, mark_review: bool = True, base_revision: int | None = None) -> Path:
+    with project_commit(db, project_id, base_revision) as commit:
+        normalized = normalize_audio_state(state)
+        current = normalize_audio_state(load_audio_state(cfg, project_id))
+        # Creating the file is itself meaningful: it opts the project into
+        # the new audio workflow, even when the saved value equals defaults.
+        if normalized == current and audio_state_path(cfg, project_id).is_file():
+            commit.record_changed(False)
+            return audio_state_path(cfg, project_id)
+        path = _save_audio_state(cfg, db, project_id, normalized, mark_review=mark_review)
+        commit.record_changed(True)
+        return path
+
+
+def _save_audio_state(cfg: dict, db: Path, project_id: int, state: Mapping[str, Any], *, mark_review: bool = True) -> Path:
     normalized = normalize_audio_state(state)
     path = audio_state_path(cfg, project_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -168,7 +183,19 @@ def save_audio_state(cfg: dict, db: Path, project_id: int, state: Mapping[str, A
     return path
 
 
-def update_audio_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str, Any]) -> dict[str, Any]:
+def update_audio_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str, Any], *, base_revision: int | None = None) -> dict[str, Any]:
+    with project_commit(db, project_id, base_revision) as commit:
+        current = load_audio_state(cfg, project_id)
+        updated = _apply_audio_patch(current, editable_audio_patch(patch))
+        state = normalize_audio_state(updated)
+        changed = state != normalize_audio_state(current)
+        commit.record_changed(changed)
+        if changed:
+            _save_audio_state(cfg, db, project_id, state, mark_review=True)
+        return state
+
+
+def _update_audio_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str, Any]) -> dict[str, Any]:
     current = load_audio_state(cfg, project_id)
     updated = _apply_audio_patch(current, editable_audio_patch(patch))
     state = normalize_audio_state(updated)

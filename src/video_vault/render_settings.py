@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .project import mark_project_needs_review, project_dir
+from .project_lifecycle import project_commit
 from .render_profiles import get_render_profile
 
 
@@ -45,14 +46,27 @@ def load_render_settings(cfg: dict, project_id: int) -> dict[str, Any]:
     return _normalize(json.loads(path.read_text(encoding="utf-8")))
 
 
-def save_render_settings(cfg: dict, db: Path, project_id: int, settings: dict[str, Any]) -> Path:
+def save_render_settings(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    settings: dict[str, Any],
+    *,
+    base_revision: int | None = None,
+) -> Path:
     normalized = _normalize(settings)
     path = project_dir(cfg, project_id) / "render_settings.json"
-    temp = path.with_name(f".{path.name}.tmp")
-    temp.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temp.replace(path)
-    mark_project_needs_review(cfg, db, project_id)
-    return path
+    current = load_render_settings(cfg, project_id)
+    with project_commit(db, project_id, base_revision) as commit:
+        if current == normalized and path.is_file():
+            commit.record_changed(False)
+            return path
+        temp = path.with_name(f".{path.name}.tmp")
+        temp.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temp.replace(path)
+        mark_project_needs_review(cfg, db, project_id)
+        commit.record_changed(True)
+        return path
 
 
 def _normalize(settings: dict[str, Any]) -> dict[str, Any]:

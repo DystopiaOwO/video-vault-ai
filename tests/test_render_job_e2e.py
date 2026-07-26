@@ -113,6 +113,7 @@ def test_background_render_job_reports_real_stages_and_final_cache(tmp_path: Pat
 
 
 @pytest.mark.pr_core
+@pytest.mark.windows_process
 def test_background_cancel_uses_real_process_and_preserves_source(tmp_path: Path, monkeypatch):
     import video_vault.render_job_manager as manager_module
     from video_vault.project import project_dir
@@ -128,7 +129,15 @@ def test_background_cancel_uses_real_process_and_preserves_source(tmp_path: Path
     monkeypatch.setattr(manager_module, "can_project_render", lambda *args: (True, "approved"))
 
     def fake_render(cfg, db, project_id, *, runner=None, execution=None, **kwargs):
-        code = f"import pathlib,subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); pathlib.Path(r'{child_pid_file}').write_text(str(p.pid)); print('out_time_us=0',flush=True); time.sleep(30)"
+        code = "\n".join(
+            (
+                "import pathlib, subprocess, sys, threading",
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])",
+                f"pathlib.Path(r'{child_pid_file}').write_text(str(child.pid), encoding='utf-8')",
+                "print('out_time_us=0', flush=True)",
+                "threading.Event().wait()",
+            )
+        )
         runner.run([sys.executable, "-c", code], expected_duration_seconds=30)
         return SimpleNamespace(output_path=tmp_path / "never.mp4", cache_hit=False)
 
@@ -144,8 +153,13 @@ def test_background_cancel_uses_real_process_and_preserves_source(tmp_path: Path
         assert manager.get(job_id).get("process_id")
         while not child_pid_file.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
+        assert child_pid_file.exists()
         child_pid = int(child_pid_file.read_text(encoding="utf-8"))
-        assert manager.cancel(job_id)["ok"] is True
+        runtime = manager._active.get(job_id)
+        assert runtime is not None
+        assert runtime.execution._publish_committed is False
+        cancellation = manager.cancel(job_id)
+        assert cancellation["ok"] is True, cancellation
         final = _wait_for(manager, job_id, {"cancelled"}, timeout=15)
         assert final["process_id"] is None
         assert not _pid_exists(child_pid)
@@ -178,12 +192,18 @@ def test_cancel_after_publish_started_still_succeeds(tmp_path: Path, monkeypatch
         created = manager.enqueue(setup["project_id"])
         job_id = created["job"]["job_id"]
         assert publish_started.wait(timeout=90)
-        cancelling = manager.cancel(job_id)
-        assert cancelling["ok"] is True
-        assert cancelling["job"]["status"] == "cancelling"
+        cancellation: dict = {}
+        cancel_thread = threading.Thread(target=lambda: cancellation.update(manager.cancel(job_id)))
+        cancel_thread.start()
         release_publish.set()
+        cancel_thread.join(timeout=10)
+        assert not cancel_thread.is_alive()
+        assert cancellation["ok"] is False
+        assert cancellation["code"] == "cancel_too_late"
         final = _wait_for(manager, job_id, {"succeeded", "failed", "cancelled"}, timeout=90)
         assert final["status"] == "succeeded"
+        coordinator = manager.coordinator.get(final["coordinator_job_id"])
+        assert coordinator and coordinator.state.value == "succeeded"
         assert final["percent"] == 100
         output = Path(final["output_path"])
         report = output.with_name(output.name + ".render.json")

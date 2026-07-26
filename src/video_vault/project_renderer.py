@@ -199,7 +199,11 @@ def render_project(
         report_temp.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         _execution_check(execution)
         _execution_update(execution, stage="publishing", percent=98, message="正在發佈正式輸出")
-        output_published, report_published = publish_final_render_atomically(partial, report_temp, output, report_path)
+        publish = lambda: publish_final_render_atomically(partial, report_temp, output, report_path)
+        if execution is not None:
+            output_published, report_published = execution.publish_atomically(publish)
+        else:
+            output_published, report_published = publish()
         _write_log(log_path, project_id, approved_hash, segment_results, concat_path, command, result, qc, track, None)
         concat_path.unlink(missing_ok=True)
         _execution_update(execution, stage="done", percent=100, message="正式輸出完成")

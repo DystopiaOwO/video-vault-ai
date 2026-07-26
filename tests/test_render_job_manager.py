@@ -94,6 +94,64 @@ def test_queued_cancel_does_not_start_worker(manager: RenderJobManager, monkeypa
     assert started == [1]
 
 
+def test_cancel_before_publish_cancels_both_job_states_and_releases_slot(manager: RenderJobManager, monkeypatch):
+    ready_to_publish = threading.Event()
+    allow_publish = threading.Event()
+    publish_calls: list[int] = []
+
+    def fake_render(cfg, db, project_id, *, execution=None, **kwargs):
+        if project_id == 1:
+            ready_to_publish.set()
+            assert allow_publish.wait(timeout=5)
+            execution.publish_atomically(lambda: publish_calls.append(project_id))
+        return SimpleNamespace(output_path=Path(f"project-{project_id}.mp4"), cache_hit=False)
+
+    monkeypatch.setattr(manager_module, "render_project", fake_render)
+    first = manager.enqueue(1)
+    first_id = first["job"]["job_id"]
+    assert _wait_for(manager, first_id, {"running"})["status"] == "running"
+    assert ready_to_publish.wait(timeout=5)
+
+    cancelled = manager.cancel(first_id)
+    assert cancelled["ok"] is True
+    allow_publish.set()
+    final = _wait_for(manager, first_id, {"cancelled"})
+    coordinator = manager.coordinator.get(final["coordinator_job_id"])
+    assert coordinator and coordinator.state.value == "cancelled"
+    assert publish_calls == []
+
+    second = manager.enqueue(2)
+    second_final = _wait_for(manager, second["job"]["job_id"], {"succeeded"})
+    assert second_final["status"] == "succeeded"
+
+
+def test_cancel_after_publish_reports_too_late_and_both_states_succeed(manager: RenderJobManager, monkeypatch):
+    published = threading.Event()
+    finish_render = threading.Event()
+
+    def fake_render(cfg, db, project_id, *, execution=None, **kwargs):
+        execution.publish_atomically(lambda: published.set())
+        assert finish_render.wait(timeout=5)
+        return SimpleNamespace(output_path=Path(f"project-{project_id}.mp4"), cache_hit=False)
+
+    monkeypatch.setattr(manager_module, "render_project", fake_render)
+    created = manager.enqueue(1)
+    job_id = created["job"]["job_id"]
+    assert published.wait(timeout=5)
+
+    too_late = manager.cancel(job_id)
+    assert too_late["ok"] is False
+    assert too_late["code"] == "cancel_too_late"
+    assert too_late["reason"] == "output already published"
+    finish_render.set()
+    final = _wait_for(manager, job_id, {"succeeded"})
+    coordinator = manager.coordinator.get(final["coordinator_job_id"])
+    assert coordinator and coordinator.state.value == "succeeded"
+
+    second = manager.enqueue(2)
+    assert _wait_for(manager, second["job"]["job_id"], {"succeeded"})["status"] == "succeeded"
+
+
 def test_queued_cancel_wins_before_worker_claim(manager: RenderJobManager, monkeypatch):
     worker_ready = threading.Event()
     release_worker = threading.Event()
@@ -121,12 +179,14 @@ def test_queued_cancel_wins_before_worker_claim(manager: RenderJobManager, monke
 
 def test_worker_claim_wins_and_running_job_has_runtime(manager: RenderJobManager, monkeypatch):
     claim_barrier = threading.Barrier(2)
+    claim_started = threading.Event()
     cancel_started = threading.Event()
     release_render = threading.Event()
     original_transition = manager.store.transition
 
     def synchronized_transition(job_id, expected_statuses, **changes):
         if expected_statuses == {"queued"} and changes.get("status") == "running":
+            claim_started.set()
             claim_barrier.wait(timeout=5)
         return original_transition(job_id, expected_statuses, **changes)
 
@@ -150,6 +210,7 @@ def test_worker_claim_wins_and_running_job_has_runtime(manager: RenderJobManager
         cancel_result.update(manager.cancel(job_id))
 
     cancel_thread = threading.Thread(target=cancel_later)
+    assert claim_started.wait(timeout=5)
     cancel_thread.start()
     assert cancel_started.wait(timeout=5)
     claim_barrier.wait(timeout=5)

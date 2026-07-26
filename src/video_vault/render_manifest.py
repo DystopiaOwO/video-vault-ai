@@ -112,7 +112,13 @@ def build_render_manifest(
 def compile_render_manifest(cfg: dict, db: Path, project_id: int, profile_id: str | None = None) -> dict[str, Any]:
     manifest = build_render_manifest(cfg, db, project_id, profile_id)
     path = project_dir(cfg, project_id) / "render_manifest.json"
-    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.tmp")
+    try:
+        temp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
     return manifest
 
 
@@ -297,8 +303,11 @@ def _manifest_bgm(cfg: dict, db: Path, project_id: int, settings: dict[str, Any]
         bgm_state = effective_project_bgm(audio_state) if new_workflow_enabled else None
         selected_id = int(bgm_state["bgm_id"]) if bgm_state is not None else None
         if not new_workflow_enabled:
+            # A disabled workflow returns to the project's legacy relation.
             pass
         elif selected_id is None:
+            # An enabled audio workflow with no selected BGM explicitly
+            # suppresses the legacy project_bgm relation.
             rows = []
         else:
             try:
