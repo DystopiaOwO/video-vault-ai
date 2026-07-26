@@ -583,6 +583,7 @@ def test_preview_cache_key_changes_when_lut_contents_change(tmp_path):
     assert preview_cache_key(source, state, {"effective_settings": settings}) != first
 
 
+@pytest.mark.media_e2e
 def test_project_preview_cache_misses_after_same_path_lut_replacement(tmp_path, monkeypatch):
     cfg, db, project_id, source, _ = _project(tmp_path)
     lut = tmp_path / "look.cube"
