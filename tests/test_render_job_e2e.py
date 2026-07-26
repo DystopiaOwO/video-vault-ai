@@ -125,19 +125,16 @@ def test_background_cancel_uses_real_process_and_preserves_source(tmp_path: Path
     (folder / "render_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     (folder / "review_status.json").write_text(json.dumps({"approved_manifest_hash": "a" * 64}), encoding="utf-8")
     child_pid_file = tmp_path / "child.pid"
-    release_file = tmp_path / "release"
     monkeypatch.setattr(manager_module, "can_project_render", lambda *args: (True, "approved"))
 
     def fake_render(cfg, db, project_id, *, runner=None, execution=None, **kwargs):
         code = "\n".join(
             (
-                "import pathlib, subprocess, sys, time",
-                f"release = pathlib.Path(r'{release_file}')",
+                "import pathlib, subprocess, sys, threading",
                 "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])",
                 f"pathlib.Path(r'{child_pid_file}').write_text(str(child.pid), encoding='utf-8')",
                 "print('out_time_us=0', flush=True)",
-                "while not release.exists():",
-                "    time.sleep(0.05)",
+                "threading.Event().wait()",
             )
         )
         runner.run([sys.executable, "-c", code], expected_duration_seconds=30)
