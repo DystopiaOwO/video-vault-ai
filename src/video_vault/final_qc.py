@@ -111,15 +111,53 @@ def validate_final_output(
         measurements.update(packet)
         errors.extend(packet.get("errors", []))
         warnings.extend(packet.get("warnings", []))
+        stream_ends = packet.get("stream_ends") or {}
+        stream_starts = packet.get("stream_starts") or {}
+        video_stream_value = getattr(probe, "video_stream_index", -1)
+        audio_stream_value = getattr(probe, "audio_stream_index", -1)
+        video_stream = int(video_stream_value) if video_stream_value is not None else -1
+        audio_stream = int(audio_stream_value) if audio_stream_value is not None else -1
+        if video_stream < 0:
+            errors.append("video stream index unavailable for packet-tail validation")
+        elif video_stream not in stream_ends:
+            errors.append("video packet tail unavailable")
+        else:
+            measurements["video"]["end_seconds"] = float(stream_ends[video_stream])
+            if video_stream in stream_starts:
+                measurements["video"]["start_seconds"] = float(stream_starts[video_stream])
+            measurements["video"]["tail_source"] = "packet"
+        if probe.has_audio:
+            if audio_stream < 0:
+                errors.append("audio stream index unavailable for packet-tail validation")
+            elif audio_stream not in stream_ends:
+                errors.append("audio packet tail unavailable")
+            else:
+                measurements["audio"]["end_seconds"] = float(stream_ends[audio_stream])
+                if audio_stream in stream_starts:
+                    measurements["audio"]["start_seconds"] = float(stream_starts[audio_stream])
+                measurements["audio"]["tail_source"] = "packet"
 
     expected_frames = int(round(expected_duration * float(profile.get("fps", 0) or 0))) if expected_duration and profile.get("fps") else 0
     actual_frames = int(measurements.get("frame_count", 0) or 0)
-    if expected_frames and actual_frames and abs(actual_frames - expected_frames) > 1:
-        errors.append(f"frame count mismatch: {actual_frames} vs {expected_frames}")
+    if expected_frames:
+        if actual_frames <= 0:
+            errors.append(f"frame count unavailable: expected approximately {expected_frames}")
+        elif abs(actual_frames - expected_frames) > 1:
+            errors.append(f"frame count mismatch: {actual_frames} vs {expected_frames}")
     video_end = float((measurements.get("video") or {}).get("end_seconds") or 0)
     audio_end = float((measurements.get("audio") or {}).get("end_seconds") or 0)
-    if getattr(probe, "source_file", None) is not None and abs(video_end - audio_end) > 0.05:
-        errors.append(f"A/V tail drift: {abs(video_end - audio_end):.3f}s")
+    if (
+        getattr(probe, "source_file", None) is not None
+        and "tail_source" in (measurements.get("video") or {})
+        and "tail_source" in (measurements.get("audio") or {})
+        and abs(
+            (video_end - float((measurements.get("video") or {}).get("start_seconds") or 0))
+            - (audio_end - float((measurements.get("audio") or {}).get("start_seconds") or 0))
+        ) > 0.05
+    ):
+        video_span = video_end - float((measurements.get("video") or {}).get("start_seconds") or 0)
+        audio_span = audio_end - float((measurements.get("audio") or {}).get("start_seconds") or 0)
+        errors.append(f"A/V tail drift: {abs(video_span - audio_span):.3f}s")
 
     if loudness is not None:
         target_lufs = float(getattr(loudness, "target_lufs", -14.0))
@@ -178,19 +216,35 @@ def _packet_diagnostics(path: Path, ffprobe_path: str) -> dict[str, Any]:
     for packet in packets:
         try:
             stream = int(packet.get("stream_index"))
-            raw_time = packet.get("dts_time") if packet.get("dts_time") not in (None, "N/A") else packet.get("pts_time")
-            timestamp = float(raw_time)
+            raw_order_time = packet.get("dts_time") if packet.get("dts_time") not in (None, "N/A") else packet.get("pts_time")
+            raw_tail_time = packet.get("pts_time") if packet.get("pts_time") not in (None, "N/A") else packet.get("dts_time")
+            timestamp = float(raw_order_time)
+            tail_timestamp = float(raw_tail_time)
             duration = float(packet.get("duration_time") or 0)
         except (TypeError, ValueError):
             continue
-        if stream in last and timestamp + 0.000001 < last[stream]:
-            errors.append(f"non-monotonic timestamps on stream {stream}")
-            break
+        if stream in last:
+            delta = timestamp - last[stream]
+            if abs(delta) <= 0.000001:
+                errors.append(f"duplicate timestamps on stream {stream}")
+                break
+            if delta < 0:
+                errors.append(f"non-monotonic timestamps on stream {stream}")
+                break
         last[stream] = timestamp
-        starts.setdefault(stream, timestamp)
-        ends[stream] = max(ends.get(stream, timestamp), timestamp + max(0.0, duration))
+        starts.setdefault(stream, tail_timestamp)
+        ends[stream] = max(ends.get(stream, tail_timestamp), tail_timestamp + max(0.0, duration))
         counts[stream] = counts.get(stream, 0) + 1
-    return {"timestamp_monotonic": not errors, "errors": errors, "warnings": [], "packet_counts": counts, "stream_starts": starts, "stream_ends": ends}
+    return {
+        "timestamp_monotonic": not errors,
+        "timestamp_policy": "strictly_increasing_per_stream",
+        "packet_timestamps_available": bool(ends),
+        "errors": errors,
+        "warnings": [],
+        "packet_counts": counts,
+        "stream_starts": starts,
+        "stream_ends": ends,
+    }
 
 
 __all__ = ["FinalQCResult", "sha256_file", "validate_final_output"]

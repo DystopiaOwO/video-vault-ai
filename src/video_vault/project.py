@@ -589,15 +589,19 @@ def _set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes:
 def _approve_project(cfg: dict, db: Path, project_id: int, notes: str = "", *, base_revision: int | None = None) -> Path:
     """Prepare approval outside the lock, then publish it as one commit."""
     init_db(db)
-    check_base_revision(db, project_id, base_revision)
+    approval_base_revision = check_base_revision(db, project_id, base_revision)
     folder = project_dir(cfg, project_id)
     storyboard_path = folder / "storyboard.json"
     if not storyboard_path.exists():
         from .storyboard import ensure_storyboard
 
         ensure_storyboard(cfg, db, project_id)
+        if base_revision is None:
+            # Legacy callers do not provide a revision.  The storyboard is a
+            # required one-time preparation step, so capture the caller's
+            # effective base only after that initialization has committed.
+            approval_base_revision = check_base_revision(db, project_id, None)
 
-    prepared_revision = current_revision(db, project_id)
     from .approval_snapshot import build_approval_snapshot, publish_approval_snapshot
     from .render_manifest import build_render_manifest
 
@@ -606,7 +610,7 @@ def _approve_project(cfg: dict, db: Path, project_id: int, notes: str = "", *, b
         cfg,
         db,
         project_id,
-        approved_revision=prepared_revision + 1,
+        approved_revision=approval_base_revision + 1,
         manifest=manifest,
     )
     plan_path = folder / "project_plan.json"
@@ -623,7 +627,7 @@ def _approve_project(cfg: dict, db: Path, project_id: int, notes: str = "", *, b
         "updated_at": now,
         "approved_manifest_hash": manifest["manifest_hash"],
         "approved_plan_id": manifest.get("plan_id", ""),
-        "approved_project_revision": prepared_revision + 1,
+        "approved_project_revision": approval_base_revision + 1,
         "approved_at": now,
         "approval_snapshot_id": approval_snapshot["snapshot_id"],
         "approval_snapshot_hash": approval_snapshot["snapshot_hash"],
@@ -681,13 +685,17 @@ def _approve_project(cfg: dict, db: Path, project_id: int, notes: str = "", *, b
         stage_paths[target] = stage_path
 
     tracked = set(staged) | {snapshot_path}
-    old_files = {path: path.read_bytes() for path in tracked if path.is_file()}
+    old_files = {
+        path: (path.read_bytes(), path.stat())
+        for path in tracked
+        if path.is_file()
+    }
     old_row = project(db, project_id)
     old_status = str(old_row["status"] or "") if old_row else ""
-    old_revision = current_revision(db, project_id)
+    old_revision = approval_base_revision
     published = False
     try:
-        with project_commit(db, project_id, prepared_revision) as commit:
+        with project_commit(db, project_id, approval_base_revision) as commit:
             try:
                 publish_approval_snapshot(cfg, approval_snapshot)
                 published = True
@@ -710,11 +718,13 @@ def _approve_project(cfg: dict, db: Path, project_id: int, notes: str = "", *, b
     return review_path
 
 
-def _restore_approval_files(tracked: set[Path], old_files: dict[Path, bytes]) -> None:
+def _restore_approval_files(tracked: set[Path], old_files: dict[Path, tuple[bytes, os.stat_result]]) -> None:
     for path in tracked:
         if path in old_files:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(old_files[path])
+            content, stat_result = old_files[path]
+            path.write_bytes(content)
+            os.utime(path, ns=(stat_result.st_atime_ns, stat_result.st_mtime_ns))
         else:
             path.unlink(missing_ok=True)
 

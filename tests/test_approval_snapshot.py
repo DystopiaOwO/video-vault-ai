@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import threading
 
 import pytest
 
 from video_vault.approval_snapshot import load_approval_snapshot, validate_snapshot
 from video_vault.database import add_analysis, add_bgm_track, add_project_bgm, init_db, project, project_revision, upsert_video
-from video_vault.project import can_project_render, create_project, project_dir, set_review_status
+from video_vault.project import can_project_render, create_project, mark_project_needs_review, project_dir, set_review_status
 from video_vault.project import build_project_plan
+from video_vault.project_lifecycle import ProjectRevisionConflict
 
 
 def _approved_project(tmp_path: Path) -> tuple[dict, Path, int, Path]:
@@ -90,6 +92,7 @@ def test_approval_failure_restores_files_db_revision_and_snapshot_set(tmp_path: 
         folder / "checkpoints" / "review_approved.json",
     ]
     before = {path: path.read_bytes() for path in tracked}
+    before_mtime = {path: path.stat().st_mtime_ns for path in tracked}
     approvals_before = {path: path.read_bytes() for path in (folder / "approvals").glob("*.json")}
     before_revision = project_revision(db, project_id)
     before_status = str(project(db, project_id)["status"])
@@ -102,7 +105,63 @@ def test_approval_failure_restores_files_db_revision_and_snapshot_set(tmp_path: 
         set_review_status(cfg, db, project_id, "approved")
 
     assert {path: path.read_bytes() for path in tracked} == before
+    assert {path: path.stat().st_mtime_ns for path in tracked} == before_mtime
     assert {path: path.read_bytes() for path in (folder / "approvals").glob("*.json")} == approvals_before
     assert project_revision(db, project_id) == before_revision
     assert str(project(db, project_id)["status"]) == before_status
+    assert not list(folder.glob(".approval-stage-*"))
+
+
+def test_stale_approval_cannot_publish_after_concurrent_writer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg, db, project_id, _source = _approved_project(tmp_path)
+    mark_project_needs_review(cfg, db, project_id)
+    base_revision = project_revision(db, project_id)
+    folder = project_dir(cfg, project_id)
+    entered = threading.Event()
+    release = threading.Event()
+    approval_errors: list[BaseException] = []
+    real_build = __import__("video_vault.render_manifest", fromlist=["build_render_manifest"]).build_render_manifest
+
+    def blocked_build(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=10), "approval preparation did not release"
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr("video_vault.render_manifest.build_render_manifest", blocked_build)
+
+    def approve():
+        try:
+            set_review_status(cfg, db, project_id, "approved", base_revision=base_revision)
+        except BaseException as exc:  # assert the exact lifecycle failure below
+            approval_errors.append(exc)
+
+    worker = threading.Thread(target=approve)
+    worker.start()
+    assert entered.wait(timeout=10), "approval did not reach preparation barrier"
+
+    set_review_status(cfg, db, project_id, "rejected", "concurrent revision", base_revision=base_revision)
+    after_writer = {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in (
+            folder / "render_manifest.json",
+            folder / "review_status.json",
+            folder / "project_plan.json",
+            folder / "decisions" / "decision_log.jsonl",
+        )
+        if path.is_file()
+    }
+    writer_revision = project_revision(db, project_id)
+    writer_status = str(project(db, project_id)["status"])
+    release.set()
+    worker.join(timeout=10)
+
+    assert not worker.is_alive()
+    assert len(approval_errors) == 1
+    assert isinstance(approval_errors[0], ProjectRevisionConflict)
+    assert project_revision(db, project_id) == writer_revision
+    assert str(project(db, project_id)["status"]) == writer_status
+    assert {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in after_writer
+    } == after_writer
     assert not list(folder.glob(".approval-stage-*"))

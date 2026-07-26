@@ -36,6 +36,8 @@ class MediaProbe:
     video_end_seconds: float = 0.0
     audio_start_seconds: float = 0.0
     audio_end_seconds: float = 0.0
+    video_stream_index: int = -1
+    audio_stream_index: int = -1
 
 
 MediaProbeResult = MediaProbe
@@ -103,6 +105,8 @@ def _parse(source: Path, raw: dict[str, Any]) -> MediaProbe:
         video_end_seconds=(_number(video.get("start_time")) or 0.0) + (_number(video.get("duration")) or duration),
         audio_start_seconds=_number(audio.get("start_time")) if audio else 0.0,
         audio_end_seconds=((_number(audio.get("start_time")) or 0.0) + (_number(audio.get("duration")) or duration)) if audio else 0.0,
+        video_stream_index=_integer(video.get("index")),
+        audio_stream_index=_integer(audio.get("index")) if audio else -1,
     )
 
 

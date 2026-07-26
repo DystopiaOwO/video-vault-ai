@@ -543,12 +543,15 @@ def _final_cache_miss_reason(output: Path, report_path: Path, manifest: Mapping[
             return "output_hash_changed"
         if not bool((report.get("qc") or {}).get("passed")):
             return "previous_qc_failed"
-        qc = validate_final_output(output, manifest, ffprobe_path, ffmpeg_path=ffmpeg_path)
-        if not qc.passed:
-            return "final_qc_revalidation_failed"
+        measured = None
         if loudness_policy and bool(loudness_policy.get("enabled")):
             from .loudness import measure_loudness
+
             measured = measure_loudness(ffmpeg_path, output, loudness_policy)
+        qc = validate_final_output(output, manifest, ffprobe_path, ffmpeg_path=ffmpeg_path, loudness=measured)
+        if not qc.passed:
+            return "final_qc_revalidation_failed"
+        if measured is not None:
             final = (report.get("loudness") or {}).get("final") or {}
             if abs(float(final.get("measured_I", 999)) - measured.measured_I) > 0.2 or abs(float(final.get("measured_TP", 999)) - measured.measured_TP) > 0.2:
                 return "loudness_measurement_changed"

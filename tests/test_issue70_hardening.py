@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -107,6 +108,52 @@ def test_report_cache_revalidation_fails_closed_when_qc_probe_errors(monkeypatch
     reason = _final_cache_miss_reason(output, report_path, {"segments": []}, "m", "final_1080p", None, "ffprobe")
 
     assert reason == "cache_report_invalid"
+
+
+def test_final_cache_hit_revalidates_loudness_against_current_policy(monkeypatch, tmp_path: Path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    output = tmp_path / "final.mp4"
+    output.write_bytes(b"final")
+    manifest = {
+        "manifest_hash": "m" * 64,
+        "profile": {"profile_id": "final_1080p"},
+        "settings": {"encoder": "cpu"},
+        "segments": [{
+            "segment_id": "seg-1", "order": 1, "source_file": str(source),
+            "source_in_seconds": 0.0, "source_out_seconds": 1.0, "speed": 1.0,
+        }],
+    }
+    cache_key = build_segment_cache_key(manifest, manifest["segments"][0])
+    policy = {"enabled": True, "target_lufs": -14.0, "true_peak_db": -1.0}
+    report = {
+        "manifest_hash": "m" * 64, "profile_id": "final_1080p", "qc_schema_version": 2,
+        "loudness_policy": policy,
+        "loudness": {"final": {"measured_I": -14.0, "measured_TP": -1.0}},
+        "cache": {"qc_policy_version": 2, "loudness_policy_key": _policy_key(policy)},
+        "segments": [{"cache_key": cache_key}], "bgm": {"fingerprint": {}},
+        "output_size": output.stat().st_size, "output_sha256": "digest", "qc": {"passed": True},
+    }
+    report_path = output.with_name(output.name + ".render.json")
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    measured = SimpleNamespace(measured_I=-10.0, measured_TP=-0.5)
+    captured: dict[str, object] = {}
+
+    def fake_validate(*args, **kwargs):
+        captured["loudness"] = kwargs.get("loudness")
+        return FinalQCResult(False, 1.0, "digest", ("loudness mismatch",)) if kwargs.get("loudness") is not None else FinalQCResult(True, 1.0, "digest")
+
+    monkeypatch.setattr("video_vault.project_renderer.sha256_file", lambda _path: "digest")
+    monkeypatch.setattr("video_vault.project_renderer.validate_final_output", fake_validate)
+    monkeypatch.setattr("video_vault.loudness.measure_loudness", lambda *_args, **_kwargs: measured)
+
+    reason = _final_cache_miss_reason(
+        output, report_path, manifest, "m" * 64, "final_1080p", None, "ffprobe",
+        loudness_policy=policy,
+    )
+
+    assert reason == "final_qc_revalidation_failed"
+    assert captured["loudness"] is measured
 
 
 @pytest.mark.media_smoke
