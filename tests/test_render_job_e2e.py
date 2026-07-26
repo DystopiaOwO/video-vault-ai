@@ -145,7 +145,11 @@ def test_background_cancel_uses_real_process_and_preserves_source(tmp_path: Path
         while not child_pid_file.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
         child_pid = int(child_pid_file.read_text(encoding="utf-8"))
-        assert manager.cancel(job_id)["ok"] is True
+        runtime = manager._active.get(job_id)
+        assert runtime is not None
+        assert runtime.execution._publish_committed is False
+        cancellation = manager.cancel(job_id)
+        assert cancellation["ok"] is True, cancellation
         final = _wait_for(manager, job_id, {"cancelled"}, timeout=15)
         assert final["process_id"] is None
         assert not _pid_exists(child_pid)
