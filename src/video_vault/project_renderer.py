@@ -90,7 +90,21 @@ def render_project(
         raise PermissionError("project render 被擋下：immutable snapshot manifest hash 不一致")
     # Encoder choice is a job-scoped runtime contract.  It is deliberately
     # separate from the user-approved manifest hash, but is pinned before any
-    # segment cache lookup and carried through the report.
+    # segment cache lookup and carried through the report.  Synchronous
+    # callers (CLI/smoke/manual render) use the exact same resolution path as
+    # RenderJobManager instead of leaving an unpinned encoder implicit.
+    if encoder_contract is None:
+        profile = manifest.get("profile") or {}
+        # Older unit-test fixtures intentionally contain only profile_id.  A
+        # real compiled manifest always has these canonical fields.
+        if {"video_codec", "fps", "pixel_format"}.issubset(profile):
+            from .encoder_contract import resolve_encoder_contract
+
+            encoder_contract = resolve_encoder_contract(
+                cfg,
+                profile,
+                str((manifest.get("settings") or {}).get("encoder") or "auto"),
+            )
     if encoder_contract is not None:
         from .encoder_contract import validate_encoder_contract
 
