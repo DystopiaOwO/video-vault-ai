@@ -9,6 +9,7 @@ import json
 import math
 from pathlib import Path
 import subprocess
+import hashlib
 from typing import Any, Callable, Mapping
 
 from .bgm_pipeline import BgmPipelineError, bgm_fingerprint, build_bgm_mix_command, validate_bgm_track
@@ -34,6 +35,7 @@ class FinalOutputPaths:
     log: Path
     managed: bool
     cache_hit: bool
+    cache_miss_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -142,6 +144,10 @@ def render_project(
         ffprobe_path,
         bgm_fp,
         output_path,
+        approval_snapshot=snapshot,
+        encoder_contract=encoder_contract,
+        loudness_policy=normalization,
+        ffmpeg_path=ffmpeg_path,
     )
     output = paths.output
     report_path = paths.report
@@ -259,7 +265,7 @@ def render_project(
             "analysis": loudness_analysis.to_dict() if loudness_analysis is not None else {},
             "final": loudness_final.to_dict() if loudness_final is not None else {},
         }
-        report = build_render_report(project_id, manifest, output, qc, segment_results, track, bgm_fp, output_size=partial.stat().st_size, approval_snapshot=snapshot, encoder_contract=encoder_contract, loudness=report_loudness)
+        report = build_render_report(project_id, manifest, output, qc, segment_results, track, bgm_fp, output_size=partial.stat().st_size, approval_snapshot=snapshot, encoder_contract=encoder_contract, loudness=report_loudness, loudness_policy=normalization, bgm_source="new" if (folder / "audio_settings.json").is_file() else "legacy", cache_miss_reason=paths.cache_miss_reason)
         report_temp_created = True
         report_temp.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         _execution_check(execution)
@@ -348,6 +354,11 @@ def prepare_final_output_paths(
     ffprobe_path: str,
     bgm_fp: Mapping[str, Any] | None,
     output_path: Path | None = None,
+    *,
+    approval_snapshot: Mapping[str, Any] | None = None,
+    encoder_contract: Mapping[str, Any] | None = None,
+    loudness_policy: Mapping[str, Any] | None = None,
+    ffmpeg_path: str = "ffmpeg",
 ) -> FinalOutputPaths:
     renders = (Path(folder) / "renders").expanduser().resolve()
     managed = output_path is None
@@ -359,8 +370,9 @@ def prepare_final_output_paths(
     report_temp = report.with_name(f".{report.name}.tmp")
     log = renders / "logs" / f"{approved_hash}.log"
     validate_project_output_path(folder, manifest, output, partial, report, report_temp)
-    cache_hit = _final_cache_valid(output, report, manifest, approved_hash, profile_id, bgm_fp, ffprobe_path)
-    paths = FinalOutputPaths(output, partial, report, report_temp, log, managed, cache_hit)
+    cache_miss_reason = _final_cache_miss_reason(output, report, manifest, approved_hash, profile_id, bgm_fp, ffprobe_path, approval_snapshot=approval_snapshot, encoder_contract=encoder_contract, loudness_policy=loudness_policy, ffmpeg_path=ffmpeg_path)
+    cache_hit = not cache_miss_reason
+    paths = FinalOutputPaths(output, partial, report, report_temp, log, managed, cache_hit, cache_miss_reason)
     if cache_hit:
         return paths
     if managed:
@@ -424,6 +436,9 @@ def build_render_report(
     approval_snapshot: Mapping[str, Any] | None = None,
     encoder_contract: Mapping[str, Any] | None = None,
     loudness: Any | None = None,
+    loudness_policy: Mapping[str, Any] | None = None,
+    bgm_source: str = "",
+    cache_miss_reason: str = "",
 ) -> dict[str, Any]:
     return {
         "project_id": project_id,
@@ -436,6 +451,22 @@ def build_render_report(
         },
         "encoder_contract": dict(encoder_contract or {}),
         "loudness": dict(loudness) if isinstance(loudness, Mapping) else (loudness.to_dict() if loudness is not None and hasattr(loudness, "to_dict") else {}),
+        "bgm_source": str(bgm_source or "unknown"),
+        "color": {
+            "project": dict((manifest.get("settings") or {}).get("color") or {}),
+            "segments": {str(item.get("segment_id")): dict(item.get("color") or {}) for item in manifest.get("segments", []) if isinstance(item, Mapping)},
+        },
+        "timing": {"expected_duration_seconds": manifest.get("expected_duration_seconds"), "measured_duration_seconds": qc.duration_seconds},
+        "qc_schema_version": 2,
+        "cache": {
+            "qc_policy_version": 2,
+            "miss_reason": str(cache_miss_reason or ""),
+            "loudness_policy_key": _policy_key(loudness_policy),
+            "snapshot_id": (approval_snapshot or {}).get("snapshot_id", ""),
+            "snapshot_hash": (approval_snapshot or {}).get("snapshot_hash", ""),
+            "encoder_contract_hash": (encoder_contract or {}).get("contract_hash") or _stable_hash(dict(encoder_contract or {})),
+        },
+        "measurements": dict(qc.measurements or {}),
         "profile_id": manifest["profile"]["profile_id"],
         "output_path": str(Path(output_path).resolve()),
         "output_size": int(output_size if output_size is not None else Path(output_path).stat().st_size),
@@ -469,25 +500,69 @@ def _validate_phase4a_settings(manifest: Mapping[str, Any]) -> None:
         raise ProjectRenderError("overlay is not supported in Phase 4A")
 
 
-def _final_cache_valid(output: Path, report_path: Path, manifest: Mapping[str, Any], manifest_id: str, profile_id: str, bgm_fp: Mapping[str, Any] | None, ffprobe_path: str) -> bool:
+def _final_cache_valid(output: Path, report_path: Path, manifest: Mapping[str, Any], manifest_id: str, profile_id: str, bgm_fp: Mapping[str, Any] | None, ffprobe_path: str, **kwargs: Any) -> bool:
+    return not _final_cache_miss_reason(output, report_path, manifest, manifest_id, profile_id, bgm_fp, ffprobe_path, **kwargs)
+
+
+def _final_cache_miss_reason(output: Path, report_path: Path, manifest: Mapping[str, Any], manifest_id: str, profile_id: str, bgm_fp: Mapping[str, Any] | None, ffprobe_path: str, *, approval_snapshot: Mapping[str, Any] | None = None, encoder_contract: Mapping[str, Any] | None = None, loudness_policy: Mapping[str, Any] | None = None, ffmpeg_path: str = "ffmpeg") -> str:
     if not output.is_file() or not report_path.is_file():
-        return False
+        return "output_or_report_missing"
     try:
         report = _read_json(report_path)
         if report.get("manifest_hash") != manifest_id or report.get("profile_id") != profile_id:
-            return False
+            return "manifest_or_profile_changed"
+        if int(report.get("qc_schema_version") or 0) < 2:
+            return "qc_policy_outdated"
+        cache = report.get("cache") if isinstance(report.get("cache"), Mapping) else {}
+        if int(cache.get("qc_policy_version") or 0) != 2:
+            return "qc_policy_changed"
+        expected_snapshot = approval_snapshot or {}
+        report_snapshot = report.get("approval_snapshot") if isinstance(report.get("approval_snapshot"), Mapping) else {}
+        for key in ("snapshot_id", "snapshot_hash"):
+            expected = str(expected_snapshot.get(key) or "")
+            if expected and str(report_snapshot.get(key) or "") != expected:
+                return "approval_snapshot_changed"
+            if expected and str(cache.get(key) or "") != expected:
+                return "approval_snapshot_changed"
+        if encoder_contract:
+            expected_encoder_hash = str(encoder_contract.get("contract_hash") or _stable_hash(encoder_contract))
+            actual_encoder_hash = str((report.get("encoder_contract") or {}).get("contract_hash") or _stable_hash(report.get("encoder_contract") or {}))
+            if actual_encoder_hash != expected_encoder_hash:
+                return "encoder_contract_changed"
+            if str(cache.get("encoder_contract_hash") or "") != expected_encoder_hash:
+                return "encoder_contract_changed"
+        if _policy_key(loudness_policy) != str(cache.get("loudness_policy_key") or _policy_key(report.get("loudness_policy") or {})):
+            return "loudness_policy_changed"
         expected_keys = [build_segment_cache_key(manifest, segment) for segment in sorted(manifest["segments"], key=lambda item: int(item["order"]))]
         actual_keys = [item.get("cache_key") for item in report.get("segments", [])]
         if actual_keys != expected_keys:
-            return False
+            return "segment_cache_changed"
         if (report.get("bgm") or {}).get("fingerprint") != dict(bgm_fp or {}):
-            return False
+            return "bgm_changed"
         if report.get("output_size") != output.stat().st_size or report.get("output_sha256") != sha256_file(output):
-            return False
-        qc = validate_final_output(output, manifest, ffprobe_path)
-        return qc.passed and bool((report.get("qc") or {}).get("passed"))
-    except (OSError, ValueError, KeyError, TypeError):
-        return False
+            return "output_hash_changed"
+        if not bool((report.get("qc") or {}).get("passed")):
+            return "previous_qc_failed"
+        qc = validate_final_output(output, manifest, ffprobe_path, ffmpeg_path=ffmpeg_path)
+        if not qc.passed:
+            return "final_qc_revalidation_failed"
+        if loudness_policy and bool(loudness_policy.get("enabled")):
+            from .loudness import measure_loudness
+            measured = measure_loudness(ffmpeg_path, output, loudness_policy)
+            final = (report.get("loudness") or {}).get("final") or {}
+            if abs(float(final.get("measured_I", 999)) - measured.measured_I) > 0.2 or abs(float(final.get("measured_TP", 999)) - measured.measured_TP) > 0.2:
+                return "loudness_measurement_changed"
+        return ""
+    except Exception:
+        return "cache_report_invalid"
+
+
+def _stable_hash(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(dict(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _policy_key(value: Mapping[str, Any] | None) -> str:
+    return _stable_hash(value or {})
 
 
 def _write_log(path: Path, project_id: int, manifest_id: str, segment_results: list[SegmentRenderResult], concat_path: Path, command: list[str] | None, result: Any, qc: FinalQCResult | None, track: Mapping[str, Any] | None, error: Exception | None) -> None:

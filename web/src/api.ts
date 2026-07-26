@@ -117,6 +117,25 @@ export type Job = {
   encoder_contract?: { implementation?: string; fallback_reason?: string; [key: string]: unknown };
 };
 
+export type RenderReport = {
+  status: "current" | "historical" | "stale" | string;
+  project_id?: number;
+  manifest_hash?: string;
+  profile_id?: string;
+  approval_snapshot?: { snapshot_id?: string; snapshot_hash?: string; schema_version?: number; approved_project_revision?: number };
+  encoder_contract?: { implementation?: string; fallback_reason?: string; [key: string]: unknown };
+  loudness?: Record<string, unknown>;
+  color?: Record<string, unknown>;
+  timing?: Record<string, unknown>;
+  measurements?: Record<string, unknown>;
+  bgm?: Record<string, unknown>;
+  output?: { filename?: string; size?: number; sha256?: string; duration_seconds?: number };
+  segment_count?: number;
+  qc?: { passed?: boolean; errors?: string[]; warnings?: string[] };
+  cache?: Record<string, unknown>;
+  created_at?: string;
+};
+
 export type JobsSnapshot = {
   jobs: Job[];
   project_revision?: number;
@@ -320,6 +339,8 @@ export const api = {
     json<{ ok: boolean; created: boolean; job?: Job; error?: string }>("/api/project/render-job", post({ project_id: projectId, output_path: outputPath })),
   cancelRenderJob: (jobId: string) =>
     json<{ ok: boolean; job?: Job; error?: string; reason?: string }>("/api/render-job/cancel", post({ job_id: jobId })),
+  renderJobReport: (jobId: string) =>
+    json<{ ok: boolean; report?: RenderReport; error?: string }>(`/api/render-job/report?id=${encodeURIComponent(jobId)}`),
   cancelLegacyJob: (projectId: number, legacyJobKey: string) =>
     json<{ ok: boolean; message?: string; job?: Job; error?: string }>("/api/project/legacy-job/cancel", post({ project_id: projectId, legacy_job_key: legacyJobKey })),
   stopJobs: (projectId: number) =>

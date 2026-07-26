@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { api, type Job } from "../../api";
+import { api, type Job, type RenderReport } from "../../api";
 import type { ProjectDataLoadOptions } from "../../projectDataLoader";
 import { createProjectMutationControls, mutationLabel, ProjectMutationCoordinator, type ProjectMutationControls } from "../../projectMutation";
 import { copyText } from "../../utils/clipboard";
@@ -73,6 +73,8 @@ export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject, mu
   const [filter, setFilter] = useState<JobFilter>("all");
   const [expanded, setExpanded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [reportByJob, setReportByJob] = useState<Record<string, RenderReport>>({});
+  const [reportLoading, setReportLoading] = useState<Set<string>>(new Set());
   const pendingCancelsRef = useRef<Job[]>([]);
   const fallbackControlsRef = useRef<ProjectMutationControls | null>(null);
   if (!fallbackControlsRef.current) fallbackControlsRef.current = createProjectMutationControls(new ProjectMutationCoordinator());
@@ -169,6 +171,26 @@ export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject, mu
     setProjectMessage(copied ? `${label}路徑已複製。` : `無法複製${label}路徑，請展開後手動複製。`);
   }
 
+  async function loadReport(jobId: string) {
+    setReportLoading((current) => new Set(current).add(jobId));
+    try {
+      const result = await api.renderJobReport(jobId);
+      if (!result.ok || !result.report) {
+        setProjectMessage(result.error || "Render Report 尚未產生");
+        return;
+      }
+      setReportByJob((current) => ({ ...current, [jobId]: result.report! }));
+    } catch (error) {
+      setProjectMessage(`Render Report 讀取失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+    } finally {
+      setReportLoading((current) => {
+        const next = new Set(current);
+        next.delete(jobId);
+        return next;
+      });
+    }
+  }
+
   return <section className="render-job-panel" aria-live="polite">
     <div className="panel-heading render-job-heading">
       <div>
@@ -223,6 +245,10 @@ export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject, mu
             {job.approval_snapshot_id && <span>核准快照：{job.approval_snapshot_id.slice(0, 20)}</span>}
             {job.encoder_contract?.implementation && <span>編碼器：{job.encoder_contract.implementation}{job.encoder_contract.fallback_reason ? `（${job.encoder_contract.fallback_reason}）` : ""}</span>}
             {job.error && <span className="job-error">錯誤：{job.error}</span>}
+            {job.job_id && SUCCESS_STATUSES.has(job.status) && <button type="button" className="compact" disabled={reportLoading.has(job.job_id)} onClick={() => void loadReport(job.job_id!)}>
+              {reportLoading.has(job.job_id) ? "讀取報告…" : reportByJob[job.job_id] ? "重新整理報告" : "查看 Render Report"}
+            </button>}
+            {job.job_id && reportByJob[job.job_id] && <RenderReportSummary report={reportByJob[job.job_id]} />}
             {(job.output_path || job.log_path) && <details className="job-files">
               <summary>{job.output_path ? "輸出與記錄" : "工作記錄"}</summary>
               {job.output_path && <JobPath label="輸出檔案" path={job.output_path} onCopy={() => void copyPath(job.output_path!, "輸出檔案")} />}
@@ -245,6 +271,20 @@ export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject, mu
     </button>}
     {hasFormalJob && <p className="job-footnote">正式輸出完成後，MP4 與 Render Report 會一起出現；發布邊界後的取消不會撤銷已完成輸出。</p>}
   </section>;
+}
+
+function RenderReportSummary({ report }: { report: RenderReport }) {
+  const status = report.status === "current" ? "目前核准" : report.status === "historical" ? "歷史成功" : "過期或無法驗證";
+  const final = report.loudness && typeof report.loudness.final === "object" && report.loudness.final !== null ? report.loudness.final as Record<string, unknown> : undefined;
+  return <div className="render-report-summary">
+    <strong>Render Report：{status}</strong>
+    <span>QC：{report.qc?.passed ? "通過" : "未通過"}</span>
+    {report.profile_id && <span>Profile：{report.profile_id}</span>}
+    {report.encoder_contract?.implementation && <span>Encoder：{report.encoder_contract.implementation}</span>}
+    {typeof final?.measured_I === "number" && <span>LUFS：{Number(final.measured_I).toFixed(1)}</span>}
+    {report.qc?.errors?.length ? <span className="job-error">硬失敗：{report.qc.errors.join("；")}</span> : null}
+    {report.qc?.warnings?.length ? <span>警告：{report.qc.warnings.join("；")}</span> : null}
+  </div>;
 }
 
 function JobPath({ label, path, onCopy }: { label: string; path: string; onCopy: () => void }) {

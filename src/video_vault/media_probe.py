@@ -32,6 +32,10 @@ class MediaProbe:
     color_matrix: str = ""
     color_range: str = ""
     frame_count: int = 0
+    video_start_seconds: float = 0.0
+    video_end_seconds: float = 0.0
+    audio_start_seconds: float = 0.0
+    audio_end_seconds: float = 0.0
 
 
 MediaProbeResult = MediaProbe
@@ -45,6 +49,8 @@ def probe_media(ffprobe_path: str, path: Path) -> MediaProbe:
         str(ffprobe_path),
         "-v",
         "error",
+        "-count_frames",
+        "-count_packets",
         "-show_streams",
         "-show_format",
         "-of",
@@ -93,6 +99,10 @@ def _parse(source: Path, raw: dict[str, Any]) -> MediaProbe:
         color_matrix=str(video.get("color_space") or ""),
         color_range=str(video.get("color_range") or ""),
         frame_count=_integer(video.get("nb_read_frames") or video.get("nb_frames")),
+        video_start_seconds=_number(video.get("start_time")) or 0.0,
+        video_end_seconds=(_number(video.get("start_time")) or 0.0) + (_number(video.get("duration")) or duration),
+        audio_start_seconds=_number(audio.get("start_time")) if audio else 0.0,
+        audio_end_seconds=((_number(audio.get("start_time")) or 0.0) + (_number(audio.get("duration")) or duration)) if audio else 0.0,
     )
 
 

@@ -575,7 +575,7 @@ def test_preview_cache_key_changes_when_lut_contents_change(tmp_path):
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source")
     lut = tmp_path / "look.cube"
-    lut.write_bytes(b"lut-a")
+    lut.write_text("TITLE \"identity\"\nLUT_3D_SIZE 2\n0 0 0\n0 0 1\n0 1 0\n0 1 1\n1 0 0\n1 0 1\n1 1 0\n1 1 1\n", encoding="ascii")
     state = default_color_state()
     settings = {"mode": "dji_lut", "lut_path": str(lut), "exposure": 0}
     first = preview_cache_key(source, state, {"effective_settings": settings})
@@ -586,7 +586,7 @@ def test_preview_cache_key_changes_when_lut_contents_change(tmp_path):
 def test_project_preview_cache_misses_after_same_path_lut_replacement(tmp_path, monkeypatch):
     cfg, db, project_id, source, _ = _project(tmp_path)
     lut = tmp_path / "look.cube"
-    lut.write_bytes(b"lut-a")
+    lut.write_text("TITLE \"identity\"\nLUT_3D_SIZE 2\n0 0 0\n0 0 1\n0 1 0\n0 1 1\n1 0 0\n1 0 1\n1 1 0\n1 1 1\n", encoding="ascii")
     state = default_color_state()
     state["applied"].update({"mode": "dji_lut", "lut_path": str(lut), "lut_kind": "cube"})
     save_project_color_state(cfg, db, project_id, {**state, "analysis": {"basis_text": "test"}}, mark_review=False)

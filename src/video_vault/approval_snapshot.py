@@ -50,9 +50,16 @@ def asset_fingerprint(path: str | Path, *, kind: str, asset_id: str = "", metada
     }
 
 
-def build_approval_snapshot(cfg: Mapping[str, Any], db: Path, project_id: int, *, approved_revision: int) -> dict[str, Any]:
+def build_approval_snapshot(
+    cfg: Mapping[str, Any],
+    db: Path,
+    project_id: int,
+    *,
+    approved_revision: int,
+    manifest: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build without writing files or changing project state."""
-    manifest = build_render_manifest(dict(cfg), Path(db), int(project_id))
+    manifest = deepcopy(manifest) if manifest is not None else build_render_manifest(dict(cfg), Path(db), int(project_id))
     validation = validate_render_manifest(manifest)
     if validation["errors"]:
         raise ApprovalSnapshotError("manifest is invalid: " + "; ".join(validation["errors"]))
@@ -64,6 +71,9 @@ def build_approval_snapshot(cfg: Mapping[str, Any], db: Path, project_id: int, *
     assets = _manifest_assets(manifest)
     audio = effective_project_audio_state(dict(cfg), int(project_id), Path(db))
     selected_bgm = resolve_audio_state_bgm(Path(db), audio) if audio is not None else None
+    if selected_bgm is None and len(manifest.get("bgm") or []) == 1:
+        # Legacy project_bgm rows are already resolved into the manifest.
+        selected_bgm = manifest["bgm"][0]
     color_state = load_project_color_state(dict(cfg), int(project_id))
     effective_color = {
         str(item.get("segment_id")): effective_color_settings(color_state, str(item.get("segment_id")))
@@ -82,7 +92,7 @@ def build_approval_snapshot(cfg: Mapping[str, Any], db: Path, project_id: int, *
             "audio": _json_safe(audio or {"source": "legacy"}),
             "selected_bgm": _public_bgm(selected_bgm),
             "color": _json_safe({"project": color_state.get("applied", {}), "segments": effective_color}),
-            "storyboard": _json_safe(manifest.get("storyboard") or {}),
+            "storyboard": _json_safe(manifest.get("storyboard_render_state") or {}),
             "render_profile": _json_safe(manifest.get("profile") or {}),
         },
     }

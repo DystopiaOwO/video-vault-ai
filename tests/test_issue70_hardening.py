@@ -1,0 +1,136 @@
+from pathlib import Path
+import json
+import shutil
+import subprocess
+import threading
+import time
+
+import pytest
+
+from video_vault.final_qc import FinalQCResult, validate_final_output
+from video_vault.project_renderer import _final_cache_miss_reason, _policy_key
+from video_vault.render_api import build_render_report_dto
+from video_vault.render_profiles import get_render_profile
+from video_vault.segment_cache import build_segment_cache_key
+
+
+def test_render_report_dto_redacts_local_paths():
+    report = {
+        "project_id": 7,
+        "manifest_hash": "m" * 64,
+        "profile_id": "final_1080p",
+        "output_path": r"D:\VideoLibrary\08_projects\project_7\renders\final.mp4",
+        "output_size": 123,
+        "output_sha256": "s" * 64,
+        "color": {"effective_source": "project", "lut_path": r"C:\Users\b3b3b\Downloads\look.cube"},
+        "bgm": {"source_path": r"D:\VideoLibrary\04_audio\bgm\city.mp3", "title": "City"},
+        "qc": {"passed": True, "errors": [], "warnings": []},
+    }
+
+    dto = build_render_report_dto(report, currentity="current").to_dict()
+    encoded = json.dumps(dto, ensure_ascii=False)
+
+    assert dto["status"] == "current"
+    assert dto["output"]["filename"] == "final.mp4"
+    assert "D:\\VideoLibrary" not in encoded
+    assert "C:\\Users" not in encoded
+    assert dto["bgm"]["title"] == "City"
+
+
+def test_final_cache_revalidation_binds_snapshot_and_encoder_contract(monkeypatch, tmp_path: Path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    output = tmp_path / "final.mp4"
+    output.write_bytes(b"final")
+    manifest = {
+        "manifest_hash": "m" * 64,
+        "profile": {"profile_id": "final_1080p"},
+        "settings": {"encoder": "cpu"},
+        "segments": [{
+            "segment_id": "seg-1", "order": 1, "source_file": str(source),
+            "source_in_seconds": 0.0, "source_out_seconds": 1.0, "speed": 1.0,
+        }],
+    }
+    cache_key = build_segment_cache_key(manifest, manifest["segments"][0])
+    contract = {"contract_hash": "encoder-contract"}
+    snapshot = {"snapshot_id": "snapshot-1", "snapshot_hash": "snapshot-hash"}
+    report = {
+        "manifest_hash": "m" * 64,
+        "profile_id": "final_1080p",
+        "qc_schema_version": 2,
+        "approval_snapshot": snapshot,
+        "encoder_contract": contract,
+        "cache": {
+            "qc_policy_version": 2,
+            "snapshot_id": snapshot["snapshot_id"],
+            "snapshot_hash": snapshot["snapshot_hash"],
+            "encoder_contract_hash": contract["contract_hash"],
+            "loudness_policy_key": _policy_key(None),
+        },
+        "segments": [{"cache_key": cache_key}],
+        "bgm": {"fingerprint": {}},
+        "output_size": output.stat().st_size,
+        "output_sha256": "digest",
+        "qc": {"passed": True},
+    }
+    report_path = output.with_name(output.name + ".render.json")
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    monkeypatch.setattr("video_vault.project_renderer.sha256_file", lambda _path: "digest")
+    monkeypatch.setattr("video_vault.project_renderer.validate_final_output", lambda *args, **kwargs: FinalQCResult(True, 1.0, "digest"))
+
+    assert _final_cache_miss_reason(
+        output, report_path, manifest, "m" * 64, "final_1080p", None, "ffprobe",
+        approval_snapshot=snapshot, encoder_contract=contract,
+    ) == ""
+
+    report["cache"]["encoder_contract_hash"] = "changed"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    assert _final_cache_miss_reason(
+        output, report_path, manifest, "m" * 64, "final_1080p", None, "ffprobe",
+        approval_snapshot=snapshot, encoder_contract=contract,
+    ) == "encoder_contract_changed"
+
+
+def test_report_cache_revalidation_fails_closed_when_qc_probe_errors(monkeypatch, tmp_path: Path):
+    output = tmp_path / "final.mp4"
+    output.write_bytes(b"final")
+    report_path = output.with_name(output.name + ".render.json")
+    report_path.write_text(json.dumps({
+        "manifest_hash": "m", "profile_id": "final_1080p", "qc_schema_version": 2,
+        "cache": {"qc_policy_version": 2, "loudness_policy_key": _policy_key(None)},
+        "segments": [], "bgm": {"fingerprint": {}}, "output_size": output.stat().st_size,
+        "output_sha256": "digest", "qc": {"passed": True},
+    }), encoding="utf-8")
+    monkeypatch.setattr("video_vault.project_renderer.sha256_file", lambda _path: "digest")
+    monkeypatch.setattr("video_vault.project_renderer.validate_final_output", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("probe failed")))
+
+    reason = _final_cache_miss_reason(output, report_path, {"segments": []}, "m", "final_1080p", None, "ffprobe")
+
+    assert reason == "cache_report_invalid"
+
+
+@pytest.mark.media_smoke
+@pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="ffmpeg/ffprobe not installed")
+def test_final_qc_media_probe_records_decode_and_timestamp_measurements(tmp_path: Path):
+    output = tmp_path / "qc-media.mp4"
+    subprocess.run([
+        shutil.which("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "testsrc=size=1920x1080:rate=30:duration=1",
+        "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=1",
+        "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
+        "-c:a", "aac", "-ar", "48000", "-ac", "2", str(output),
+    ], check=True)
+    profile = get_render_profile("final_1080p")
+    # This fixture focuses on media measurements; color metadata is covered by
+    # the renderer's final-profile tests and is intentionally absent here.
+    profile.update({"color_primaries": "", "color_transfer": "", "color_matrix": "", "color_range": ""})
+    result = validate_final_output(
+        output, {"profile": profile, "segments": [{"timeline_duration_seconds": 1.0}],},
+        shutil.which("ffprobe"), ffmpeg_path=shutil.which("ffmpeg"),
+    )
+
+    assert result.passed, result.errors
+    assert result.measurements["decode"]["ok"] is True
+    assert result.measurements["timestamp_monotonic"] is True
+    assert result.measurements["frame_count"] == 30

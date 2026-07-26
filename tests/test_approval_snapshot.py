@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from video_vault.approval_snapshot import load_approval_snapshot, validate_snapshot
-from video_vault.database import add_analysis, init_db, upsert_video
+from video_vault.database import add_analysis, add_bgm_track, add_project_bgm, init_db, project, project_revision, upsert_video
 from video_vault.project import can_project_render, create_project, project_dir, set_review_status
 from video_vault.project import build_project_plan
 
@@ -54,3 +56,53 @@ def test_snapshot_hash_detects_manifest_tampering(tmp_path: Path):
     snapshot = load_approval_snapshot(path)
     snapshot["manifest"]["segments"][0]["speed"] = 2.0
     assert not validate_snapshot(snapshot, check_assets=False)["valid"]
+
+
+def test_snapshot_effective_storyboard_matches_manifest_render_state(tmp_path: Path):
+    cfg, _db, project_id, _source = _approved_project(tmp_path)
+    folder = project_dir(cfg, project_id)
+    review = json.loads((folder / "review_status.json").read_text(encoding="utf-8"))
+    snapshot = load_approval_snapshot(folder / review["approval_snapshot_path"])
+    assert snapshot["effective"]["storyboard"] == snapshot["manifest"]["storyboard_render_state"]
+
+
+def test_legacy_manifest_bgm_is_exposed_as_effective_selected_bgm(tmp_path: Path):
+    cfg, db, project_id, _source = _approved_project(tmp_path)
+    bgm = tmp_path / "legacy.mp3"
+    bgm.write_bytes(b"legacy-bgm")
+    track_id = add_bgm_track(db, {"title": "Legacy BGM", "file_path": str(bgm), "source_url": "https://example.test/legacy", "license_name": "CC0", "attribution_text": "Legacy"})
+    add_project_bgm(db, project_id, track_id)
+    set_review_status(cfg, db, project_id, "approved")
+    folder = project_dir(cfg, project_id)
+    review = json.loads((folder / "review_status.json").read_text(encoding="utf-8"))
+    snapshot = load_approval_snapshot(folder / review["approval_snapshot_path"])
+    assert snapshot["effective"]["selected_bgm"]["track_id"] == track_id
+
+
+def test_approval_failure_restores_files_db_revision_and_snapshot_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg, db, project_id, _source = _approved_project(tmp_path)
+    folder = project_dir(cfg, project_id)
+    tracked = [
+        folder / "render_manifest.json",
+        folder / "review_status.json",
+        folder / "project_plan.json",
+        folder / "decisions" / "decision_log.jsonl",
+        folder / "checkpoints" / "review_approved.json",
+    ]
+    before = {path: path.read_bytes() for path in tracked}
+    approvals_before = {path: path.read_bytes() for path in (folder / "approvals").glob("*.json")}
+    before_revision = project_revision(db, project_id)
+    before_status = str(project(db, project_id)["status"])
+
+    def fail_status(*_args, **_kwargs):
+        raise RuntimeError("status publish failed")
+
+    monkeypatch.setattr("video_vault.project.set_project_status", fail_status)
+    with pytest.raises(RuntimeError, match="status publish failed"):
+        set_review_status(cfg, db, project_id, "approved")
+
+    assert {path: path.read_bytes() for path in tracked} == before
+    assert {path: path.read_bytes() for path in (folder / "approvals").glob("*.json")} == approvals_before
+    assert project_revision(db, project_id) == before_revision
+    assert str(project(db, project_id)["status"]) == before_status
+    assert not list(folder.glob(".approval-stage-*"))

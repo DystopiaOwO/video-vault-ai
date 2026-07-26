@@ -50,6 +50,7 @@ class RenderJobStore:
         capabilities: list[str] | None = None,
         resources: list[str] | None = None,
         queue_reason: str = "",
+        generation: int = 1,
     ) -> dict[str, Any]:
         with _STORE_LOCK:
             directory = self.jobs_dir(project_id)
@@ -69,6 +70,7 @@ class RenderJobStore:
                 capabilities=capabilities,
                 resources=resources,
                 queue_reason=queue_reason,
+                generation=generation,
             )
             log_path = directory / f"{job.job_id}.log"
             job.log_path = str(log_path.resolve())

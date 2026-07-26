@@ -134,6 +134,7 @@ class RenderJobManager:
         self._shutting_down = False
         self.coordinator = JobCoordinator(ffmpeg_slots=1, gpu_slots=1, ai_provider_slots=1)
         self._claiming: set[str] = set()
+        self._enqueue_inflight: dict[int, threading.Event] = {}
 
     def start(self) -> None:
         with self._lock:
@@ -153,7 +154,7 @@ class RenderJobManager:
 
     def shutdown(self, wait: bool = True) -> bool:
         with self._lock:
-            if not self._started:
+            if not self._started and not self._enqueue_inflight:
                 return True
             self._shutting_down = True
             self._stop.set()
@@ -184,77 +185,135 @@ class RenderJobManager:
                 return False
             self._started = False
             self._worker = None
-            self._shutting_down = False
+            if not self._enqueue_inflight:
+                self._shutting_down = False
             return True
 
     def enqueue(self, project_id: int, output_path: Path | None = None) -> dict[str, Any]:
-        allowed, reason = can_project_render(self.cfg, self.db, int(project_id))
+        project_id = int(project_id)
+        allowed, reason = can_project_render(self.cfg, self.db, project_id)
         if not allowed:
             return {"created": False, "ok": False, "error": reason}
-        with self._lock:
-            if self._shutting_down:
-                return {"created": False, "ok": False, "error": "Render Manager 正在關閉"}
-            if not self._started:
-                self._start_locked()
-            if self._shutting_down:
-                return {"created": False, "ok": False, "error": "Render Manager 正在關閉"}
-            existing = next((job for job in self.store.list(int(project_id)) if job.get("status") in ACTIVE_JOB_STATUSES), None)
-            if existing:
-                return {"created": False, "ok": True, "job": existing}
-            folder = project_dir(self.cfg, int(project_id))
-            manifest = _read_json(folder / "render_manifest.json")
-            review = _read_json(folder / "review_status.json")
-            from .approval_snapshot import load_approval_snapshot, validate_snapshot
-
-            snapshot = None
-            snapshot_token = str(review.get("approval_snapshot_path") or "")
-            if snapshot_token:
-                try:
-                    snapshot = load_approval_snapshot(folder / snapshot_token)
-                    snapshot_validation = validate_snapshot(snapshot, check_assets=True)
-                except Exception as exc:
-                    return {"created": False, "ok": False, "error": f"approval snapshot 無法讀取：{exc}"}
-                if not snapshot_validation["valid"]:
-                    return {"created": False, "ok": False, "error": "approval snapshot 已失效：" + "; ".join(snapshot_validation["errors"])}
-            encoder_contract = None
-            if snapshot is not None:
-                from .encoder_contract import resolve_encoder_contract
-                try:
-                    encoder_contract = resolve_encoder_contract(self.cfg, dict(snapshot.get("manifest", {}).get("profile") or {}), str((snapshot.get("manifest", {}).get("settings") or {}).get("encoder") or "auto"))
-                except Exception as exc:
-                    return {"created": False, "ok": False, "error": f"encoder 無法解析：{exc}"}
+        while True:
+            with self._lock:
+                if self._shutting_down:
+                    return {"created": False, "ok": False, "error": "Render Manager 正在關閉"}
+                existing = next((job for job in self.store.list(project_id) if job.get("status") in ACTIVE_JOB_STATUSES), None)
+                if existing:
+                    return {"created": False, "ok": True, "job": existing}
+                reservation = self._enqueue_inflight.get(project_id)
+                if reservation is None:
+                    reservation = threading.Event()
+                    self._enqueue_inflight[project_id] = reservation
+                    owner = True
+                else:
+                    owner = False
+            if not owner:
+                reservation.wait()
+                continue
             try:
-                base_revision = project_revision(self.db, int(project_id))
-            except ValueError:
-                # Keep the existing HTTP-neutral manager tests and legacy
-                # callers usable when they provide a mocked render gate.
-                base_revision = 1
-            coordinated = self.coordinator.submit(
-                int(project_id),
-                "formal_render",
-                {"approval_snapshot_reader", "ffmpeg_heavy", "gpu_heavy"},
-                base_revision,
-                resources={"ffmpeg_heavy", "gpu_heavy"},
-            )
-            job = self.store.create(
-                project_id=int(project_id),
-                manifest_hash=str(manifest.get("manifest_hash") or ""),
-                approved_manifest_hash=str(review.get("approved_manifest_hash") or ""),
-                approval_snapshot_id=str((snapshot or {}).get("snapshot_id") or ""),
-                approval_snapshot_hash=str((snapshot or {}).get("snapshot_hash") or ""),
-                approval_snapshot=snapshot,
-                encoder_contract=encoder_contract,
-                requested_output_path=str(output_path or ""),
-                segment_count=len(manifest.get("segments") or []),
-                base_revision=base_revision,
-                capabilities=sorted(coordinated.capabilities),
-                resources=sorted(coordinated.resources),
-                queue_reason=coordinated.queue_reason,
-            )
-            job["coordinator_job_id"] = coordinated.job_id
-            self.store.update(str(job["job_id"]), coordinator_job_id=coordinated.job_id)
-            self._queue.put(str(job["job_id"]))
-            return {"created": True, "ok": True, "job": job}
+                prepared = self._prepare_enqueue(project_id, output_path)
+                # A probe may be slow and the approval can change while it is
+                # running.  Revalidate before touching the manager state or
+                # creating a persistent job so the contract cannot be stale.
+                allowed, reason = can_project_render(self.cfg, self.db, project_id)
+                if not allowed:
+                    return {"created": False, "ok": False, "error": reason}
+                with self._lock:
+                    if self._shutting_down:
+                        return {"created": False, "ok": False, "error": "Render Manager 正在關閉"}
+                    existing = next((job for job in self.store.list(project_id) if job.get("status") in ACTIVE_JOB_STATUSES), None)
+                    if existing:
+                        return {"created": False, "ok": True, "job": existing}
+                    if not _approval_binding_matches(self.cfg, project_id, prepared):
+                        return {"created": False, "ok": False, "error": "正式輸出核准狀態在 encoder probe 期間變更，請重新核准"}
+                    if not self._started:
+                        self._start_locked()
+                    if self._shutting_down:
+                        return {"created": False, "ok": False, "error": "Render Manager 正在關閉"}
+                    try:
+                        base_revision = project_revision(self.db, project_id)
+                    except ValueError:
+                        # Keep the existing HTTP-neutral manager tests and legacy
+                        # callers usable when they provide a mocked render gate.
+                        base_revision = 1
+                    coordinated = self.coordinator.submit(
+                        project_id,
+                        "formal_render",
+                        {"approval_snapshot_reader", "ffmpeg_heavy", "gpu_heavy"},
+                        base_revision,
+                        resources={"ffmpeg_heavy", "gpu_heavy"},
+                    )
+                    job = self.store.create(
+                        project_id=project_id,
+                        manifest_hash=prepared["manifest_hash"],
+                        approved_manifest_hash=prepared["approved_manifest_hash"],
+                        approval_snapshot_id=prepared["snapshot_id"],
+                        approval_snapshot_hash=prepared["snapshot_hash"],
+                        approval_snapshot=prepared["snapshot"],
+                        encoder_contract=prepared["encoder_contract"],
+                        requested_output_path=str(output_path or ""),
+                        segment_count=prepared["segment_count"],
+                        base_revision=base_revision,
+                        generation=coordinated.generation,
+                        capabilities=sorted(coordinated.capabilities),
+                        resources=sorted(coordinated.resources),
+                        queue_reason=coordinated.queue_reason,
+                    )
+                    job["coordinator_job_id"] = coordinated.job_id
+                    self.store.update(str(job["job_id"]), coordinator_job_id=coordinated.job_id)
+                    self._queue.put(str(job["job_id"]))
+                    return {"created": True, "ok": True, "job": job}
+            except Exception as exc:
+                return {"created": False, "ok": False, "error": str(exc) or exc.__class__.__name__}
+            finally:
+                with self._lock:
+                    self._enqueue_inflight.pop(project_id, None)
+                    reservation.set()
+                    if self._shutting_down and not self._started and not self._enqueue_inflight:
+                        self._shutting_down = False
+
+    def _prepare_enqueue(self, project_id: int, output_path: Path | None) -> dict[str, Any]:
+        del output_path
+        folder = project_dir(self.cfg, int(project_id))
+        manifest = _read_json(folder / "render_manifest.json")
+        review = _read_json(folder / "review_status.json")
+        from .approval_snapshot import load_approval_snapshot, validate_snapshot
+
+        snapshot = None
+        snapshot_token = str(review.get("approval_snapshot_path") or "")
+        if snapshot_token:
+            try:
+                snapshot = load_approval_snapshot(folder / snapshot_token)
+                snapshot_validation = validate_snapshot(snapshot, check_assets=True)
+            except Exception as exc:
+                raise ValueError(f"approval snapshot 無法讀取：{exc}") from exc
+            if not snapshot_validation["valid"]:
+                raise ValueError("approval snapshot 已失效：" + "; ".join(snapshot_validation["errors"]))
+        encoder_contract = None
+        if snapshot is not None:
+            from .encoder_contract import resolve_encoder_contract
+            try:
+                # This is deliberately outside ``self._lock``.  The resolver
+                # may run both an NVENC probe and ``ffmpeg -version``.
+                encoder_contract = resolve_encoder_contract(
+                    self.cfg,
+                    dict(snapshot.get("manifest", {}).get("profile") or {}),
+                    str((snapshot.get("manifest", {}).get("settings") or {}).get("encoder") or "auto"),
+                )
+            except Exception as exc:
+                raise ValueError(f"encoder 無法解析：{exc}") from exc
+        return {
+            "folder": folder,
+            "manifest_hash": str(manifest.get("manifest_hash") or ""),
+            "approved_manifest_hash": str(review.get("approved_manifest_hash") or ""),
+            "approval_snapshot_path": snapshot_token,
+            "snapshot_id": str((snapshot or {}).get("snapshot_id") or ""),
+            "snapshot_hash": str((snapshot or {}).get("snapshot_hash") or ""),
+            "snapshot": snapshot,
+            "encoder_contract": encoder_contract,
+            "segment_count": len(manifest.get("segments") or []),
+        }
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         return self.store.get(job_id)
@@ -512,6 +571,36 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"invalid JSON object: {path}")
     return data
+
+
+def _approval_binding_matches(cfg: dict[str, Any], project_id: int, prepared: dict[str, Any]) -> bool:
+    """Compare the cheap immutable approval pointers after an unlocked probe."""
+    del cfg
+    folder = Path(prepared["folder"])
+    try:
+        manifest = _read_json(folder / "render_manifest.json")
+        review = _read_json(folder / "review_status.json")
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    if str(manifest.get("manifest_hash") or "") != prepared["manifest_hash"]:
+        return False
+    if str(review.get("approved_manifest_hash") or "") != prepared["approved_manifest_hash"]:
+        return False
+    if str(review.get("approval_snapshot_path") or "") != prepared["approval_snapshot_path"]:
+        return False
+    if prepared["snapshot"] is None:
+        return True
+    try:
+        from .approval_snapshot import load_approval_snapshot
+
+        latest = load_approval_snapshot(folder / prepared["approval_snapshot_path"])
+    except Exception:
+        return False
+    return (
+        int(latest.get("project_id") or 0) == int(project_id)
+        and str(latest.get("snapshot_id") or "") == prepared["snapshot_id"]
+        and str(latest.get("snapshot_hash") or "") == prepared["snapshot_hash"]
+    )
 
 
 __all__ = ["RenderExecutionContext", "RenderJobManager"]
