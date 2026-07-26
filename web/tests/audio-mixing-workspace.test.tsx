@@ -46,6 +46,21 @@ function audio(volume = -18): AudioState {
   };
 }
 
+function legacyAudio(state: "legacy_single" | "legacy_multiple" | "legacy_empty"): AudioState {
+  const selected = state === "legacy_single" ? { id: 1, title: "既有配樂" } : undefined;
+  return {
+    ...audio(),
+    source: "legacy",
+    settings_exists: false,
+    bgm: { ...audio().bgm, bgm_id: selected?.id ?? null, enabled: Boolean(selected) },
+    effective_selected_track: selected,
+    migration: {
+      state,
+      warning: state === "legacy_multiple" ? "請明確選擇一首配樂。" : "",
+    },
+  };
+}
+
 function color(): ColorState {
   return {
     schema_version: 2,
@@ -222,5 +237,42 @@ describe("AudioMixingWorkspace", () => {
     fireEvent.change(screen.getByLabelText("原音預設角色"), { target: { value: "bgm_only" } });
     expect(screen.getByText(/目前沒有有效 BGM/)).toBeTruthy();
     expect((screen.getByRole("button", { name: "儲存音訊設定" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it.each([
+    ["legacy_single", "既有配樂", "legacy_single"],
+    ["legacy_multiple", "尚未選擇", "legacy_multiple"],
+    ["legacy_empty", "尚未選擇", "legacy_empty"],
+  ] as const)("shows legacy audio state %s", (state, selected, migration) => {
+    renderWorkspace(detail(1, legacyAudio(state)));
+
+    expect(screen.getByText("來源：legacy（舊版）")).toBeTruthy();
+    expect(screen.getByText("設定：尚未建立，沿用既有資料")).toBeTruthy();
+    expect(screen.getByText(new RegExp(`^遷移：${migration}`))).toBeTruthy();
+    expect(screen.getByText(`有效選曲：${selected}`)).toBeTruthy();
+  });
+
+  it("gives legacy multiple users an actionable selection repair", () => {
+    renderWorkspace(detail(1, legacyAudio("legacy_multiple")));
+
+    expect(screen.getByRole("alert").textContent).toContain("請在下方「音樂」選單明確選擇一首");
+    const music = screen.getByLabelText("音樂") as HTMLSelectElement;
+    fireEvent.change(music, { target: { value: "2" } });
+    expect(music.value).toBe("2");
+    expect((screen.getByRole("button", { name: "儲存音訊設定" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("shows a valid selected track from the effective API state", () => {
+    renderWorkspace(detail(1, {
+      ...audio(),
+      source: "new",
+      settings_exists: true,
+      effective_selected_track: { id: 2, title: "有效配樂", artist: "測試作者" },
+      bgm: { ...audio().bgm, bgm_id: 2 },
+    }));
+
+    expect(screen.getByText("來源：new（新版）")).toBeTruthy();
+    expect(screen.getByText("設定：已建立")).toBeTruthy();
+    expect(screen.getByText("有效選曲：有效配樂 · 測試作者")).toBeTruthy();
   });
 });

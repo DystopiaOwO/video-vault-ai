@@ -143,7 +143,11 @@ export type ProjectDetail = {
 
 export type ColorAdjustment = {
   mode: string;
-  lut_path: string;
+  // The API intentionally hides local LUT absolute paths.  A user may enter
+  // a replacement path, while an existing server-owned path is represented
+  // by ``lut_name`` only.
+  lut_path?: string;
+  lut_name?: string;
   lut_kind: string;
   exposure: number;
   temperature: number;
@@ -179,7 +183,11 @@ export type ColorSegmentState = {
   warnings?: string[];
 };
 
-export type ColorSegmentPatch = Pick<ColorSegmentState, "enabled" | "locked" | "excluded" | "applied">;
+export type ColorSegmentAnalysis = Partial<Pick<ColorSegmentState, "reference_candidate" | "suggested" | "confidence" | "warnings">>;
+export type ColorSegmentOverride = Partial<Pick<ColorSegmentState, "enabled" | "locked" | "excluded" | "applied">>;
+export type ColorSegmentPatch = ColorSegmentOverride;
+export type ColorLutModeContract = { requires_lut: boolean; extension: string };
+export type ColorLutContract = { version: string; strategy: string; modes: Record<string, ColorLutModeContract> };
 
 export type ColorState = {
   schema_version: number;
@@ -190,16 +198,16 @@ export type ColorState = {
   suggested: ColorAdjustment;
   applied: ColorAdjustment;
   segments: Record<string, ColorSegmentState>;
-  segment_analysis?: Record<string, Pick<ColorSegmentState, "reference_candidate" | "suggested" | "confidence" | "warnings">>;
-  segment_overrides?: Record<string, Pick<ColorSegmentState, "enabled" | "locked" | "excluded" | "applied">>;
-  lut_contract?: { version: string; strategy: string; modes: Record<string, { requires_lut: boolean; extension: string }> };
+  segment_analysis?: Record<string, ColorSegmentAnalysis>;
+  segment_overrides?: Record<string, ColorSegmentOverride | null>;
+  lut_contract?: ColorLutContract;
 };
 
 export type ColorStatePatch = {
   schema_version: number;
   enabled: boolean;
   applied: ColorAdjustment;
-  segments: Record<string, ColorSegmentPatch | null>;
+  segments: Record<string, ColorSegmentOverride | null>;
 };
 
 export type BgmRecommendation = {

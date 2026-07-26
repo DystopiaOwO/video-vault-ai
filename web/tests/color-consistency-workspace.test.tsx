@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, type AudioState, type ColorAdjustment, type ColorState, type ProjectDetail } from "../src/api";
+import { ApiError, api, type AudioState, type ColorAdjustment, type ColorState, type ProjectDetail } from "../src/api";
 import { ColorConsistencyWorkspace } from "../src/workspaces/color/ColorConsistencyWorkspace";
 
 function adjustment(exposure = 0): ColorAdjustment {
@@ -70,6 +70,18 @@ function color(exposure = 0): ColorState {
     suggested: adjustment(.2),
     applied: adjustment(exposure),
     segments: {},
+    segment_analysis: {
+      a: { suggested: adjustment(.25), confidence: .9, warnings: [] },
+      b: { suggested: adjustment(.15), confidence: .8, warnings: [] },
+    },
+    segment_overrides: {},
+    lut_contract: {
+      version: "1",
+      strategy: "user_managed",
+      modes: {
+        camera_lut: { requires_lut: true, extension: ".cube" },
+      },
+    },
   };
 }
 
@@ -223,14 +235,19 @@ describe("ColorConsistencyWorkspace", () => {
     expect(document.querySelectorAll("video")).toHaveLength(0);
   });
 
-  it("searches segments and removes a segment override", () => {
+  it("shows analysis suggestions separately from manual overrides and sends a reset tombstone", async () => {
     const customized = color();
-    customized.segments.a = { enabled: true, locked: false, excluded: false, applied: adjustment(.7), confidence: .9, warnings: [] };
+    customized.segment_overrides = { a: { enabled: true, locked: false, excluded: false, applied: adjustment(.7) } };
+    const save = vi.spyOn(api, "colorSettings").mockResolvedValue({ ok: true, state: customized });
     renderWorkspace(detail(1, customized));
 
-    expect(screen.getByText(/片段自訂/)).toBeTruthy();
+    expect(screen.getByText(/片段手動覆寫/)).toBeTruthy();
+    expect(screen.getAllByText(/分析建議（唯讀）/).length).toBeGreaterThan(0);
     fireEvent.click(screen.getAllByRole("button", { name: "恢復專案預設" })[0]);
     expect(screen.getByText("有未儲存變更")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "儲存調色設定" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(1, expect.objectContaining({ segments: { a: null } }), 7));
 
     fireEvent.change(screen.getByLabelText("搜尋調色片段"), { target: { value: "巷弄" } });
     expect(screen.queryByText("抵達車站")).toBeNull();
@@ -249,14 +266,51 @@ describe("ColorConsistencyWorkspace", () => {
     expect(screen.queryByText("有未儲存變更")).toBeNull();
   });
 
-  it("requires a LUT path before saving custom DJI LUT mode", () => {
+  it("reads LUT requirements from the backend contract", () => {
     renderWorkspace();
 
-    fireEvent.change(screen.getByLabelText("技術 LUT 模式"), { target: { value: "dji_lut" } });
-    expect(screen.getByText(/需要有效的 .cube 路徑/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("技術 LUT 模式"), { target: { value: "camera_lut" } });
+    expect(screen.getByText(/需要有效的 \.cube LUT 路徑/)).toBeTruthy();
     expect((screen.getByRole("button", { name: "儲存調色設定" }) as HTMLButtonElement).disabled).toBe(true);
 
-    fireEvent.change(screen.getByLabelText("LUT 路徑"), { target: { value: "C:/LUTs/DJI.cube" } });
+    fireEvent.change(screen.getByLabelText("LUT 路徑"), { target: { value: "C:/LUTs/camera.cube" } });
     expect((screen.getByRole("button", { name: "儲存調色設定" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("keeps a masked server LUT usable without exposing its local path", () => {
+    const masked = color();
+    masked.applied = { ...masked.applied, mode: "camera_lut", lut_name: "private-look.cube" };
+    delete masked.applied.lut_path;
+    renderWorkspace(detail(1, masked));
+
+    expect((screen.getByLabelText("LUT 路徑") as HTMLInputElement).value).toBe("");
+    expect((screen.getByRole("button", { name: "儲存調色設定" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("專案曝光"), { target: { value: ".2" } });
+    expect((screen.getByRole("button", { name: "儲存調色設定" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("keeps validation, conflict, and refresh failures safe", async () => {
+    const { setMessage, refreshProject } = renderWorkspace();
+    const save = vi.spyOn(api, "colorSettings");
+
+    save.mockResolvedValueOnce({ ok: false, error: "欄位無效", code: "validation_error" });
+    fireEvent.change(screen.getByLabelText("專案曝光"), { target: { value: ".4" } });
+    fireEvent.click(screen.getByRole("button", { name: "儲存調色設定" }));
+    await waitFor(() => expect(setMessage).toHaveBeenCalledWith("色彩設定儲存失敗：欄位無效"));
+    expect(refreshProject).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "放棄變更" }));
+    save.mockRejectedValueOnce(new ApiError(409, { project_revision: 8 }));
+    fireEvent.change(screen.getByLabelText("專案曝光"), { target: { value: ".5" } });
+    fireEvent.click(screen.getByRole("button", { name: "儲存調色設定" }));
+    await waitFor(() => expect(setMessage).toHaveBeenCalledWith(expect.stringContaining("目前版本 8")));
+    expect(refreshProject).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "放棄變更" }));
+    save.mockResolvedValueOnce({ ok: true, state: color(.6) });
+    refreshProject.mockRejectedValueOnce(new Error("refresh down"));
+    fireEvent.change(screen.getByLabelText("專案曝光"), { target: { value: ".6" } });
+    fireEvent.click(screen.getByRole("button", { name: "儲存調色設定" }));
+    await waitFor(() => expect(setMessage).toHaveBeenCalledWith(expect.stringContaining("但畫面更新失敗")));
   });
 });

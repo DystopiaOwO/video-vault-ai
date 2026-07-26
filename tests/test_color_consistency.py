@@ -90,6 +90,24 @@ def test_effective_color_settings_respects_enable_and_exclude():
     assert effective_color_settings(state, "seg-1")["mode"] == "none"
 
 
+def test_analysis_only_segment_uses_project_applied_and_auto_source():
+    state = default_color_state()
+    state["applied"].update({"mode": "warm_food", "exposure": -0.3})
+    state["segment_analysis"]["seg-1"] = {
+        "suggested": {"mode": "manual", "exposure": 0.8},
+        "confidence": 0.9,
+        "warnings": [],
+    }
+    state["segment_overrides"]["seg-1"] = {"enabled": True, "locked": False, "excluded": False}
+
+    effective = effective_color_settings(state, "seg-1")
+
+    assert effective["mode"] == "warm_food"
+    assert effective["exposure"] == -0.3
+    assert effective["effective_source"] == "auto"
+    assert "applied" not in normalize_color_state(state)["segment_overrides"]["seg-1"]
+
+
 def test_enabled_segment_override_can_opt_in_when_project_default_is_disabled():
     state = default_color_state()
     state["enabled"] = False
@@ -106,6 +124,68 @@ def test_removing_segment_color_override_restores_project_default(tmp_path):
     updated = update_color_state(cfg, db, project_id, {"segments": {"seg-1": None}})
     assert "seg-1" not in updated["segments"]
     assert effective_color_settings(updated, "seg-1")["mode"] == "none" if not updated["enabled"] else effective_color_settings(updated, "seg-1")["mode"] == updated["applied"]["mode"]
+
+
+def test_resetting_segment_applied_override_does_not_revive_old_value(tmp_path):
+    cfg, db, project_id, _, _ = _project(tmp_path)
+    state = default_color_state()
+    state["applied"].update({"mode": "safe_restore", "exposure": 0.1})
+    state["segments"]["seg-1"] = {
+        "enabled": True,
+        "locked": False,
+        "excluded": False,
+        "applied": {"mode": "manual", "exposure": -0.7},
+    }
+    save_project_color_state(cfg, db, project_id, state, mark_review=False)
+
+    reset = update_color_state(cfg, db, project_id, {"segments": {"seg-1": {"applied": None}}})
+    assert "applied" not in reset["segment_overrides"]["seg-1"]
+    assert effective_color_settings(reset, "seg-1")["exposure"] == 0.1
+    assert effective_color_settings(reset, "seg-1")["effective_source"] == "project"
+
+    tombstoned = update_color_state(cfg, db, project_id, {"segments": {"seg-1": None}})
+    assert "seg-1" not in tombstoned["segment_overrides"]
+    assert effective_color_settings(tombstoned, "seg-1")["exposure"] == 0.1
+
+
+def test_force_reanalysis_keeps_analysis_only_segment_out_of_manual_overrides(tmp_path, monkeypatch):
+    cfg, db, project_id, _, video_id = _project(tmp_path)
+    segment_id = "analysis_only_00000000"
+    _write_project_plan(cfg, project_id, [{"clip_id": "analysis_only", "video_id": video_id, "start_seconds": 0, "end_seconds": 1, "title": "analysis-only"}])
+    state = default_color_state()
+    state["applied"].update({"mode": "manual", "exposure": 0.25})
+    state["analysis"] = {"old": True}
+    state["segment_analysis"][segment_id] = {"suggested": {"exposure": -0.5}, "confidence": 0.8, "warnings": []}
+    state["segment_overrides"][segment_id] = {"enabled": True, "locked": False, "excluded": False}
+    save_project_color_state(cfg, db, project_id, state, mark_review=False)
+    monkeypatch.setattr("video_vault.color_consistency._reference_luma", lambda cfg, reference: {"average": 190, "highlight_ratio": 0.2, "sampled_frames": 1})
+
+    result = analyze_project_color(cfg, db, project_id, force=True)
+
+    assert "applied" not in result["segment_overrides"][segment_id]
+    assert result["segments"][segment_id]["applied"]["exposure"] == 0.25
+    assert effective_color_settings(result, segment_id)["exposure"] == 0.25
+    assert effective_color_settings(result, segment_id)["effective_source"] == "auto"
+
+
+def test_color_api_separates_analysis_and_manual_override_without_paths(tmp_path):
+    cfg, db, project_id, _, _ = _project(tmp_path)
+    lut_path = tmp_path / "private" / "look.cube"
+    state = default_color_state()
+    state["suggested"].update({"mode": "dji_lut", "lut_path": str(lut_path)})
+    state["applied"].update({"mode": "manual", "lut_path": str(lut_path)})
+    state["segment_analysis"]["seg-1"] = {"suggested": {"lut_path": str(lut_path)}, "warnings": [f"LUT 檔案不存在：{lut_path}"]}
+    state["segment_overrides"]["seg-1"] = {"enabled": True, "locked": True, "excluded": False, "applied": {"mode": "manual", "lut_path": str(lut_path)}}
+
+    api_state = color_state_for_api(cfg, project_id, state)
+    payload = json.dumps(api_state, ensure_ascii=False)
+
+    assert "suggested" in api_state["segment_analysis"]["seg-1"]
+    assert "applied" in api_state["segment_overrides"]["seg-1"]
+    assert api_state["suggested"]["lut_name"] == lut_path.name
+    assert api_state["segment_overrides"]["seg-1"]["applied"]["lut_name"] == lut_path.name
+    assert "lut_path" not in api_state["suggested"]
+    assert str(lut_path) not in payload
 
 
 def test_preview_cache_key_changes_when_applied_color_changes(tmp_path):

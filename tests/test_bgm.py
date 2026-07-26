@@ -1,7 +1,8 @@
 from pathlib import Path
 
-from video_vault.bgm import download_online_bgm, import_bgm, list_bgm, youtube_credits
-from video_vault.database import init_db
+from video_vault.bgm import download_online_bgm, import_bgm, list_bgm, recommend_bgm_for_groups, youtube_credits
+from video_vault.database import add_bgm_track, init_db, project_bgm_tracks
+from video_vault.project import create_project
 
 
 def test_import_bgm_tracks_source_and_license(tmp_path, monkeypatch):
@@ -51,3 +52,23 @@ def test_download_online_bgm_imports_track(tmp_path, monkeypatch):
     assert track["title"] == "Chill Test"
     assert track["artist"] == "Artist"
     assert "CC BY" in track["attribution_text"]
+
+
+def test_bgm_recommendations_are_pure_and_do_not_attach_tracks(tmp_path, monkeypatch):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    project_id = create_project(db, "純推薦", [], category="travel", content_type="travel_diary")
+    add_bgm_track(db, {"title": "Travel Vlog", "file_path": str(tmp_path / "travel.mp3"), "source_url": "x", "license_name": "CC0", "mood": "travel cinematic vlog"})
+    add_bgm_track(db, {"title": "Coffee Lofi", "file_path": str(tmp_path / "coffee.mp3"), "source_url": "x", "license_name": "CC0", "mood": "coffee cozy lofi"})
+    cfg = {"library_root": str(tmp_path)}
+    groups = [{"label": "風景", "activity": "風景"}, {"label": "飲食", "activity": "飲食"}]
+    download_calls = []
+    monkeypatch.setattr("video_vault.bgm.download_online_bgm", lambda *args, **kwargs: download_calls.append((args, kwargs)))
+
+    first = recommend_bgm_for_groups(cfg, db, project_id, {"category": "travel", "content_type": "travel_diary"}, groups)
+    second = recommend_bgm_for_groups(cfg, db, project_id, {"category": "travel", "content_type": "travel_diary"}, groups)
+
+    assert [item["track"]["title"] for item in first] == ["Travel Vlog", "Coffee Lofi"]
+    assert second == first
+    assert project_bgm_tracks(db, project_id) == []
+    assert download_calls == []

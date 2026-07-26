@@ -250,6 +250,9 @@ export function AudioMixingWorkspace({ detail, bgmTracks, setMessage, refreshPro
   const invalidBgmOnly = state.enabled
     && (!state.bgm.enabled || !state.bgm.bgm_id)
     && (state.original_audio.default_role === "bgm_only" || Object.values(state.segments).some((item) => item?.role === "bgm_only"));
+  const effectiveTrack = state.effective_selected_track || state.bgm.track;
+  const migrationState = state.migration?.state || "unknown";
+  const legacyMultiple = state.source === "legacy" && migrationState === "legacy_multiple";
 
   return <div className="audio-workspace">
     <section className="audio-project-panel">
@@ -265,6 +268,16 @@ export function AudioMixingWorkspace({ detail, bgmTracks, setMessage, refreshPro
           <button type="button" className="good" disabled={workspaceBusy || !dirty || invalidBgmOnly} onClick={() => void save()}>{busy === "save" ? "儲存中…" : "儲存音訊設定"}</button>
         </div>
       </header>
+
+      <div className="audio-state-meta">
+        <p>來源：{state.source === "legacy" ? "legacy（舊版）" : state.source === "new" ? "new（新版）" : "未標示"}</p>
+        <p>設定：{state.settings_exists === false ? "尚未建立，沿用既有資料" : state.settings_exists === true ? "已建立" : "狀態未標示"}</p>
+        <p>遷移：{migrationState}{state.migration?.warning ? `：${state.migration.warning}` : ""}</p>
+        <p>有效選曲：{effectiveTrack ? `${effectiveTrack.title}${effectiveTrack.artist ? ` · ${effectiveTrack.artist}` : ""}` : "尚未選擇"}</p>
+      </div>
+      {legacyMultiple && <p className="audio-warning" role="alert">
+        舊版資料包含多首配樂，系統不會自行猜選。請在下方「音樂」選單明確選擇一首，再按「儲存音訊設定」完成修復。
+      </p>}
 
       <label className="audio-toggle"><input type="checkbox" disabled={workspaceBusy} checked={state.enabled} onChange={(event) => patchState({ enabled: event.target.checked })} /> 啟用專案音訊設定</label>
 

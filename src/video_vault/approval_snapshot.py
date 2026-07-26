@@ -62,7 +62,7 @@ def build_approval_snapshot(cfg: Mapping[str, Any], db: Path, project_id: int, *
     if len(manifest.get("bgm") or []) > 1:
         raise ApprovalSnapshotError("Phase 4A 只支援一首有效 BGM；請在音訊工作區明確選擇一首後再核准")
     assets = _manifest_assets(manifest)
-    audio = effective_project_audio_state(dict(cfg), int(project_id))
+    audio = effective_project_audio_state(dict(cfg), int(project_id), Path(db))
     selected_bgm = resolve_audio_state_bgm(Path(db), audio) if audio is not None else None
     color_state = load_project_color_state(dict(cfg), int(project_id))
     effective_color = {
