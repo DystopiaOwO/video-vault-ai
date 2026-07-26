@@ -125,10 +125,21 @@ def test_background_cancel_uses_real_process_and_preserves_source(tmp_path: Path
     (folder / "render_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     (folder / "review_status.json").write_text(json.dumps({"approved_manifest_hash": "a" * 64}), encoding="utf-8")
     child_pid_file = tmp_path / "child.pid"
+    release_file = tmp_path / "release"
     monkeypatch.setattr(manager_module, "can_project_render", lambda *args: (True, "approved"))
 
     def fake_render(cfg, db, project_id, *, runner=None, execution=None, **kwargs):
-        code = f"import pathlib,subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); pathlib.Path(r'{child_pid_file}').write_text(str(p.pid)); print('out_time_us=0',flush=True); time.sleep(30)"
+        code = "\n".join(
+            (
+                "import pathlib, subprocess, sys, time",
+                f"release = pathlib.Path(r'{release_file}')",
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])",
+                f"pathlib.Path(r'{child_pid_file}').write_text(str(child.pid), encoding='utf-8')",
+                "print('out_time_us=0', flush=True)",
+                "while not release.exists():",
+                "    time.sleep(0.05)",
+            )
+        )
         runner.run([sys.executable, "-c", code], expected_duration_seconds=30)
         return SimpleNamespace(output_path=tmp_path / "never.mp4", cache_hit=False)
 
@@ -144,6 +155,7 @@ def test_background_cancel_uses_real_process_and_preserves_source(tmp_path: Path
         assert manager.get(job_id).get("process_id")
         while not child_pid_file.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
+        assert child_pid_file.exists()
         child_pid = int(child_pid_file.read_text(encoding="utf-8"))
         runtime = manager._active.get(job_id)
         assert runtime is not None
