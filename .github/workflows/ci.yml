@@ -112,26 +112,26 @@ jobs:
         run: pytest -q -m "pr_core and not media_smoke and not media_e2e"
       - name: Run PR Targeted fallback
         if: github.event_name == 'pull_request' && runner.os == 'Linux' && needs.select.outputs.fallback_non_media == 'true'
-        run: pytest -q -m "not media_smoke and not media_e2e"
+        run: pytest -q -m "not media_smoke and not media_e2e and not windows_process"
       - name: Run PR Targeted tests
         if: github.event_name == 'pull_request' && runner.os == 'Linux' && needs.select.outputs.fallback_non_media != 'true' && needs.select.outputs.targeted_tests != ''
         shell: bash
         env:
           TARGETED_TESTS: ${{ needs.select.outputs.targeted_tests }}
-        run: pytest -q -m "not pr_core and not media_smoke and not media_e2e" $TARGETED_TESTS
+        run: pytest -q -m "not pr_core and not media_smoke and not media_e2e and not windows_process" $TARGETED_TESTS
 
       - name: Run selected manual core suite
         if: github.event_name == 'workflow_dispatch' && inputs.suite == 'core'
         run: pytest -q -m "pr_core and not media_smoke and not media_e2e"
       - name: Run selected manual non-media suite
         if: github.event_name == 'workflow_dispatch' && inputs.suite == 'non-media'
-        run: pytest -q -m "not media_smoke and not media_e2e"
+        run: pytest -q -m "not media_smoke and not media_e2e and not windows_process"
       - name: Run selected manual media suite
         if: github.event_name == 'workflow_dispatch' && inputs.suite == 'media' && runner.os == 'Windows'
         run: pytest -q -m media_e2e
       - name: Run Ubuntu portable suite for push, schedule, and full manual runs
         if: runner.os == 'Linux' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.suite == 'full'))
-        run: pytest -q -m "not media_smoke and not media_e2e"
+        run: pytest -q -m "not media_smoke and not media_e2e and not windows_process"
       - name: Run Windows authoritative full suite
         if: runner.os == 'Windows' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.suite == 'full'))
         run: pytest -q

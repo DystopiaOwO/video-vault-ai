@@ -113,6 +113,7 @@ def test_background_render_job_reports_real_stages_and_final_cache(tmp_path: Pat
 
 
 @pytest.mark.pr_core
+@pytest.mark.windows_process
 def test_background_cancel_uses_real_process_and_preserves_source(tmp_path: Path, monkeypatch):
     import video_vault.render_job_manager as manager_module
     from video_vault.project import project_dir
