@@ -167,7 +167,8 @@ def render_project(
     report_temp_created = False
     output_published = False
     report_published = False
-    loudness_measurement = None
+    loudness_analysis = None
+    loudness_final = None
     total_segment_duration = max(0.001, sum(float(item["timeline_duration_seconds"]) for item in segments))
     completed_segment_duration = 0.0
     try:
@@ -226,20 +227,25 @@ def render_project(
         if normalization.get("enabled"):
             _execution_check(execution)
             _execution_update(execution, stage="assembling", percent=92, message="正在量測並套用正式音量")
-            loudness_measurement = measure_loudness(ffmpeg_path, partial, normalization)
+            loudness_analysis = measure_loudness(ffmpeg_path, partial, normalization)
             normalized_partial = partial.with_name(f".{partial.stem}.loudnorm.mp4")
-            loudness_command = build_second_pass_command(ffmpeg_path, partial, normalized_partial, manifest["profile"], loudness_measurement)
+            loudness_command = build_second_pass_command(ffmpeg_path, partial, normalized_partial, manifest["profile"], loudness_analysis)
             second_result = run_command(loudness_command, runner, expected_duration_seconds=expected)
             if int(getattr(second_result, "returncode", 0) or 0) != 0:
                 normalized_partial.unlink(missing_ok=True)
                 raise ProjectRenderError(str(getattr(second_result, "stderr", "") or "two-pass loudnorm failed"))
             normalized_partial.replace(partial)
+            loudness_final = measure_loudness(ffmpeg_path, partial, normalization)
         _execution_check(execution)
         _execution_update(execution, stage="final_qc", percent=95, message="正在進行 Final QC")
-        qc = validate_final_output(partial, manifest, ffprobe_path, ffmpeg_path=ffmpeg_path, loudness=loudness_measurement)
+        qc = validate_final_output(partial, manifest, ffprobe_path, ffmpeg_path=ffmpeg_path, loudness=loudness_final)
         if not qc.passed:
             raise ProjectRenderError("final QC failed: " + "; ".join(qc.errors))
-        report = build_render_report(project_id, manifest, output, qc, segment_results, track, bgm_fp, output_size=partial.stat().st_size, approval_snapshot=snapshot, encoder_contract=encoder_contract, loudness=loudness_measurement)
+        report_loudness = {
+            "analysis": loudness_analysis.to_dict() if loudness_analysis is not None else {},
+            "final": loudness_final.to_dict() if loudness_final is not None else {},
+        }
+        report = build_render_report(project_id, manifest, output, qc, segment_results, track, bgm_fp, output_size=partial.stat().st_size, approval_snapshot=snapshot, encoder_contract=encoder_contract, loudness=report_loudness)
         report_temp_created = True
         report_temp.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         _execution_check(execution)
@@ -415,7 +421,7 @@ def build_render_report(
             "approved_project_revision": (approval_snapshot or {}).get("approved_project_revision", ""),
         },
         "encoder_contract": dict(encoder_contract or {}),
-        "loudness": loudness.to_dict() if loudness is not None and hasattr(loudness, "to_dict") else {},
+        "loudness": dict(loudness) if isinstance(loudness, Mapping) else (loudness.to_dict() if loudness is not None and hasattr(loudness, "to_dict") else {}),
         "profile_id": manifest["profile"]["profile_id"],
         "output_path": str(Path(output_path).resolve()),
         "output_size": int(output_size if output_size is not None else Path(output_path).stat().st_size),

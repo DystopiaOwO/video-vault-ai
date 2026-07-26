@@ -65,11 +65,20 @@ def validate_final_output(output_path: Path, manifest: Mapping[str, Any], ffprob
     if getattr(probe, "source_file", None) is not None and not _decode_ok(path, ffmpeg_path):
         errors.append("full decode validation failed")
     if loudness is not None:
-        # The measured first-pass value is not the final LUFS value, but it is
-        # persisted for auditability. Final measurement is recorded separately
-        # by the renderer when the profile enables normalisation.
-        if float(getattr(loudness, "measured_TP", -999)) > float(getattr(loudness, "true_peak_db", -1.0)) + 12:
-            errors.append("loudness measurement is implausible")
+        # This must be a measurement of the encoded final file, not the
+        # pre-normalisation analysis used to construct the second pass.
+        target_lufs = float(getattr(loudness, "target_lufs", -14.0))
+        true_peak = float(getattr(loudness, "true_peak_db", -1.0))
+        measured_lufs = float(getattr(loudness, "measured_I", -999.0))
+        measured_peak = float(getattr(loudness, "measured_TP", 999.0))
+        if not math.isfinite(measured_lufs) or abs(measured_lufs - target_lufs) > 1.0:
+            errors.append(
+                f"loudness mismatch: {measured_lufs:.2f} LUFS vs {target_lufs:.2f} LUFS"
+            )
+        if not math.isfinite(measured_peak) or measured_peak > true_peak + 0.1:
+            errors.append(
+                f"true peak exceeds policy: {measured_peak:.2f} dBTP vs {true_peak:.2f} dBTP"
+            )
     return FinalQCResult(not errors, probe.duration_seconds, digest, tuple(errors), tuple((manifest.get("validation") or {}).get("warnings", [])))
 
 
