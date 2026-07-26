@@ -163,12 +163,30 @@ class JobCoordinator:
         with self._lock:
             job = self._jobs[str(job_id)]
             if job.state == JobState.QUEUED:
-                job.state = JobState.CANCELLED
-                job.finished_at = utc_now()
-                self._admit_waiting_locked()
+                return self._finish_cancel_locked(job)
             elif job.state == JobState.RUNNING:
                 job.state = JobState.CANCELLING
             return job
+
+    def finish_cancel(self, job_id: str) -> CoordinatedJob:
+        """Acknowledge a cancellation and move the job to its terminal state.
+
+        ``cancel`` only requests cancellation for a running job.  Workers must
+        call this method after their cooperative cleanup so a cancelled job can
+        never be completed as succeeded and its resource slots are released.
+        """
+        with self._lock:
+            return self._finish_cancel_locked(self._jobs[str(job_id)])
+
+    def _finish_cancel_locked(self, job: CoordinatedJob) -> CoordinatedJob:
+        if job.state in TERMINAL_STATES:
+            return job
+        if job.state not in {JobState.QUEUED, JobState.RUNNING, JobState.CANCELLING}:
+            return job
+        job.state = JobState.CANCELLED
+        job.finished_at = utc_now()
+        self._admit_waiting_locked()
+        return job
 
     def is_current(self, job_id: str, generation: int) -> bool:
         with self._lock:
@@ -215,7 +233,11 @@ class JobCoordinator:
     def _terminal(self, job_id: str, state: JobState, *, result: dict | None = None, error: str = "") -> CoordinatedJob:
         with self._lock:
             job = self._jobs[str(job_id)]
-            if job.state == JobState.CANCELLED:
+            # Once cancellation is acknowledged, no late worker callback may
+            # turn the same job back into succeeded or failed.
+            if job.state in {JobState.CANCELLING, JobState.CANCELLED}:
+                return job
+            if job.state in TERMINAL_STATES:
                 return job
             job.state = state
             job.finished_at = utc_now()

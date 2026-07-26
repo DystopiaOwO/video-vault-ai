@@ -303,8 +303,11 @@ def _manifest_bgm(cfg: dict, db: Path, project_id: int, settings: dict[str, Any]
         bgm_state = effective_project_bgm(audio_state) if new_workflow_enabled else None
         selected_id = int(bgm_state["bgm_id"]) if bgm_state is not None else None
         if not new_workflow_enabled:
+            # A disabled workflow returns to the project's legacy relation.
             pass
         elif selected_id is None:
+            # An enabled audio workflow with no selected BGM explicitly
+            # suppresses the legacy project_bgm relation.
             rows = []
         else:
             try:

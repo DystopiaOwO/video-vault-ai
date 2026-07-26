@@ -121,9 +121,23 @@ def normalize_color_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
     return result
 
 
+def _color_revision_payload(state: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return persisted color meaning without analysis timestamps."""
+    result = normalize_color_state(state)
+    analysis = dict(result.get("analysis") or {})
+    analysis.pop("analyzed_at", None)
+    result["analysis"] = analysis
+    return result
+
+
 def save_project_color_state(cfg: dict, db: Path, project_id: int, state: Mapping[str, Any], *, mark_review: bool = True, base_revision: int | None = None) -> Path:
     with project_commit(db, project_id, base_revision) as commit:
-        path = _save_project_color_state(cfg, db, project_id, state, mark_review=mark_review)
+        normalized = normalize_color_state(state)
+        current = normalize_color_state(load_project_color_state(cfg, project_id))
+        if normalized == current and color_state_path(cfg, project_id).is_file():
+            commit.changed = False
+            return color_state_path(cfg, project_id)
+        path = _save_project_color_state(cfg, db, project_id, normalized, mark_review=mark_review)
         commit.changed = True
         return path
 
@@ -154,8 +168,9 @@ def effective_color_settings(state: Mapping[str, Any], segment_id: str | None = 
 
 def analyze_project_color(cfg: dict, db: Path, project_id: int, *, force: bool = False, base_revision: int | None = None) -> dict[str, Any]:
     with project_commit(db, project_id, base_revision) as commit:
+        before = _color_revision_payload(load_project_color_state(cfg, project_id))
         state = _analyze_project_color(cfg, db, project_id, force=force)
-        commit.changed = True
+        commit.changed = before != _color_revision_payload(state)
         return state
 
 
@@ -207,8 +222,9 @@ def _analyze_project_color(cfg: dict, db: Path, project_id: int, *, force: bool 
 
 def set_color_reference(cfg: dict, db: Path, project_id: int, reference_id: str, *, base_revision: int | None = None) -> dict[str, Any]:
     with project_commit(db, project_id, base_revision) as commit:
+        before = _color_revision_payload(load_project_color_state(cfg, project_id))
         state = _set_color_reference(cfg, db, project_id, reference_id)
-        commit.changed = True
+        commit.changed = before != _color_revision_payload(state)
         return state
 
 

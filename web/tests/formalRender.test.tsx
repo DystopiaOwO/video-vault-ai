@@ -105,9 +105,9 @@ describe("正式輸出 submitting lifecycle", () => {
     await screen.findByRole("heading", { name: "project-8" });
 
     create.resolve({ ok: true, created: true });
-    await vi.waitFor(() => expect(jobs).toHaveBeenCalledWith(7));
+    await vi.waitFor(() => expect(jobs.mock.calls.some(([projectId]) => projectId === 7)).toBe(true));
     project7FreshJobs.resolve([{ job_id: "job-7", kind: "正式輸出", status: "running", message: "執行中", percent: 5 }]);
-    await vi.waitFor(() => expect(jobs).toHaveBeenCalledWith(8));
+    await vi.waitFor(() => expect(jobs.mock.calls.some(([projectId]) => projectId === 8)).toBe(true));
 
     expect(screen.getByRole("heading", { name: "project-8" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "正在建立正式輸出…" })).toBeNull();

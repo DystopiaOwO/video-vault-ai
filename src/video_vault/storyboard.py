@@ -92,7 +92,7 @@ def normalize_storyboard(state: Mapping[str, Any] | None) -> dict[str, Any]:
     return {"schema_version": STORYBOARD_SCHEMA_VERSION, "groups": groups, "segments": segments}
 
 
-def generate_storyboard(cfg: dict, db: Path, project_id: int, *, force: bool = False) -> dict[str, Any]:
+def generate_storyboard(cfg: dict, db: Path, project_id: int, *, force: bool = False, base_revision: int | None = None) -> dict[str, Any]:
     from .project import _read_json, project, project_segments
 
     plan = _read_json(Path(cfg["library_root"]) / "08_projects" / f"project_{project_id}" / "project_plan.json")
@@ -163,7 +163,7 @@ def generate_storyboard(cfg: dict, db: Path, project_id: int, *, force: bool = F
         }
 
     state = normalize_storyboard({"groups": merged_groups, "segments": segment_state})
-    save_storyboard(cfg, db, project_id, state, mark_review=True)
+    save_storyboard(cfg, db, project_id, state, mark_review=True, base_revision=base_revision)
     thumbnail_errors: list[str] = []
     for row in rows:
         try:
@@ -187,8 +187,15 @@ def save_storyboard(cfg: dict, db: Path, project_id: int, state: Mapping[str, An
     from .project_lifecycle import project_commit
 
     with project_commit(db, project_id, base_revision) as commit:
-        path = _save_storyboard(cfg, db, project_id, state, mark_review=mark_review)
-        commit.changed = True
+        normalized = normalize_storyboard(state)
+        current = load_storyboard(cfg, project_id) or default_storyboard()
+        changed = current != normalized
+        existed = storyboard_path(cfg, project_id).is_file()
+        if changed or not existed:
+            path = _save_storyboard(cfg, db, project_id, normalized, mark_review=mark_review)
+        else:
+            path = storyboard_path(cfg, project_id)
+        commit.changed = changed or not existed
         return path
 
 

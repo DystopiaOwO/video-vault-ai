@@ -235,7 +235,9 @@ export function StoryboardWorkspaceController({
     setBusy("regenerate");
     setProjectMessage(model.exists ? "正在重新產生分鏡…" : "正在建立分鏡…");
     try {
-      const result = await api.generateStoryboard(detail.project.id, model.exists);
+      const result = await (detail.project_revision === undefined
+        ? api.generateStoryboard(detail.project.id, model.exists)
+        : api.generateStoryboard(detail.project.id, model.exists, detail.project_revision));
       if (!result.ok || !result.storyboard) {
         setProjectMessage(`分鏡產生失敗：${result.error || "未知錯誤"}`);
         return;

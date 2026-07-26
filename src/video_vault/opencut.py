@@ -42,13 +42,13 @@ def _bun() -> Path | None:
     return next(base.glob("Oven-sh.Bun_*/*/bun.exe"), None) if base.exists() else None
 
 
-def export_opencut_handoff(cfg: dict, db: Path, project_id: int, render_clips: bool = False, max_segments: int = 20) -> Path:
+def export_opencut_handoff(cfg: dict, db: Path, project_id: int, render_clips: bool = False, max_segments: int = 20, *, base_revision: int | None = None) -> Path:
     if render_clips:
         assert_project_approved(cfg, db, project_id, "OpenCut 調色片段輸出")
     detail = project_detail(cfg, db, project_id)
     plan = detail.get("plan") or {}
     if not plan.get("groups"):
-        plan = build_project_plan(cfg, db, project_id)
+        plan = build_project_plan(cfg, db, project_id, base_revision=base_revision)
         detail = project_detail(cfg, db, project_id)
     out = project_dir(cfg, project_id) / "output" / "opencut_handoff"
     assets = out / "assets"

@@ -11,11 +11,14 @@ from .opencut import export_opencut_handoff
 from .project import assert_project_approved, project_dir
 
 
-def export_hyperframes_project(cfg: dict, db: Path, project_id: int, render_clips: bool = True, max_segments: int = 20) -> Path:
+def export_hyperframes_project(cfg: dict, db: Path, project_id: int, render_clips: bool = True, max_segments: int = 20, *, base_revision: int | None = None) -> Path:
     if render_clips:
         unload_local_llm_model(cfg)
     # ponytail: avoid CPU-heavy LUT pre-render here; dedicated OpenCut graded clips can do that when explicitly requested.
-    handoff = export_opencut_handoff(cfg, db, project_id, render_clips=False, max_segments=max_segments)
+    if base_revision is None:
+        handoff = export_opencut_handoff(cfg, db, project_id, render_clips=False, max_segments=max_segments)
+    else:
+        handoff = export_opencut_handoff(cfg, db, project_id, render_clips=False, max_segments=max_segments, base_revision=base_revision)
     data = json.loads((handoff / "opencut_handoff.json").read_text(encoding="utf-8"))
     out = project_dir(cfg, project_id) / "output" / "hyperframes"
     media = out / "media"

@@ -90,8 +90,69 @@ def sync_project_files(cfg: dict, db: Path, project_id: int) -> list[dict]:
 
 def build_project_plan(cfg: dict, db: Path, project_id: int, *, base_revision: int | None = None) -> dict:
     with project_commit(db, project_id, base_revision) as commit:
+        old = _read_json(project_dir(cfg, project_id) / "project_plan.json")
         result = _build_project_plan(cfg, db, project_id)
-        commit.changed = True
+        commit.changed = _plan_revision_payload(old) != _plan_revision_payload(result)
+        return result
+
+
+def _plan_revision_payload(plan: dict | None) -> dict:
+    """Exclude generated version/timestamp fields from no-op comparison."""
+    value = deepcopy(plan or {})
+    for key in ("created_at", "plan_id", "version", "parent_plan_id", "created_reason"):
+        value.pop(key, None)
+    return value
+
+
+def revise_project(cfg: dict, db: Path, project_id: int, notes: str, *, base_revision: int | None = None) -> dict:
+    """Atomically apply revision notes and rebuild the project plan.
+
+    The base revision is checked before any note is written.  File snapshots
+    keep the old review/plan state recoverable if the rebuild fails halfway.
+    """
+    folder = project_dir(cfg, project_id)
+    tracked = [
+        folder / "project_plan.json",
+        folder / "project_script.md",
+        folder / "review_status.json",
+        folder / "feedback" / "revision_notes.md",
+        folder / "plans" / "latest.json",
+    ]
+    tracked.extend((folder / "plans").glob("*.json") if (folder / "plans").exists() else [])
+    tracked.extend((folder / "plans").glob("*.md") if (folder / "plans").exists() else [])
+    tracked.extend((folder / "feedback").glob("revision_*.md") if (folder / "feedback").exists() else [])
+    snapshots = {path: path.read_bytes() for path in set(tracked) if path.is_file()}
+    old_status = None
+    row = project(db, project_id)
+    if row:
+        old_status = str(row["status"] or "")
+    text = (notes or "").strip()
+    with project_commit(db, project_id, base_revision) as commit:
+        old_plan = _read_json(folder / "project_plan.json")
+        old_notes = _revision_notes(cfg, project_id)
+        try:
+            if text:
+                save_revision_notes(cfg, project_id, text)
+            result = _build_project_plan(cfg, db, project_id)
+        except Exception:
+            cleanup = set(tracked)
+            cleanup.update((folder / "plans").glob("*.json"))
+            cleanup.update((folder / "plans").glob("*.md"))
+            cleanup.update((folder / "feedback").glob("revision_*.md"))
+            for path in cleanup:
+                if path not in snapshots and path.is_file():
+                    path.unlink(missing_ok=True)
+            for path, payload in snapshots.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+            if old_status:
+                set_project_status(db, project_id, old_status)
+            raise
+        commit.changed = (
+            old_notes != _revision_notes(cfg, project_id)
+            or _plan_revision_payload(old_plan) != _plan_revision_payload(result)
+            or old_status != str((project(db, project_id)["status"] if project(db, project_id) else "") or "")
+        )
         return result
 
 
@@ -352,12 +413,16 @@ def _stage(stage_id: str, label: str, done: bool, artifacts: list[Path]) -> dict
 
 def save_segment_review(cfg: dict, db: Path, project_id: int, rows: list[dict], *, base_revision: int | None = None) -> Path:
     with project_commit(db, project_id, base_revision) as commit:
-        path = _save_segment_review(cfg, db, project_id, rows)
-        commit.changed = True
+        before = _segment_review(cfg, project_id)
+        path = _save_segment_review(cfg, db, project_id, rows, mark_review=False)
+        after = _segment_review(cfg, project_id)
+        commit.changed = before != after
+        if commit.changed:
+            mark_project_needs_review(cfg, db, project_id)
         return path
 
 
-def _save_segment_review(cfg: dict, db: Path, project_id: int, rows: list[dict]) -> Path:
+def _save_segment_review(cfg: dict, db: Path, project_id: int, rows: list[dict], *, mark_review: bool = True) -> Path:
     allowed = {"segment_id", "include", "user_notes", "manual_order", "scene_role", "story_position", "audio_role", "speed", "start_seconds", "end_seconds"}
     current = {str(row.get("segment_id")): row for row in project_segments(cfg, project_id, _read_json(project_dir(cfg, project_id) / "project_plan.json"), apply_storyboard=False, db=db)}
     videos = {int(row["id"]): dict(row) for row in project_videos(db, project_id)}
@@ -384,7 +449,8 @@ def _save_segment_review(cfg: dict, db: Path, project_id: int, rows: list[dict])
     path = project_dir(cfg, project_id) / "feedback" / "segment_review.json"
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     append_decision(cfg, project_id, "segment_review", f"更新 {len(data)} 段片段審核", "segment_review", affected_segments=[row.get("segment_id", "") for row in data])
-    mark_project_needs_review(cfg, db, project_id)
+    if mark_review:
+        mark_project_needs_review(cfg, db, project_id)
     return path
 
 
@@ -401,8 +467,12 @@ def update_segment_timing(
 ) -> Path:
     """Patch only one segment's timing without copying storyboard metadata."""
     with project_commit(db, project_id, base_revision) as commit:
-        path = _update_segment_timing(cfg, db, project_id, segment_id, start_seconds, end_seconds, speed)
-        commit.changed = True
+        before = _segment_review(cfg, project_id)
+        path = _update_segment_timing(cfg, db, project_id, segment_id, start_seconds, end_seconds, speed, mark_review=False)
+        after = _segment_review(cfg, project_id)
+        commit.changed = before != after
+        if commit.changed:
+            mark_project_needs_review(cfg, db, project_id)
         return path
 
 
@@ -414,6 +484,8 @@ def _update_segment_timing(
     start_seconds: float,
     end_seconds: float,
     speed: float,
+    *,
+    mark_review: bool = True,
 ) -> Path:
     """Patch only one segment's timing without copying storyboard metadata."""
     segment_id = str(segment_id or "")
@@ -452,7 +524,8 @@ def _update_segment_timing(
     temp.write_text(json.dumps(existing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temp.replace(path)
     append_decision(cfg, project_id, "segment_timing", f"更新片段 {segment_id} 時間與速度", "segment_review", affected_segments=[segment_id])
-    mark_project_needs_review(cfg, db, project_id)
+    if mark_review:
+        mark_project_needs_review(cfg, db, project_id)
     return path
 
 
@@ -468,9 +541,23 @@ def _clean_segment_review(row: dict, allowed: set[str]) -> dict:
 
 def set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes: str = "", *, base_revision: int | None = None) -> Path:
     with project_commit(db, project_id, base_revision) as commit:
+        folder = project_dir(cfg, project_id)
+        before_review = _review_revision_payload(_read_json(folder / "review_status.json"))
+        before_project_status = str((project(db, project_id)["status"] if project(db, project_id) else "") or "")
+        before_plan_status = str(_read_json(folder / "project_plan.json").get("status") or "")
         path = _set_review_status(cfg, db, project_id, status, notes)
-        commit.changed = True
+        after_review = _review_revision_payload(_read_json(folder / "review_status.json"))
+        after_project_status = str((project(db, project_id)["status"] if project(db, project_id) else "") or "")
+        after_plan_status = str(_read_json(folder / "project_plan.json").get("status") or "")
+        commit.changed = before_review != after_review or before_project_status != after_project_status or before_plan_status != after_plan_status
         return path
+
+
+def _review_revision_payload(review: dict | None) -> dict:
+    value = deepcopy(review or {})
+    for key in ("updated_at", "approved_at"):
+        value.pop(key, None)
+    return value
 
 
 def _set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes: str = "") -> Path:
@@ -519,8 +606,19 @@ def save_revision_notes(cfg: dict, project_id: int, notes: str) -> Path | None:
 
 def mark_project_needs_review(cfg: dict, db: Path, project_id: int, *, base_revision: int | None = None) -> None:
     with project_commit(db, project_id, base_revision) as commit:
+        folder = project_dir(cfg, project_id)
+        before = (
+            str((project(db, project_id)["status"] if project(db, project_id) else "") or ""),
+            _review_revision_payload(_read_json(folder / "review_status.json")),
+            str(_read_json(folder / "project_plan.json").get("status") or ""),
+        )
         _mark_project_needs_review(cfg, db, project_id)
-        commit.changed = True
+        after = (
+            str((project(db, project_id)["status"] if project(db, project_id) else "") or ""),
+            _review_revision_payload(_read_json(folder / "review_status.json")),
+            str(_read_json(folder / "project_plan.json").get("status") or ""),
+        )
+        commit.changed = before != after
 
 
 def _mark_project_needs_review(cfg: dict, db: Path, project_id: int) -> None:

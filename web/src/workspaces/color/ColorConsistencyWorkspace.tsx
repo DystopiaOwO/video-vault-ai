@@ -324,7 +324,7 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
     setBusy("preview");
     setProjectMessage(force ? "正在忽略快取並重新產生調色預覽…" : "正在產生 Before / After 調色預覽…");
     try {
-      const result = await api.colorPreviewDirect(detail.project.id, force);
+      const result = await api.colorPreviewDirect(detail.project.id, force, detail.project_revision);
       if (!result.ok) {
         setPreviews([]);
         setProjectMessage(`調色預覽失敗：${result.error || "未知錯誤"}`);

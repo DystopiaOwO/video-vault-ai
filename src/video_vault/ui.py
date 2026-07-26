@@ -29,8 +29,8 @@ from .naming import rename_after_perception
 from .opencut import OPENCUT_URL, export_opencut_handoff, opencut_status, start_opencut
 from .paths import db_path
 from .planner import draft_plan, perceive_output, review_text, revise_plan, set_plan_status, video_dir, write_plan_files
-from .project import build_project_plan, can_project_render, create_project, list_projects, mark_project_needs_review, project_detail, project_dir, save_revision_notes, save_segment_review, set_review_status, sync_project_files, update_segment_timing
-from .project_lifecycle import CancellationRequested, CancellationToken, ProjectRevisionConflict, current_revision, project_commit
+from .project import build_project_plan, can_project_render, create_project, list_projects, mark_project_needs_review, project_detail, project_dir, revise_project, save_revision_notes, save_segment_review, set_review_status, sync_project_files, update_segment_timing
+from .project_lifecycle import CancellationRequested, CancellationToken, ProjectRevisionConflict, check_base_revision, current_revision, project_commit
 from .job_coordinator import DEFAULT_COORDINATOR, JobState
 from .project_perception import run_project_perception
 from .perception_runs import PerceptionCancelled, ensure_perception_schema, perception_jobs, recover_interrupted_perception_runs
@@ -280,7 +280,13 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 jobs = project_jobs(project_id, render_manager, db) if project_id else project_jobs(0, render_manager, db)
                 if query.get("meta", ["0"])[0] == "1":
                     row = db_project(db, project_id) if project_id else None
-                    self._json({"jobs": jobs, "project_revision": int(row["project_revision"] or 1) if row else None, "project_changed": False})
+                    revision = int(row["project_revision"] or 1) if row else None
+                    previous = query.get("since_revision", [""])[0]
+                    try:
+                        project_changed = revision is not None and previous != "" and int(previous) < revision
+                    except (TypeError, ValueError):
+                        project_changed = False
+                    self._json({"jobs": jobs, "project_revision": revision, "project_changed": project_changed})
                 else:
                     self._json(jobs)
             elif parsed.path == "/api/render-job":
@@ -461,8 +467,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json({"ok": True, "plan": build_project_plan(cfg, db, project_id, base_revision=_base_revision(data))})
             elif path == "/api/project/revise":
                 project_id = int(data.get("project_id", 0))
-                save_revision_notes(cfg, project_id, data.get("notes", ""))
-                self._json({"ok": True, "plan": build_project_plan(cfg, db, project_id, base_revision=_base_revision(data))})
+                self._json({"ok": True, "plan": revise_project(cfg, db, project_id, data.get("notes", ""), base_revision=_base_revision(data))})
             elif path == "/api/project/segments":
                 try:
                     project_id = int(data.get("project_id", 0))
@@ -495,7 +500,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif path == "/api/project/storyboard/generate":
                 try:
                     project_id = int(data.get("project_id", 0))
-                    state = generate_storyboard(cfg, db, project_id, force=bool(data.get("force")))
+                    state = generate_storyboard(cfg, db, project_id, force=bool(data.get("force")), base_revision=_base_revision(data))
                     self._json({"ok": True, "storyboard": storyboard_for_api(cfg, db, project_id), "state": state})
                 except (OSError, TypeError, ValueError) as exc:
                     self._json({"ok": False, "code": "storyboard_generation_failed", "error": str(exc)})
@@ -626,11 +631,18 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     if not ok:
                         self._json({"ok": False, "error": f"正式輸出被擋下：{reason}"})
                         return
-                out = export_opencut_handoff(cfg, db, project_id, bool(data.get("render_clips")), int(data.get("max_segments", 20)))
+                out = export_opencut_handoff(
+                    cfg,
+                    db,
+                    project_id,
+                    bool(data.get("render_clips")),
+                    int(data.get("max_segments", 20)),
+                    base_revision=_base_revision(data),
+                )
                 self._json({"ok": True, "folder": str(out)})
             elif path == "/api/project/opencut-job":
                 project_id = int(data.get("project_id", 0))
-                started = start_opencut_job(cfg, db, project_id, bool(data.get("render_clips")), int(data.get("max_segments", 20)))
+                started = start_opencut_job(cfg, db, project_id, bool(data.get("render_clips")), int(data.get("max_segments", 20)), base_revision=_base_revision(data))
                 self._json({"ok": started, "message": "OpenCut 工作已開始" if started else "OpenCut 工作已在執行中"})
             elif path == "/api/project/hyperframes-export":
                 project_id = int(data.get("project_id", 0))
@@ -640,7 +652,14 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     if not ok:
                         self._json({"ok": False, "error": f"正式輸出被擋下：{reason}"})
                         return
-                out = export_hyperframes_project(cfg, db, project_id, render, int(data.get("max_segments", 20)))
+                out = export_hyperframes_project(
+                    cfg,
+                    db,
+                    project_id,
+                    render,
+                    int(data.get("max_segments", 20)),
+                    base_revision=_base_revision(data),
+                )
                 result = render_fast_draft(out, cfg, db=db, project_id=project_id) if render else None
                 if result and not result["ok"]:
                     self._json({"ok": False, "folder": str(out), "error": f"快速輸出 MP4 失敗：{result['stderr'][-500:]}"})
@@ -648,7 +667,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json({"ok": True, "folder": str(out), "output": result["output"] if result else ""})
             elif path == "/api/project/hyperframes-job":
                 project_id = int(data.get("project_id", 0))
-                started = start_hyperframes_job(cfg, db, project_id, bool(data.get("render")), int(data.get("max_segments", 20)))
+                started = start_hyperframes_job(cfg, db, project_id, bool(data.get("render")), int(data.get("max_segments", 20)), base_revision=_base_revision(data))
                 self._json({"ok": started, "message": "HyperFrames 工作已開始" if started else "HyperFrames 工作已在執行中"})
             elif path == "/api/project/stop-jobs":
                 stop_project_jobs(int(data.get("project_id", 0)), render_manager)
@@ -857,7 +876,7 @@ def _finish_coordinated_job(project_id: int, kind: str, status: str, error: str 
     if not coordinator_id:
         return
     if status in {"stopped", "cancelled", "cancelling"}:
-        JOB_COORDINATOR.cancel(str(coordinator_id))
+        JOB_COORDINATOR.finish_cancel(str(coordinator_id))
     elif status in {"done", "succeeded", "completed"}:
         JOB_COORDINATOR.complete(str(coordinator_id))
     elif status == "superseded":
@@ -923,7 +942,7 @@ def start_color_job(cfg: dict, db: Path, project_id: int, mode: str, *, base_rev
     return True
 
 
-def start_opencut_job(cfg: dict, db: Path, project_id: int, render_clips: bool, max_segments: int) -> bool:
+def start_opencut_job(cfg: dict, db: Path, project_id: int, render_clips: bool, max_segments: int, *, base_revision: int | None = None) -> bool:
     key = (project_id, "opencut")
     with JOBS_LOCK:
         current = JOBS.get(key)
@@ -931,14 +950,14 @@ def start_opencut_job(cfg: dict, db: Path, project_id: int, render_clips: bool, 
             return False
         caps = {"external_handoff"} | ({"ffmpeg_heavy", "gpu_heavy"} if render_clips else set())
         resources = {"ffmpeg_heavy", "gpu_heavy"} if render_clips else set()
-        coordinated = _enqueue_legacy_job(db, project_id, "opencut", "OpenCut 交接", caps, resources)
+        coordinated = _enqueue_legacy_job(db, project_id, "opencut", "OpenCut 交接", caps, resources, base_revision)
         JOBS[key] = {"kind": "OpenCut 交接", "status": "queued", "state": coordinated.state.value, "queue_reason": coordinated.queue_reason, "coordinator_job_id": coordinated.job_id, "base_revision": coordinated.base_revision, "message": coordinated.queue_reason or "等待開始", "done": 0, "total": 3, "percent": 0, "updated_at": time.time()}
-    thread = threading.Thread(target=_opencut_job, args=(cfg, db, project_id, render_clips, max_segments), daemon=True)
+    thread = threading.Thread(target=_opencut_job, args=(cfg, db, project_id, render_clips, max_segments, coordinated.base_revision), daemon=True)
     thread.start()
     return True
 
 
-def start_hyperframes_job(cfg: dict, db: Path, project_id: int, render: bool, max_segments: int) -> bool:
+def start_hyperframes_job(cfg: dict, db: Path, project_id: int, render: bool, max_segments: int, *, base_revision: int | None = None) -> bool:
     key = (project_id, "hyperframes")
     with JOBS_LOCK:
         current = JOBS.get(key)
@@ -946,9 +965,9 @@ def start_hyperframes_job(cfg: dict, db: Path, project_id: int, render: bool, ma
             return False
         caps = {"external_handoff"} | ({"ffmpeg_heavy", "gpu_heavy"} if render else set())
         resources = {"ffmpeg_heavy", "gpu_heavy"} if render else set()
-        coordinated = _enqueue_legacy_job(db, project_id, "hyperframes", "HyperFrames 初剪", caps, resources)
+        coordinated = _enqueue_legacy_job(db, project_id, "hyperframes", "HyperFrames 初剪", caps, resources, base_revision)
         JOBS[key] = {"kind": "HyperFrames 初剪", "status": "queued", "state": coordinated.state.value, "queue_reason": coordinated.queue_reason, "coordinator_job_id": coordinated.job_id, "base_revision": coordinated.base_revision, "message": coordinated.queue_reason or "等待開始", "done": 0, "total": 3 if render else 2, "percent": 0, "updated_at": time.time()}
-    thread = threading.Thread(target=_hyperframes_job, args=(cfg, db, project_id, render, max_segments), daemon=True)
+    thread = threading.Thread(target=_hyperframes_job, args=(cfg, db, project_id, render, max_segments, coordinated.base_revision), daemon=True)
     thread.start()
     return True
 
@@ -982,7 +1001,7 @@ def stop_project_jobs(project_id: int, render_manager: RenderJobManager | None =
                 if token:
                     token.cancel()
                 if job.get("coordinator_job_id"):
-                    JOB_COORDINATOR.cancel(str(job["coordinator_job_id"]))
+                    JOB_COORDINATOR.finish_cancel(str(job["coordinator_job_id"]))
     if render_manager is not None:
         render_manager.cancel_project(project_id)
 
@@ -1002,7 +1021,7 @@ def cancel_legacy_job(project_id: int, legacy_job_key: str) -> dict:
             if token:
                 token.cancel()
             if job.get("coordinator_job_id"):
-                JOB_COORDINATOR.cancel(str(job["coordinator_job_id"]))
+                JOB_COORDINATOR.finish_cancel(str(job["coordinator_job_id"]))
         return {
             "ok": True,
             "message": "已停止指定背景工作" if job.get("status") == "stopped" else "工作已結束",
@@ -1020,6 +1039,8 @@ def _set_job(project_id: int, name: str, **changes: object) -> None:
     terminal_message = str(changes.get("message") or "")
     with JOBS_LOCK:
         job = JOBS.setdefault((project_id, name), {})
+        if job.get("status") in {"stopped", "cancelled"} and terminal_status not in {"stopped", "cancelled"}:
+            return
         job.update(changes)
         if "percent" not in changes:
             done = int(job.get("done") or 0)
@@ -1067,7 +1088,7 @@ def _analyze_job(cfg: dict, db: Path, project_id: int, force: bool) -> None:
             processed.extend(result.get("processed", []))
             _set_job(project_id, "analyze", message=f"已完成 {video.get('filename', '')}", done=index)
         if todo:
-            build_project_plan(cfg, db, project_id)
+            build_project_plan(cfg, db, project_id, base_revision=current_revision(db, project_id))
         _set_job(project_id, "analyze", status="done", message=f"內容感知完成：{len(processed)} 支", processed=processed, percent=100)
     except PerceptionCancelled:
         _set_job(project_id, "analyze", status="stopped", message="內容感知已由使用者停止")
@@ -1136,7 +1157,7 @@ def _color_job(cfg: dict, db: Path, project_id: int, mode: str) -> None:
         _set_job(project_id, "color", status="failed", message=f"調色預覽失敗：{exc}")
 
 
-def _opencut_job(cfg: dict, db: Path, project_id: int, render_clips: bool, max_segments: int) -> None:
+def _opencut_job(cfg: dict, db: Path, project_id: int, render_clips: bool, max_segments: int, base_revision: int) -> None:
     try:
         if not _wait_for_coordinated_job(project_id, "opencut"):
             _set_job(project_id, "opencut", status="stopped", message="OpenCut 工作已由使用者停止")
@@ -1156,7 +1177,7 @@ def _opencut_job(cfg: dict, db: Path, project_id: int, render_clips: bool, max_s
         if _job_stopped(project_id, "opencut"):
             return
         _set_job(project_id, "opencut", message="正在產生 OpenCut 素材包", done=1)
-        out = export_opencut_handoff(cfg, db, project_id, render_clips, max_segments)
+        out = export_opencut_handoff(cfg, db, project_id, render_clips, max_segments, base_revision=base_revision)
         if _job_stopped(project_id, "opencut"):
             return
         _set_job(project_id, "opencut", message="正在打開素材包資料夾", done=2)
@@ -1168,7 +1189,7 @@ def _opencut_job(cfg: dict, db: Path, project_id: int, render_clips: bool, max_s
         _set_job(project_id, "opencut", status="failed", message=f"OpenCut 交接失敗：{exc}")
 
 
-def _hyperframes_job(cfg: dict, db: Path, project_id: int, render: bool, max_segments: int) -> None:
+def _hyperframes_job(cfg: dict, db: Path, project_id: int, render: bool, max_segments: int, base_revision: int) -> None:
     try:
         if not _wait_for_coordinated_job(project_id, "hyperframes"):
             _set_job(project_id, "hyperframes", status="stopped", message="HyperFrames 工作已由使用者停止")
@@ -1180,7 +1201,7 @@ def _hyperframes_job(cfg: dict, db: Path, project_id: int, render: bool, max_seg
                 return
             _set_job(project_id, "hyperframes", status="running", message="正在卸載本機模型以釋放顯存", done=0, percent=3)
         _set_job(project_id, "hyperframes", status="running", message="正在產生 HyperFrames timeline" + (" 與調色片段" if render else ""), done=0, percent=5)
-        out = export_hyperframes_project(cfg, db, project_id, render, max_segments)
+        out = export_hyperframes_project(cfg, db, project_id, render, max_segments, base_revision=base_revision)
         if _job_stopped(project_id, "hyperframes"):
             return
         _set_job(project_id, "hyperframes", message="正在打開初剪資料夾", done=1, percent=60 if render else 80)
@@ -1603,9 +1624,19 @@ def upload_project(handler: BaseHTTPRequestHandler, cfg: dict, db: Path) -> dict
             return {"ok": False, "error": "project_id 無效", "project_id": 0, "files": []}
         if not project_id:
             return {"ok": False, "error": "project_id required", "project_id": 0, "files": []}
+        raw_base_revision = _form_value(form, "base_revision")
+        try:
+            base_revision = None if raw_base_revision in (None, "") else int(raw_base_revision)
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": "base_revision 必須是整數", "project_id": project_id, "files": []}
         project_row = db_project(db, project_id)
         if not project_row:
             return {"ok": False, "error": "找不到指定專案", "project_id": project_id, "files": []}
+        if base_revision is not None:
+            try:
+                check_base_revision(db, project_id, base_revision)
+            except ProjectRevisionConflict as exc:
+                return {"ok": False, "code": exc.code, "error": str(exc), "project_revision": exc.current, "project_id": project_id, "files": []}
         project_folder_path = Path(cfg["library_root"]) / "08_projects" / f"project_{project_id}"
         source_dir = project_folder_path / "source"
         source_dir_existed = source_dir.exists()
@@ -1707,7 +1738,7 @@ def upload_project(handler: BaseHTTPRequestHandler, cfg: dict, db: Path) -> dict
                 error=f"專案檔案同步失敗：{exc}", project_id=project_id, failed_files=[record["name"] for record in records], staged_paths=staged_paths, published_paths=published_paths, source_dir=source_dir, source_dir_existed=source_dir_existed, db=db, previous_video_ids=previous_video_ids, new_video_ids=new_ids, previous_status=previous_project.get("status"), previous_updated_at=previous_project.get("updated_at"), clips_folder=clips_folder, clips_snapshot=clips_snapshot, review_path=review_path, review_snapshot=review_snapshot, plan_path=plan_path, plan_snapshot=plan_snapshot,
             )
         try:
-            mark_project_needs_review(cfg, db, project_id)
+            mark_project_needs_review(cfg, db, project_id, base_revision=base_revision)
         except Exception as exc:
             return _upload_project_failure(
                 error=f"專案狀態更新失敗：{exc}", project_id=project_id, failed_files=[record["name"] for record in records], staged_paths=staged_paths, published_paths=published_paths, source_dir=source_dir, source_dir_existed=source_dir_existed, db=db, previous_video_ids=previous_video_ids, new_video_ids=new_ids, previous_status=previous_project.get("status"), previous_updated_at=previous_project.get("updated_at"), clips_folder=clips_folder, clips_snapshot=clips_snapshot, review_path=review_path, review_snapshot=review_snapshot, plan_path=plan_path, plan_snapshot=plan_snapshot,
@@ -1766,7 +1797,7 @@ def analyze_project(cfg: dict, db: Path, project_id: int, force: bool = False, *
         processed.extend(result.get("processed", []))
         base_revision = current_revision(db, project_id)
     if processed:
-        build_project_plan(cfg, db, project_id)
+        build_project_plan(cfg, db, project_id, base_revision=current_revision(db, project_id))
     return {"ok": True, "processed": processed}
 
 

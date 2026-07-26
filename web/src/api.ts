@@ -110,6 +110,12 @@ export type Job = {
   updated_at?: string;
 };
 
+export type JobsSnapshot = {
+  jobs: Job[];
+  project_revision?: number;
+  project_changed?: boolean;
+};
+
 export type ProjectDetail = {
   project: Project;
   project_revision?: number;
@@ -230,20 +236,21 @@ async function json<T>(url: string, init?: RequestInit): Promise<T> {
 export const api = {
   projects: () => json<Project[]>("/api/projects"),
   project: (id: number, signal?: AbortSignal) => json<ProjectDetail>(`/api/project?id=${id}`, { signal }),
-  jobs: (projectId: number, signal?: AbortSignal) => json<Job[] | { jobs: Job[] }>(`/api/jobs?project_id=${projectId}&meta=1`, { signal }).then((result) => Array.isArray(result) ? result : result.jobs),
+  jobs: (projectId: number, signal?: AbortSignal, sinceRevision?: number) => json<Job[] | JobsSnapshot>(`/api/jobs?project_id=${projectId}&meta=1${sinceRevision === undefined ? "" : `&since_revision=${sinceRevision}`}`, { signal }).then((result) => Array.isArray(result) ? { jobs: result } : result),
   bgm: () => json<BgmTrack[]>("/api/bgm"),
   createProject: (name: string) =>
     json<{ ok: boolean; id: number }>("/api/projects", post({ name, video_ids: [], category: "unknown", content_type: "diary_montage", platform: "YouTube" })),
-  uploadProject: (projectId: number, files: ReadonlyArray<File>) => {
+  uploadProject: (projectId: number, files: ReadonlyArray<File>, baseRevision?: number) => {
     const body = new FormData();
     body.append("project_id", String(projectId));
+    if (baseRevision !== undefined) body.append("base_revision", String(baseRevision));
     files.forEach((file) => body.append("file", file));
     return json<{ ok: boolean; files?: string[]; error?: string }>("/api/project/upload", { method: "POST", body });
   },
-  analyzeJob: (projectId: number, force = false) =>
-    json<{ ok: boolean; message?: string }>("/api/project/analyze-job", post({ project_id: projectId, force })),
-  analyzeVideo: (projectId: number, videoId: number) =>
-    json<{ ok: boolean; message?: string }>("/api/project/analyze-video", post({ project_id: projectId, video_id: videoId })),
+  analyzeJob: (projectId: number, force = false, baseRevision?: number) =>
+    json<{ ok: boolean; message?: string }>("/api/project/analyze-job", post({ project_id: projectId, force, base_revision: baseRevision })),
+  analyzeVideo: (projectId: number, videoId: number, baseRevision?: number) =>
+    json<{ ok: boolean; message?: string }>("/api/project/analyze-video", post({ project_id: projectId, video_id: videoId, base_revision: baseRevision })),
   saveClipSummary: (projectId: number, videoId: number, userSummary: string, baseRevision?: number) =>
     json<{ ok: boolean; plan_rebuilt?: boolean; error?: string; code?: string; project_revision?: number }>("/api/project/clip-summary", post({ project_id: projectId, video_id: videoId, user_summary: userSummary, base_revision: baseRevision })),
   colorAnalyze: (projectId: number, force = false, baseRevision?: number) =>
@@ -254,8 +261,8 @@ export const api = {
     json<{ ok: boolean; state?: ColorState; error?: string; code?: string; project_revision?: number }>("/api/project/color-reference", post({ project_id: projectId, reference_id: referenceId, base_revision: baseRevision })),
   colorPreview: (projectId: number, mode = "") =>
     json<{ ok: boolean; message?: string; previews?: Array<{ video_id: number; segment_id: string; before_url: string; after_url: string; cache_hit: boolean }>; error?: string }>("/api/project/color-job", post({ project_id: projectId, mode })),
-  colorPreviewDirect: (projectId: number, force = false) =>
-    json<{ ok: boolean; previews?: Array<{ video_id: number; segment_id: string; before_url: string; after_url: string; cache_hit: boolean; confidence?: number; warnings?: string[] }>; error?: string }>("/api/project/color-preview", post({ project_id: projectId, force })),
+  colorPreviewDirect: (projectId: number, force = false, baseRevision?: number) =>
+    json<{ ok: boolean; previews?: Array<{ video_id: number; segment_id: string; before_url: string; after_url: string; cache_hit: boolean; confidence?: number; warnings?: string[] }>; error?: string }>("/api/project/color-preview", post({ project_id: projectId, force, base_revision: baseRevision })),
   buildPlan: (projectId: number, baseRevision?: number) =>
     json<{ ok: boolean; error?: string; code?: string; project_revision?: number }>("/api/project/build-plan", post({ project_id: projectId, base_revision: baseRevision })),
   assignBgm: (projectId: number, bgmId: number, baseRevision?: number) =>
@@ -275,8 +282,8 @@ export const api = {
   saveSegmentTiming: (projectId: number, segmentId: string, timing: { start_seconds: number; end_seconds: number; speed: number }, baseRevision?: number) =>
     json<{ ok: boolean; path?: string; error?: string }>("/api/project/segment-timing", post({ project_id: projectId, segment_id: segmentId, ...timing, base_revision: baseRevision })),
   storyboard: (projectId: number) => json<StoryboardState>(`/api/project/storyboard?project_id=${projectId}`),
-  generateStoryboard: (projectId: number, force = false) =>
-    json<{ ok: boolean; storyboard?: StoryboardState; error?: string }>("/api/project/storyboard/generate", post({ project_id: projectId, force })),
+  generateStoryboard: (projectId: number, force = false, baseRevision?: number) =>
+    json<{ ok: boolean; storyboard?: StoryboardState; error?: string }>("/api/project/storyboard/generate", post({ project_id: projectId, force, base_revision: baseRevision })),
   updateStoryboard: (projectId: number, state: StoryboardState, baseRevision?: number) =>
     json<{ ok: boolean; storyboard?: StoryboardState; render_changed?: boolean; approval_invalidated?: boolean; error?: string }>("/api/project/storyboard", post({ project_id: projectId, state, base_revision: baseRevision })),
   storyboardThumbnail: (projectId: number, segmentId: string, ratio = 0.5, force = false) =>
@@ -287,10 +294,10 @@ export const api = {
     json<{ ok: boolean; folder?: string; output?: string; error?: string }>("/api/project/opencut-export", post({ project_id: projectId, render_clips: renderClips, max_segments: 20 })),
   hyperframesExport: (projectId: number, render = false) =>
     json<{ ok: boolean; folder?: string; output?: string; error?: string }>("/api/project/hyperframes-export", post({ project_id: projectId, render, max_segments: 20 })),
-  opencutJob: (projectId: number, renderClips = false) =>
-    json<{ ok: boolean; message?: string; error?: string }>("/api/project/opencut-job", post({ project_id: projectId, render_clips: renderClips, max_segments: 20 })),
-  hyperframesJob: (projectId: number, render = false) =>
-    json<{ ok: boolean; message?: string; error?: string }>("/api/project/hyperframes-job", post({ project_id: projectId, render, max_segments: 20 })),
+  opencutJob: (projectId: number, renderClips = false, baseRevision?: number) =>
+    json<{ ok: boolean; message?: string; error?: string }>("/api/project/opencut-job", post({ project_id: projectId, render_clips: renderClips, max_segments: 20, base_revision: baseRevision })),
+  hyperframesJob: (projectId: number, render = false, baseRevision?: number) =>
+    json<{ ok: boolean; message?: string; error?: string }>("/api/project/hyperframes-job", post({ project_id: projectId, render, max_segments: 20, base_revision: baseRevision })),
   createRenderJob: (projectId: number, outputPath = "") =>
     json<{ ok: boolean; created: boolean; job?: Job; error?: string }>("/api/project/render-job", post({ project_id: projectId, output_path: outputPath })),
   cancelRenderJob: (jobId: string) =>

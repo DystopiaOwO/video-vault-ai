@@ -159,7 +159,14 @@ def resolve_legacy_project_bgm(db: Path, project_id: int, settings: Mapping[str,
 
 def save_audio_state(cfg: dict, db: Path, project_id: int, state: Mapping[str, Any], *, mark_review: bool = True, base_revision: int | None = None) -> Path:
     with project_commit(db, project_id, base_revision) as commit:
-        path = _save_audio_state(cfg, db, project_id, state, mark_review=mark_review)
+        normalized = normalize_audio_state(state)
+        current = normalize_audio_state(load_audio_state(cfg, project_id))
+        # Creating the file is itself meaningful: it opts the project into
+        # the new audio workflow, even when the saved value equals defaults.
+        if normalized == current and audio_state_path(cfg, project_id).is_file():
+            commit.changed = False
+            return audio_state_path(cfg, project_id)
+        path = _save_audio_state(cfg, db, project_id, normalized, mark_review=mark_review)
         commit.changed = True
         return path
 

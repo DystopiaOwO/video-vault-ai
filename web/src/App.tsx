@@ -36,6 +36,7 @@ export function App() {
   const [newProjectName, setNewProjectName] = useState("");
   const [creatingProject, setCreatingProject] = useState(false);
   const currentIdRef = useRef(0);
+  const loadedRevisionRef = useRef<number | undefined>(undefined);
   const mountedRef = useRef(true);
   const loaderRef = useRef<ProjectDataLoader | null>(null);
   const navigationIdentityRef = useRef(new ProjectNavigationIdentity());
@@ -54,14 +55,15 @@ export function App() {
       {
         // Keep the existing App-level API call shape stable for legacy mocks;
         // ProjectDataLoader still owns generation, timeout, and cancellation.
-        project: (projectId) => api.project(projectId),
-        jobs: (projectId) => api.jobs(projectId),
+        project: (projectId, signal) => api.project(projectId, signal),
+        jobs: (projectId, signal) => api.jobs(projectId, signal),
       },
       (projectId) => projectId === currentIdRef.current,
       () => mountedRef.current,
-      (project, nextJobs) => {
+      (project, nextJobs, projectRevision) => {
         setDetail(project);
         setJobs(nextJobs);
+        loadedRevisionRef.current = projectRevision;
       },
       (error) => setMessage(`狀態更新失敗：${error instanceof Error ? error.message : "未知錯誤"}`),
     );
@@ -109,17 +111,17 @@ export function App() {
   }
 
   async function refreshProjectAfterMutation(projectId: number, operation?: ProjectOperationToken): Promise<Job[]> {
-    loaderRef.current?.invalidate();
-    const [nextDetail, nextJobs] = await Promise.all([api.project(projectId), api.jobs(projectId)]);
-    if (mountedRef.current && currentIdRef.current === projectId && (!operation || isCurrentProjectOperation(operation))) {
-      setDetail(nextDetail);
-      setJobs(nextJobs);
+    const result = await loaderRef.current?.loadResult(projectId, { forceFresh: true, throwOnError: true, timeoutMs: 15000 });
+    if (!result || !result.ok) {
+      throw result?.error || new Error("專案更新後重新載入失敗");
     }
-    return nextJobs;
+    if (mountedRef.current && currentIdRef.current === projectId && (!operation || isCurrentProjectOperation(operation))) return result.jobs;
+    return result.jobs;
   }
 
   useEffect(() => {
     if (!currentId) return;
+    loadedRevisionRef.current = undefined;
     let cancelled = false;
     let timer: number | undefined;
     let wasActive = false;
@@ -127,22 +129,30 @@ export function App() {
       if (cancelled) return;
       const requestedProjectId = currentId;
       try {
-        const nextJobs = await api.jobs(requestedProjectId);
+        const rawSnapshot = await api.jobs(requestedProjectId, undefined, loadedRevisionRef.current);
         if (cancelled || currentIdRef.current !== requestedProjectId) return;
+        const snapshot: import("./api").JobsSnapshot = Array.isArray(rawSnapshot)
+          ? { jobs: rawSnapshot as Job[] }
+          : rawSnapshot;
+        const nextJobs = snapshot.jobs;
         const active = nextJobs.some((job) => Boolean(job.job_id) && ["queued", "running", "cancelling"].includes(job.status));
         setJobs(nextJobs);
-        if (wasActive && !active) {
+        const revisionChanged = typeof snapshot.project_revision === "number"
+          && typeof loadedRevisionRef.current === "number"
+          && snapshot.project_revision > loadedRevisionRef.current;
+        if ((wasActive && !active) || revisionChanged) {
           const result = await loaderRef.current?.loadResult(requestedProjectId, { forceFresh: true, timeoutMs: 15000 });
           if (!cancelled && result && !result.ok) {
             setMessage(`工作完成後更新失敗：${result.error.message}`);
           }
         }
         wasActive = active;
-        if (!cancelled) timer = window.setTimeout(() => void poll(), active ? 1500 : 10000);
+        if (!cancelled) timer = window.setTimeout(() => void poll(), document.hidden ? 30000 : active ? 1500 : 10000);
       } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") return;
         if (!cancelled && currentIdRef.current === requestedProjectId) {
           setMessage(`工作狀態更新失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
-          timer = window.setTimeout(() => void poll(), 10000);
+          timer = window.setTimeout(() => void poll(), document.hidden ? 30000 : 10000);
         }
       }
     };
@@ -153,7 +163,7 @@ export function App() {
         if (result?.ok) {
           wasActive = result.jobs.some((job) => Boolean(job.job_id) && ["queued", "running", "cancelling"].includes(job.status));
         }
-        timer = window.setTimeout(() => void poll(), wasActive ? 1500 : 10000);
+        timer = window.setTimeout(() => void poll(), document.hidden ? 30000 : wasActive ? 1500 : 10000);
       }
     })();
     return () => {
@@ -516,8 +526,8 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
     try {
       setMessage("工作已送出，請看 Render Job 狀態與進度。");
       const result = kind.startsWith("hyperframes")
-        ? await api.hyperframesJob(detail.project.id, kind === "hyperframes-render")
-        : await api.opencutJob(detail.project.id, kind === "opencut-render");
+        ? await api.hyperframesJob(detail.project.id, kind === "hyperframes-render", detail.project_revision)
+        : await api.opencutJob(detail.project.id, kind === "opencut-render", detail.project_revision);
       if (!result.ok) {
         if (isCurrentProjectOperation(operation)) setMessage(`工作啟動失敗：${result.error || result.message || "工作未成功送出"}`);
         return;
@@ -583,7 +593,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
     const operation = beginProjectOperation(detail.project.id);
     setMessage("正在匯入素材...");
     try {
-      const result = await api.uploadProject(detail.project.id, files);
+      const result = await api.uploadProject(detail.project.id, files, detail.project_revision);
       if (!result.ok) {
         if (isCurrentProjectOperation(operation)) setMessage(`素材匯入失敗：${result.error || "操作未成功"}`);
         return;
@@ -610,7 +620,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
     const operation = beginProjectOperation(detail.project.id);
     setMessage(force ? "已送出全部重跑感知。" : "已送出待感知素材。");
     try {
-      const result = await api.analyzeJob(detail.project.id, force);
+      const result = await api.analyzeJob(detail.project.id, force, detail.project_revision);
       if (!result.ok) {
         if (isCurrentProjectOperation(operation)) setMessage(`內容感知啟動失敗：${result.message || "操作未成功"}`);
         return;
@@ -637,7 +647,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
     const operation = beginProjectOperation(detail.project.id);
     setMessage("已送出單支素材感知，請看工作狀態百分比。");
     try {
-      const result = await api.analyzeVideo(detail.project.id, videoId);
+      const result = await api.analyzeVideo(detail.project.id, videoId, detail.project_revision);
       if (!result.ok) {
         if (isCurrentProjectOperation(operation)) setMessage(`單支素材感知啟動失敗：${result.message || "操作未成功"}`);
         return;

@@ -228,8 +228,8 @@ class RenderJobManager:
             if not job:
                 return {"ok": False, "reason": "job not found"}
             status = str(job.get("status"))
+            coordinator_id = str(job.get("coordinator_job_id") or "")
             if status == "queued":
-                coordinator_id = str(job.get("coordinator_job_id") or "")
                 if coordinator_id:
                     self.coordinator.cancel(coordinator_id)
                 updated = self.store.transition(
@@ -292,6 +292,8 @@ class RenderJobManager:
                     )
                     if completed is not None:
                         updated = completed
+                    if coordinator_id:
+                        self.coordinator.finish_cancel(coordinator_id)
             else:
                 updated = job
         if runtime is not None:
@@ -319,12 +321,19 @@ class RenderJobManager:
                 try:
                     current = self.store.get(job_id)
                     if current and current.get("status") in ACTIVE_JOB_STATUSES:
+                        coordinator_id = str(current.get("coordinator_job_id") or "")
+                        cancelled = current.get("status") in {"cancelling", "cancelled"} or bool(current.get("cancel_requested"))
+                        if coordinator_id:
+                            if cancelled:
+                                self.coordinator.finish_cancel(coordinator_id)
+                            else:
+                                self.coordinator.fail(coordinator_id, "render worker exception")
                         self.store.update(
                             job_id,
-                            status="failed",
+                            status="cancelled" if cancelled else "failed",
                             stage="done",
-                            message="Render Worker 發生未預期錯誤",
-                            error="render worker exception",
+                            message="正式輸出已取消" if cancelled else "Render Worker 發生未預期錯誤",
+                            error="" if cancelled else "render worker exception",
                             process_id=None,
                             finished_at=utc_now(),
                         )
@@ -350,6 +359,10 @@ class RenderJobManager:
                 break
             if coordinated.state in {JobState.CANCELLED, JobState.SUPERSEDED}:
                 self.store.transition(job_id, {"queued"}, status="cancelled", stage="done", message="正式輸出未開始前已取消", finished_at=utc_now())
+                return
+            if coordinated.state == JobState.CANCELLING:
+                self.coordinator.finish_cancel(coordinator_id)
+                self.store.transition(job_id, {"queued", "running", "cancelling"}, status="cancelled", stage="done", message="正式輸出未開始前已取消", finished_at=utc_now())
                 return
             try:
                 self.coordinator.start(coordinator_id)
@@ -395,13 +408,13 @@ class RenderJobManager:
             )
         except RenderCancelled:
             if coordinator_id:
-                self.coordinator.cancel(coordinator_id)
+                self.coordinator.finish_cancel(coordinator_id)
             self.store.append_log(job_id, "result: cancelled")
             self.store.update(job_id, status="cancelled", stage="done", message="正式輸出已取消", error="", process_id=None, finished_at=utc_now())
         except Exception as exc:
             if cancel_event.is_set():
                 if coordinator_id:
-                    self.coordinator.cancel(coordinator_id)
+                    self.coordinator.finish_cancel(coordinator_id)
                 self.store.append_log(job_id, "result: cancelled\n" + traceback.format_exc())
                 self.store.update(job_id, status="cancelled", stage="done", message="正式輸出已取消", error="", process_id=None, finished_at=utc_now())
             else:
@@ -412,7 +425,16 @@ class RenderJobManager:
                 self.store.update(job_id, status="failed", stage="done", message="正式輸出失敗", error=error, process_id=None, finished_at=utc_now())
         else:
             if coordinator_id:
-                self.coordinator.complete(coordinator_id)
+                coordinated = self.coordinator.get(coordinator_id)
+                if coordinated and coordinated.state == JobState.CANCELLING:
+                    # The renderer has crossed its atomic publish boundary.
+                    # Keep the cancellation contract monotonic and release
+                    # the coordinator slot as cancelled; the persistent job
+                    # result remains succeeded because the output is already
+                    # committed and cannot be safely rolled back here.
+                    self.coordinator.finish_cancel(coordinator_id)
+                else:
+                    self.coordinator.complete(coordinator_id)
             self.store.append_log(job_id, f"result: succeeded\noutput: {result.output_path}")
             self.store.update(job_id, status="succeeded", stage="done", percent=100, message="正式輸出完成", output_path=str(result.output_path), cache_hit=bool(result.cache_hit), error="", process_id=None, finished_at=utc_now())
         finally:
