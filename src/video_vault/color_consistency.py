@@ -135,10 +135,10 @@ def save_project_color_state(cfg: dict, db: Path, project_id: int, state: Mappin
         normalized = normalize_color_state(state)
         current = normalize_color_state(load_project_color_state(cfg, project_id))
         if normalized == current and color_state_path(cfg, project_id).is_file():
-            commit.changed = False
+            commit.record_changed(False)
             return color_state_path(cfg, project_id)
         path = _save_project_color_state(cfg, db, project_id, normalized, mark_review=mark_review)
-        commit.changed = True
+        commit.record_changed(True)
         return path
 
 
@@ -170,7 +170,7 @@ def analyze_project_color(cfg: dict, db: Path, project_id: int, *, force: bool =
     with project_commit(db, project_id, base_revision) as commit:
         before = _color_revision_payload(load_project_color_state(cfg, project_id))
         state = _analyze_project_color(cfg, db, project_id, force=force)
-        commit.changed = before != _color_revision_payload(state)
+        commit.record_changed(before != _color_revision_payload(state))
         return state
 
 
@@ -224,7 +224,7 @@ def set_color_reference(cfg: dict, db: Path, project_id: int, reference_id: str,
     with project_commit(db, project_id, base_revision) as commit:
         before = _color_revision_payload(load_project_color_state(cfg, project_id))
         state = _set_color_reference(cfg, db, project_id, reference_id)
-        commit.changed = before != _color_revision_payload(state)
+        commit.record_changed(before != _color_revision_payload(state))
         return state
 
 
@@ -276,8 +276,9 @@ def update_color_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str,
                     segments[key] = _merge(dict(segments.get(key) or {}), dict(value))
             updated["segments"] = segments
         state = normalize_color_state(updated)
-        commit.changed = state != normalize_color_state(current)
-        if commit.changed:
+        changed = state != normalize_color_state(current)
+        commit.record_changed(changed)
+        if changed:
             _save_project_color_state(cfg, db, project_id, state)
         return state
 

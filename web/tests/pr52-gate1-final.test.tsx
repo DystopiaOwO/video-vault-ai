@@ -38,6 +38,7 @@ function color(): ColorState {
 function detail(projectId = 1, canRender = true): ProjectDetail {
   return {
     project: { id: projectId, name: `專案-${projectId}`, status: "needs_review" },
+    project_revision: 1,
     clips: [{
       clip_id: "clip-1",
       video_id: 1,

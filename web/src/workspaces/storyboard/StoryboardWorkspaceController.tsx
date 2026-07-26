@@ -416,6 +416,10 @@ export function StoryboardWorkspaceController({
     if (busy) return;
     const segment = model.segments.find((item) => item.id === segmentId);
     if (!segment) return;
+    if (typeof detail.project_revision !== "number") {
+      setProjectMessage("專案版本資料遺失，請重新載入後再修改片段調色。");
+      return;
+    }
     const mutation = beginMutation("color");
     if (!mutation) return;
     setBusy("color");
@@ -433,9 +437,7 @@ export function StoryboardWorkspaceController({
         applied: { ...detail.color.applied },
         segments: { [segmentId]: patch },
       };
-      const result = await (detail.project_revision === undefined
-        ? api.colorSettings(detail.project.id, colorPatch)
-        : api.colorSettings(detail.project.id, colorPatch, detail.project_revision));
+      const result = await api.colorSettings(detail.project.id, colorPatch, detail.project_revision);
       if (!result.ok) {
         setProjectMessage(`片段調色更新失敗：${result.error || "未知錯誤"}`);
         return;
@@ -454,6 +456,10 @@ export function StoryboardWorkspaceController({
 
   async function resetColor(segmentId: string) {
     if (busy) return;
+    if (typeof detail.project_revision !== "number") {
+      setProjectMessage("專案版本資料遺失，請重新載入後再修改片段調色。");
+      return;
+    }
     const mutation = beginMutation("color");
     if (!mutation) return;
     setBusy("color");
@@ -464,9 +470,7 @@ export function StoryboardWorkspaceController({
         applied: { ...detail.color.applied },
         segments: { [segmentId]: null },
       };
-      const result = await (detail.project_revision === undefined
-        ? api.colorSettings(detail.project.id, colorPatch)
-        : api.colorSettings(detail.project.id, colorPatch, detail.project_revision));
+      const result = await api.colorSettings(detail.project.id, colorPatch, detail.project_revision);
       if (!result.ok) {
         setProjectMessage(`恢復調色預設失敗：${result.error || "未知錯誤"}`);
         return;

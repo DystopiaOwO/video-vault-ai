@@ -183,7 +183,16 @@ def ensure_storyboard(cfg: dict, db: Path, project_id: int) -> dict[str, Any]:
     return state
 
 
-def save_storyboard(cfg: dict, db: Path, project_id: int, state: Mapping[str, Any], *, mark_review: bool = True, base_revision: int | None = None) -> Path:
+def save_storyboard(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    state: Mapping[str, Any],
+    *,
+    mark_review: bool = True,
+    base_revision: int | None = None,
+    revision_changed: bool | None = None,
+) -> Path:
     from .project_lifecycle import project_commit
 
     with project_commit(db, project_id, base_revision) as commit:
@@ -195,7 +204,11 @@ def save_storyboard(cfg: dict, db: Path, project_id: int, state: Mapping[str, An
             path = _save_storyboard(cfg, db, project_id, normalized, mark_review=mark_review)
         else:
             path = storyboard_path(cfg, project_id)
-        commit.changed = changed or not existed
+        # A standalone storyboard save changes the project revision when it
+        # writes state.  The review update flow supplies its stricter render
+        # projection so notes/locks/thumbnails do not invalidate approval.
+        effective_change = (changed or not existed) if revision_changed is None else revision_changed
+        commit.record_changed(effective_change)
         return path
 
 
@@ -218,7 +231,7 @@ def update_storyboard(cfg: dict, db: Path, project_id: int, patch: Mapping[str, 
 
     with project_commit(db, project_id, base_revision) as commit:
         result = _update_storyboard(cfg, db, project_id, patch, return_result=True)
-        commit.changed = bool(result.get("render_changed"))
+        commit.record_changed(bool(result.get("render_changed")))
         return result if return_result else result["state"]
 
 
@@ -236,7 +249,14 @@ def _update_storyboard(cfg: dict, db: Path, project_id: int, patch: Mapping[str,
     before_render = storyboard_render_state(current, rows)
     after_render = storyboard_render_state(updated, rows)
     render_changed = before_render != after_render
-    save_storyboard(cfg, db, project_id, updated, mark_review=render_changed)
+    save_storyboard(
+        cfg,
+        db,
+        project_id,
+        updated,
+        mark_review=render_changed,
+        revision_changed=render_changed,
+    )
     if return_result:
         return {
             "state": updated,

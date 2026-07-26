@@ -178,12 +178,18 @@ def test_cancel_after_publish_started_still_succeeds(tmp_path: Path, monkeypatch
         created = manager.enqueue(setup["project_id"])
         job_id = created["job"]["job_id"]
         assert publish_started.wait(timeout=90)
-        cancelling = manager.cancel(job_id)
-        assert cancelling["ok"] is True
-        assert cancelling["job"]["status"] == "cancelling"
+        cancellation: dict = {}
+        cancel_thread = threading.Thread(target=lambda: cancellation.update(manager.cancel(job_id)))
+        cancel_thread.start()
         release_publish.set()
+        cancel_thread.join(timeout=10)
+        assert not cancel_thread.is_alive()
+        assert cancellation["ok"] is False
+        assert cancellation["code"] == "cancel_too_late"
         final = _wait_for(manager, job_id, {"succeeded", "failed", "cancelled"}, timeout=90)
         assert final["status"] == "succeeded"
+        coordinator = manager.coordinator.get(final["coordinator_job_id"])
+        assert coordinator and coordinator.state.value == "succeeded"
         assert final["percent"] == 100
         output = Path(final["output_path"])
         report = output.with_name(output.name + ".render.json")

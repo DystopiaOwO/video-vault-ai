@@ -92,7 +92,7 @@ def build_project_plan(cfg: dict, db: Path, project_id: int, *, base_revision: i
     with project_commit(db, project_id, base_revision) as commit:
         old = _read_json(project_dir(cfg, project_id) / "project_plan.json")
         result = _build_project_plan(cfg, db, project_id)
-        commit.changed = _plan_revision_payload(old) != _plan_revision_payload(result)
+        commit.record_changed(_plan_revision_payload(old) != _plan_revision_payload(result))
         return result
 
 
@@ -148,7 +148,7 @@ def revise_project(cfg: dict, db: Path, project_id: int, notes: str, *, base_rev
             if old_status:
                 set_project_status(db, project_id, old_status)
             raise
-        commit.changed = (
+        commit.record_changed(
             old_notes != _revision_notes(cfg, project_id)
             or _plan_revision_payload(old_plan) != _plan_revision_payload(result)
             or old_status != str((project(db, project_id)["status"] if project(db, project_id) else "") or "")
@@ -416,8 +416,9 @@ def save_segment_review(cfg: dict, db: Path, project_id: int, rows: list[dict], 
         before = _segment_review(cfg, project_id)
         path = _save_segment_review(cfg, db, project_id, rows, mark_review=False)
         after = _segment_review(cfg, project_id)
-        commit.changed = before != after
-        if commit.changed:
+        changed = before != after
+        commit.record_changed(changed)
+        if changed:
             mark_project_needs_review(cfg, db, project_id)
         return path
 
@@ -470,8 +471,9 @@ def update_segment_timing(
         before = _segment_review(cfg, project_id)
         path = _update_segment_timing(cfg, db, project_id, segment_id, start_seconds, end_seconds, speed, mark_review=False)
         after = _segment_review(cfg, project_id)
-        commit.changed = before != after
-        if commit.changed:
+        changed = before != after
+        commit.record_changed(changed)
+        if changed:
             mark_project_needs_review(cfg, db, project_id)
         return path
 
@@ -549,7 +551,7 @@ def set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes: 
         after_review = _review_revision_payload(_read_json(folder / "review_status.json"))
         after_project_status = str((project(db, project_id)["status"] if project(db, project_id) else "") or "")
         after_plan_status = str(_read_json(folder / "project_plan.json").get("status") or "")
-        commit.changed = before_review != after_review or before_project_status != after_project_status or before_plan_status != after_plan_status
+        commit.record_changed(before_review != after_review or before_project_status != after_project_status or before_plan_status != after_plan_status)
         return path
 
 
@@ -618,7 +620,7 @@ def mark_project_needs_review(cfg: dict, db: Path, project_id: int, *, base_revi
             _review_revision_payload(_read_json(folder / "review_status.json")),
             str(_read_json(folder / "project_plan.json").get("status") or ""),
         )
-        commit.changed = before != after
+        commit.record_changed(before != after)
 
 
 def _mark_project_needs_review(cfg: dict, db: Path, project_id: int) -> None:

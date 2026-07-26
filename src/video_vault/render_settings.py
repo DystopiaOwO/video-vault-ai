@@ -59,13 +59,13 @@ def save_render_settings(
     current = load_render_settings(cfg, project_id)
     with project_commit(db, project_id, base_revision) as commit:
         if current == normalized and path.is_file():
-            commit.changed = False
+            commit.record_changed(False)
             return path
         temp = path.with_name(f".{path.name}.tmp")
         temp.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         temp.replace(path)
         mark_project_needs_review(cfg, db, project_id)
-        commit.changed = True
+        commit.record_changed(True)
         return path
 
 

@@ -68,6 +68,22 @@ def _base_revision(data: dict) -> int | None:
         raise ValueError("base_revision 必須是整數") from exc
 
 
+class ProjectRevisionRequired(ValueError):
+    """A modern API writer was called without its optimistic-lock token."""
+
+    code = "base_revision_required"
+
+    def __init__(self) -> None:
+        super().__init__("缺少 base_revision，請重新載入專案後再操作")
+
+
+def _require_api_base_revision(data: dict) -> int:
+    revision = _base_revision(data)
+    if revision is None:
+        raise ProjectRevisionRequired()
+    return revision
+
+
 class _UploadPart:
     def __init__(self, filename: str, file, value: str = ""):
         self.filename = filename
@@ -577,53 +593,62 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                         self._json({"ok": False, "code": "audio_preview_failed", "error": "音訊預覽無法產生，請檢查素材與音訊設定。"})
             elif path == "/api/project/bgm":
                 project_id = int(data.get("project_id", 0))
-                with project_commit(db, project_id, _base_revision(data)):
+                with project_commit(db, project_id, _base_revision(data)) as commit:
+                    before_tracks = {int(row["id"]) for row in project_bgm_tracks(db, project_id)}
                     add_project_bgm(db, project_id, int(data.get("bgm_id", 0)))
-                    mark_project_needs_review(cfg, db, project_id)
+                    changed = before_tracks != {int(row["id"]) for row in project_bgm_tracks(db, project_id)}
+                    commit.record_changed(changed)
+                    if changed:
+                        mark_project_needs_review(cfg, db, project_id)
                 self._json({"ok": True})
             elif path == "/api/project/color-preview":
                 try:
-                    self._json(color_preview_project(cfg, db, int(data.get("project_id", 0)), data.get("mode") or cfg.get("color", {}).get("default_mode", "safe_restore"), force=bool(data.get("force")), base_revision=_base_revision(data)))
+                    self._json(color_preview_project(cfg, db, int(data.get("project_id", 0)), data.get("mode") or cfg.get("color", {}).get("default_mode", "safe_restore"), force=bool(data.get("force")), base_revision=_require_api_base_revision(data)))
                 except ColorPipelineError as exc:
                     self._json({"ok": False, "code": "missing_lut" if "LUT file does not exist" in str(exc) else "color_pipeline_error", "error": str(exc)})
                 except Exception as exc:
                     if isinstance(exc, ProjectRevisionConflict):
                         raise
-                    self._json({"ok": False, "error": f"調色預覽失敗：{exc}"})
+                    self._json({"ok": False, "code": getattr(exc, "code", "color_preview_failed"), "error": f"調色預覽失敗：{exc}"})
             elif path == "/api/project/color-job":
                 project_id = int(data.get("project_id", 0))
-                started = start_color_job(cfg, db, project_id, data.get("mode") or cfg.get("color", {}).get("default_mode", "safe_restore"), base_revision=_base_revision(data))
-                self._json({"ok": started, "message": "調色預覽已開始" if started else "調色預覽已在執行中"})
+                try:
+                    started = start_color_job(cfg, db, project_id, data.get("mode") or cfg.get("color", {}).get("default_mode", "safe_restore"), base_revision=_require_api_base_revision(data))
+                    self._json({"ok": started, "message": "調色預覽已開始" if started else "調色預覽已在執行中"})
+                except Exception as exc:
+                    if isinstance(exc, ProjectRevisionConflict):
+                        raise
+                    self._json({"ok": False, "code": getattr(exc, "code", "color_job_failed"), "error": str(exc)})
             elif path == "/api/project/color-analyze":
                 try:
-                    state = analyze_project_color(cfg, db, int(data.get("project_id", 0)), force=bool(data.get("force")), base_revision=_base_revision(data))
+                    state = analyze_project_color(cfg, db, int(data.get("project_id", 0)), force=bool(data.get("force")), base_revision=_require_api_base_revision(data))
                     self._json({"ok": True, "state": color_state_for_api(cfg, int(data.get("project_id", 0)), state)})
                 except ColorReferenceError as exc:
                     self._json({"ok": False, "code": exc.code, "error": str(exc), "warnings": [str(exc)]})
                 except Exception as exc:
                     if isinstance(exc, ProjectRevisionConflict):
                         raise
-                    self._json({"ok": False, "error": f"色彩分析失敗：{exc}"})
+                    self._json({"ok": False, "code": getattr(exc, "code", "color_analysis_failed"), "error": f"色彩分析失敗：{exc}"})
             elif path == "/api/project/color-settings":
                 try:
                     project_id = int(data.get("project_id", 0))
                     patch = data.get("state") if isinstance(data.get("state"), dict) else data.get("patch", {})
-                    state = update_color_state(cfg, db, project_id, patch if isinstance(patch, dict) else {}, base_revision=_base_revision(data))
+                    state = update_color_state(cfg, db, project_id, patch if isinstance(patch, dict) else {}, base_revision=_require_api_base_revision(data))
                     self._json({"ok": True, "state": color_state_for_api(cfg, int(data.get("project_id", 0)), state)})
                 except Exception as exc:
                     if isinstance(exc, ProjectRevisionConflict):
                         raise
-                    self._json({"ok": False, "error": f"色彩設定儲存失敗：{exc}"})
+                    self._json({"ok": False, "code": getattr(exc, "code", "color_settings_failed"), "error": f"色彩設定儲存失敗：{exc}"})
             elif path == "/api/project/color-reference":
                 try:
-                    state = set_color_reference(cfg, db, int(data.get("project_id", 0)), str(data.get("reference_id", "")), base_revision=_base_revision(data))
+                    state = set_color_reference(cfg, db, int(data.get("project_id", 0)), str(data.get("reference_id", "")), base_revision=_require_api_base_revision(data))
                     self._json({"ok": True, "state": color_state_for_api(cfg, int(data.get("project_id", 0)), state)})
                 except ColorReferenceError as exc:
                     self._json({"ok": False, "code": exc.code, "error": str(exc)})
                 except Exception as exc:
                     if isinstance(exc, ProjectRevisionConflict):
                         raise
-                    self._json({"ok": False, "error": f"色彩基準更新失敗：{exc}"})
+                    self._json({"ok": False, "code": getattr(exc, "code", "color_reference_failed"), "error": f"色彩基準更新失敗：{exc}"})
             elif path == "/api/project/opencut-export":
                 project_id = int(data.get("project_id", 0))
                 if bool(data.get("render_clips")):
@@ -1816,7 +1841,7 @@ def update_clip_summary(cfg: dict, db: Path, project_id: int, video_id: int, sum
         ok = update_video_summary(db, video_id, summary.strip(), project_id=project_id)
         if ok:
             build_project_plan(cfg, db, project_id)
-        commit.changed = bool(ok)
+        commit.record_changed(bool(ok))
     return ok
 
 

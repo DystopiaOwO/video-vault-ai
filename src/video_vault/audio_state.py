@@ -164,10 +164,10 @@ def save_audio_state(cfg: dict, db: Path, project_id: int, state: Mapping[str, A
         # Creating the file is itself meaningful: it opts the project into
         # the new audio workflow, even when the saved value equals defaults.
         if normalized == current and audio_state_path(cfg, project_id).is_file():
-            commit.changed = False
+            commit.record_changed(False)
             return audio_state_path(cfg, project_id)
         path = _save_audio_state(cfg, db, project_id, normalized, mark_review=mark_review)
-        commit.changed = True
+        commit.record_changed(True)
         return path
 
 
@@ -188,8 +188,9 @@ def update_audio_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str,
         current = load_audio_state(cfg, project_id)
         updated = _apply_audio_patch(current, editable_audio_patch(patch))
         state = normalize_audio_state(updated)
-        commit.changed = state != normalize_audio_state(current)
-        if commit.changed:
+        changed = state != normalize_audio_state(current)
+        commit.record_changed(changed)
+        if changed:
             _save_audio_state(cfg, db, project_id, state, mark_review=True)
         return state
 

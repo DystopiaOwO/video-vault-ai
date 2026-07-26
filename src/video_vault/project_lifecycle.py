@@ -64,8 +64,18 @@ def check_base_revision(db: Path, project_id: int, base_revision: int | None) ->
 class ProjectCommit:
     project_id: int
     base_revision: int
-    changed: bool = True
+    changed: bool = False
     new_revision: int | None = None
+
+    def record_changed(self, value: bool = True) -> bool:
+        """Accumulate effective changes across nested project writers.
+
+        A nested writer can be a no-op even when its caller has already
+        staged a real mutation.  ``changed`` therefore has OR semantics for
+        the entire commit boundary and must never be reset by a nested call.
+        """
+        self.changed = self.changed or bool(value)
+        return self.changed
 
 
 def _active_commit(project_id: int) -> ProjectCommit | None:
@@ -115,7 +125,7 @@ def project_commit(db: Path, project_id: int, base_revision: int | None = None) 
 def mark_changed(project_id: int, changed: bool = True) -> None:
     active = _active_commit(project_id)
     if active is not None:
-        active.changed = bool(changed)
+        active.record_changed(changed)
 
 
 class CancellationToken:

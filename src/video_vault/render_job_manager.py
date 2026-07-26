@@ -27,6 +27,7 @@ _SHUTDOWN_TIMEOUT_SECONDS = 10.0
 class _Runtime:
     cancel_event: threading.Event
     runner: ManagedFFmpegRunner
+    execution: RenderExecutionContext
 
 
 class RenderExecutionContext:
@@ -43,10 +44,35 @@ class RenderExecutionContext:
         self._ffmpeg_base = 0.0
         self._ffmpeg_span = 0.0
         self._ffmpeg_message = ""
+        self._publish_lock = threading.RLock()
+        self._publish_committed = False
 
     def check_cancelled(self) -> None:
         if self.cancel_event.is_set():
             raise RenderCancelled("render cancellation requested")
+
+    def request_cancel(self) -> bool:
+        """Request cancellation unless the final output is already committed.
+
+        The publication lock makes the decision atomic with the final
+        ``partial -> output`` replacement.  A caller therefore receives one
+        deterministic answer instead of racing a late cancellation against a
+        successful persistent render result.
+        """
+        with self._publish_lock:
+            if self._publish_committed:
+                return False
+            self.cancel_event.set()
+            self.runner.request_cancel()
+            return True
+
+    def publish_atomically(self, publish: Callable[[], Any]) -> Any:
+        """Publish the final output or honour a cancellation before it starts."""
+        with self._publish_lock:
+            self.check_cancelled()
+            result = publish()
+            self._publish_committed = True
+            return result
 
     def update(
         self,
@@ -250,6 +276,18 @@ class RenderJobManager:
             if status not in ACTIVE_JOB_STATUSES:
                 return {"ok": False, "reason": "job is already finished", "job": job}
             runtime = self._active.get(job_id)
+            if runtime is not None and not runtime.execution.request_cancel():
+                # The final MP4/report pair is already committed.  Do not move
+                # either state machine into cancellation: the worker will
+                # immediately complete both as succeeded.
+                return {
+                    "ok": False,
+                    "code": "cancel_too_late",
+                    "reason": "output already published",
+                    "job": self.store.get(job_id) or job,
+                }
+            if coordinator_id:
+                self.coordinator.cancel(coordinator_id)
             if status == "running":
                 updated = self.store.transition(
                     job_id,
@@ -279,7 +317,7 @@ class RenderJobManager:
                 # runtime. In that narrow window there is no process to stop;
                 # complete cancellation now so callers never observe a
                 # transient cancelling job with no runtime behind it.
-                if job_id not in self._active:
+                if runtime is None:
                     completed = self.store.transition(
                         job_id,
                         {"cancelling"},
@@ -296,9 +334,6 @@ class RenderJobManager:
                         self.coordinator.finish_cancel(coordinator_id)
             else:
                 updated = job
-        if runtime is not None:
-            runtime.cancel_event.set()
-            runtime.runner.request_cancel()
         return {"ok": True, "job": updated}
 
     def cancel_project(self, project_id: int) -> dict[str, Any]:
@@ -393,7 +428,7 @@ class RenderJobManager:
             if latest and (latest.get("status") == "cancelling" or latest.get("cancel_requested")):
                 cancel_event.set()
                 runner.request_cancel()
-            self._active[job_id] = _Runtime(cancel_event, runner)
+            self._active[job_id] = _Runtime(cancel_event, runner, context)
         try:
             current = claimed
             self.store.append_log(job_id, f"started_at: {current.get('started_at')}\n")
@@ -425,16 +460,7 @@ class RenderJobManager:
                 self.store.update(job_id, status="failed", stage="done", message="正式輸出失敗", error=error, process_id=None, finished_at=utc_now())
         else:
             if coordinator_id:
-                coordinated = self.coordinator.get(coordinator_id)
-                if coordinated and coordinated.state == JobState.CANCELLING:
-                    # The renderer has crossed its atomic publish boundary.
-                    # Keep the cancellation contract monotonic and release
-                    # the coordinator slot as cancelled; the persistent job
-                    # result remains succeeded because the output is already
-                    # committed and cannot be safely rolled back here.
-                    self.coordinator.finish_cancel(coordinator_id)
-                else:
-                    self.coordinator.complete(coordinator_id)
+                self.coordinator.complete(coordinator_id)
             self.store.append_log(job_id, f"result: succeeded\noutput: {result.output_path}")
             self.store.update(job_id, status="succeeded", stage="done", percent=100, message="正式輸出完成", output_path=str(result.output_path), cache_hit=bool(result.cache_hit), error="", process_id=None, finished_at=utc_now())
         finally:

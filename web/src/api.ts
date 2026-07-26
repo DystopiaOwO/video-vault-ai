@@ -259,8 +259,8 @@ export const api = {
     json<{ ok: boolean; state?: ColorState; error?: string; code?: string; project_revision?: number }>("/api/project/color-settings", post({ project_id: projectId, state, base_revision: baseRevision })),
   colorReference: (projectId: number, referenceId: string, baseRevision?: number) =>
     json<{ ok: boolean; state?: ColorState; error?: string; code?: string; project_revision?: number }>("/api/project/color-reference", post({ project_id: projectId, reference_id: referenceId, base_revision: baseRevision })),
-  colorPreview: (projectId: number, mode = "") =>
-    json<{ ok: boolean; message?: string; previews?: Array<{ video_id: number; segment_id: string; before_url: string; after_url: string; cache_hit: boolean }>; error?: string }>("/api/project/color-job", post({ project_id: projectId, mode })),
+  colorPreview: (projectId: number, mode = "", baseRevision?: number) =>
+    json<{ ok: boolean; message?: string; previews?: Array<{ video_id: number; segment_id: string; before_url: string; after_url: string; cache_hit: boolean }>; error?: string; code?: string }>("/api/project/color-job", post({ project_id: projectId, mode, base_revision: baseRevision })),
   colorPreviewDirect: (projectId: number, force = false, baseRevision?: number) =>
     json<{ ok: boolean; previews?: Array<{ video_id: number; segment_id: string; before_url: string; after_url: string; cache_hit: boolean; confidence?: number; warnings?: string[] }>; error?: string }>("/api/project/color-preview", post({ project_id: projectId, force, base_revision: baseRevision })),
   buildPlan: (projectId: number, baseRevision?: number) =>

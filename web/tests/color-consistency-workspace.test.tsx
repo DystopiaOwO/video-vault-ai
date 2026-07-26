@@ -87,6 +87,7 @@ function audio(): AudioState {
 function detail(projectId = 1, colorState = color()): ProjectDetail {
   return {
     project: { id: projectId, name: `project-${projectId}`, status: "needs_review" },
+    project_revision: 7,
     clips: [],
     segments: [
       {
@@ -186,7 +187,7 @@ describe("ColorConsistencyWorkspace", () => {
     fireEvent.change(screen.getByLabelText("專案曝光"), { target: { value: ".4" } });
     fireEvent.click(screen.getByRole("button", { name: "儲存調色設定" }));
 
-    await waitFor(() => expect(save).toHaveBeenCalledWith(1, expect.objectContaining({ applied: expect.objectContaining({ exposure: .4 }) })));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(1, expect.objectContaining({ applied: expect.objectContaining({ exposure: .4 }) }), 7));
     await waitFor(() => expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true, throwOnError: true }));
     expect(screen.queryByText("有未儲存變更")).toBeNull();
   });
@@ -201,11 +202,11 @@ describe("ColorConsistencyWorkspace", () => {
     renderWorkspace();
 
     fireEvent.click(screen.getByRole("button", { name: "分析核心畫面" }));
-    await waitFor(() => expect(analyze).toHaveBeenCalledWith(1, false));
+    await waitFor(() => expect(analyze).toHaveBeenCalledWith(1, false, 7));
     await waitFor(() => expect(screen.getByText("重新分析完成")).toBeTruthy());
 
     fireEvent.change(screen.getByLabelText("色彩基準"), { target: { value: "segment:b:0.5" } });
-    await waitFor(() => expect(reference).toHaveBeenCalledWith(1, "segment:b:0.5"));
+    await waitFor(() => expect(reference).toHaveBeenCalledWith(1, "segment:b:0.5", 7));
   });
 
   it("renders saved previews and clears them after any local edit", async () => {
