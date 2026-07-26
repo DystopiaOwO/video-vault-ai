@@ -204,6 +204,25 @@ class RenderJobManager:
             folder = project_dir(self.cfg, int(project_id))
             manifest = _read_json(folder / "render_manifest.json")
             review = _read_json(folder / "review_status.json")
+            from .approval_snapshot import load_approval_snapshot, validate_snapshot
+
+            snapshot = None
+            snapshot_token = str(review.get("approval_snapshot_path") or "")
+            if snapshot_token:
+                try:
+                    snapshot = load_approval_snapshot(folder / snapshot_token)
+                    snapshot_validation = validate_snapshot(snapshot, check_assets=True)
+                except Exception as exc:
+                    return {"created": False, "ok": False, "error": f"approval snapshot 無法讀取：{exc}"}
+                if not snapshot_validation["valid"]:
+                    return {"created": False, "ok": False, "error": "approval snapshot 已失效：" + "; ".join(snapshot_validation["errors"])}
+            encoder_contract = None
+            if snapshot is not None:
+                from .encoder_contract import resolve_encoder_contract
+                try:
+                    encoder_contract = resolve_encoder_contract(self.cfg, dict(snapshot.get("manifest", {}).get("profile") or {}), str((snapshot.get("manifest", {}).get("settings") or {}).get("encoder") or "auto"))
+                except Exception as exc:
+                    return {"created": False, "ok": False, "error": f"encoder 無法解析：{exc}"}
             try:
                 base_revision = project_revision(self.db, int(project_id))
             except ValueError:
@@ -221,6 +240,10 @@ class RenderJobManager:
                 project_id=int(project_id),
                 manifest_hash=str(manifest.get("manifest_hash") or ""),
                 approved_manifest_hash=str(review.get("approved_manifest_hash") or ""),
+                approval_snapshot_id=str((snapshot or {}).get("snapshot_id") or ""),
+                approval_snapshot_hash=str((snapshot or {}).get("snapshot_hash") or ""),
+                approval_snapshot=snapshot,
+                encoder_contract=encoder_contract,
                 requested_output_path=str(output_path or ""),
                 segment_count=len(manifest.get("segments") or []),
                 base_revision=base_revision,
@@ -440,6 +463,8 @@ class RenderJobManager:
                 output_path=Path(current["requested_output_path"]) if current.get("requested_output_path") else None,
                 runner=runner,
                 execution=context,
+                approval_snapshot=current.get("approval_snapshot") if isinstance(current.get("approval_snapshot"), dict) else None,
+                encoder_contract=current.get("encoder_contract") if isinstance(current.get("encoder_contract"), dict) else None,
             )
         except RenderCancelled:
             if coordinator_id:

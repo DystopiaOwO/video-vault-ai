@@ -207,6 +207,9 @@ def audio_state_for_api(cfg: dict, project_id: int, db: Path | None = None) -> d
     """Return editable audio settings without exposing local media paths."""
     state = load_audio_state(cfg, project_id)
     result = deepcopy(state)
+    result["settings_exists"] = has_audio_state(cfg, project_id)
+    result["source"] = "new" if result["settings_exists"] else "legacy"
+    result["migration"] = {"state": "none", "warning": ""}
     bgm = result.get("bgm")
     if isinstance(bgm, dict):
         for key in ("source_path", "file_path", "path"):
@@ -228,6 +231,15 @@ def audio_state_for_api(cfg: dict, project_id: int, db: Path | None = None) -> d
                     "attribution_text": str(track.get("attribution_text") or ""),
                     "duration_seconds": track.get("duration_seconds"),
                 }
+                result["effective_selected_track"] = deepcopy(bgm["track"])
+        if db is not None and not result["settings_exists"]:
+            legacy = resolve_legacy_project_bgm(db, project_id)
+            if len(legacy) == 1:
+                result["migration"] = {"state": "legacy_single", "warning": "第一次儲存會保留既有單一 BGM 輸出"}
+            elif len(legacy) > 1:
+                result["migration"] = {"state": "legacy_multiple", "warning": "正式核准前必須選擇單一 BGM"}
+            else:
+                result["migration"] = {"state": "legacy_empty", "warning": "目前未選擇 BGM"}
     return result
 
 

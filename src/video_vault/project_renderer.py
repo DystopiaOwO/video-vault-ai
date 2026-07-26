@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from copy import deepcopy
 import json
 import math
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any, Callable, Mapping
 
 from .bgm_pipeline import BgmPipelineError, bgm_fingerprint, build_bgm_mix_command, validate_bgm_track
 from .final_qc import FinalQCResult, sha256_file, validate_final_output
+from .loudness import LoudnessError, build_second_pass_command, measure_loudness
 from .project import can_project_render, project_dir
 from .render_manifest import manifest_hash, validate_render_manifest
 from .segment_cache import build_segment_cache_key, cache_paths
@@ -54,17 +56,47 @@ def render_project(
     output_path: Path | None = None,
     runner: Callable[..., Any] | None = None,
     execution: Any | None = None,
+    approval_snapshot: Mapping[str, Any] | None = None,
+    encoder_contract: Mapping[str, Any] | None = None,
 ) -> ProjectRenderResult:
-    allowed, reason = can_project_render(cfg, db, project_id)
-    if not allowed:
-        raise PermissionError(f"project render 被擋下：{reason}")
     folder = project_dir(cfg, project_id)
-    manifest_path = folder / "render_manifest.json"
-    manifest = _read_json(manifest_path)
-    review = _read_json(folder / "review_status.json")
-    approved_hash = review.get("approved_manifest_hash")
-    if not approved_hash or manifest.get("manifest_hash") != approved_hash or manifest_hash(manifest) != approved_hash:
-        raise PermissionError("project render 被擋下：核准 Manifest snapshot hash 不一致")
+    snapshot: Mapping[str, Any] | None = approval_snapshot
+    if snapshot is None:
+        allowed, reason = can_project_render(cfg, db, project_id)
+        if not allowed:
+            raise PermissionError(f"project render 被擋下：{reason}")
+        manifest_path = folder / "render_manifest.json"
+        manifest = _read_json(manifest_path)
+        review = _read_json(folder / "review_status.json")
+        approved_hash = review.get("approved_manifest_hash")
+        if not approved_hash or manifest.get("manifest_hash") != approved_hash or manifest_hash(manifest) != approved_hash:
+            raise PermissionError("project render 被擋下：核准 Manifest snapshot hash 不一致")
+        from .approval_snapshot import load_approval_snapshot
+
+        snapshot_token = str(review.get("approval_snapshot_path") or "")
+        snapshot = load_approval_snapshot(folder / snapshot_token) if snapshot_token else None
+    else:
+        manifest = dict(snapshot.get("manifest") or {})
+        approved_hash = str(snapshot.get("manifest_hash") or "")
+        if not approved_hash:
+            raise PermissionError("project render 被擋下：Render Job 缺少核准 snapshot")
+    if snapshot is not None:
+        from .approval_snapshot import validate_snapshot
+
+        immutable_validation = validate_snapshot(snapshot, check_assets=True)
+        if not immutable_validation["valid"]:
+            raise PermissionError("project render 被擋下：approval snapshot 已失效：" + "; ".join(immutable_validation["errors"]))
+    if manifest.get("manifest_hash") != approved_hash or manifest_hash(manifest) != approved_hash:
+        raise PermissionError("project render 被擋下：immutable snapshot manifest hash 不一致")
+    # Encoder choice is a job-scoped runtime contract.  It is deliberately
+    # separate from the user-approved manifest hash, but is pinned before any
+    # segment cache lookup and carried through the report.
+    if encoder_contract is not None:
+        from .encoder_contract import validate_encoder_contract
+
+        validate_encoder_contract(encoder_contract, manifest.get("profile") or {})
+        manifest = deepcopy(manifest)
+        manifest.setdefault("settings", {})["encoder_contract"] = dict(encoder_contract)
     validation = validate_render_manifest(manifest)
     if validation["errors"]:
         raise ProjectRenderError("approved render manifest is invalid: " + "; ".join(validation["errors"]))
@@ -76,6 +108,7 @@ def render_project(
     if len(tracks) > 1:
         raise ProjectRenderError("multiple BGM scheduling is not supported in Phase 4A")
     track = tracks[0] if tracks else None
+    normalization = dict(((manifest.get("settings") or {}).get("audio") or {}).get("normalization") or {})
     ffmpeg_path = str(cfg.get("ffmpeg_path") or "ffmpeg")
     ffprobe_path = str(cfg.get("ffprobe_path") or "ffprobe")
     if track is not None:
@@ -134,6 +167,7 @@ def render_project(
     report_temp_created = False
     output_published = False
     report_published = False
+    loudness_measurement = None
     total_segment_duration = max(0.001, sum(float(item["timeline_duration_seconds"]) for item in segments))
     completed_segment_duration = 0.0
     try:
@@ -166,7 +200,7 @@ def render_project(
                 concat_path,
                 partial,
                 duration_seconds=expected,
-                normalization=((manifest.get("settings") or {}).get("audio") or {}).get("normalization"),
+                normalization=None if normalization.get("enabled") else normalization,
                 profile=manifest["profile"],
             )
         else:
@@ -177,7 +211,7 @@ def render_project(
                 track,
                 expected,
                 manifest["profile"],
-                normalization=((manifest.get("settings") or {}).get("audio") or {}).get("normalization"),
+                normalization=None if normalization.get("enabled") else normalization,
             )
         partial_created = True
         try:
@@ -189,12 +223,23 @@ def render_project(
             result = run_command(command, runner)
         if int(getattr(result, "returncode", 0) or 0) != 0:
             raise ProjectRenderError(str(getattr(result, "stderr", "") or "FFmpeg project render failed"))
+        if normalization.get("enabled"):
+            _execution_check(execution)
+            _execution_update(execution, stage="assembling", percent=92, message="正在量測並套用正式音量")
+            loudness_measurement = measure_loudness(ffmpeg_path, partial, normalization)
+            normalized_partial = partial.with_name(f".{partial.stem}.loudnorm.mp4")
+            loudness_command = build_second_pass_command(ffmpeg_path, partial, normalized_partial, manifest["profile"], loudness_measurement)
+            second_result = run_command(loudness_command, runner, expected_duration_seconds=expected)
+            if int(getattr(second_result, "returncode", 0) or 0) != 0:
+                normalized_partial.unlink(missing_ok=True)
+                raise ProjectRenderError(str(getattr(second_result, "stderr", "") or "two-pass loudnorm failed"))
+            normalized_partial.replace(partial)
         _execution_check(execution)
         _execution_update(execution, stage="final_qc", percent=95, message="正在進行 Final QC")
-        qc = validate_final_output(partial, manifest, ffprobe_path)
+        qc = validate_final_output(partial, manifest, ffprobe_path, ffmpeg_path=ffmpeg_path, loudness=loudness_measurement)
         if not qc.passed:
             raise ProjectRenderError("final QC failed: " + "; ".join(qc.errors))
-        report = build_render_report(project_id, manifest, output, qc, segment_results, track, bgm_fp, output_size=partial.stat().st_size)
+        report = build_render_report(project_id, manifest, output, qc, segment_results, track, bgm_fp, output_size=partial.stat().st_size, approval_snapshot=snapshot, encoder_contract=encoder_contract, loudness=loudness_measurement)
         report_temp_created = True
         report_temp.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         _execution_check(execution)
@@ -213,7 +258,7 @@ def render_project(
         _write_log(log_path, project_id, approved_hash, segment_results, concat_path, command, locals().get("result"), locals().get("qc"), track, exc)
         if isinstance(exc, (ProjectRenderError, PermissionError)):
             raise
-        if isinstance(exc, (TimelineAssemblyError, BgmPipelineError)):
+        if isinstance(exc, (TimelineAssemblyError, BgmPipelineError, LoudnessError)):
             raise ProjectRenderError(str(exc)) from exc
         if isinstance(exc, OSError):
             raise ProjectRenderError(f"project render failed: {exc}") from exc
@@ -356,10 +401,21 @@ def build_render_report(
     bgm_fp: Mapping[str, Any] | None,
     *,
     output_size: int | None = None,
+    approval_snapshot: Mapping[str, Any] | None = None,
+    encoder_contract: Mapping[str, Any] | None = None,
+    loudness: Any | None = None,
 ) -> dict[str, Any]:
     return {
         "project_id": project_id,
         "manifest_hash": manifest["manifest_hash"],
+        "approval_snapshot": {
+            "snapshot_id": (approval_snapshot or {}).get("snapshot_id", ""),
+            "snapshot_hash": (approval_snapshot or {}).get("snapshot_hash", ""),
+            "schema_version": (approval_snapshot or {}).get("schema_version", ""),
+            "approved_project_revision": (approval_snapshot or {}).get("approved_project_revision", ""),
+        },
+        "encoder_contract": dict(encoder_contract or {}),
+        "loudness": loudness.to_dict() if loudness is not None and hasattr(loudness, "to_dict") else {},
         "profile_id": manifest["profile"]["profile_id"],
         "output_path": str(Path(output_path).resolve()),
         "output_size": int(output_size if output_size is not None else Path(output_path).stat().st_size),

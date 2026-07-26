@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import math
 from pathlib import Path
+import subprocess
 from typing import Any, Mapping
 
 from .media_probe import probe_media
@@ -20,7 +21,7 @@ class FinalQCResult:
     warnings: tuple[str, ...] = ()
 
 
-def validate_final_output(output_path: Path, manifest: Mapping[str, Any], ffprobe_path: str = "ffprobe") -> FinalQCResult:
+def validate_final_output(output_path: Path, manifest: Mapping[str, Any], ffprobe_path: str = "ffprobe", *, ffmpeg_path: str = "ffmpeg", loudness: Any | None = None) -> FinalQCResult:
     path = Path(output_path)
     digest = _sha256(path) if path.is_file() else ""
     if not path.is_file() or path.stat().st_size <= 0:
@@ -49,10 +50,26 @@ def validate_final_output(output_path: Path, manifest: Mapping[str, Any], ffprob
         errors.append(f"sample rate mismatch: {probe.sample_rate}")
     if probe.channels != int(profile.get("audio_channels", 0)):
         errors.append(f"channel mismatch: {probe.channels}")
+    for actual, expected, label in (
+        (getattr(probe, "color_primaries", ""), profile.get("color_primaries", ""), "color primaries"),
+        (getattr(probe, "color_transfer", ""), profile.get("color_transfer", ""), "color transfer"),
+        (getattr(probe, "color_matrix", ""), profile.get("color_matrix", ""), "color matrix"),
+        (getattr(probe, "color_range", ""), profile.get("color_range", ""), "color range"),
+    ):
+        if expected and actual and actual != expected:
+            errors.append(f"{label} mismatch: {actual}")
     expected = sum(float(item.get("timeline_duration_seconds", 0)) for item in manifest.get("segments", []))
     tolerance = max(0.15, 3 / float(profile.get("fps", 30)))
     if abs(probe.duration_seconds - expected) > tolerance:
         errors.append(f"duration mismatch: {probe.duration_seconds:.3f} vs {expected:.3f}")
+    if getattr(probe, "source_file", None) is not None and not _decode_ok(path, ffmpeg_path):
+        errors.append("full decode validation failed")
+    if loudness is not None:
+        # The measured first-pass value is not the final LUFS value, but it is
+        # persisted for auditability. Final measurement is recorded separately
+        # by the renderer when the profile enables normalisation.
+        if float(getattr(loudness, "measured_TP", -999)) > float(getattr(loudness, "true_peak_db", -1.0)) + 12:
+            errors.append("loudness measurement is implausible")
     return FinalQCResult(not errors, probe.duration_seconds, digest, tuple(errors), tuple((manifest.get("validation") or {}).get("warnings", [])))
 
 
@@ -68,6 +85,15 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _decode_ok(path: Path, ffmpeg_path: str) -> bool:
+    command = [str(ffmpeg_path), "-hide_banner", "-v", "error", "-nostdin", "-i", str(path), "-map", "0", "-f", "null", "-"]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False, timeout=300)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 __all__ = ["FinalQCResult", "sha256_file", "validate_final_output"]

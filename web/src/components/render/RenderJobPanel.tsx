@@ -220,6 +220,8 @@ export function RenderJobPanel({ jobs, projectId, setMessage, refreshProject, mu
 
           <div className="job-meta">
             {job.job_id && SUCCESS_STATUSES.has(job.status) && job.cache_hit !== undefined && <span>Final Cache：{job.cache_hit ? "命中" : "本次建立"}</span>}
+            {job.approval_snapshot_id && <span>核准快照：{job.approval_snapshot_id.slice(0, 20)}</span>}
+            {job.encoder_contract?.implementation && <span>編碼器：{job.encoder_contract.implementation}{job.encoder_contract.fallback_reason ? `（${job.encoder_contract.fallback_reason}）` : ""}</span>}
             {job.error && <span className="job-error">錯誤：{job.error}</span>}
             {(job.output_path || job.log_path) && <details className="job-files">
               <summary>{job.output_path ? "輸出與記錄" : "工作記錄"}</summary>

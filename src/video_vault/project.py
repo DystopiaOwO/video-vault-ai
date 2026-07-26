@@ -571,13 +571,28 @@ def _set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes:
 
         ensure_storyboard(cfg, db, project_id)
         from .render_manifest import compile_render_manifest
+        from .approval_snapshot import build_approval_snapshot, publish_approval_snapshot
 
         manifest = compile_render_manifest(cfg, db, project_id)
+        approval_snapshot = build_approval_snapshot(
+            cfg,
+            db,
+            project_id,
+            approved_revision=current_revision(db, project_id) + 1,
+        )
+        # Manifest and immutable approval data are both materialized before
+        # the review pointer is published.  A failed snapshot build therefore
+        # cannot leave a project in an apparently approved state.
+        snapshot_path = publish_approval_snapshot(cfg, approval_snapshot)
         snapshot = {
             "approved_manifest_hash": manifest["manifest_hash"],
             "approved_plan_id": manifest.get("plan_id", ""),
             "approved_project_revision": current_revision(db, project_id) + 1,
             "approved_at": datetime.now().isoformat(timespec="seconds"),
+            "approval_snapshot_id": approval_snapshot["snapshot_id"],
+            "approval_snapshot_hash": approval_snapshot["snapshot_hash"],
+            "approval_snapshot_schema_version": approval_snapshot["schema_version"],
+            "approval_snapshot_path": str(snapshot_path.relative_to(folder)),
         }
     data = {"project_id": project_id, "status": status, "approved_by_user": status == "approved", "notes": notes, "updated_at": datetime.now().isoformat(timespec="seconds"), **snapshot}
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -630,7 +645,10 @@ def _mark_project_needs_review(cfg: dict, db: Path, project_id: int) -> None:
     if review_path.exists():
         review = _read_json(review_path)
         review.update({"status": "needs_review", "approved_by_user": False, "updated_at": datetime.now().isoformat(timespec="seconds")})
-        for key in ("approved_manifest_hash", "approved_plan_id", "approved_project_revision", "approved_at"):
+        for key in (
+            "approved_manifest_hash", "approved_plan_id", "approved_project_revision", "approved_at",
+            "approval_snapshot_id", "approval_snapshot_hash", "approval_snapshot_schema_version", "approval_snapshot_path",
+        ):
             review.pop(key, None)
         review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
     plan_path = folder / "project_plan.json"
@@ -681,11 +699,17 @@ def can_project_render(cfg: dict, db: Path, project_id: int) -> tuple[bool, str]
     approved_revision = review.get("approved_project_revision")
     if approved_revision not in (None, "") and int(approved_revision) != current_revision(db, project_id):
         return False, "approved_project_revision 已失效"
+    snapshot_id = str(review.get("approval_snapshot_id") or "")
+    snapshot_hash = str(review.get("approval_snapshot_hash") or "")
+    snapshot_relative_path = str(review.get("approval_snapshot_path") or "")
+    if not snapshot_id or not snapshot_hash or not snapshot_relative_path:
+        return False, "核准資料為舊版，請重新核准以建立不可變 approval snapshot"
     manifest_path = folder / "render_manifest.json"
     if not manifest_path.exists():
         return False, "缺少 render_manifest.json"
     try:
         from .render_manifest import build_render_manifest, manifest_hash, validate_render_manifest
+        from .approval_snapshot import load_approval_snapshot, validate_snapshot
 
         current_manifest = build_render_manifest(cfg, db, project_id)
         if current_manifest["manifest_hash"] != approved_hash:
@@ -696,6 +720,18 @@ def can_project_render(cfg: dict, db: Path, project_id: int) -> tuple[bool, str]
         snapshot_validation = validate_render_manifest(snapshot)
         if not snapshot_validation["valid"]:
             return False, "render_manifest 核准快照無效：" + "; ".join(snapshot_validation["errors"])
+        approval_path = (folder / snapshot_relative_path).resolve()
+        approvals_dir = (folder / "approvals").resolve()
+        if approvals_dir not in approval_path.parents:
+            return False, "approval snapshot 路徑無效"
+        approval_snapshot = load_approval_snapshot(approval_path)
+        if approval_snapshot.get("snapshot_id") != snapshot_id or approval_snapshot.get("snapshot_hash") != snapshot_hash:
+            return False, "approval snapshot 指標不一致"
+        immutable_validation = validate_snapshot(approval_snapshot, check_assets=True)
+        if not immutable_validation["valid"]:
+            return False, "approval snapshot 已失效：" + "; ".join(immutable_validation["errors"])
+        if approval_snapshot.get("manifest_hash") != approved_hash:
+            return False, "approval snapshot manifest hash 不一致"
     except Exception as exc:
         return False, f"目前 Manifest 無法建立：{exc}"
     return True, "approved"

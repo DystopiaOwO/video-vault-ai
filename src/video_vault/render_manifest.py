@@ -135,7 +135,7 @@ def validate_render_manifest(manifest: dict[str, Any], check_files: bool = False
     else:
         try:
             canonical = get_render_profile(str(profile["profile_id"]))
-            for field in ("width", "height", "fps", "video_codec", "pixel_format", "audio_codec", "audio_sample_rate", "audio_channels"):
+            for field in ("width", "height", "fps", "video_codec", "pixel_format", "audio_codec", "audio_sample_rate", "audio_channels", "color_primaries", "color_transfer", "color_matrix", "color_range", "hdr_intent"):
                 if profile.get(field) != canonical[field]:
                     errors.append(f"profile {field} does not match canonical profile")
         except ValueError as exc:

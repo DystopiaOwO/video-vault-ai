@@ -28,6 +28,10 @@ class RenderJob:
     project_id: int
     manifest_hash: str
     approved_manifest_hash: str
+    approval_snapshot_id: str = ""
+    approval_snapshot_hash: str = ""
+    approval_snapshot: dict[str, Any] | None = None
+    encoder_contract: dict[str, Any] | None = None
     requested_output_path: str = ""
     status: str = "queued"
     stage: str = "queued"
@@ -61,6 +65,10 @@ class RenderJob:
         project_id: int,
         manifest_hash: str,
         approved_manifest_hash: str,
+        approval_snapshot_id: str = "",
+        approval_snapshot_hash: str = "",
+        approval_snapshot: dict[str, Any] | None = None,
+        encoder_contract: dict[str, Any] | None = None,
         requested_output_path: str = "",
         segment_count: int = 0,
         log_path: str = "",
@@ -75,6 +83,10 @@ class RenderJob:
             project_id=int(project_id),
             manifest_hash=str(manifest_hash),
             approved_manifest_hash=str(approved_manifest_hash),
+            approval_snapshot_id=str(approval_snapshot_id or ""),
+            approval_snapshot_hash=str(approval_snapshot_hash or ""),
+            approval_snapshot=dict(approval_snapshot or {}) or None,
+            encoder_contract=dict(encoder_contract or {}) or None,
             requested_output_path=str(requested_output_path or ""),
             segment_count=max(0, int(segment_count)),
             log_path=str(log_path or ""),

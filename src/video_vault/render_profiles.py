@@ -16,6 +16,11 @@ _PROFILES: dict[str, dict[str, object]] = {
         "audio_codec": "aac",
         "audio_sample_rate": 48000,
         "audio_channels": 2,
+        "color_primaries": "bt709",
+        "color_transfer": "bt709",
+        "color_matrix": "bt709",
+        "color_range": "tv",
+        "hdr_intent": "sdr",
     },
     "final_1080p": {
         "profile_id": "final_1080p",
@@ -27,6 +32,11 @@ _PROFILES: dict[str, dict[str, object]] = {
         "audio_codec": "aac",
         "audio_sample_rate": 48000,
         "audio_channels": 2,
+        "color_primaries": "bt709",
+        "color_transfer": "bt709",
+        "color_matrix": "bt709",
+        "color_range": "tv",
+        "hdr_intent": "sdr",
     },
 }
 

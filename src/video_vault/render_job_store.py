@@ -40,6 +40,10 @@ class RenderJobStore:
         project_id: int,
         manifest_hash: str,
         approved_manifest_hash: str,
+        approval_snapshot_id: str = "",
+        approval_snapshot_hash: str = "",
+        approval_snapshot: dict[str, Any] | None = None,
+        encoder_contract: dict[str, Any] | None = None,
         requested_output_path: str = "",
         segment_count: int = 0,
         base_revision: int = 0,
@@ -54,6 +58,10 @@ class RenderJobStore:
                 project_id=project_id,
                 manifest_hash=manifest_hash,
                 approved_manifest_hash=approved_manifest_hash,
+                approval_snapshot_id=approval_snapshot_id,
+                approval_snapshot_hash=approval_snapshot_hash,
+                approval_snapshot=approval_snapshot,
+                encoder_contract=encoder_contract,
                 requested_output_path=requested_output_path,
                 segment_count=segment_count,
                 log_path=str((directory / "PLACEHOLDER.log").resolve()),
@@ -66,7 +74,7 @@ class RenderJobStore:
             job.log_path = str(log_path.resolve())
             self._write_json(directory / f"{job.job_id}.json", job.to_dict())
             log_path.write_text(
-                f"job_id: {job.job_id}\nproject_id: {job.project_id}\nmanifest_hash: {job.manifest_hash}\ncreated_at: {job.created_at}\n",
+                f"job_id: {job.job_id}\nproject_id: {job.project_id}\nmanifest_hash: {job.manifest_hash}\napproval_snapshot_id: {job.approval_snapshot_id}\nencoder: {(job.encoder_contract or {}).get('implementation', '')}\ncreated_at: {job.created_at}\n",
                 encoding="utf-8",
             )
             return job.to_dict()

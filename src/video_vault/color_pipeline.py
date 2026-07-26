@@ -4,15 +4,50 @@ from __future__ import annotations
 
 from pathlib import Path
 import math
+import subprocess
 from typing import Any, Mapping
 
 
 COLOR_MODES = frozenset({"none", "safe_restore", "warm_food", "manual", "dji_lut", "dji_dlog", "dji_dlog_m"})
 LUT_MODES = frozenset({"dji_lut", "dji_dlog", "dji_dlog_m"})
+LUT_PRODUCT_CONTRACT = {
+    "version": "1",
+    "strategy": "user_managed",
+    "modes": {mode: {"requires_lut": True, "extension": ".cube"} for mode in sorted(LUT_MODES)},
+}
 
 
 class ColorPipelineError(ValueError):
     pass
+
+
+def color_mode_contract(mode: str) -> dict[str, Any]:
+    token = str(mode or "none")
+    return {"mode": token, "requires_lut": token in LUT_MODES, "strategy": LUT_PRODUCT_CONTRACT["strategy"], "version": LUT_PRODUCT_CONTRACT["version"]}
+
+
+def validate_lut_resource(settings: Mapping[str, Any] | None, *, ffmpeg_path: str = "ffmpeg", parse: bool = False) -> Path | None:
+    data = dict(settings or {})
+    mode = str(data.get("mode") or "none")
+    if mode not in LUT_MODES:
+        return None
+    raw = str(data.get("lut_path") or "").strip()
+    if not raw:
+        raise ColorPipelineError(f"{mode} requires a user-managed .cube LUT")
+    lut = Path(raw).expanduser().resolve()
+    if not lut.is_file():
+        raise ColorPipelineError(f"LUT file does not exist: {lut}")
+    if lut.suffix.lower() != ".cube":
+        raise ColorPipelineError(f"{mode} requires a .cube LUT")
+    if parse:
+        command = [str(ffmpeg_path), "-hide_banner", "-loglevel", "error", "-nostdin", "-f", "lavfi", "-i", "color=c=black:s=16x16:d=0.04", "-frames:v", "1", "-vf", build_lut3d_filter(lut), "-f", "null", "-"]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False, timeout=15)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ColorPipelineError(f"unable to validate LUT with FFmpeg: {exc}") from exc
+        if result.returncode != 0:
+            raise ColorPipelineError("FFmpeg cannot parse LUT: " + (result.stderr or result.stdout or "unknown error")[-500:])
+    return lut
 
 
 def build_color_filter(settings: Mapping[str, Any] | None, *, lut_already_applied: bool = False) -> str:
@@ -26,9 +61,8 @@ def build_color_filter(settings: Mapping[str, Any] | None, *, lut_already_applie
         raise ColorPipelineError("LUT must not be applied more than once")
     lut_parts: list[str] = []
     if mode in LUT_MODES:
-        lut = Path(str(data.get("lut_path") or "")).expanduser().resolve()
-        if not lut.is_file():
-            raise ColorPipelineError(f"LUT file does not exist: {lut}")
+        lut = validate_lut_resource(data)
+        assert lut is not None
         lut_parts.append(build_lut3d_filter(lut))
 
     values = {key: _number(data.get(key), default) for key, default in (("exposure", 0.0), ("contrast", 1.0), ("saturation", 1.0), ("gamma", 1.0), ("highlights", 0.0), ("shadows", 0.0))}
@@ -136,12 +170,15 @@ def escape_filter_path(path: Path | str) -> str:
 
 __all__ = [
     "COLOR_MODES",
+    "LUT_PRODUCT_CONTRACT",
     "LUT_MODES",
     "ColorPipelineError",
+    "color_mode_contract",
     "build_color_filter",
     "build_lut3d_filter",
     "color_filter",
     "escape_filter_option_value",
     "escape_filter_path",
     "escape_filtergraph_value",
+    "validate_lut_resource",
 ]

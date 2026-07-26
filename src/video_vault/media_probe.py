@@ -27,6 +27,11 @@ class MediaProbe:
     audio_codec: str
     sample_rate: int
     channels: int
+    color_primaries: str = ""
+    color_transfer: str = ""
+    color_matrix: str = ""
+    color_range: str = ""
+    frame_count: int = 0
 
 
 MediaProbeResult = MediaProbe
@@ -83,6 +88,11 @@ def _parse(source: Path, raw: dict[str, Any]) -> MediaProbe:
         audio_codec=str(audio.get("codec_name") or "") if audio else "",
         sample_rate=_integer(audio.get("sample_rate")) if audio else 0,
         channels=_integer(audio.get("channels")) if audio else 0,
+        color_primaries=str(video.get("color_primaries") or ""),
+        color_transfer=str(video.get("color_transfer") or video.get("color_trc") or ""),
+        color_matrix=str(video.get("color_space") or ""),
+        color_range=str(video.get("color_range") or ""),
+        frame_count=_integer(video.get("nb_read_frames") or video.get("nb_frames")),
     )
 
 

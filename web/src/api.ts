@@ -53,6 +53,10 @@ export type AudioState = {
   original_audio: { default_role: AudioSegmentSettings["role"]; default_volume_db: number; lower_volume_db: number; fade_in_seconds?: number; fade_out_seconds?: number };
   normalization: { enabled: boolean; target_lufs: number; true_peak_db: number };
   segments: Record<string, AudioSegmentOverride | null>;
+  source?: "legacy" | "new";
+  settings_exists?: boolean;
+  effective_selected_track?: BgmTrack;
+  migration?: { state: string; warning: string };
 };
 
 export type Segment = {
@@ -108,6 +112,9 @@ export type Job = {
   error?: string;
   log_path?: string;
   updated_at?: string;
+  approval_snapshot_id?: string;
+  approval_snapshot_hash?: string;
+  encoder_contract?: { implementation?: string; fallback_reason?: string; [key: string]: unknown };
 };
 
 export type JobsSnapshot = {
@@ -183,6 +190,9 @@ export type ColorState = {
   suggested: ColorAdjustment;
   applied: ColorAdjustment;
   segments: Record<string, ColorSegmentState>;
+  segment_analysis?: Record<string, Pick<ColorSegmentState, "reference_candidate" | "suggested" | "confidence" | "warnings">>;
+  segment_overrides?: Record<string, Pick<ColorSegmentState, "enabled" | "locked" | "excluded" | "applied">>;
+  lut_contract?: { version: string; strategy: string; modes: Record<string, { requires_lut: boolean; extension: string }> };
 };
 
 export type ColorStatePatch = {
