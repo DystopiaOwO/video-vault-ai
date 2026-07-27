@@ -160,7 +160,19 @@ def create_perception_run(
     staging = run_staging_dir(cfg, run_uuid)
     video_id = int(video["id"])
     project_media_uuid = str(video.get("project_media_uuid") or "")
-    input_snapshot = build_input_snapshot(video, cfg)
+    input_error: OSError | None = None
+    try:
+        input_snapshot = build_input_snapshot(video, cfg)
+    except OSError as exc:
+        # Persist an auditable failed run even when the source disappears before
+        # fingerprinting.  The original exception is re-raised after the row
+        # and project run pointer have been committed.
+        input_error = exc
+        input_snapshot = {
+            "source": {"path": str(Path(video["current_path"]).expanduser().resolve()), "missing": True},
+            "extractor": extractor_snapshot(cfg),
+            "duration_seconds": float(video.get("duration_seconds") or 0),
+        }
     provider_contract = {
         "contract_version": PERCEPTION_CONTRACT_VERSION,
         "provider": str(cfg.get("ai", {}).get("provider", "mock")),
@@ -185,12 +197,13 @@ def create_perception_run(
                     video_id, provider, model, status, raw_output_path, run_uuid, project_id,
                     project_media_uuid, generation, requested_at, started_at,
                     input_snapshot_json, staging_path, previous_success_run_uuid,
-                    provider_contract_json
-                ) values(?, ?, ?, 'running', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    provider_contract_json, finished_at, error
+                ) values(?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     video_id,
                     str(cfg.get("ai", {}).get("provider", "mock")),
                     str(cfg.get("ai", {}).get("model", "")),
+                    "failed" if input_error else "running",
                     run_uuid,
                     int(project_id),
                     project_media_uuid,
@@ -201,6 +214,8 @@ def create_perception_run(
                     str(staging),
                     previous_uuid,
                     json.dumps(provider_contract, ensure_ascii=False, sort_keys=True),
+                    _now() if input_error else "",
+                    str(input_error) if input_error else "",
                 ),
             )
         except sqlite3.IntegrityError as exc:
@@ -208,9 +223,9 @@ def create_perception_run(
             raise RuntimeError(f"video {video_id} already has an active perception run") from exc
         con.execute(
             """update project_videos
-            set current_analysis_run_uuid=?, analysis_generation=?, analysis_status='analyzing'
+            set current_analysis_run_uuid=?, analysis_generation=?, analysis_status=?
             where video_id=?""",
-            (run_uuid, generation, video_id),
+            (run_uuid, generation, "failed" if input_error else "analyzing", video_id),
         )
         con.execute(
             """update projects
@@ -218,6 +233,8 @@ def create_perception_run(
             where id in (select project_id from project_videos where video_id=?)""",
             (video_id,),
         )
+    if input_error:
+        raise input_error
     return analysis_run(db, run_uuid)
 
 
