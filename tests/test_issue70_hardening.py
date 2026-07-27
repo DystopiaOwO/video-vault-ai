@@ -165,13 +165,15 @@ def test_final_qc_media_probe_records_decode_and_timestamp_measurements(tmp_path
         "-f", "lavfi", "-i", "testsrc=size=1920x1080:rate=30:duration=1",
         "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=1",
         "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709",
         "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
         "-c:a", "aac", "-ar", "48000", "-ac", "2", str(output),
     ], check=True)
     profile = get_render_profile("final_1080p")
-    # This fixture focuses on media measurements; color metadata is covered by
-    # the renderer's final-profile tests and is intentionally absent here.
-    profile.update({"color_primaries": "", "color_transfer": "", "color_matrix": "", "color_range": ""})
+    assert profile["color_primaries"] == "bt709"
+    assert profile["color_transfer"] == "bt709"
+    assert profile["color_matrix"] == "bt709"
+    assert profile["color_range"] == "tv"
     result = validate_final_output(
         output, {"profile": profile, "segments": [{"timeline_duration_seconds": 1.0}],},
         shutil.which("ffprobe"), ffmpeg_path=shutil.which("ffmpeg"),

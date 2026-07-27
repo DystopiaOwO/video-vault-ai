@@ -593,14 +593,7 @@ def _approve_project(cfg: dict, db: Path, project_id: int, notes: str = "", *, b
     folder = project_dir(cfg, project_id)
     storyboard_path = folder / "storyboard.json"
     if not storyboard_path.exists():
-        from .storyboard import ensure_storyboard
-
-        ensure_storyboard(cfg, db, project_id)
-        if base_revision is None:
-            # Legacy callers do not provide a revision.  The storyboard is a
-            # required one-time preparation step, so capture the caller's
-            # effective base only after that initialization has committed.
-            approval_base_revision = check_base_revision(db, project_id, None)
+        raise ValueError("缺少 storyboard.json，請先明確初始化分鏡後再核准")
 
     from .approval_snapshot import build_approval_snapshot, publish_approval_snapshot
     from .render_manifest import build_render_manifest

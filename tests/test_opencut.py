@@ -6,6 +6,7 @@ import pytest
 from video_vault.database import add_analysis, init_db, upsert_video
 from video_vault.opencut import export_opencut_handoff
 from video_vault.project import build_project_plan, can_project_render, create_project, project_detail, save_segment_review, set_review_status
+from video_vault.storyboard import generate_storyboard
 
 
 def test_opencut_handoff_writes_manifest(tmp_path):
@@ -85,6 +86,7 @@ def test_opencut_preview_keeps_approved_project_approved(tmp_path):
     cfg = {"library_root": str(tmp_path)}
     project_id = create_project(db, "coffee", [video_id], category="coffee")
     build_project_plan(cfg, db, project_id)
+    generate_storyboard(cfg, db, project_id)
     set_review_status(cfg, db, project_id, "approved")
 
     export_opencut_handoff(cfg, db, project_id, render_clips=False)

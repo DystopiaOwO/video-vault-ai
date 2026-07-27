@@ -13,7 +13,7 @@ from video_vault.project import build_project_plan
 from video_vault.project_lifecycle import ProjectRevisionConflict
 
 
-def _approved_project(tmp_path: Path) -> tuple[dict, Path, int, Path]:
+def _planned_project(tmp_path: Path) -> tuple[dict, Path, int, Path]:
     db = tmp_path / "db.sqlite3"
     init_db(db)
     source = tmp_path / "source.mp4"
@@ -23,6 +23,14 @@ def _approved_project(tmp_path: Path) -> tuple[dict, Path, int, Path]:
     cfg = {"library_root": str(tmp_path)}
     project_id = create_project(db, "snapshot", [video_id], category="travel")
     build_project_plan(cfg, db, project_id)
+    return cfg, db, project_id, source
+
+
+def _approved_project(tmp_path: Path) -> tuple[dict, Path, int, Path]:
+    cfg, db, project_id, source = _planned_project(tmp_path)
+    from video_vault.storyboard import generate_storyboard
+
+    generate_storyboard(cfg, db, project_id)
     set_review_status(cfg, db, project_id, "approved")
     return cfg, db, project_id, source
 
@@ -165,3 +173,44 @@ def test_stale_approval_cannot_publish_after_concurrent_writer(tmp_path: Path, m
         for path in after_writer
     } == after_writer
     assert not list(folder.glob(".approval-stage-*"))
+
+
+def test_approval_missing_storyboard_fails_without_live_state_changes(tmp_path: Path):
+    cfg, db, project_id, _source = _planned_project(tmp_path)
+    folder = project_dir(cfg, project_id)
+    thumbnail = folder / "cache" / "storyboard" / "clip_001.jpg"
+    thumbnail.parent.mkdir(parents=True, exist_ok=True)
+    thumbnail.write_bytes(b"thumbnail-before-approval")
+    before_files = {
+        path.relative_to(folder): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in folder.rglob("*")
+        if path.is_file()
+    }
+    before_revision = project_revision(db, project_id)
+    before_row = dict(project(db, project_id))
+
+    with pytest.raises(ValueError, match="缺少 storyboard.json"):
+        set_review_status(cfg, db, project_id, "approved", base_revision=before_revision)
+
+    after_files = {
+        path.relative_to(folder): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in folder.rglob("*")
+        if path.is_file()
+    }
+    assert after_files == before_files
+    assert not (folder / "storyboard.json").exists()
+    assert project_revision(db, project_id) == before_revision
+    assert dict(project(db, project_id)) == before_row
+
+
+def test_explicit_storyboard_initialization_then_approval_advances_one_revision(tmp_path: Path):
+    cfg, db, project_id, _source = _planned_project(tmp_path)
+    from video_vault.storyboard import generate_storyboard
+
+    generate_storyboard(cfg, db, project_id)
+    base_revision = project_revision(db, project_id)
+    set_review_status(cfg, db, project_id, "approved", base_revision=base_revision)
+
+    assert project_revision(db, project_id) == base_revision + 1
+    review = json.loads((project_dir(cfg, project_id) / "review_status.json").read_text(encoding="utf-8"))
+    assert review["approved_project_revision"] == base_revision + 1
