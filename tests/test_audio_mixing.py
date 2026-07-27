@@ -3,10 +3,11 @@ from pathlib import Path
 
 import pytest
 
-from video_vault.audio_state import audio_state_for_api, default_audio_state, save_audio_state, update_audio_state
+from video_vault.approval_snapshot import ApprovalSnapshotError, build_approval_snapshot
+from video_vault.audio_state import audio_state_for_api, audio_state_path, default_audio_state, effective_project_audio_state, save_audio_state, update_audio_state
 from video_vault.bgm_pipeline import BgmPipelineError, build_bgm_mix_command
 from video_vault.bgm import list_bgm
-from video_vault.database import add_bgm_track, add_project_bgm, connect, project_bgm_tracks
+from video_vault.database import add_bgm_track, add_project_bgm, connect, project_bgm_tracks, project_revision
 from video_vault.render_manifest import build_render_manifest
 from video_vault.project import project_detail
 from video_vault.timeline_assembler import build_timeline_command
@@ -188,6 +189,64 @@ def test_audio_api_state_does_not_expose_local_bgm_path(tmp_path: Path):
     assert "private.mp3" not in encoded
     assert "file_path" not in json.dumps(list_bgm(db), ensure_ascii=False)
     assert "private.mp3" not in json.dumps(project_detail(cfg, db, project_id), ensure_ascii=False)
+
+
+def test_single_legacy_bgm_is_effective_and_first_save_preserves_it(tmp_path: Path):
+    cfg, db, project_id = _project(tmp_path, count=1)
+    source = tmp_path / "legacy-single.mp3"
+    _make_audio(source)
+    track_id = add_bgm_track(db, {"title": "既有配樂", "file_path": str(source), "source_url": "https://example.com/legacy", "license_name": "CC0", "attribution_text": "既有配樂"})
+    add_project_bgm(db, project_id, track_id)
+
+    api_state = audio_state_for_api(cfg, project_id, db)
+    assert api_state["settings_exists"] is False
+    assert api_state["source"] == "legacy"
+    assert api_state["migration"]["state"] == "legacy_single"
+    assert api_state["bgm"]["bgm_id"] == track_id
+    assert api_state["effective_selected_track"]["id"] == track_id
+    assert "file_path" not in json.dumps(api_state, ensure_ascii=False)
+    legacy_manifest = build_render_manifest(cfg, db, project_id)
+    assert [item["track_id"] for item in legacy_manifest["bgm"]] == [track_id]
+    assert legacy_manifest["settings"]["audio"]["bgm"]["bgm_id"] == track_id
+
+    revision = project_revision(db, project_id)
+    seeded = effective_project_audio_state(cfg, project_id, db)
+    assert seeded is not None
+    assert update_audio_state(cfg, db, project_id, seeded) == seeded
+    assert project_revision(db, project_id) == revision
+    assert not audio_state_path(cfg, project_id).exists()
+
+    saved = update_audio_state(cfg, db, project_id, {"normalization": {"target_lufs": -16}})
+    assert saved["bgm"]["bgm_id"] == track_id
+    assert saved["bgm"]["enabled"] is True
+    assert audio_state_path(cfg, project_id).is_file()
+    assert [item["track_id"] for item in build_render_manifest(cfg, db, project_id)["bgm"]] == [track_id]
+
+
+def test_multiple_legacy_bgm_remains_unselected_and_blocks_approval(tmp_path: Path):
+    cfg, db, project_id = _project(tmp_path, count=1)
+    for index in range(2):
+        source = tmp_path / f"legacy-{index}.mp3"
+        _make_audio(source)
+        track_id = add_bgm_track(db, {"title": f"舊版 {index}", "file_path": str(source), "source_url": "https://example.com", "license_name": "CC0", "attribution_text": "舊版"})
+        add_project_bgm(db, project_id, track_id)
+
+    api_state = audio_state_for_api(cfg, project_id, db)
+    assert api_state["settings_exists"] is False
+    assert api_state["migration"]["state"] == "legacy_multiple"
+    assert api_state["bgm"]["bgm_id"] is None
+    assert effective_project_audio_state(cfg, project_id, db) is None
+    with pytest.raises(ApprovalSnapshotError, match="明確選擇一首"):
+        build_approval_snapshot(cfg, db, project_id, approved_revision=project_revision(db, project_id))
+
+
+def test_legacy_project_without_bgm_has_no_effective_selection(tmp_path: Path):
+    cfg, db, project_id = _project(tmp_path, count=1)
+    api_state = audio_state_for_api(cfg, project_id, db)
+    assert api_state["migration"]["state"] == "legacy_empty"
+    assert api_state["bgm"]["bgm_id"] is None
+    assert "effective_selected_track" not in api_state
+    assert effective_project_audio_state(cfg, project_id, db) is None
 
 
 def test_bgm_command_supports_start_and_loudness_normalization():

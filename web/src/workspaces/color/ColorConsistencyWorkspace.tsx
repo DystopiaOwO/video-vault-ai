@@ -3,6 +3,7 @@ import {
   api,
   formatApiError,
   type ColorAdjustment,
+  type ColorSegmentOverride,
   type ColorSegmentState,
   type ColorState,
   type ColorStatePatch,
@@ -32,6 +33,7 @@ type ColorPreviewItem = {
 };
 
 type BusyAction = "" | "analyze" | "reference" | "save" | "preview";
+type EffectiveColorSegment = Omit<ColorSegmentState, "suggested" | "applied"> & Required<Pick<ColorSegmentState, "suggested" | "applied">>;
 
 const EMPTY_ADJUSTMENT: ColorAdjustment = {
   mode: "none",
@@ -73,7 +75,9 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
     return null;
   }
   const selectedReferenceId = isColorReference(state.reference) ? state.reference.id : "";
-  const requiresLutPath = state.enabled && state.applied.mode === "dji_lut" && !state.applied.lut_path.trim();
+  const lutModeContract = state.lut_contract?.modes?.[state.applied.mode];
+  const hasEffectiveLut = Boolean(state.applied.lut_path?.trim() || state.applied.lut_name);
+  const requiresLutPath = state.enabled && Boolean(lutModeContract?.requires_lut) && !hasEffectiveLut;
 
   useEffect(() => {
     dirtyRef.current = dirty;
@@ -141,16 +145,11 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
 
   function updateSegment(segmentId: string, patch: Partial<Pick<ColorSegmentState, "enabled" | "locked" | "excluded">>) {
     applyState((current) => {
-      const existing = current.segments[segmentId] || {
-        enabled: true,
-        locked: false,
-        excluded: false,
-        applied: { ...current.applied },
-      };
+      const existing = segmentOverride(current, segmentId) || segmentDefaults(effectiveSegment(current, segmentId));
       return {
         ...current,
-        segments: {
-          ...current.segments,
+        segment_overrides: {
+          ...(current.segment_overrides || {}),
           [segmentId]: { ...existing, ...patch },
         },
       };
@@ -159,19 +158,16 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
 
   function updateSegmentApplied(segmentId: string, field: keyof ColorAdjustment, value: string | number) {
     applyState((current) => {
-      const existing = current.segments[segmentId] || {
-        enabled: true,
-        locked: false,
-        excluded: false,
-      };
+      const effective = effectiveSegment(current, segmentId);
+      const existing = segmentOverride(current, segmentId) || segmentDefaults(effective);
       return {
         ...current,
-        segments: {
-          ...current.segments,
+        segment_overrides: {
+          ...(current.segment_overrides || {}),
           [segmentId]: {
             ...existing,
             applied: {
-              ...(existing.applied || current.applied),
+              ...(existing.applied || effective.applied),
               [field]: isStringAdjustment(field) ? String(value) : Number(value),
             },
           },
@@ -183,12 +179,13 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
   function applySegmentSuggestion(segmentId: string) {
     applyState((current) => {
       const effective = effectiveSegment(current, segmentId);
+      const existing = segmentOverride(current, segmentId) || segmentDefaults(effective);
       return {
         ...current,
-        segments: {
-          ...current.segments,
+        segment_overrides: {
+          ...(current.segment_overrides || {}),
           [segmentId]: {
-            ...effective,
+            ...existing,
             applied: { ...(effective.suggested || current.suggested) },
           },
         },
@@ -198,9 +195,13 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
 
   function resetSegment(segmentId: string) {
     applyState((current) => {
-      const segments = { ...current.segments };
-      delete segments[segmentId];
-      return { ...current, segments };
+      return {
+        ...current,
+        segment_overrides: {
+          ...(current.segment_overrides || {}),
+          [segmentId]: null,
+        },
+      };
     });
   }
 
@@ -393,18 +394,18 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
         </section>
 
         <section className="color-project-settings">
-          <div className="color-section-title"><b>專案套用值</b><span>正式輸出與預覽使用已儲存的套用值</span></div>
+          <div className="color-section-title"><b>手動覆寫（專案）</b><span>正式輸出與預覽使用已儲存的手動覆寫值</span></div>
           <div className="color-form-grid">
-            <label>技術模式<select aria-label="技術 LUT 模式" disabled={workspaceBusy} value={state.applied.mode} onChange={(event) => updateApplied("mode", event.target.value)}><option value="dji_dlog_m">DJI D-Log M</option><option value="dji_dlog">DJI D-Log</option><option value="dji_lut">自訂 DJI LUT</option><option value="safe_restore">保守修正</option><option value="manual">手動調整</option><option value="none">不套用</option></select></label>
-            <label className="wide">LUT 路徑<input aria-label="LUT 路徑" disabled={workspaceBusy || state.applied.mode !== "dji_lut"} value={state.applied.lut_path} onChange={(event) => updateApplied("lut_path", event.target.value)} placeholder=".cube LUT 路徑" /></label>
+            <label>技術模式<select aria-label="技術 LUT 模式" disabled={workspaceBusy} value={state.applied.mode} onChange={(event) => updateApplied("mode", event.target.value)}>{Object.entries(state.lut_contract?.modes || {}).map(([mode, contract]) => <option key={mode} value={mode}>{mode}（需要 {contract.extension} LUT）</option>)}<option value="safe_restore">保守修正</option><option value="manual">手動調整</option><option value="none">不套用</option></select></label>
+            <label className="wide">LUT 路徑<input aria-label="LUT 路徑" disabled={workspaceBusy || !lutModeContract?.requires_lut} value={state.applied.lut_path || ""} onChange={(event) => updateApplied("lut_path", event.target.value)} placeholder={state.applied.lut_name ? `目前已套用：${state.applied.lut_name}；輸入新路徑可替換` : "依後端契約指定的 LUT 路徑"} /></label>
           </div>
-          {requiresLutPath && <div className="color-warning">自訂 DJI LUT 模式需要有效的 .cube 路徑。</div>}
+          {requiresLutPath && <div className="color-warning">目前模式需要有效的 {lutModeContract?.extension || ".cube"} LUT 路徑。</div>}
           <div className="color-adjustment-grid">
             {adjustmentFields.map((field) => <label key={field}>{adjustmentLabel(field)}<input aria-label={`專案${adjustmentLabel(field)}`} disabled={workspaceBusy} type="number" step="0.01" value={state.applied[field]} onChange={(event) => updateApplied(field, event.target.value)} /></label>)}
           </div>
           <div className="color-suggestion">
-            <div><b>系統建議值</b><span>曝光 {state.suggested.exposure} · 色溫 {state.suggested.temperature} · 色調 {state.suggested.tint} · 對比 {state.suggested.contrast} · 飽和 {state.suggested.saturation}</span></div>
-            <button type="button" disabled={workspaceBusy} onClick={applySuggestedToProject}>套用全部建議</button>
+            <div><b>分析建議（唯讀）</b><span>曝光 {state.suggested.exposure} · 色溫 {state.suggested.temperature} · 色調 {state.suggested.tint} · 對比 {state.suggested.contrast} · 飽和 {state.suggested.saturation}</span></div>
+            <button type="button" disabled={workspaceBusy} onClick={applySuggestedToProject}>套用分析建議</button>
           </div>
         </section>
       </div>
@@ -435,7 +436,7 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
           segment={segment}
           state={state}
           item={effectiveSegment(state, segment.segment_id)}
-          customized={Boolean(state.segments[segment.segment_id])}
+          customized={hasSegmentOverride(state, segment.segment_id)}
           busy={workspaceBusy}
           onToggle={(patch) => updateSegment(segment.segment_id, patch)}
           onAdjustment={(field, value) => updateSegmentApplied(segment.segment_id, field, value)}
@@ -460,9 +461,10 @@ function ColorSegmentRow({ segment, state, item, customized, busy, onToggle, onA
   onReset: () => void;
 }) {
   const disabled = item.excluded || !item.enabled;
+  const effectiveSource = effectiveSourceForSegment(state, segment.segment_id);
   return <article className={`color-segment-row${disabled ? " disabled" : ""}`}>
     <header>
-      <div><b>{segment.title || segment.segment_id}</b><span>{segment.clip_id} · {customized ? "片段自訂" : "專案預設"} · 信心 {Number(item.confidence || 0).toFixed(2)}</span></div>
+      <div><b>{segment.title || segment.segment_id}</b><span>{segment.clip_id} · {effectiveSourceLabel(effectiveSource)} · 分析信心 {Number(item.confidence || 0).toFixed(2)}</span></div>
       <div className="color-segment-toggles">
         <label><input type="checkbox" disabled={busy} checked={item.enabled} onChange={(event) => onToggle({ enabled: event.target.checked })} />啟用</label>
         <label><input type="checkbox" disabled={busy} checked={item.locked} onChange={(event) => onToggle({ locked: event.target.checked })} />鎖定</label>
@@ -470,14 +472,17 @@ function ColorSegmentRow({ segment, state, item, customized, busy, onToggle, onA
       </div>
     </header>
     {item.warnings?.length ? <div className="color-segment-warning">{item.warnings.join(" · ")}</div> : null}
+    <div className="color-suggestion">
+      <div><b>分析建議（唯讀）</b><span>曝光 {item.suggested?.exposure ?? state.suggested.exposure} · 色溫 {item.suggested?.temperature ?? state.suggested.temperature} · 對比 {item.suggested?.contrast ?? state.suggested.contrast}</span></div>
+      <button type="button" disabled={busy || disabled} onClick={onSuggestion}>套用分析建議</button>
+    </div>
     <details>
-      <summary>片段色彩值</summary>
+      <summary>手動覆寫值（目前套用）</summary>
       <div className="color-adjustment-grid">
         {adjustmentFields.map((field) => <label key={field}>{adjustmentLabel(field)}<input aria-label={`${segment.title || segment.segment_id} ${adjustmentLabel(field)}`} disabled={busy || disabled} type="number" step="0.01" value={item.applied?.[field] ?? state.applied[field]} onChange={(event) => onAdjustment(field, event.target.value)} /></label>)}
       </div>
     </details>
     <footer>
-      <button type="button" disabled={busy || disabled} onClick={onSuggestion}>套用片段建議</button>
       <button type="button" disabled={busy || !customized} onClick={onReset}>恢復專案預設</button>
     </footer>
   </article>;
@@ -485,28 +490,55 @@ function ColorSegmentRow({ segment, state, item, customized, busy, onToggle, onA
 
 const adjustmentFields = ["exposure", "temperature", "tint", "contrast", "highlights", "shadows", "saturation", "gamma"] as const;
 
-function effectiveSegment(state: ColorState, segmentId: string): ColorSegmentState {
-  return state.segments[segmentId] || {
-    enabled: true,
-    locked: false,
-    excluded: false,
-    suggested: state.suggested,
-    applied: state.applied,
-    confidence: 0,
-    warnings: [],
+function effectiveSegment(state: ColorState, segmentId: string): EffectiveColorSegment {
+  const legacy: Partial<ColorSegmentState> = hasSeparatedSegmentState(state) ? {} : (state.segments[segmentId] || {});
+  const analysis = state.segment_analysis?.[segmentId] || {};
+  const override = segmentOverride(state, segmentId) || {};
+  return {
+    enabled: override.enabled ?? legacy.enabled ?? true,
+    locked: override.locked ?? legacy.locked ?? false,
+    excluded: override.excluded ?? legacy.excluded ?? false,
+    reference_candidate: analysis.reference_candidate ?? legacy.reference_candidate,
+    suggested: analysis.suggested ?? legacy.suggested ?? state.suggested,
+    applied: override.applied ?? legacy.applied ?? state.applied,
+    confidence: analysis.confidence ?? legacy.confidence ?? 0,
+    warnings: analysis.warnings ?? legacy.warnings ?? [],
   };
 }
 
+export type EffectiveColorSource = "project" | "manual" | "disabled";
+
+export function effectiveSourceForSegment(state: ColorState, segmentId: string): EffectiveColorSource {
+  const override = segmentOverride(state, segmentId);
+  const item = effectiveSegment(state, segmentId);
+  if (item.excluded || !item.enabled || (!state.enabled && override?.enabled !== true)) return "disabled";
+  return override?.applied ? "manual" : "project";
+}
+
+function effectiveSourceLabel(source: EffectiveColorSource): string {
+  return source === "manual"
+    ? "片段手動覆寫"
+    : source === "disabled"
+      ? "調色未套用"
+      : "繼承專案套用值（分析建議未套用）";
+}
+
 function toColorStatePatch(state: ColorState): ColorStatePatch {
+  const overrides = state.segment_overrides || Object.fromEntries(Object.entries(state.segments).map(([segmentId, segment]) => [segmentId, {
+    enabled: segment.enabled,
+    locked: segment.locked,
+    excluded: segment.excluded,
+    ...(segment.applied ? { applied: { ...segment.applied } } : {}),
+  }]));
   return {
     schema_version: state.schema_version,
     enabled: state.enabled,
-    applied: { ...state.applied },
-    segments: Object.fromEntries(Object.entries(state.segments).map(([segmentId, segment]) => [segmentId, {
-      enabled: segment.enabled,
-      locked: segment.locked,
-      excluded: segment.excluded,
-      ...(segment.applied ? { applied: { ...segment.applied } } : {}),
+    applied: editableAdjustment(state.applied),
+    segments: Object.fromEntries(Object.entries(overrides).map(([segmentId, segment]) => [segmentId, segment === null ? null : {
+      ...(segment.enabled === undefined ? {} : { enabled: segment.enabled }),
+      ...(segment.locked === undefined ? {} : { locked: segment.locked }),
+      ...(segment.excluded === undefined ? {} : { excluded: segment.excluded }),
+      ...(segment.applied ? { applied: editableAdjustment(segment.applied) } : {}),
     }])),
   };
 }
@@ -515,8 +547,43 @@ function colorSignature(state: ColorState): string {
   return JSON.stringify({
     enabled: state.enabled,
     applied: state.applied,
-    segments: state.segments,
+    segments: state.segment_overrides ?? state.segments,
   });
+}
+
+function editableAdjustment(value: ColorAdjustment): ColorAdjustment {
+  const { lut_name: _lutName, ...editable } = value;
+  return editable;
+}
+
+function hasSeparatedSegmentState(state: ColorState): boolean {
+  return state.segment_analysis !== undefined || state.segment_overrides !== undefined;
+}
+
+function segmentOverride(state: ColorState, segmentId: string): ColorSegmentOverride | undefined {
+  if (state.segment_overrides) return state.segment_overrides[segmentId] || undefined;
+  const legacy = state.segments[segmentId];
+  if (!legacy) return undefined;
+  return {
+    enabled: legacy.enabled,
+    locked: legacy.locked,
+    excluded: legacy.excluded,
+    ...(legacy.applied ? { applied: legacy.applied } : {}),
+  };
+}
+
+function segmentDefaults(segment: EffectiveColorSegment): ColorSegmentOverride {
+  return {
+    enabled: segment.enabled,
+    locked: segment.locked,
+    excluded: segment.excluded,
+    applied: { ...segment.applied },
+  };
+}
+
+function hasSegmentOverride(state: ColorState, segmentId: string): boolean {
+  if (state.segment_overrides) return Boolean(state.segment_overrides[segmentId]);
+  return Boolean(state.segments[segmentId]);
 }
 
 function cloneColorState(state: ColorState): ColorState {
@@ -525,7 +592,7 @@ function cloneColorState(state: ColorState): ColorState {
 
 function emptyColorState(): ColorState {
   return {
-    schema_version: 2,
+    schema_version: 3,
     enabled: true,
     reference: {},
     references: [],
@@ -533,6 +600,8 @@ function emptyColorState(): ColorState {
     suggested: { ...EMPTY_ADJUSTMENT },
     applied: { ...EMPTY_ADJUSTMENT },
     segments: {},
+    segment_analysis: {},
+    segment_overrides: {},
   };
 }
 

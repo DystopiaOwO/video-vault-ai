@@ -12,6 +12,7 @@ from video_vault.database import add_analysis, add_bgm_track, add_project_bgm, c
 from video_vault.audio_state import default_audio_state, save_audio_state
 from video_vault.project import build_project_plan, create_project, project_detail, project_dir, save_segment_review, set_review_status
 from video_vault.project_renderer import render_project
+from video_vault.storyboard import generate_storyboard
 
 
 FFMPEG = shutil.which("ffmpeg")
@@ -55,6 +56,7 @@ def _create_project(cfg, db: Path, sources: list[Path], *, bgm: Path | None = No
     # Story planning may auto-recommend a library track; keep this fixture explicit.
     with connect(db) as con:
         con.execute("delete from project_bgm where project_id=?", (project_id,))
+    generate_storyboard(cfg, db, project_id)
     if bgm:
         track_id = add_bgm_track(db, {"title": "E2E BGM", "artist": "Test", "file_path": str(bgm), "source_url": "https://example.com/bgm", "license_name": "CC0", "license_url": "https://example.com/license", "attribution_required": 0, "attribution_text": "E2E", "mood": "calm", "duration_seconds": 0.5})
         add_project_bgm(db, project_id, track_id)

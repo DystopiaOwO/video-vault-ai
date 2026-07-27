@@ -5,6 +5,7 @@ from video_vault.database import add_analysis, add_bgm_track, add_project_bgm, i
 from video_vault.project import build_project_plan, can_project_render, create_project, project_detail, project_dir, set_review_status
 from video_vault.render_manifest import compile_render_manifest, manifest_hash
 from video_vault.render_settings import default_render_settings, load_render_settings, save_render_settings
+from video_vault.storyboard import generate_storyboard
 
 
 def _approved_project(tmp_path: Path) -> tuple[dict, Path, int]:
@@ -17,6 +18,7 @@ def _approved_project(tmp_path: Path) -> tuple[dict, Path, int]:
     cfg = {"library_root": str(tmp_path)}
     project_id = create_project(db, "settings", [video_id], category="coffee")
     build_project_plan(cfg, db, project_id)
+    generate_storyboard(cfg, db, project_id)
     set_review_status(cfg, db, project_id, "approved")
     return cfg, db, project_id
 

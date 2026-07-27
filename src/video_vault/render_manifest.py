@@ -10,6 +10,7 @@ from typing import Any
 
 from .database import project
 from .audio_state import (
+    effective_project_audio_state,
     effective_project_bgm,
     effective_segment_audio_settings,
     has_audio_state,
@@ -48,8 +49,18 @@ def build_render_manifest(
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     settings = load_render_settings(cfg, project_id)
     audio_file_exists = audio_state_override is not None or has_audio_state(cfg, project_id)
-    audio_state = normalize_audio_state(audio_state_override) if audio_state_override is not None else load_audio_state(cfg, project_id)
-    active_audio_state = audio_state if audio_state_file_is_enabled(audio_state, audio_file_exists) else None
+    # A legacy project with exactly one BGM has an effective in-memory state.
+    # Keep the raw disabled-file state distinct so disabling the new workflow
+    # still restores the legacy relation as before.
+    if audio_state_override is not None:
+        audio_state = normalize_audio_state(audio_state_override)
+        active_audio_state = audio_state if audio_state_file_is_enabled(audio_state, True) else None
+    elif audio_file_exists:
+        audio_state = load_audio_state(cfg, project_id)
+        active_audio_state = audio_state if audio_state_file_is_enabled(audio_state, True) else None
+    else:
+        audio_state = effective_project_audio_state(cfg, project_id, db)
+        active_audio_state = audio_state
     if active_audio_state is not None:
         settings = {**settings, "audio": active_audio_state}
     color_state = load_project_color_state(cfg, project_id) if has_color_state(cfg, project_id) else None
@@ -86,7 +97,10 @@ def build_render_manifest(
     ]
     # Keep the disabled-file marker here so legacy BGM handling can avoid
     # silently reusing the track selected by the disabled new workflow.
-    bgm = _manifest_bgm(cfg, db, project_id, settings, audio_state if audio_file_exists else None)
+    # A legacy seed preserves the old manifest behaviour: its source asset is
+    # fingerprinted during approval/preflight, rather than turning a current
+    # manifest-hash invalidation into an unrelated early media-probe error.
+    bgm = _manifest_bgm(cfg, db, project_id, settings, audio_state, validate_selected_bgm=audio_file_exists or audio_state_override is not None)
     manifest: dict[str, Any] = {
         "schema_version": "2.0",
         "project_id": int(project_id),
@@ -135,7 +149,7 @@ def validate_render_manifest(manifest: dict[str, Any], check_files: bool = False
     else:
         try:
             canonical = get_render_profile(str(profile["profile_id"]))
-            for field in ("width", "height", "fps", "video_codec", "pixel_format", "audio_codec", "audio_sample_rate", "audio_channels"):
+            for field in ("width", "height", "fps", "video_codec", "pixel_format", "audio_codec", "audio_sample_rate", "audio_channels", "color_primaries", "color_transfer", "color_matrix", "color_range", "hdr_intent"):
                 if profile.get(field) != canonical[field]:
                     errors.append(f"profile {field} does not match canonical profile")
         except ValueError as exc:
@@ -294,7 +308,15 @@ def _manifest_segment(
     return result
 
 
-def _manifest_bgm(cfg: dict, db: Path, project_id: int, settings: dict[str, Any], audio_state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def _manifest_bgm(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    settings: dict[str, Any],
+    audio_state: dict[str, Any] | None = None,
+    *,
+    validate_selected_bgm: bool = True,
+) -> list[dict[str, Any]]:
     rows = resolve_legacy_project_bgm(db, project_id, settings)
     result = []
     selected_id = None
@@ -316,10 +338,11 @@ def _manifest_bgm(cfg: dict, db: Path, project_id: int, settings: dict[str, Any]
                 raise BgmPipelineError("selected BGM is not attached to the global library") from exc
             if selected is None:
                 raise BgmPipelineError("selected BGM is not available")
-            try:
-                validate_bgm_track({"source_path": selected.get("file_path")}, str(cfg.get("ffprobe_path") or "ffprobe"))
-            except BgmPipelineError as exc:
-                raise BgmPipelineError("selected BGM file is missing or unreadable") from exc
+            if validate_selected_bgm:
+                try:
+                    validate_bgm_track({"source_path": selected.get("file_path")}, str(cfg.get("ffprobe_path") or "ffprobe"))
+                except BgmPipelineError as exc:
+                    raise BgmPipelineError("selected BGM file is missing or unreadable") from exc
             rows = [selected]
     for row in rows:
         item = dict(row)

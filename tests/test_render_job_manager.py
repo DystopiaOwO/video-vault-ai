@@ -47,6 +47,44 @@ def test_same_project_is_deduplicated(manager: RenderJobManager):
     assert second["job"]["job_id"] == first["job"]["job_id"]
 
 
+def test_concurrent_enqueue_runs_one_encoder_prepare(manager: RenderJobManager, monkeypatch):
+    prepare_started = threading.Event()
+    release_prepare = threading.Event()
+    prepare_count = 0
+    prepare_lock = threading.Lock()
+    original_prepare = manager._prepare_enqueue
+
+    def slow_prepare(project_id, output_path):
+        nonlocal prepare_count
+        with prepare_lock:
+            prepare_count += 1
+        prepare_started.set()
+        assert release_prepare.wait(timeout=5)
+        return original_prepare(project_id, output_path)
+
+    monkeypatch.setattr(manager, "_prepare_enqueue", slow_prepare)
+    results = []
+
+    def enqueue():
+        results.append(manager.enqueue(1))
+
+    first = threading.Thread(target=enqueue)
+    second = threading.Thread(target=enqueue)
+    first.start()
+    assert prepare_started.wait(timeout=5)
+    second.start()
+    time.sleep(0.05)
+    assert second.is_alive()
+    release_prepare.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert prepare_count == 1
+    assert sorted(result["created"] for result in results) == [False, True]
+
+
 def test_queue_is_fifo_and_only_one_render_runs(manager: RenderJobManager, monkeypatch):
     release = threading.Event()
     started: list[int] = []

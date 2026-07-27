@@ -9,15 +9,18 @@ import json
 import math
 from pathlib import Path
 import sqlite3
+import stat
 import subprocess
 from typing import Any, Mapping
 
+from .color_pipeline import validate_lut_resource
 from .project import mark_project_needs_review, project_dir
 from .project_lifecycle import project_commit
 from .render_settings import load_render_settings
 
 
-COLOR_STATE_VERSION = 2
+COLOR_STATE_VERSION = 3
+COLOR_MIGRATION_STATES = frozenset({"analysis/generated", "known_manual", "ambiguous"})
 ADJUSTMENT_DEFAULTS: dict[str, float] = {
     "exposure": 0.0,
     "temperature": 0.0,
@@ -43,6 +46,7 @@ LUT_MODES = frozenset({"dji_lut", "dji_dlog", "dji_dlog_m"})
 _USER_EDITABLE_COLOR_FIELDS = frozenset({"enabled", "applied", "segments"})
 _USER_EDITABLE_SEGMENT_FIELDS = frozenset({"enabled", "locked", "excluded", "applied"})
 _EXCLUDED_SEGMENT_WARNING = "此段已排除色彩分析"
+_AMBIGUOUS_MIGRATION_WARNING = "舊版色彩套用來源不明，請人工確認"
 
 
 class ColorReferenceError(ValueError):
@@ -74,6 +78,8 @@ def default_color_state() -> dict[str, Any]:
         "analysis": {},
         "suggested": {"mode": "none", "lut_path": "", "lut_kind": "", **deepcopy(adjustments)},
         "applied": {"mode": "none", "lut_path": "", "lut_kind": "", **adjustments},
+        "segment_analysis": {},
+        "segment_overrides": {},
         "segments": {},
     }
 
@@ -96,6 +102,10 @@ def normalize_color_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
     base = default_color_state()
     source = dict(state or {})
     result = _merge(base, source)
+    try:
+        source_schema_version = int(source.get("schema_version", 1) or 1)
+    except (TypeError, ValueError):
+        source_schema_version = 1
     result["schema_version"] = COLOR_STATE_VERSION
     result["enabled"] = _as_bool(result.get("enabled", True))
     result["reference"] = dict(result.get("reference") or {})
@@ -103,11 +113,43 @@ def normalize_color_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
     result["analysis"] = dict(result.get("analysis") or {})
     result["suggested"] = _normalize_adjustment_set(result.get("suggested"), base["suggested"])
     result["applied"] = _normalize_adjustment_set(result.get("applied"), base["applied"])
-    segments: dict[str, Any] = {}
-    for segment_id, value in (result.get("segments") or {}).items():
+    analysis_items = {str(key): dict(value) for key, value in (result.get("segment_analysis") or {}).items() if isinstance(value, Mapping)}
+    override_items = {str(key): dict(value) for key, value in (result.get("segment_overrides") or {}).items() if isinstance(value, Mapping)}
+    # v2 stored analysis and manual choices together.  Split it deterministically
+    # on read while continuing to expose the merged `segments` view to older UI.
+    # A freshly-created default v3 state may still receive legacy `segments`
+    # from callers before its first save.  Treat it as legacy unless there is
+    # actual separated data to preserve.
+    legacy_segments = {} if (analysis_items or override_items) else (result.get("segments") or {})
+    migration_segments: dict[str, dict[str, Any]] = {}
+    for segment_id, value in legacy_segments.items():
         if not isinstance(value, Mapping):
             continue
-        item = dict(value)
+        key = str(segment_id)
+        migration_state = _classify_legacy_segment(value, result)
+        analysis_fields = {field: deepcopy(value[field]) for field in ("reference_candidate", "suggested", "confidence", "warnings") if field in value}
+        override_fields = {}
+        if migration_state in {"known_manual", "ambiguous"}:
+            override_fields = {field: deepcopy(value[field]) for field in ("enabled", "locked", "excluded", "applied") if field in value}
+        if migration_state == "ambiguous":
+            warnings = [str(warning) for warning in analysis_fields.get("warnings", []) or []]
+            if _AMBIGUOUS_MIGRATION_WARNING not in warnings:
+                warnings.append(_AMBIGUOUS_MIGRATION_WARNING)
+            analysis_fields["warnings"] = warnings
+        if analysis_fields:
+            analysis_items.setdefault(key, {}).update(analysis_fields)
+        if override_fields:
+            override_items.setdefault(key, {}).update(override_fields)
+        migration_segments[key] = {
+            "state": migration_state,
+            "classification": migration_state,
+            "warning": _AMBIGUOUS_MIGRATION_WARNING if migration_state == "ambiguous" else "",
+        }
+    segments: dict[str, Any] = {}
+    for segment_id in sorted(set(analysis_items) | set(override_items)):
+        analysis_item = analysis_items.get(segment_id, {})
+        override_item = override_items.get(segment_id, {})
+        item = {**analysis_item, **override_item}
         item["enabled"] = _as_bool(item.get("enabled", True))
         item["locked"] = _as_bool(item.get("locked", False))
         item["excluded"] = _as_bool(item.get("excluded", False))
@@ -115,9 +157,43 @@ def normalize_color_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
         item["confidence"] = _finite_confidence(item.get("confidence", 0.0))
         item["warnings"] = [str(warning) for warning in item.get("warnings", []) or []]
         item["suggested"] = _normalize_adjustment_set(item.get("suggested"), result["suggested"])
+        # Keep the merged legacy view useful without turning an analysis-only
+        # segment into a manual override.
         item["applied"] = _normalize_adjustment_set(item.get("applied"), result["applied"])
         segments[str(segment_id)] = item
+    result["segment_analysis"] = {
+        key: {field: deepcopy(segments[key][field]) for field in ("reference_candidate", "suggested", "confidence", "warnings") if field in analysis_items.get(key, {})}
+        for key in analysis_items
+        if key in segments
+    }
+    result["segment_overrides"] = {}
+    for key, value in override_items.items():
+        if key not in segments:
+            continue
+        override = {
+            field: deepcopy(segments[key][field])
+            for field in ("enabled", "locked", "excluded")
+            if field in value
+        }
+        if isinstance(value.get("applied"), Mapping):
+            override["applied"] = _normalize_adjustment_set(value["applied"], result["applied"])
+        if override:
+            result["segment_overrides"][key] = override
     result["segments"] = segments
+    if migration_segments or isinstance(result.get("migration"), Mapping):
+        migration = dict(result.get("migration") or {})
+        existing_migrations = migration.get("segments") if isinstance(migration.get("segments"), Mapping) else {}
+        migration["segments"] = {
+            str(key): deepcopy(value)
+            for key, value in {**dict(existing_migrations), **migration_segments}.items()
+            if isinstance(value, Mapping)
+        }
+        migration["from_schema_version"] = source_schema_version
+        migration["requires_review"] = any(
+            item.get("state") == "ambiguous" for item in migration["segments"].values()
+        )
+        migration["state"] = "review" if migration["requires_review"] else "migrated"
+        result["migration"] = migration
     return result
 
 
@@ -130,9 +206,20 @@ def _color_revision_payload(state: Mapping[str, Any] | None) -> dict[str, Any]:
     return result
 
 
-def save_project_color_state(cfg: dict, db: Path, project_id: int, state: Mapping[str, Any], *, mark_review: bool = True, base_revision: int | None = None) -> Path:
+def save_project_color_state(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    state: Mapping[str, Any],
+    *,
+    mark_review: bool = True,
+    base_revision: int | None = None,
+    validate_lut: bool = True,
+) -> Path:
+    normalized = normalize_color_state(state)
+    if validate_lut:
+        _validate_saved_luts(cfg, normalized)
     with project_commit(db, project_id, base_revision) as commit:
-        normalized = normalize_color_state(state)
         current = normalize_color_state(load_project_color_state(cfg, project_id))
         if normalized == current and color_state_path(cfg, project_id).is_file():
             commit.record_changed(False)
@@ -146,8 +233,11 @@ def _save_project_color_state(cfg: dict, db: Path, project_id: int, state: Mappi
     normalized = normalize_color_state(state)
     path = color_state_path(cfg, project_id)
     temp = path.with_name(f".{path.name}.tmp")
-    temp.write_text(json.dumps(normalized, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temp.replace(path)
+    try:
+        temp.write_text(json.dumps(normalized, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
     if mark_review:
         mark_project_needs_review(cfg, db, project_id)
     return path
@@ -156,14 +246,19 @@ def _save_project_color_state(cfg: dict, db: Path, project_id: int, state: Mappi
 def effective_color_settings(state: Mapping[str, Any], segment_id: str | None = None) -> dict[str, Any]:
     normalized = normalize_color_state(state)
     result = deepcopy(normalized["applied"])
-    override = normalized["segments"].get(str(segment_id), {}) if segment_id else {}
+    override = normalized["segment_overrides"].get(str(segment_id), {}) if segment_id else {}
+    source = "project"
     if not normalized["enabled"] and not (segment_id and "enabled" in override and _as_bool(override.get("enabled"))):
-        return {**result, "mode": "none"}
+        return {**result, "mode": "none", "effective_source": "disabled"}
     if override.get("excluded") or not override.get("enabled", True):
         result["mode"] = "none"
+        source = "disabled"
     elif isinstance(override.get("applied"), Mapping):
         result.update(override["applied"])
-    return result
+        source = "manual"
+    # Analysis suggestions are advisory until a user creates an explicit
+    # segment override.  There is no automatic apply policy in this workflow.
+    return {**result, "effective_source": source}
 
 
 def analyze_project_color(cfg: dict, db: Path, project_id: int, *, force: bool = False, base_revision: int | None = None) -> dict[str, Any]:
@@ -214,9 +309,11 @@ def _analyze_project_color(cfg: dict, db: Path, project_id: int, *, force: bool 
         },
         "suggested": suggested,
         "applied": applied,
+        "segment_analysis": _split_segment_state(segment_states, "analysis"),
+        "segment_overrides": _split_segment_state(segment_states, "overrides"),
         "segments": segment_states,
     })
-    save_project_color_state(cfg, db, project_id, state)
+    save_project_color_state(cfg, db, project_id, state, validate_lut=False)
     return state
 
 
@@ -254,9 +351,11 @@ def _set_color_reference(cfg: dict, db: Path, project_id: int, reference_id: str
             "analyzed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         },
         "suggested": suggested,
+        "segment_analysis": _split_segment_state(segment_states, "analysis"),
+        "segment_overrides": _split_segment_state(segment_states, "overrides"),
         "segments": segment_states,
     })
-    save_project_color_state(cfg, db, project_id, state)
+    save_project_color_state(cfg, db, project_id, state, validate_lut=False)
     return state
 
 
@@ -267,14 +366,19 @@ def update_color_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str,
         segment_patch = editable_patch.pop("segments", None)
         updated = _merge(current, editable_patch)
         if isinstance(segment_patch, Mapping):
-            segments = deepcopy(dict(current.get("segments") or {}))
+            overrides = deepcopy(dict(current.get("segment_overrides") or {}))
             for segment_id, value in segment_patch.items():
                 key = str(segment_id)
                 if value is None:
-                    segments.pop(key, None)
+                    overrides.pop(key, None)
                 elif isinstance(value, Mapping):
-                    segments[key] = _merge(dict(segments.get(key) or {}), dict(value))
-            updated["segments"] = segments
+                    overrides[key] = _merge(dict(overrides.get(key) or {}), dict(value))
+                    if value.get("applied") is None and "applied" in value:
+                        overrides[key].pop("applied", None)
+                    if not overrides[key]:
+                        overrides.pop(key, None)
+            updated["segment_overrides"] = overrides
+            updated["segments"] = {}
         state = normalize_color_state(updated)
         changed = state != normalize_color_state(current)
         commit.record_changed(changed)
@@ -289,14 +393,19 @@ def _update_color_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str
     segment_patch = editable_patch.pop("segments", None)
     updated = _merge(current, editable_patch)
     if isinstance(segment_patch, Mapping):
-        segments = deepcopy(dict(current.get("segments") or {}))
+        overrides = deepcopy(dict(current.get("segment_overrides") or {}))
         for segment_id, value in segment_patch.items():
             key = str(segment_id)
             if value is None:
-                segments.pop(key, None)
+                overrides.pop(key, None)
             elif isinstance(value, Mapping):
-                segments[key] = _merge(dict(segments.get(key) or {}), dict(value))
-        updated["segments"] = segments
+                overrides[key] = _merge(dict(overrides.get(key) or {}), dict(value))
+                if value.get("applied") is None and "applied" in value:
+                    overrides[key].pop("applied", None)
+                if not overrides[key]:
+                    overrides.pop(key, None)
+        updated["segment_overrides"] = overrides
+        updated["segments"] = {}
     state = normalize_color_state(updated)
     save_project_color_state(cfg, db, project_id, state)
     return state
@@ -397,11 +506,32 @@ def ensure_reference_frame(cfg: dict, db: Path, project_id: int, reference: Mapp
 
 def color_state_for_api(cfg: dict, project_id: int, state: Mapping[str, Any] | None = None) -> dict[str, Any]:
     result = normalize_color_state(state or load_project_color_state(cfg, project_id))
+    result["suggested"] = _settings_for_api(result["suggested"])
+    result["applied"] = _settings_for_api(result["applied"])
+    result["segment_analysis"] = {
+        str(segment_id): _segment_analysis_for_api(value)
+        for segment_id, value in result.get("segment_analysis", {}).items()
+    }
+    result["segment_overrides"] = {
+        str(segment_id): _segment_override_for_api(value)
+        for segment_id, value in result.get("segment_overrides", {}).items()
+    }
+    result["segments"] = {
+        str(segment_id): _segment_for_api(value)
+        for segment_id, value in result.get("segments", {}).items()
+    }
     if result.get("reference"):
         result["reference"] = _reference_url(result["reference"], project_id)
     result["references"] = [_reference_url(item, project_id) for item in result.get("references", [])]
     if isinstance(result.get("analysis"), Mapping) and isinstance(result["analysis"].get("reference"), Mapping):
         result["analysis"] = {**result["analysis"], "reference": _reference_url(result["analysis"]["reference"], project_id)}
+    if isinstance(result.get("analysis"), Mapping):
+        result["analysis"] = {
+            **result["analysis"],
+            "warnings": _warnings_for_api(result["analysis"].get("warnings", [])),
+        }
+    from .color_pipeline import LUT_PRODUCT_CONTRACT
+    result["lut_contract"] = deepcopy(LUT_PRODUCT_CONTRACT)
     return result
 
 
@@ -413,8 +543,66 @@ def reference_file_path(cfg: dict, project_id: int, token: str) -> Path:
     return _safe_project_media_path(color_dir(cfg, project_id) / "reference_frames", token)
 
 
+def _classify_legacy_segment(value: Mapping[str, Any], state: Mapping[str, Any]) -> str:
+    """Classify v2's merged segment entry before creating a manual override."""
+
+    explicit_manual = any(
+        _as_bool(value.get(field))
+        for field in ("manual", "manual_override", "user_modified", "user_authored", "user_override")
+    )
+    source = str(
+        value.get("source")
+        or value.get("effective_source")
+        or value.get("override_source")
+        or value.get("applied_source")
+        or ""
+    ).strip().lower()
+    if explicit_manual or source in {"manual", "user", "user_authored", "user_override"}:
+        return "known_manual"
+    if _as_bool(value.get("locked")) or not _as_bool(value.get("enabled", True)) or _as_bool(value.get("excluded")):
+        return "known_manual"
+
+    applied = value.get("applied")
+    if not isinstance(applied, Mapping):
+        if not any(field in value for field in ("reference_candidate", "suggested", "confidence", "warnings")):
+            return "known_manual"
+        return "analysis/generated"
+    normalized_applied = _normalize_adjustment_set(applied, state["applied"])
+    suggested = value.get("suggested")
+    if isinstance(suggested, Mapping):
+        if normalized_applied == _normalize_adjustment_set(suggested, state["suggested"]):
+            return "analysis/generated"
+    if normalized_applied == _normalize_adjustment_set(state["applied"], state["applied"]):
+        return "analysis/generated"
+    return "ambiguous"
+
+
+def _validate_saved_luts(cfg: Mapping[str, Any], state: Mapping[str, Any]) -> None:
+    """Validate every user-applied LUT before project state can be written."""
+
+    settings: list[Mapping[str, Any]] = []
+    applied = state.get("applied")
+    if isinstance(applied, Mapping):
+        settings.append(applied)
+    for override in (state.get("segment_overrides") or {}).values():
+        if isinstance(override, Mapping) and isinstance(override.get("applied"), Mapping):
+            settings.append(override["applied"])
+
+    ffmpeg_path = str(cfg.get("ffmpeg_path") or "ffmpeg")
+    for value in settings:
+        if str(value.get("mode") or "none") not in LUT_MODES:
+            continue
+        try:
+            lut = validate_lut_resource(value, ffmpeg_path=ffmpeg_path, parse=True)
+            if lut is None or not lut.is_file() or not stat.S_ISREG(lut.stat().st_mode):
+                raise ValueError(f"LUT file is not a regular file: {lut}")
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"LUT 驗證失敗，未儲存色彩設定：{exc}") from exc
+
+
 def _normalize_adjustment_set(value: Any, fallback: Mapping[str, Any]) -> dict[str, Any]:
     data = {**dict(fallback), **(dict(value) if isinstance(value, Mapping) else {})}
+    data.pop("lut_name", None)
     data["mode"] = str(data.get("mode") or "none")
     data["lut_path"] = str(data.get("lut_path") or "")
     data["lut_kind"] = str(data.get("lut_kind") or "")
@@ -427,6 +615,15 @@ def _normalize_adjustment_set(value: Any, fallback: Mapping[str, Any]) -> dict[s
             number = ADJUSTMENT_DEFAULTS[key]
         data[key] = round(min(upper, max(lower, number)), 6)
     return data
+
+
+def _split_segment_state(segments: Mapping[str, Any], kind: str) -> dict[str, dict[str, Any]]:
+    fields = ("reference_candidate", "suggested", "confidence", "warnings") if kind == "analysis" else ("enabled", "locked", "excluded", "applied")
+    return {
+        str(segment_id): {field: deepcopy(value[field]) for field in fields if field in value}
+        for segment_id, value in segments.items()
+        if isinstance(value, Mapping)
+    }
 
 
 def _suggested_adjustments(cfg: dict, project_id: int, stats: Mapping[str, Any], state: Mapping[str, Any]) -> dict[str, Any]:
@@ -682,6 +879,8 @@ def _analyze_segments(cfg: dict, db: Path, project_id: int, existing: Mapping[st
     plan_path = project_dir(cfg, project_id) / "project_plan.json"
     plan = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.exists() else {}
     old_segments = dict(existing.get("segments") or {})
+    old_analysis = {str(key): dict(value) for key, value in (existing.get("segment_analysis") or {}).items() if isinstance(value, Mapping)}
+    old_overrides = {str(key): dict(value) for key, value in (existing.get("segment_overrides") or {}).items() if isinstance(value, Mapping)}
     result: dict[str, Any] = {}
     ref_luma = float(reference_stats.get("average") or 128)
     segments = project_segments(cfg, project_id, plan)
@@ -692,13 +891,17 @@ def _analyze_segments(cfg: dict, db: Path, project_id: int, existing: Mapping[st
         segment_id = str(segment.get("segment_id") or "")
         if not segment_id:
             continue
-        old = dict(old_segments.get(segment_id) or {})
+        old_override = old_overrides.get(segment_id, {})
+        old = {**old_analysis.get(segment_id, {}), **old_override}
+        if not isinstance(old_override.get("applied"), Mapping):
+            old.pop("applied", None)
+        manual_applied = isinstance(old_override.get("applied"), Mapping)
         if preserve_manual_segments and _as_bool(old.get("locked", False)):
             result[segment_id] = deepcopy(old)
             continue
         excluded = _as_bool(old.get("excluded", False))
         if excluded:
-            result[segment_id] = _excluded_segment_state(old, project_applied)
+            result[segment_id] = _excluded_segment_state(old, project_applied, manual_applied=manual_applied)
             continue
         if segment.get("_fallback_reference"):
             candidate = dict(reference)
@@ -722,30 +925,78 @@ def _analyze_segments(cfg: dict, db: Path, project_id: int, existing: Mapping[st
         locked = _as_bool(old.get("locked", False))
         if locked:
             suggested = deepcopy(old.get("suggested") if isinstance(old.get("suggested"), Mapping) else suggested)
-            applied = deepcopy(old.get("applied") if isinstance(old.get("applied"), Mapping) else project_applied)
-        else:
-            applied = deepcopy(old.get("applied") if isinstance(old.get("applied"), Mapping) else (suggested if confidence >= 0.55 else project_applied))
         result[segment_id] = {
             "enabled": _as_bool(old.get("enabled", True)),
             "locked": locked,
             "excluded": False,
             "reference_candidate": True,
             "suggested": suggested,
-            "applied": applied,
             "confidence": confidence,
             "warnings": warnings,
         }
+        if manual_applied:
+            result[segment_id]["applied"] = deepcopy(old["applied"])
     return result
 
 
-def _excluded_segment_state(old: Mapping[str, Any], project_applied: Mapping[str, Any]) -> dict[str, Any]:
+def _settings_for_api(settings: Mapping[str, Any] | None) -> dict[str, Any]:
+    result = dict(settings or {})
+    lut_path = result.pop("lut_path", "")
+    if lut_path:
+        result["lut_name"] = Path(str(lut_path)).name
+    return result
+
+
+def _warnings_for_api(warnings: Any) -> list[str]:
+    result = []
+    for warning in warnings or []:
+        text = str(warning)
+        for prefix in ("LUT 檔案不存在：", "原始素材不存在："):
+            if text.startswith(prefix):
+                text = prefix + Path(text[len(prefix):]).name
+                break
+        result.append(text)
+    return result
+
+
+def _segment_analysis_for_api(value: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(value)
+    if isinstance(result.get("suggested"), Mapping):
+        result["suggested"] = _settings_for_api(result["suggested"])
+    if "warnings" in result:
+        result["warnings"] = _warnings_for_api(result["warnings"])
+    return result
+
+
+def _segment_override_for_api(value: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(value)
+    if isinstance(result.get("applied"), Mapping):
+        result["applied"] = _settings_for_api(result["applied"])
+    return result
+
+
+def _segment_for_api(value: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(value)
+    if isinstance(result.get("suggested"), Mapping):
+        result["suggested"] = _settings_for_api(result["suggested"])
+    if isinstance(result.get("applied"), Mapping):
+        result["applied"] = _settings_for_api(result["applied"])
+    if "warnings" in result:
+        result["warnings"] = _warnings_for_api(result["warnings"])
+    return result
+
+
+def _excluded_segment_state(old: Mapping[str, Any], project_applied: Mapping[str, Any], *, manual_applied: bool = False) -> dict[str, Any]:
     result = deepcopy(dict(old))
     result["enabled"] = _as_bool(old.get("enabled", True))
     result["locked"] = _as_bool(old.get("locked", False))
     result["excluded"] = True
     result["reference_candidate"] = False
     result["suggested"] = deepcopy(old.get("suggested") if isinstance(old.get("suggested"), Mapping) else project_applied)
-    result["applied"] = deepcopy(old.get("applied") if isinstance(old.get("applied"), Mapping) else project_applied)
+    if manual_applied and isinstance(old.get("applied"), Mapping):
+        result["applied"] = deepcopy(old["applied"])
+    else:
+        result.pop("applied", None)
     warnings = [str(warning) for warning in old.get("warnings", []) or []]
     if _EXCLUDED_SEGMENT_WARNING not in warnings:
         warnings.append(_EXCLUDED_SEGMENT_WARNING)
@@ -887,6 +1138,8 @@ def _user_editable_color_patch(patch: Mapping[str, Any] | None) -> dict[str, Any
                     if field in {"suggested", "applied"}:
                         if isinstance(field_value, Mapping):
                             editable[field] = deepcopy(dict(field_value))
+                        elif field == "applied" and field_value is None:
+                            editable[field] = None
                     else:
                         editable[field] = deepcopy(field_value)
                 if editable:

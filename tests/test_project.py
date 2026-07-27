@@ -2,6 +2,7 @@ from pathlib import Path
 
 from video_vault.database import add_analysis, add_bgm_track, add_frame, frames as db_frames, init_db, update_frame_analysis, update_video_summary, upsert_video
 from video_vault.project import build_project_plan, can_project_render, create_project, pre_render_validation, project_detail, save_revision_notes, save_segment_review, set_review_status
+from video_vault.storyboard import generate_storyboard
 
 
 def test_project_has_own_source_and_clip_files(tmp_path):
@@ -71,6 +72,7 @@ def test_project_render_gate_requires_db_review_and_plan_approval(tmp_path):
     assert not ok
     assert "尚未核准" in reason
 
+    generate_storyboard(cfg, db, project_id)
     set_review_status(cfg, db, project_id, "approved")
     ok, reason = can_project_render(cfg, db, project_id)
     assert ok
@@ -155,6 +157,7 @@ def test_pre_render_validation_writes_report(tmp_path):
     project_id = create_project(db, "測試專案", [video_id], category="coffee")
 
     build_project_plan(cfg, db, project_id)
+    generate_storyboard(cfg, db, project_id)
     set_review_status(cfg, db, project_id, "approved")
     report = pre_render_validation(cfg, db, project_id)
     folder = tmp_path / "08_projects" / f"project_{project_id}"

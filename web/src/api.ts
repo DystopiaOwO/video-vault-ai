@@ -53,6 +53,10 @@ export type AudioState = {
   original_audio: { default_role: AudioSegmentSettings["role"]; default_volume_db: number; lower_volume_db: number; fade_in_seconds?: number; fade_out_seconds?: number };
   normalization: { enabled: boolean; target_lufs: number; true_peak_db: number };
   segments: Record<string, AudioSegmentOverride | null>;
+  source?: "legacy" | "new";
+  settings_exists?: boolean;
+  effective_selected_track?: BgmTrack;
+  migration?: { state: string; warning: string };
 };
 
 export type Segment = {
@@ -108,6 +112,28 @@ export type Job = {
   error?: string;
   log_path?: string;
   updated_at?: string;
+  approval_snapshot_id?: string;
+  approval_snapshot_hash?: string;
+  encoder_contract?: { implementation?: string; fallback_reason?: string; [key: string]: unknown };
+};
+
+export type RenderReport = {
+  status: "current" | "historical" | "stale" | string;
+  project_id?: number;
+  manifest_hash?: string;
+  profile_id?: string;
+  approval_snapshot?: { snapshot_id?: string; snapshot_hash?: string; schema_version?: number; approved_project_revision?: number };
+  encoder_contract?: { implementation?: string; fallback_reason?: string; [key: string]: unknown };
+  loudness?: Record<string, unknown>;
+  color?: Record<string, unknown>;
+  timing?: Record<string, unknown>;
+  measurements?: Record<string, unknown>;
+  bgm?: Record<string, unknown>;
+  output?: { filename?: string; size?: number; sha256?: string; duration_seconds?: number };
+  segment_count?: number;
+  qc?: { passed?: boolean; errors?: string[]; warnings?: string[] };
+  cache?: Record<string, unknown>;
+  created_at?: string;
 };
 
 export type JobsSnapshot = {
@@ -136,7 +162,11 @@ export type ProjectDetail = {
 
 export type ColorAdjustment = {
   mode: string;
-  lut_path: string;
+  // The API intentionally hides local LUT absolute paths.  A user may enter
+  // a replacement path, while an existing server-owned path is represented
+  // by ``lut_name`` only.
+  lut_path?: string;
+  lut_name?: string;
   lut_kind: string;
   exposure: number;
   temperature: number;
@@ -172,7 +202,11 @@ export type ColorSegmentState = {
   warnings?: string[];
 };
 
-export type ColorSegmentPatch = Pick<ColorSegmentState, "enabled" | "locked" | "excluded" | "applied">;
+export type ColorSegmentAnalysis = Partial<Pick<ColorSegmentState, "reference_candidate" | "suggested" | "confidence" | "warnings">>;
+export type ColorSegmentOverride = Partial<Pick<ColorSegmentState, "enabled" | "locked" | "excluded" | "applied">>;
+export type ColorSegmentPatch = ColorSegmentOverride;
+export type ColorLutModeContract = { requires_lut: boolean; extension: string };
+export type ColorLutContract = { version: string; strategy: string; modes: Record<string, ColorLutModeContract> };
 
 export type ColorState = {
   schema_version: number;
@@ -183,13 +217,16 @@ export type ColorState = {
   suggested: ColorAdjustment;
   applied: ColorAdjustment;
   segments: Record<string, ColorSegmentState>;
+  segment_analysis?: Record<string, ColorSegmentAnalysis>;
+  segment_overrides?: Record<string, ColorSegmentOverride | null>;
+  lut_contract?: ColorLutContract;
 };
 
 export type ColorStatePatch = {
   schema_version: number;
   enabled: boolean;
   applied: ColorAdjustment;
-  segments: Record<string, ColorSegmentPatch | null>;
+  segments: Record<string, ColorSegmentOverride | null>;
 };
 
 export type BgmRecommendation = {
@@ -302,6 +339,8 @@ export const api = {
     json<{ ok: boolean; created: boolean; job?: Job; error?: string }>("/api/project/render-job", post({ project_id: projectId, output_path: outputPath })),
   cancelRenderJob: (jobId: string) =>
     json<{ ok: boolean; job?: Job; error?: string; reason?: string }>("/api/render-job/cancel", post({ job_id: jobId })),
+  renderJobReport: (jobId: string) =>
+    json<{ ok: boolean; report?: RenderReport; error?: string }>(`/api/render-job/report?id=${encodeURIComponent(jobId)}`),
   cancelLegacyJob: (projectId: number, legacyJobKey: string) =>
     json<{ ok: boolean; message?: string; job?: Job; error?: string }>("/api/project/legacy-job/cancel", post({ project_id: projectId, legacy_job_key: legacyJobKey })),
   stopJobs: (projectId: number) =>

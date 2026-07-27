@@ -10,6 +10,7 @@ from typing import Any, Callable, Mapping
 
 from .audio_pipeline import atempo_filter, build_audio_filter, build_silence_filter, normalize_audio_role
 from .color_pipeline import build_color_filter
+from .encoder_contract import encoder_arguments, validate_encoder_contract
 from .media_probe import MediaProbe, probe_media
 from .render_errors import SegmentRenderError, is_encoder_fallback_error
 from .render_job_models import RenderCancelled
@@ -58,7 +59,12 @@ def render_segment(
     profile = get_render_profile(profile_id)
     settings = dict(manifest.get("settings") or {})
     requested = str(settings.get("encoder") or "auto")
-    encoder = map_encoder(requested)
+    contract = settings.get("encoder_contract")
+    if isinstance(contract, Mapping):
+        validate_encoder_contract(contract, profile)
+        encoder = str(contract["implementation"])
+    else:
+        encoder = map_encoder(requested)
     audio = _effective_segment_audio(manifest, segment)
     normalize_audio_role(audio["role"])
     start = float(segment.get("source_in_seconds"))
@@ -92,7 +98,7 @@ def render_segment(
         if probe.duration_seconds > 0 and end > probe.duration_seconds + 0.001:
             raise SegmentRenderError(f"segment end {end} exceeds source duration {probe.duration_seconds}")
         command = build_segment_ffmpeg_command(cfg, manifest, segment, probe, output=paths["partial"], encoder=encoder)
-        result, used = _run_with_fallback(command, encoder, requested, runner, warnings, attempts, expected)
+        result, used = _run_with_fallback(command, encoder, requested, runner, warnings, attempts, expected, allow_fallback=not isinstance(contract, Mapping))
         qc = validate_segment_output(paths["partial"], profile, expected, str(cfg.get("ffprobe_path") or "ffprobe"))
         qc_errors = qc.errors
         if not qc.passed:
@@ -132,6 +138,7 @@ def build_segment_ffmpeg_command(
 ) -> list[str]:
     profile = get_render_profile(str((manifest.get("profile") or {}).get("profile_id")))
     settings = dict(manifest.get("settings") or {})
+    contract = settings.get("encoder_contract")
     start = float(segment["source_in_seconds"])
     end = float(segment["source_out_seconds"])
     speed = float(segment["speed"])
@@ -152,12 +159,18 @@ def build_segment_ffmpeg_command(
     else:
         args.extend(["-f", "lavfi", "-t", f"{timeline:.6f}", "-i", build_silence_filter(timeline)])
         graph.append(f"[1:a]atrim=duration={timeline:.6f},asetpts=PTS-STARTPTS[aout]")
+    video_args = ["-c:v", encoder or map_encoder(str(settings.get("encoder") or "auto"))]
+    if isinstance(contract, Mapping):
+        validate_encoder_contract(contract, profile)
+        video_args = encoder_arguments(contract)
     args.extend([
         "-filter_complex", ";".join(graph),
         "-map", "[vout]", "-map", "[aout]",
-        "-c:v", encoder or map_encoder(str(settings.get("encoder") or "auto")),
+        *video_args,
         "-r", str(profile["fps"]), "-pix_fmt", str(profile["pixel_format"]),
         "-c:a", str(profile["audio_codec"]), "-ar", str(profile["audio_sample_rate"]), "-ac", str(profile["audio_channels"]),
+        "-color_primaries", str(profile.get("color_primaries") or "bt709"), "-color_trc", str(profile.get("color_transfer") or "bt709"),
+        "-colorspace", str(profile.get("color_matrix") or "bt709"), "-color_range", str(profile.get("color_range") or "tv"),
         "-movflags", "+faststart", "-f", "mp4", str(output),
     ])
     return args
@@ -222,12 +235,14 @@ def _run_with_fallback(
     warnings: list[str],
     attempts: list[dict[str, Any]],
     expected_duration_seconds: float,
+    *,
+    allow_fallback: bool = True,
 ) -> tuple[Any, str]:
     result = _run_and_record(command, encoder, runner, attempts, expected_duration_seconds)
     if _returncode(result) == 0:
         return result, encoder
     stderr = str(getattr(result, "stderr", "") or "")
-    if encoder != "libx264" and is_encoder_fallback_error(stderr):
+    if allow_fallback and encoder != "libx264" and is_encoder_fallback_error(stderr):
         warnings.append(f"encoder fallback: {encoder} -> libx264: {stderr.strip()[-300:]}")
         fallback_command = list(command)
         index = fallback_command.index("-c:v") + 1

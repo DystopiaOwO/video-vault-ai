@@ -64,14 +64,43 @@ def load_audio_state(cfg: dict, project_id: int) -> dict[str, Any]:
         return default_audio_state()
 
 
-def effective_project_audio_state(cfg: dict, project_id: int) -> dict[str, Any] | None:
-    """Return the new project audio state only when its workflow is enabled.
+def legacy_audio_state_seed(cfg: dict, db: Path, project_id: int) -> dict[str, Any] | None:
+    """Translate one legacy project BGM into an in-memory audio state.
 
-    ``None`` means legacy behavior.  It is deliberately different from a
-    mute state: disabling this workflow must not silence the original media.
+    The seed is deliberately not persisted here.  It gives the API, manifest,
+    and approval snapshot the same effective selection until the user's first
+    audio save writes ``audio_settings.json``.  More than one legacy track is
+    ambiguous and must remain a review-time error rather than picking one by
+    database order.
+    """
+    from .render_settings import load_render_settings
+
+    rows = resolve_legacy_project_bgm(db, project_id, load_render_settings(cfg, project_id))
+    if len(rows) != 1:
+        return None
+    legacy = rows[0]
+    state = default_audio_state()
+    state["bgm"].update({
+        "bgm_id": int(legacy["track_id"]),
+        "enabled": True,
+        "volume_db": float(legacy.get("gain_db", state["bgm"]["volume_db"])),
+        "start_seconds": float(legacy.get("start_seconds", state["bgm"]["start_seconds"])),
+        "loop": bool(legacy.get("loop", state["bgm"]["loop"])),
+        "fade_in_seconds": float(legacy.get("fade_in_seconds", state["bgm"]["fade_in_seconds"])),
+        "fade_out_seconds": float(legacy.get("fade_out_seconds", state["bgm"]["fade_out_seconds"])),
+    })
+    return normalize_audio_state(state)
+
+
+def effective_project_audio_state(cfg: dict, project_id: int, db: Path | None = None) -> dict[str, Any] | None:
+    """Return the enabled project state, including a safe legacy single-BGM seed.
+
+    ``None`` keeps legacy media roles unchanged.  With a database supplied,
+    exactly one legacy BGM becomes a deterministic in-memory state; zero or
+    multiple tracks never silently become a selected BGM.
     """
     if not has_audio_state(cfg, project_id):
-        return None
+        return legacy_audio_state_seed(cfg, db, project_id) if db is not None else None
     state = load_audio_state(cfg, project_id)
     return state if state.get("enabled", True) else None
 
@@ -185,7 +214,10 @@ def _save_audio_state(cfg: dict, db: Path, project_id: int, state: Mapping[str, 
 
 def update_audio_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str, Any], *, base_revision: int | None = None) -> dict[str, Any]:
     with project_commit(db, project_id, base_revision) as commit:
-        current = load_audio_state(cfg, project_id)
+        # The first save must start from the effective legacy single-track
+        # state, not from defaults, or a normalization-only edit would erase
+        # the user's existing BGM selection.
+        current = load_audio_state(cfg, project_id) if has_audio_state(cfg, project_id) else (legacy_audio_state_seed(cfg, db, project_id) or default_audio_state())
         updated = _apply_audio_patch(current, editable_audio_patch(patch))
         state = normalize_audio_state(updated)
         changed = state != normalize_audio_state(current)
@@ -205,8 +237,18 @@ def _update_audio_state(cfg: dict, db: Path, project_id: int, patch: Mapping[str
 
 def audio_state_for_api(cfg: dict, project_id: int, db: Path | None = None) -> dict[str, Any]:
     """Return editable audio settings without exposing local media paths."""
+    settings_exists = has_audio_state(cfg, project_id)
     state = load_audio_state(cfg, project_id)
+    legacy: list[dict[str, Any]] = []
+    if db is not None and not settings_exists:
+        legacy = resolve_legacy_project_bgm(db, project_id)
+        seeded = legacy_audio_state_seed(cfg, db, project_id)
+        if seeded is not None:
+            state = seeded
     result = deepcopy(state)
+    result["settings_exists"] = settings_exists
+    result["source"] = "new" if result["settings_exists"] else "legacy"
+    result["migration"] = {"state": "none", "warning": ""}
     bgm = result.get("bgm")
     if isinstance(bgm, dict):
         for key in ("source_path", "file_path", "path"):
@@ -228,6 +270,14 @@ def audio_state_for_api(cfg: dict, project_id: int, db: Path | None = None) -> d
                     "attribution_text": str(track.get("attribution_text") or ""),
                     "duration_seconds": track.get("duration_seconds"),
                 }
+                result["effective_selected_track"] = deepcopy(bgm["track"])
+        if db is not None and not result["settings_exists"]:
+            if len(legacy) == 1:
+                result["migration"] = {"state": "legacy_single", "warning": "已載入既有單一 BGM；第一次儲存會保留此選擇"}
+            elif len(legacy) > 1:
+                result["migration"] = {"state": "legacy_multiple", "warning": "正式核准前必須選擇單一 BGM"}
+            else:
+                result["migration"] = {"state": "legacy_empty", "warning": "目前未選擇 BGM"}
     return result
 
 
@@ -383,7 +433,7 @@ def _apply_audio_patch(base: Mapping[str, Any], patch: Mapping[str, Any]) -> dic
 
 __all__ = [
     "AUDIO_ROLES", "AUDIO_STATE_VERSION", "LEGACY_AUDIO_ROLE_MAP", "audio_state_for_api", "audio_state_path",
-    "effective_project_audio_state", "effective_project_bgm", "effective_segment_audio_settings", "has_audio_state",
+    "effective_project_audio_state", "effective_project_bgm", "effective_segment_audio_settings", "has_audio_state", "legacy_audio_state_seed",
     "resolve_audio_state_bgm", "resolve_legacy_project_bgm",
     "default_audio_state", "editable_audio_patch", "load_audio_state", "normalize_audio_role",
     "normalize_audio_state", "save_audio_state", "update_audio_state", "_apply_audio_patch",

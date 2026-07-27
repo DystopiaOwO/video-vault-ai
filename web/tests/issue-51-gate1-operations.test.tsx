@@ -238,6 +238,21 @@ describe("Issue #51 Gate 1 專案操作行為", () => {
     await screen.findByText("審核操作失敗：approve failed");
   });
 
+  it("缺少 storyboard 時顯示可操作的核准錯誤與建立分鏡引導", async () => {
+    setup();
+    vi.spyOn(api, "approve").mockResolvedValue({
+      ok: false,
+      code: "storyboard_required",
+      error: "尚未建立 storyboard.json",
+    });
+    await openProject();
+
+    fireEvent.click(screen.getByRole("button", { name: "核准專案" }));
+
+    await screen.findByText("核准失敗：尚未建立 storyboard.json 請先到「分鏡審核」執行「建立分鏡」，完成後再核准。");
+    expect(screen.queryByText("專案已核准")).toBeNull();
+  });
+
   it("切換專案後，舊 approve 的成功或 refresh 錯誤不污染新專案", async () => {
     setup([1, 2]);
     const approveRequest = deferred<{ ok: boolean }>();

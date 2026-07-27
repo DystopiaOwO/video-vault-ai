@@ -5,13 +5,15 @@ from copy import deepcopy
 from pathlib import Path
 import json
 import math
+import os
 import re
 import shutil
+import uuid
 
 from .bgm import recommend_bgm_for_groups
-from .database import create_project_row, frames, init_db, project, project_bgm_tracks, project_videos, projects, segments, set_project_status, set_project_videos
+from .database import connect, create_project_row, frames, init_db, project, project_bgm_tracks, project_videos, projects, segments, set_project_status, set_project_videos
 from .story_context import story_context
-from .project_lifecycle import current_revision, project_commit
+from .project_lifecycle import check_base_revision, current_revision, project_commit
 
 
 def create_project(db: Path, name: str, video_ids: list[int], kind: str = "auto", category: str = "unknown", content_type: str = "diary_montage", platform: str = "YouTube", target_duration_seconds: float = 0) -> int:
@@ -542,6 +544,8 @@ def _clean_segment_review(row: dict, allowed: set[str]) -> dict:
 
 
 def set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes: str = "", *, base_revision: int | None = None) -> Path:
+    if status == "approved":
+        return _approve_project(cfg, db, project_id, notes, base_revision=base_revision)
     with project_commit(db, project_id, base_revision) as commit:
         folder = project_dir(cfg, project_id)
         before_review = _review_revision_payload(_read_json(folder / "review_status.json"))
@@ -563,23 +567,11 @@ def _review_revision_payload(review: dict | None) -> dict:
 
 
 def _set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes: str = "") -> Path:
+    if status == "approved":
+        return _approve_project(cfg, db, project_id, notes)
     folder = project_dir(cfg, project_id)
     path = folder / "review_status.json"
-    snapshot = {}
-    if status == "approved":
-        from .storyboard import ensure_storyboard
-
-        ensure_storyboard(cfg, db, project_id)
-        from .render_manifest import compile_render_manifest
-
-        manifest = compile_render_manifest(cfg, db, project_id)
-        snapshot = {
-            "approved_manifest_hash": manifest["manifest_hash"],
-            "approved_plan_id": manifest.get("plan_id", ""),
-            "approved_project_revision": current_revision(db, project_id) + 1,
-            "approved_at": datetime.now().isoformat(timespec="seconds"),
-        }
-    data = {"project_id": project_id, "status": status, "approved_by_user": status == "approved", "notes": notes, "updated_at": datetime.now().isoformat(timespec="seconds"), **snapshot}
+    data = {"project_id": project_id, "status": status, "approved_by_user": False, "notes": notes, "updated_at": datetime.now().isoformat(timespec="seconds")}
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     save_revision_notes(cfg, project_id, notes)
     set_project_status(db, project_id, status)
@@ -592,6 +584,150 @@ def _set_review_status(cfg: dict, db: Path, project_id: int, status: str, notes:
     if status == "approved":
         write_checkpoint(cfg, project_id, "review_approved", "passed", plan_id=_read_json(plan_path).get("plan_id", ""), inputs=["review_status.json", "project_plan.json"])
     return path
+
+
+def _approve_project(cfg: dict, db: Path, project_id: int, notes: str = "", *, base_revision: int | None = None) -> Path:
+    """Prepare approval outside the lock, then publish it as one commit."""
+    init_db(db)
+    approval_base_revision = check_base_revision(db, project_id, base_revision)
+    folder = project_dir(cfg, project_id)
+    storyboard_path = folder / "storyboard.json"
+    if not storyboard_path.exists():
+        raise ValueError("缺少 storyboard.json，請先明確初始化分鏡後再核准")
+
+    from .approval_snapshot import build_approval_snapshot, publish_approval_snapshot
+    from .render_manifest import build_render_manifest
+
+    manifest = build_render_manifest(cfg, db, project_id)
+    approval_snapshot = build_approval_snapshot(
+        cfg,
+        db,
+        project_id,
+        approved_revision=approval_base_revision + 1,
+        manifest=manifest,
+    )
+    plan_path = folder / "project_plan.json"
+    plan = _read_json(plan_path)
+    plan["status"] = "approved"
+    snapshot_path = folder / "approvals" / f"{approval_snapshot['snapshot_id']}.json"
+    now = datetime.now().isoformat(timespec="seconds")
+    review = _read_json(folder / "review_status.json")
+    review.update({
+        "project_id": project_id,
+        "status": "approved",
+        "approved_by_user": True,
+        "notes": notes,
+        "updated_at": now,
+        "approved_manifest_hash": manifest["manifest_hash"],
+        "approved_plan_id": manifest.get("plan_id", ""),
+        "approved_project_revision": approval_base_revision + 1,
+        "approved_at": now,
+        "approval_snapshot_id": approval_snapshot["snapshot_id"],
+        "approval_snapshot_hash": approval_snapshot["snapshot_hash"],
+        "approval_snapshot_schema_version": approval_snapshot["schema_version"],
+        "approval_snapshot_path": str(snapshot_path.relative_to(folder)),
+    })
+    decision_path = folder / "decisions" / "decision_log.jsonl"
+    decision = json.dumps({
+        "created_at": now,
+        "project_id": project_id,
+        "plan_id": plan.get("plan_id", ""),
+        "decision_type": "review_approved",
+        "decision": "使用者將專案標記為 approved",
+        "reason": notes,
+        "source": "user_review",
+        "confidence": 1.0,
+        "affected_segments": [],
+    }, ensure_ascii=False) + "\n"
+    previous_decisions = decision_path.read_text(encoding="utf-8") if decision_path.is_file() else ""
+    checkpoint_path = folder / "checkpoints" / "review_approved.json"
+    checkpoint = {
+        "checkpoint_id": "review_approved",
+        "project_id": project_id,
+        "plan_id": plan.get("plan_id", ""),
+        "status": "passed",
+        "created_at": now,
+        "inputs": ["review_status.json", "project_plan.json"],
+        "outputs": ["render_manifest.json", str(snapshot_path.relative_to(folder))],
+        "warnings": [],
+        "errors": [],
+    }
+    manifest_path = folder / "render_manifest.json"
+    review_path = folder / "review_status.json"
+    staged = {
+        manifest_path: json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        review_path: json.dumps(review, ensure_ascii=False, indent=2),
+        plan_path: json.dumps(plan, ensure_ascii=False, indent=2),
+        decision_path: previous_decisions + decision,
+        checkpoint_path: json.dumps(checkpoint, ensure_ascii=False, indent=2),
+    }
+    notes_text = (notes or "").strip()
+    if notes_text:
+        feedback = folder / "feedback"
+        stamped = feedback / f"revision_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        staged[feedback / "revision_notes.md"] = notes_text
+        staged[stamped] = notes_text
+
+    stage_dir = folder / f".approval-stage-{uuid.uuid4().hex}"
+    stage_paths: dict[Path, Path] = {}
+    for target, text in staged.items():
+        relative = target.relative_to(folder)
+        stage_path = stage_dir / relative
+        stage_path.parent.mkdir(parents=True, exist_ok=True)
+        stage_path.write_text(text, encoding="utf-8")
+        stage_paths[target] = stage_path
+
+    tracked = set(staged) | {snapshot_path}
+    old_files = {
+        path: (path.read_bytes(), path.stat())
+        for path in tracked
+        if path.is_file()
+    }
+    old_row = project(db, project_id)
+    old_status = str(old_row["status"] or "") if old_row else ""
+    old_revision = approval_base_revision
+    published = False
+    try:
+        with project_commit(db, project_id, approval_base_revision) as commit:
+            try:
+                publish_approval_snapshot(cfg, approval_snapshot)
+                published = True
+                for target, stage_path in stage_paths.items():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(stage_path, target)
+                set_project_status(db, project_id, "approved")
+                commit.record_changed(True)
+            except Exception:
+                _restore_approval_files(tracked, old_files)
+                _restore_approval_project_row(db, project_id, old_status, old_revision)
+                raise
+    except Exception:
+        if published:
+            _restore_approval_files(tracked, old_files)
+            _restore_approval_project_row(db, project_id, old_status, old_revision)
+        raise
+    finally:
+        shutil.rmtree(stage_dir, ignore_errors=True)
+    return review_path
+
+
+def _restore_approval_files(tracked: set[Path], old_files: dict[Path, tuple[bytes, os.stat_result]]) -> None:
+    for path in tracked:
+        if path in old_files:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            content, stat_result = old_files[path]
+            path.write_bytes(content)
+            os.utime(path, ns=(stat_result.st_atime_ns, stat_result.st_mtime_ns))
+        else:
+            path.unlink(missing_ok=True)
+
+
+def _restore_approval_project_row(db: Path, project_id: int, status: str, revision: int) -> None:
+    with connect(db) as con:
+        con.execute(
+            "update projects set status=?, project_revision=?, updated_at=current_timestamp where id=?",
+            (status, revision, project_id),
+        )
 
 
 def save_revision_notes(cfg: dict, project_id: int, notes: str) -> Path | None:
@@ -630,7 +766,10 @@ def _mark_project_needs_review(cfg: dict, db: Path, project_id: int) -> None:
     if review_path.exists():
         review = _read_json(review_path)
         review.update({"status": "needs_review", "approved_by_user": False, "updated_at": datetime.now().isoformat(timespec="seconds")})
-        for key in ("approved_manifest_hash", "approved_plan_id", "approved_project_revision", "approved_at"):
+        for key in (
+            "approved_manifest_hash", "approved_plan_id", "approved_project_revision", "approved_at",
+            "approval_snapshot_id", "approval_snapshot_hash", "approval_snapshot_schema_version", "approval_snapshot_path",
+        ):
             review.pop(key, None)
         review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
     plan_path = folder / "project_plan.json"
@@ -681,11 +820,17 @@ def can_project_render(cfg: dict, db: Path, project_id: int) -> tuple[bool, str]
     approved_revision = review.get("approved_project_revision")
     if approved_revision not in (None, "") and int(approved_revision) != current_revision(db, project_id):
         return False, "approved_project_revision 已失效"
+    snapshot_id = str(review.get("approval_snapshot_id") or "")
+    snapshot_hash = str(review.get("approval_snapshot_hash") or "")
+    snapshot_relative_path = str(review.get("approval_snapshot_path") or "")
+    if not snapshot_id or not snapshot_hash or not snapshot_relative_path:
+        return False, "核准資料為舊版，請重新核准以建立不可變 approval snapshot"
     manifest_path = folder / "render_manifest.json"
     if not manifest_path.exists():
         return False, "缺少 render_manifest.json"
     try:
         from .render_manifest import build_render_manifest, manifest_hash, validate_render_manifest
+        from .approval_snapshot import load_approval_snapshot, validate_snapshot
 
         current_manifest = build_render_manifest(cfg, db, project_id)
         if current_manifest["manifest_hash"] != approved_hash:
@@ -696,6 +841,18 @@ def can_project_render(cfg: dict, db: Path, project_id: int) -> tuple[bool, str]
         snapshot_validation = validate_render_manifest(snapshot)
         if not snapshot_validation["valid"]:
             return False, "render_manifest 核准快照無效：" + "; ".join(snapshot_validation["errors"])
+        approval_path = (folder / snapshot_relative_path).resolve()
+        approvals_dir = (folder / "approvals").resolve()
+        if approvals_dir not in approval_path.parents:
+            return False, "approval snapshot 路徑無效"
+        approval_snapshot = load_approval_snapshot(approval_path)
+        if approval_snapshot.get("snapshot_id") != snapshot_id or approval_snapshot.get("snapshot_hash") != snapshot_hash:
+            return False, "approval snapshot 指標不一致"
+        immutable_validation = validate_snapshot(approval_snapshot, check_assets=True)
+        if not immutable_validation["valid"]:
+            return False, "approval snapshot 已失效：" + "; ".join(immutable_validation["errors"])
+        if approval_snapshot.get("manifest_hash") != approved_hash:
+            return False, "approval snapshot manifest hash 不一致"
     except Exception as exc:
         return False, f"目前 Manifest 無法建立：{exc}"
     return True, "approved"

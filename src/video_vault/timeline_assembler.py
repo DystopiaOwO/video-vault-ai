@@ -83,6 +83,8 @@ def build_timeline_command(
     else:
         command += ["-an"]
     command += ["-movflags", "+faststart", "-avoid_negative_ts", "make_zero"]
+    if profile:
+        command += ["-color_primaries", str(profile.get("color_primaries") or "bt709"), "-color_trc", str(profile.get("color_transfer") or "bt709"), "-colorspace", str(profile.get("color_matrix") or "bt709"), "-color_range", str(profile.get("color_range") or "tv")]
     if duration_seconds is not None:
         command += ["-t", f"{float(duration_seconds):.6f}"]
     command += ["-f", "mp4", str(Path(output_path))]

@@ -22,12 +22,52 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+@dataclass(frozen=True)
+class RenderReportDTO:
+    """Path-safe, transport-neutral summary of a persisted Render Report."""
+
+    status: str
+    project_id: int | None = None
+    manifest_hash: str = ""
+    approval_snapshot: dict[str, Any] | None = None
+    profile: dict[str, Any] | None = None
+    profile_id: str = ""
+    encoder_contract: dict[str, Any] | None = None
+    loudness: dict[str, Any] | None = None
+    lufs: Any = None
+    true_peak: Any = None
+    color: dict[str, Any] | None = None
+    color_effective_source: Any = None
+    timing: dict[str, Any] | None = None
+    frame: dict[str, Any] | None = None
+    decode: dict[str, Any] | None = None
+    measurements: dict[str, Any] | None = None
+    asset_mismatches: list[Any] | None = None
+    bgm: dict[str, Any] | None = None
+    bgm_migration: Any = None
+    bgm_source: Any = None
+    hard_failures: list[Any] | None = None
+    warnings: list[Any] | None = None
+    cache: dict[str, Any] | None = None
+    cache_miss_reason: Any = None
+    output: dict[str, Any] | None = None
+    segment_count: int = 0
+    created_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass
 class RenderJob:
     job_id: str
     project_id: int
     manifest_hash: str
     approved_manifest_hash: str
+    approval_snapshot_id: str = ""
+    approval_snapshot_hash: str = ""
+    approval_snapshot: dict[str, Any] | None = None
+    encoder_contract: dict[str, Any] | None = None
     requested_output_path: str = ""
     status: str = "queued"
     stage: str = "queued"
@@ -61,6 +101,10 @@ class RenderJob:
         project_id: int,
         manifest_hash: str,
         approved_manifest_hash: str,
+        approval_snapshot_id: str = "",
+        approval_snapshot_hash: str = "",
+        approval_snapshot: dict[str, Any] | None = None,
+        encoder_contract: dict[str, Any] | None = None,
         requested_output_path: str = "",
         segment_count: int = 0,
         log_path: str = "",
@@ -68,6 +112,7 @@ class RenderJob:
         capabilities: list[str] | None = None,
         resources: list[str] | None = None,
         queue_reason: str = "",
+        generation: int = 1,
     ) -> "RenderJob":
         now = utc_now()
         return cls(
@@ -75,6 +120,10 @@ class RenderJob:
             project_id=int(project_id),
             manifest_hash=str(manifest_hash),
             approved_manifest_hash=str(approved_manifest_hash),
+            approval_snapshot_id=str(approval_snapshot_id or ""),
+            approval_snapshot_hash=str(approval_snapshot_hash or ""),
+            approval_snapshot=dict(approval_snapshot or {}) or None,
+            encoder_contract=dict(encoder_contract or {}) or None,
             requested_output_path=str(requested_output_path or ""),
             segment_count=max(0, int(segment_count)),
             log_path=str(log_path or ""),
@@ -84,6 +133,7 @@ class RenderJob:
             capabilities=list(capabilities or []),
             resources=list(resources or []),
             queue_reason=str(queue_reason or ""),
+            generation=max(1, int(generation or 1)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -120,6 +170,7 @@ __all__ = [
     "JOB_STATUSES",
     "RenderCancelled",
     "RenderJob",
+    "RenderReportDTO",
     "utc_now",
     "validate_job_fields",
 ]

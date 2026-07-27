@@ -14,6 +14,7 @@ import pytest
 from video_vault.database import add_analysis, connect, init_db, upsert_video
 from video_vault.project import build_project_plan, create_project, project_dir, set_review_status
 from video_vault.render_job_manager import RenderJobManager
+from video_vault.storyboard import generate_storyboard
 
 
 FFMPEG = shutil.which("ffmpeg")
@@ -55,6 +56,7 @@ def _create_approved_project(tmp_path: Path) -> tuple[dict, Path]:
     build_project_plan(cfg, db, project_id)
     with connect(db) as connection:
         connection.execute("delete from project_bgm where project_id=?", (project_id,))
+    generate_storyboard(cfg, db, project_id)
     settings = {"profile_id": "final_1080p", "encoder": "cpu", "color": {"mode": "none", "lut_path": ""}, "audio": {"original_gain_db": 0, "lower_original_gain_db": -12, "bgm_gain_db": -18}, "transition": {"type": "cut", "duration_seconds": 0}, "overlay": {"enabled": False}}
     (project_dir(cfg, project_id) / "render_settings.json").write_text(json.dumps(settings), encoding="utf-8")
     set_review_status(cfg, db, project_id, "approved")

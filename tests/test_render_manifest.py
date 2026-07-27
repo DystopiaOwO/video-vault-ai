@@ -145,6 +145,34 @@ def test_render_manifest_contains_effective_segment_color(tmp_path):
     manifest = build_render_manifest(cfg, db, project_id)
     assert manifest["segments"][0]["color"]["mode"] == "manual"
     assert manifest["segments"][0]["color"]["exposure"] == -0.3
+    assert manifest["segments"][0]["color"]["effective_source"] == "manual"
+
+
+def test_analysis_suggestion_is_advisory_until_manual_override(tmp_path):
+    cfg, db, project_id = _project(tmp_path, count=1)
+    detail = project_detail(cfg, db, project_id)
+    segment_id = detail["segments"][0]["segment_id"]
+    state = default_color_state()
+    state["applied"].update({"mode": "safe_restore", "exposure": -0.2})
+    state["segment_analysis"][segment_id] = {
+        "suggested": {"mode": "manual", "exposure": 0.8},
+        "confidence": 0.9,
+        "warnings": [],
+    }
+    state["segment_overrides"][segment_id] = {"enabled": True, "locked": False, "excluded": False}
+    save_project_color_state(cfg, db, project_id, state, mark_review=False)
+
+    analysis_only = build_render_manifest(cfg, db, project_id)["segments"][0]["color"]
+    assert analysis_only["mode"] == "safe_restore"
+    assert analysis_only["exposure"] == -0.2
+    assert analysis_only["effective_source"] == "project"
+
+    state["segment_overrides"][segment_id]["applied"] = {"mode": "manual", "exposure": 0.35}
+    save_project_color_state(cfg, db, project_id, state, mark_review=False)
+    manual = build_render_manifest(cfg, db, project_id)["segments"][0]["color"]
+    assert manual["mode"] == "manual"
+    assert manual["exposure"] == 0.35
+    assert manual["effective_source"] == "manual"
 
 
 def test_manifest_validation_rejects_missing_lut_file(tmp_path):

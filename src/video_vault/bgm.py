@@ -5,7 +5,7 @@ import shutil
 import re
 import urllib.request
 
-from .database import add_bgm_track, add_project_bgm, bgm_tracks
+from .database import add_bgm_track, bgm_tracks
 from .ffmpeg_tools import metadata
 
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
@@ -67,16 +67,11 @@ def auto_assign_bgm(cfg: dict, db: Path, project_id: int, project_info: dict, gr
 def recommend_bgm_for_groups(cfg: dict, db: Path, project_id: int, project_info: dict, groups: list[dict]) -> list[dict]:
     tracks = [dict(row) for row in bgm_tracks(db)]
     if not tracks:
-        online = download_online_bgm(cfg, db, _online_key(project_info, groups))
-        if online:
-            tracks = [online]
-    if not tracks:
         return []
     result = []
     for group in groups:
         target = _group_mood(project_info, group)
         chosen = sorted(tracks, key=lambda track: _bgm_score(track, target), reverse=True)[0]
-        add_project_bgm(db, project_id, int(chosen["id"]))
         result.append({"group": group.get("label", ""), "activity": group.get("activity", ""), "mood": sorted(target), "track": chosen})
     return result
 
@@ -149,6 +144,14 @@ def _project_mood(project_info: dict, groups: list[dict]) -> set[str]:
 
 
 def _group_mood(project_info: dict, group: dict) -> set[str]:
+    # A project may contain travel, food, and coffee chapters.  Let the
+    # chapter's explicit activity win over the broad project category so a
+    # recommendation remains a useful suggestion rather than a global choice.
+    words = {str(group.get("activity", "")).lower(), str(group.get("label", "")).lower()}
+    if {"coffee", "matcha", "food", "飲食"} & words:
+        return {"coffee", "food", "warm", "chill", "lofi", "cozy"}
+    if {"travel", "travel_diary", "風景", "逛街"} & words:
+        return {"travel", "bright", "uplifting", "cinematic", "vlog", "chill"}
     return _project_mood(project_info, [group])
 
 

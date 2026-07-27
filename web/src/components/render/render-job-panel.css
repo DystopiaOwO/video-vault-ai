@@ -75,6 +75,23 @@
   margin: 12px auto 0;
 }
 
+#root .render-report-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--border, #d8dee6) 86%, transparent);
+  border-radius: 8px;
+  background: var(--surface-muted, #f7f9fc);
+  font-size: 12px;
+}
+
+#root .render-report-summary strong {
+  flex-basis: 100%;
+}
+
 @media (max-width: 980px) {
   #root .job-row {
     grid-template-columns: minmax(0, 1fr) minmax(170px, .8fr) auto;

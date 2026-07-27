@@ -34,7 +34,7 @@ from .project_lifecycle import CancellationRequested, CancellationToken, Project
 from .job_coordinator import DEFAULT_COORDINATOR, JobState
 from .project_perception import run_project_perception
 from .perception_runs import PerceptionCancelled, ensure_perception_schema, perception_jobs, recover_interrupted_perception_runs
-from .render_job_api import RenderJobAPI
+from .render_api import RenderAPI
 from .render_job_manager import RenderJobManager
 from .renderer import render_approved
 from .scanner import scan_inbox
@@ -82,6 +82,33 @@ def _require_api_base_revision(data: dict) -> int:
     if revision is None:
         raise ProjectRevisionRequired()
     return revision
+
+
+def _approve_project_api(cfg: dict, db: Path, data: dict) -> dict:
+    """Apply the project approval API contract without swallowing conflicts.
+
+    Missing storyboard initialization is a user-actionable validation result,
+    while optimistic-lock conflicts must continue to propagate to ``do_POST``
+    so callers receive the established HTTP 409 response.
+    """
+    try:
+        set_review_status(
+            cfg,
+            db,
+            int(data.get("project_id", 0)),
+            "approved",
+            data.get("notes", ""),
+            base_revision=_base_revision(data),
+        )
+    except ValueError as exc:
+        if not str(exc).startswith("缺少 storyboard.json"):
+            raise
+        return {
+            "ok": False,
+            "code": "storyboard_required",
+            "error": "尚未建立 storyboard.json，請先到「分鏡審核」執行「建立分鏡」，完成後再核准。",
+        }
+    return {"ok": True}
 
 
 class _UploadPart:
@@ -266,7 +293,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
     render_manager = RenderJobManager(cfg, db)
     render_manager.coordinator = JOB_COORDINATOR
     render_manager.start()
-    render_api = RenderJobAPI(render_manager)
+    render_api = RenderAPI(render_manager)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -307,6 +334,8 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     self._json(jobs)
             elif parsed.path == "/api/render-job":
                 self._json(render_api.get(query.get("id", [""])[0]))
+            elif parsed.path == "/api/render-job/report":
+                self._json(render_api.report(query.get("id", [""])[0]))
             elif parsed.path == "/api/render-jobs":
                 project_id = int(query.get("project_id", ["0"])[0] or 0)
                 result = render_api.list(project_id or None)
@@ -704,8 +733,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif path == "/api/render-job/cancel":
                 self._json(render_api.cancel(str(data.get("job_id", ""))))
             elif path == "/api/project/approve":
-                set_review_status(cfg, db, int(data.get("project_id", 0)), "approved", data.get("notes", ""), base_revision=_base_revision(data))
-                self._json({"ok": True})
+                self._json(_approve_project_api(cfg, db, data))
             elif path == "/api/project/reject":
                 set_review_status(cfg, db, int(data.get("project_id", 0)), "rejected", data.get("notes", ""), base_revision=_base_revision(data))
                 self._json({"ok": True})
