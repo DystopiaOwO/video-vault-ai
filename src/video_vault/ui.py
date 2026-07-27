@@ -17,6 +17,7 @@ import time
 
 from .analyzer.vision_pipeline import analyze_video_frames
 from .audio_state import audio_state_for_api, update_audio_state
+from .artifact_retention import RetentionError, build_cleanup_plan, execute_cleanup_plan, load_inventory, reconcile_inventory, set_artifact_pinned
 from .audio_preview import AudioPreviewError, audio_preview_file_path, render_project_audio_preview
 from .bgm_pipeline import BgmPipelineError, validate_bgm_track
 from .bgm import import_bgm, list_bgm
@@ -339,6 +340,18 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json(project_detail(cfg, db, int(query.get("id", ["0"])[0])))
             elif parsed.path == "/api/project/storyboard":
                 self._json(storyboard_for_api(cfg, db, int(query.get("project_id", ["0"])[0] or 0)))
+            elif parsed.path == "/api/project/storage":
+                project_id = int(query.get("project_id", ["0"])[0] or 0)
+                inventory = reconcile_inventory(cfg, project_id)
+                artifacts = inventory.get("artifacts", [])
+                self._json({
+                    "ok": True,
+                    "project_id": project_id,
+                    "artifacts": artifacts,
+                    "total_bytes": sum(int(item.get("size") or 0) for item in artifacts),
+                    "protected_bytes": sum(int(item.get("size") or 0) for item in artifacts if item.get("pinned") or item.get("type") in {"source_media", "approval_snapshot", "formal_output", "manifest"}),
+                    "pinned_count": sum(1 for item in artifacts if item.get("pinned")),
+                })
             elif parsed.path == "/api/videos":
                 self._json(video_list(cfg, db))
             elif parsed.path == "/api/bgm":
@@ -432,6 +445,8 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 }, status=409)
             except WebSecurityError as exc:
                 self._json(exc.as_dict(), status=403)
+            except RetentionError as exc:
+                self._json(exc.as_dict(), status=409 if exc.code == "stale_cleanup_plan" else 400)
 
         def _ui_post(self, path: str) -> None:
             if path in {"/ui/upload-project", "/ui/upload-bgm"}:
@@ -586,6 +601,22 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     self._json({"ok": True, "storyboard": storyboard_for_api(cfg, db, project_id), "state": state})
                 except (OSError, TypeError, ValueError) as exc:
                     self._json({"ok": False, "code": "storyboard_generation_failed", "error": str(exc)})
+            elif path == "/api/project/storage/reconcile":
+                project_id = int(data.get("project_id", 0))
+                self._json(reconcile_inventory(cfg, project_id))
+            elif path == "/api/project/storage/plan":
+                project_id = int(data.get("project_id", 0))
+                self._json({"ok": True, "plan": build_cleanup_plan(cfg, project_id, data.get("policy") if isinstance(data.get("policy"), dict) else None)})
+            elif path == "/api/project/storage/cleanup":
+                project_id = int(data.get("project_id", 0))
+                plan_id = Path(str(data.get("plan_id") or "")).name
+                plan_path = project_dir(cfg, project_id) / "storage" / f"{plan_id}.json"
+                if not plan_id or plan_path.parent.resolve() not in plan_path.resolve().parents or not plan_path.is_file():
+                    raise RetentionError("invalid_cleanup_plan", "找不到指定 cleanup plan", action="重新建立 dry-run plan")
+                self._json(execute_cleanup_plan(cfg, json.loads(plan_path.read_text(encoding="utf-8"))))
+            elif path == "/api/project/storage/pin":
+                project_id = int(data.get("project_id", 0))
+                self._json({"ok": True, "artifact": set_artifact_pinned(cfg, project_id, str(data.get("artifact_id") or ""), bool(data.get("pinned")))})
             elif path == "/api/project/storyboard/thumbnail":
                 try:
                     project_id = int(data.get("project_id", 0))

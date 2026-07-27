@@ -19,6 +19,7 @@ import {
 import { AudioMixingWorkspace } from "./workspaces/audio/AudioMixingWorkspace";
 import { ColorConsistencyWorkspace } from "./workspaces/color/ColorConsistencyWorkspace";
 import { StoryboardWorkspaceController } from "./workspaces/storyboard/StoryboardWorkspaceController";
+import { StorageWorkspace } from "./workspaces/storage/StorageWorkspace";
 import "./project-detail-polish.css";
 
 export function App() {
@@ -459,6 +460,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
       <RenderJobPanel jobs={jobs} projectId={detail.project.id} setMessage={setMessage} refreshProject={refreshCurrentProject} mutationControls={mutationControls} />
       <ProjectWorkflow detail={detail} jobs={jobs} />
       <WorkflowSkeleton detail={detail} />
+      <StorageWorkspace projectId={detail.project.id} setMessage={setMessage} />
     </div>
 
     <div className="workspace-section" id="workspace-storyboard" tabIndex={-1}>

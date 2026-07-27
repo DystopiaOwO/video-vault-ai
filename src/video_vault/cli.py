@@ -23,6 +23,7 @@ from .report import write_report
 from .renderer import render_approved
 from .scanner import scan_inbox
 from .ui import run_ui
+from .web_security import WebSecurityError
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -152,7 +153,11 @@ def main(argv: list[str] | None = None) -> int:
         for video in videos(db):
             print(write_report(dict(video), db, root(cfg) / "06_reports"))
     elif args.cmd == "ui":
-        run_ui(cfg, args.host, args.port)
+        try:
+            run_ui(cfg, args.host, args.port)
+        except WebSecurityError as exc:
+            print(json.dumps(exc.as_dict(), ensure_ascii=False), file=sys.stderr)
+            return 2
     elif args.cmd == "color-preview":
         video = next(v for v in videos(db) if int(v["id"]) == args.video_id)
         mode = args.mode or cfg.get("color", {}).get("default_mode", "safe_restore")

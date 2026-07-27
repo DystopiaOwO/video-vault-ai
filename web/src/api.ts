@@ -123,6 +123,35 @@ export type Job = {
   encoder_contract?: { implementation?: string; fallback_reason?: string; [key: string]: unknown };
 };
 
+export type StorageArtifact = {
+  artifact_id: string;
+  project_id: number;
+  type: string;
+  path: string;
+  size: number;
+  pinned: boolean;
+  lifecycle_state: string;
+  deletion_status: string;
+  references?: string[];
+};
+
+export type StorageSummary = {
+  ok: boolean;
+  project_id: number;
+  artifacts: StorageArtifact[];
+  total_bytes: number;
+  protected_bytes: number;
+  pinned_count: number;
+};
+
+export type CleanupPlan = {
+  plan_id: string;
+  candidate_count: number;
+  candidate_size: number;
+  candidates: Array<{ artifact_id: string; type: string; size: number; reason: string }>;
+  protected: Array<{ artifact_id: string; type: string; reason: string }>;
+};
+
 export type RenderReport = {
   status: "current" | "historical" | "stale" | string;
   project_id?: number;
@@ -304,6 +333,10 @@ export const api = {
   project: (id: number, signal?: AbortSignal) => json<ProjectDetail>(`/api/project?id=${id}`, { signal }),
   jobs: (projectId: number, signal?: AbortSignal, sinceRevision?: number) => json<Job[] | JobsSnapshot>(`/api/jobs?project_id=${projectId}&meta=1${sinceRevision === undefined ? "" : `&since_revision=${sinceRevision}`}`, { signal }).then((result) => Array.isArray(result) ? { jobs: result } : result),
   bgm: () => json<BgmTrack[]>("/api/bgm"),
+  storage: (projectId: number) => json<StorageSummary>(`/api/project/storage?project_id=${projectId}`),
+  storagePlan: (projectId: number) => json<{ ok: boolean; plan?: CleanupPlan; error?: string }>("/api/project/storage/plan", post({ project_id: projectId })),
+  storageCleanup: (projectId: number, planId: string) => json<{ ok: boolean; results?: Array<{ artifact_id: string; status: string; code?: string }>; reclaimed_bytes?: number; error?: string }>("/api/project/storage/cleanup", post({ project_id: projectId, plan_id: planId })),
+  storagePin: (projectId: number, artifactId: string, pinned: boolean) => json<{ ok: boolean; artifact?: StorageArtifact; error?: string }>("/api/project/storage/pin", post({ project_id: projectId, artifact_id: artifactId, pinned })),
   createProject: (name: string) =>
     json<{ ok: boolean; id: number }>("/api/projects", post({ name, video_ids: [], category: "unknown", content_type: "diary_montage", platform: "YouTube" })),
   uploadProject: (projectId: number, files: ReadonlyArray<File>, baseRevision?: number) => {
