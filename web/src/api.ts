@@ -269,8 +269,31 @@ export function formatApiError(error: unknown): string {
   return error instanceof Error ? error.message : "網路或服務錯誤";
 }
 
+let csrfToken: string | null = null;
+let csrfRequest: Promise<string> | null = null;
+
+async function getCsrfToken(): Promise<string> {
+  if (csrfToken) return csrfToken;
+  csrfRequest ||= fetch("/api/security", { headers: { accept: "application/json" } })
+    .then(async (response) => {
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || typeof payload.csrf_token !== "string" || !payload.csrf_token) throw new Error("無法取得本機安全 token");
+      csrfToken = payload.csrf_token;
+      return payload.csrf_token;
+    })
+    .finally(() => { csrfRequest = null; });
+  return csrfRequest;
+}
+
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
+  let request = init;
+  if (String(init?.method || "GET").toUpperCase() !== "GET" && url !== "/api/security") {
+    const token = await getCsrfToken();
+    const headers = new Headers(init?.headers);
+    headers.set("x-video-vault-csrf", token);
+    request = { ...init, headers };
+  }
+  const res = await fetch(url, request);
   const payload = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError(res.status, payload && typeof payload === "object" ? payload : {});
   return payload as T;

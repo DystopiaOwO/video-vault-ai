@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import json
 import mimetypes
 import os
+import secrets
 import subprocess
 import tempfile
 import threading
@@ -40,12 +41,15 @@ from .renderer import render_approved
 from .scanner import scan_inbox
 from .storyboard import generate_storyboard, generate_thumbnail, storyboard_for_api, storyboard_thumbnail_path, update_storyboard
 from .storyboard_preview import StoryboardPreviewError, render_storyboard_preview, storyboard_preview_path
+from .web_security import WebSecurityError, parse_single_range, validate_local_bind_host, validate_origin_headers
 
 
 JOBS: dict[tuple[int, str], dict] = {}
 JOBS_LOCK = threading.Lock()
 JOB_COORDINATOR = DEFAULT_COORDINATOR
 JOB_TOKENS: dict[tuple[int, str], CancellationToken] = {}
+FORM_CSRF_TOKEN = ""
+MEDIA_STREAM_CHUNK = 64 * 1024
 
 
 class MultipartFormError(ValueError):
@@ -286,6 +290,9 @@ def _form_value(form: dict[str, list[_UploadPart]], name: str) -> str:
 
 
 def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
+    validate_local_bind_host(host)
+    global FORM_CSRF_TOKEN
+    FORM_CSRF_TOKEN = secrets.token_urlsafe(32)
     db = db_path(cfg)
     init_db(db)
     ensure_perception_schema(db)
@@ -296,10 +303,28 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
     render_api = RenderAPI(render_manager)
 
     class Handler(BaseHTTPRequestHandler):
+        def _check_host(self) -> None:
+            validate_origin_headers(self.headers, host, port, csrf_token=None, supplied_token=None)
+
+        def _check_mutation(self, supplied_token: str | None = None) -> None:
+            validate_origin_headers(self.headers, host, port, csrf_token=FORM_CSRF_TOKEN, supplied_token=supplied_token or self.headers.get("x-video-vault-csrf"))
+
         def do_GET(self) -> None:
+            self._head_only = False
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
-            if parsed.path == "/" and _web_dist().exists():
+            try:
+                # GET requests do not need CSRF, but Host validation still
+                # prevents DNS-rebinding access to this local service.
+                from .web_security import validate_host_header
+
+                validate_host_header(self.headers.get("host"), host, port)
+            except WebSecurityError as exc:
+                self._json(exc.as_dict(), status=400)
+                return
+            if parsed.path == "/api/security":
+                self._json({"ok": True, "csrf_token": FORM_CSRF_TOKEN})
+            elif parsed.path == "/" and _web_dist().exists():
                 self._file(_web_dist() / "index.html")
             elif parsed.path == "/classic" or (parsed.path == "/" and not _web_dist().exists()):
                 project_id = int(query.get("project_id", ["0"])[0] or 0)
@@ -375,22 +400,27 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             else:
                 self.send_error(404)
 
+        def do_HEAD(self) -> None:
+            self._head_only = True
+            self.do_GET()
+
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path.startswith("/ui/"):
                 self._ui_post(parsed.path)
                 return
-            if parsed.path == "/api/upload":
-                self._json(upload(self, cfg))
-                return
-            if parsed.path == "/api/project/upload":
-                self._json(upload_project(self, cfg, db))
-                return
-            if parsed.path == "/api/upload-bgm":
-                self._json(upload_bgm(self, cfg, db))
-                return
-            data = self._json_body()
             try:
+                self._check_mutation()
+                if parsed.path == "/api/upload":
+                    self._json(upload(self, cfg))
+                    return
+                if parsed.path == "/api/project/upload":
+                    self._json(upload_project(self, cfg, db))
+                    return
+                if parsed.path == "/api/upload-bgm":
+                    self._json(upload_bgm(self, cfg, db))
+                    return
+                data = self._json_body()
                 self._api_post(parsed.path, data)
             except ProjectRevisionConflict as exc:
                 self._json({
@@ -400,6 +430,8 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     "project_revision": exc.current,
                     "current_revision": exc.current,
                 }, status=409)
+            except WebSecurityError as exc:
+                self._json(exc.as_dict(), status=403)
 
         def _ui_post(self, path: str) -> None:
             if path in {"/ui/upload-project", "/ui/upload-bgm"}:
@@ -413,6 +445,11 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 return
 
             data = self._form_body()
+            try:
+                self._check_mutation(data.get("csrf_token"))
+            except WebSecurityError as exc:
+                self._redirect(project_id if "project_id" in locals() else 0, f"安全性驗證失敗：{exc.message}")
+                return
             project_id = int(data.get("project_id", "0") or 0)
             try:
                 if path == "/ui/create":
@@ -802,13 +839,46 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             self.wfile.write(body)
 
         def _file(self, path: Path) -> None:
-            body = path.read_bytes()
-            self.send_response(200)
+            try:
+                size = path.stat().st_size
+                requested = parse_single_range(self.headers.get("range"), size)
+            except (OSError, WebSecurityError) as exc:
+                if isinstance(exc, WebSecurityError):
+                    self.send_response(416)
+                    self.send_header("content-type", "application/json; charset=utf-8")
+                    self.send_header("content-range", f"bytes */{path.stat().st_size if path.exists() else 0}")
+                    body = json.dumps(exc.as_dict(), ensure_ascii=False).encode("utf-8")
+                    self.send_header("content-length", str(len(body)))
+                    self.end_headers()
+                    if not getattr(self, "_head_only", False):
+                        self.wfile.write(body)
+                    return
+                self.send_error(404)
+                return
+            start, end = requested or (0, max(0, size - 1))
+            status = 206 if requested else 200
+            self.send_response(status)
             self.send_header("content-type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
             self.send_header("cache-control", "no-store")
-            self.send_header("content-length", str(len(body)))
+            self.send_header("accept-ranges", "bytes")
+            self.send_header("content-length", str(end - start + 1 if size else 0))
+            if requested:
+                self.send_header("content-range", f"bytes {start}-{end}/{size}")
             self.end_headers()
-            self.wfile.write(body)
+            if getattr(self, "_head_only", False) or size == 0:
+                return
+            try:
+                with path.open("rb") as stream:
+                    stream.seek(start)
+                    remaining = end - start + 1
+                    while remaining:
+                        chunk = stream.read(min(MEDIA_STREAM_CHUNK, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
         def log_message(self, fmt: str, *args) -> None:
             return
@@ -835,7 +905,7 @@ def render_page(cfg: dict, db: Path, project_id: int = 0, message: str = "", ren
     bgm = list_bgm(db)
     jobs = project_jobs(project_id, render_manager, db) if project_id else []
     refresh = '<meta http-equiv="refresh" content="3">' if any(j.get("status") in {"running", "queued"} for j in jobs) else ""
-    return f"""<!doctype html>
+    html = f"""<!doctype html>
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
@@ -859,10 +929,11 @@ def render_page(cfg: dict, db: Path, project_id: int = 0, message: str = "", ren
   </main>
 </body>
 </html>"""
+    return _inject_csrf_fields(html)
 
 
 def render_bgm_page(db: Path, message: str = "") -> str:
-    return f"""<!doctype html>
+    return _inject_csrf_fields(f"""<!doctype html>
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
@@ -880,7 +951,14 @@ def render_bgm_page(db: Path, message: str = "") -> str:
     </section>
   </main>
 </body>
-</html>"""
+</html>""")
+
+
+def _inject_csrf_fields(html: str) -> str:
+    if not FORM_CSRF_TOKEN:
+        return html
+    hidden = f'<input type="hidden" name="csrf_token" value="{h(FORM_CSRF_TOKEN)}">'
+    return html.replace("<form ", f"<form {hidden}")
 
 
 def _nav() -> str:
@@ -1455,6 +1533,12 @@ def _parse_upload_form(handler: BaseHTTPRequestHandler) -> tuple[dict[str, list[
         return None, {"ok": False, "error": str(exc)}
 
 
+def _verify_form_csrf(form: dict[str, list[_UploadPart]]) -> dict | None:
+    if FORM_CSRF_TOKEN and _form_value(form, "csrf_token") != FORM_CSRF_TOKEN:
+        return {"ok": False, "code": "csrf_failed", "error": "CSRF token 無效或缺失，已拒絕變更操作", "action": "重新整理頁面後再試"}
+    return None
+
+
 class DuplicateUploadError(ValueError):
     """The requested project upload would clobber an existing source."""
 
@@ -1639,6 +1723,10 @@ def upload(handler: BaseHTTPRequestHandler, cfg: dict) -> dict:
     if error:
         return error | {"files": []}
     assert form is not None
+    csrf_error = _verify_form_csrf(form)
+    if csrf_error:
+        _close_form(form)
+        return csrf_error | {"files": []}
     saved = []
     try:
         items = _form_items(form, "file")
@@ -1669,6 +1757,10 @@ def upload_project(handler: BaseHTTPRequestHandler, cfg: dict, db: Path) -> dict
     if error:
         return error | {"project_id": 0, "files": []}
     assert form is not None
+    csrf_error = _verify_form_csrf(form)
+    if csrf_error:
+        _close_form(form)
+        return csrf_error | {"project_id": 0, "files": []}
     saved = []
     try:
         try:
@@ -1807,6 +1899,10 @@ def upload_bgm(handler: BaseHTTPRequestHandler, cfg: dict, db: Path) -> dict:
     if error:
         return error
     assert form is not None
+    csrf_error = _verify_form_csrf(form)
+    if csrf_error:
+        _close_form(form)
+        return csrf_error
     staged: Path | None = None
     try:
         items = _form_items(form, "file")
