@@ -14,15 +14,14 @@
 
 ### Partial
 
-- run-scoped staging 原本只有檔案；live DB 以 video 為 scope，沒有 durable frame/segment staging tables。
-- project media relation 沒有保存 immutable source fingerprint，也沒有明確 ownership/migration schema marker。
-- migration report 有 rollback snapshot，但版本與 migration contract 不完整。
-- reanalysis 的 publish rollback 已存在，但 run provider contract、published revision 與 interrupted timestamp 未完整保存。
+- run-scoped staging 原本只有檔案；本 checkpoint 已補 durable `analysis_run_frames`／`analysis_run_segments`，並在 publish 前先寫入。
+- project media relation 原本沒有 immutable source fingerprint 與 ownership marker；本 checkpoint 已補欄位與可重複 migration report。
+- migration report 原本版本與 contract 不完整；本 checkpoint 已升為 stable-segment-state-v2 並保留 rollback snapshot。
+- reanalysis 的 publish rollback 原本缺少 run provider contract、published revision 與 interrupted timestamp；本 checkpoint 已補入 `analysis_runs`。
 
 ### Missing
 
-- Batch A 所需的 project-local source fingerprint/ownership metadata contract。
-- run-scoped DB staging rows 與 publish boundary 的 durable record。
+- 完整的跨程序 DB transaction/replay coordinator 仍留待後續 Render/Job 階段；本批已提供 durable staging record，但不擴張既有 publish engine。
 
 ## Phase 2：Target Duration、Visual Timeline
 
@@ -30,34 +29,33 @@
 
 - project 有 `target_duration_seconds`。
 - storyboard 有 groups、included/order、locked/manual flags、thumbnail 與 notes。
-- title card suggestion 已存在於 `project_plan.json`；Render Manifest 已包含 storyboard render state。
+- duration-budget-v1 已依既有 storyboard/manual input 做 deterministic selection，輸出 target、estimated、tolerance、group budget、coverage、omitted reason 與 locked conflict。
+- visual-timeline-v1 已以 versioned `visual_items` 產生 chapter cards，並納入 project plan、Render Manifest、manifest hash 與 approval snapshot。
 
 ### Partial
 
-- target duration 目前只被記錄，尚未真正影響自動選片、group budget、omitted reason 或 conflict。
-- title cards 尚未是版本化 `visual_items` contract，也尚未完整進入 manifest/approval/cache/report。
+- formal renderer 的 overlay composition、font/assets runtime validation 留待 Batch B；本批只建立可審核、可 hash 的 visual timeline contract。
 
 ### Missing
 
-- deterministic duration budgeting、chapter coverage、target/estimated/tolerance API data。
-- versioned visual timeline items 與 formal manifest integration。
+- Phase 2 Batch A 沒有未完成的核心資料契約；Batch B 的正式 overlay render 不在本分支。
 
 ## Phase 3：BGM License、整合驗證
 
 ### Completed
 
 - global BGM library、project BGM relation、local import、source URL、license URL、attribution text 已存在。
-- project plan、approval snapshot、manifest 可帶出 BGM 與署名資訊。
+- `attribution_status`、`license_status`、`license_verified_at`、`license_source_url`、`verification_source`、`verification_provenance` 已加入資料庫、API、manifest、approval snapshot 與 WebUI。
+- legacy migration 對有可靠 CC0/public-domain/self-owned 證據的資料標為 `not_required/verified`，有可靠 CC BY 證據的資料標為 `required/verified`；沒有證據的 legacy 0 改為 `unknown/unverified`。
+- manifest 產生 `bgm_credits` 與 `unresolved_bgm_licenses`；未知或未驗證授權預設使 approval fail closed，僅接受一次性、明確列出 track IDs 的 acknowledgement。
 
 ### Partial
 
-- 目前只有 `attribution_required` boolean，沒有 `attribution_status`、`license_status`、verification time/provenance。
-- legacy `attribution_required=0` 無法安全區分 CC0/public domain 與未知授權；manifest 只警告授權資料不完整。
+- server-side BGM form 已可輸入授權 URL 與署名狀態；專用的 library 編輯/授權證據管理畫面仍可在後續 UI 工作補強。
 
 ### Missing
 
-- `required/not_required/unknown` 與 `verified/unverified/invalid` contract。
-- unknown BGM 不得被列入「不需署名」、approval/render checklist warning 與 YouTube credits/unresolved license 分流。
+- Phase 3 Batch A 沒有未完成的核心授權資料與 gate 契約；更完整的線上驗證 provider 不在本批範圍。
 
 ## 採用方案
 

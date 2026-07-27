@@ -32,6 +32,12 @@ export type BgmTrack = {
   source_url?: string;
   license_name?: string;
   attribution_text?: string;
+  attribution_status?: "required" | "not_required" | "unknown";
+  license_status?: "verified" | "unverified" | "invalid";
+  license_verified_at?: string;
+  license_source_url?: string;
+  verification_source?: string;
+  verification_provenance?: string;
   mood?: string;
   duration_seconds?: number;
 };

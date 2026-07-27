@@ -23,7 +23,12 @@ export function moodTokens(track: LibraryTrack): string[] {
 }
 
 export function requiresAttribution(track: LibraryTrack): boolean {
-  return track.attribution_required === true || Number(track.attribution_required) === 1;
+  return track.attribution_status === "required" || (track.attribution_status === undefined && (track.attribution_required === true || Number(track.attribution_required) === 1));
+}
+
+export function licenseIsUnresolved(track: LibraryTrack): boolean {
+  return (track.attribution_status !== undefined && track.attribution_status === "unknown")
+    || (track.license_status !== undefined && track.license_status !== "verified");
 }
 
 export function trackCredit(track: LibraryTrack): string {
@@ -44,7 +49,7 @@ export function filterBgmTracks(tracks: LibraryTrack[], query: string, mood: str
     const matchesMood = !mood || moodTokens(track).some((token) => normalized(token) === normalized(mood));
     const matchesLicense = license === "all"
       || (license === "attribution" && requiresAttribution(track))
-      || (license === "no-attribution" && !requiresAttribution(track) && Boolean(track.license_name))
+      || (license === "no-attribution" && (track.attribution_status === "not_required" && track.license_status === "verified" || track.attribution_status === undefined && !requiresAttribution(track) && Boolean(track.license_name)))
       || (license === "missing" && !track.license_name);
     return matchesQuery && matchesMood && matchesLicense;
   });
@@ -204,7 +209,7 @@ export function BgmLibraryPage() {
             <span className="bgm-duration">{formatDuration(track.duration_seconds)}</span>
           </header>
           <div className="bgm-track-badges">
-            <span className={requiresAttribution(track) ? "warning" : "ok"}>{requiresAttribution(track) ? "需要署名" : "不需署名"}</span>
+            <span className={licenseIsUnresolved(track) ? "warning" : (requiresAttribution(track) ? "warning" : "ok")}>{licenseIsUnresolved(track) ? "授權待確認" : (requiresAttribution(track) ? "需要署名" : "不需署名")}</span>
             <span>{track.license_name || "授權待補"}</span>
             {moodTokens(track).map((token) => <span key={token}>{token}</span>)}
           </div>

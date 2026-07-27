@@ -299,6 +299,8 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
             for key in (
                 "id", "title", "artist", "source_url", "license_name", "license_url",
                 "attribution_required", "attribution_text", "mood", "duration_seconds",
+                "attribution_status", "license_status", "license_verified_at", "license_source_url",
+                "verification_source", "verification_provenance",
             )
         })
 
@@ -379,6 +381,8 @@ def _public_bgm_row(row: dict) -> dict:
         for key in (
             "id", "track_id", "title", "artist", "source_url", "license_name", "license_url",
             "attribution_required", "attribution_text", "mood", "duration_seconds",
+            "attribution_status", "license_status", "license_verified_at", "license_source_url",
+            "verification_source", "verification_provenance",
         )
         if key in row
     }
@@ -900,6 +904,10 @@ def pre_render_validation(cfg: dict, db: Path, project_id: int) -> dict:
     for track in project_bgm_tracks(db, project_id):
         if not track["source_url"] or not track["license_name"] or not track["attribution_text"]:
             warnings.append(f"BGM license incomplete: {track['title']}")
+        if str(track["attribution_status"] or "unknown") == "unknown":
+            warnings.append(f"BGM license attribution unresolved: {track['title']}")
+        if str(track["license_status"] or "unverified") != "verified":
+            warnings.append(f"BGM license not verified: {track['title']}")
     report = {"project_id": project_id, "plan_id": plan.get("plan_id", ""), "status": "failed" if errors else "passed", "created_at": datetime.now().isoformat(timespec="seconds"), "errors": errors, "warnings": warnings}
     out = folder / "validation"
     out.mkdir(parents=True, exist_ok=True)

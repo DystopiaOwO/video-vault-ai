@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timezone
 import shutil
 import re
 import urllib.request
@@ -23,6 +24,7 @@ def import_bgm(cfg: dict, db: Path, source: Path, info: dict) -> int:
     target = _unique(bgm_dir(cfg) / source.name)
     if source.resolve() != target.resolve():
         shutil.copy2(source, target)
+    contract = license_contract(info)
     row = {
         "title": info.get("title") or target.stem,
         "artist": info.get("artist") or "",
@@ -30,7 +32,13 @@ def import_bgm(cfg: dict, db: Path, source: Path, info: dict) -> int:
         "source_url": info["source_url"],
         "license_name": info["license_name"],
         "license_url": info.get("license_url", ""),
+        "license_source_url": info.get("license_source_url") or info.get("license_url") or info.get("source_url", ""),
         "attribution_required": 1 if info.get("attribution_required") else 0,
+        "attribution_status": contract["attribution_status"],
+        "license_status": contract["license_status"],
+        "license_verified_at": contract["license_verified_at"],
+        "verification_source": info.get("verification_source") or "user_upload",
+        "verification_provenance": info.get("verification_provenance") or "user-provided license metadata",
         "attribution_text": info.get("attribution_text") or attribution(info.get("title") or target.stem, info.get("artist") or "", info.get("source_url") or "", info.get("license_name") or ""),
         "mood": info.get("mood", ""),
         "duration_seconds": audio_duration(target, cfg),
@@ -48,6 +56,8 @@ def _public_bgm(row: dict) -> dict:
         for key in (
             "id", "title", "artist", "source_url", "license_name", "license_url",
             "attribution_required", "attribution_text", "mood", "duration_seconds",
+            "attribution_status", "license_status", "license_verified_at", "license_source_url",
+            "verification_source", "verification_provenance",
         )
     }
 
@@ -122,6 +132,36 @@ def attribution(title: str, artist: str, source_url: str, license_name: str) -> 
     if source_url:
         bits.append(source_url)
     return " ".join(bits)
+
+
+def license_contract(info: dict) -> dict[str, str]:
+    """Normalize explicit license metadata into the Batch A contract."""
+    explicit_attribution = str(info.get("attribution_status") or "").strip()
+    explicit_license = str(info.get("license_status") or "").strip()
+    name = str(info.get("license_name") or "").strip().lower()
+    license_url = str(info.get("license_url") or info.get("license_source_url") or "").strip()
+    source_url = str(info.get("source_url") or "").strip()
+    if explicit_attribution in {"required", "not_required", "unknown"}:
+        attribution_status = explicit_attribution
+    elif info.get("attribution_required"):
+        attribution_status = "required"
+    elif any(token in name for token in ("cc0", "public domain", "public-domain", "自有", "self-owned")):
+        attribution_status = "not_required"
+    else:
+        attribution_status = "unknown"
+    if explicit_license in {"verified", "unverified", "invalid"}:
+        license_status = explicit_license
+    elif attribution_status == "not_required" and name and (license_url or source_url):
+        license_status = "verified"
+    elif attribution_status == "required" and name and license_url:
+        license_status = "verified"
+    else:
+        license_status = "unverified"
+    return {
+        "attribution_status": attribution_status,
+        "license_status": license_status,
+        "license_verified_at": datetime.now(timezone.utc).isoformat(timespec="seconds") if license_status == "verified" else "",
+    }
 
 
 def youtube_credits(db: Path) -> str:

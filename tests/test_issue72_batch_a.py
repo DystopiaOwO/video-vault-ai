@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from video_vault.database import connect, init_db, project_videos, upsert_video
+from video_vault.database import add_bgm_track, connect, init_db, project_videos, upsert_video
 from video_vault.perception_runs import (
     analysis_run,
     create_perception_run,
@@ -15,6 +15,7 @@ from video_vault.project import create_project
 from video_vault.project_media import ensure_project_media_ownership, rollback_project_media_ownership
 from video_vault.duration_budget import apply_duration_budget
 from video_vault.visual_timeline import build_visual_timeline, validate_visual_timeline
+from video_vault.bgm import license_contract
 
 
 def _fixture(tmp_path: Path):
@@ -106,3 +107,20 @@ def test_visual_timeline_is_versioned_and_manifest_ready():
     ])
     assert timeline["items"][0]["type"] == "chapter_card"
     assert validate_visual_timeline(timeline)["valid"] is True
+
+
+def test_bgm_license_contract_distinguishes_verified_required_and_unknown(tmp_path):
+    assert license_contract({"license_name": "CC BY 4.0", "license_url": "https://creativecommons.org/licenses/by/4.0/", "attribution_required": True})["attribution_status"] == "required"
+    assert license_contract({"license_name": "CC BY 4.0", "license_url": "https://creativecommons.org/licenses/by/4.0/", "attribution_required": True})["license_status"] == "verified"
+    assert license_contract({"license_name": "", "source_url": ""}) == {
+        "attribution_status": "unknown", "license_status": "unverified", "license_verified_at": "",
+    }
+
+
+def test_legacy_zero_attribution_without_evidence_is_unknown(tmp_path):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    add_bgm_track(db, {"title": "Unclear", "file_path": str(tmp_path / "unclear.mp3"), "license_name": "", "source_url": "", "attribution_required": 0})
+    with connect(db) as con:
+        row = con.execute("select attribution_status, license_status from bgm_tracks").fetchone()
+    assert dict(row) == {"attribution_status": "unknown", "license_status": "unverified"}
