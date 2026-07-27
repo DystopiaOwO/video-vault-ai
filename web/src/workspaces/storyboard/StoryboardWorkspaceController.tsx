@@ -58,6 +58,7 @@ export function StoryboardWorkspaceController({
   const dirtyRef = useRef(false);
   const timingDirtyRef = useRef<Record<string, boolean>>({});
   const projectIdRef = useRef(detail.project.id);
+  const initializedRef = useRef(false);
   const fallbackControlsRef = useRef<ProjectMutationControls | null>(null);
   if (!fallbackControlsRef.current) fallbackControlsRef.current = createProjectMutationControls(new ProjectMutationCoordinator());
   const controls = mutationControls || fallbackControlsRef.current;
@@ -109,6 +110,14 @@ export function StoryboardWorkspaceController({
       setSelectedId(firstSegmentId(detail));
       setPreviewItems([]);
       setBusy("");
+      initializedRef.current = true;
+      return;
+    }
+
+    // State and timing refs are initialized from the first props. Skip the
+    // mount sync so a fast edit cannot be replaced by the passive effect.
+    if (!initializedRef.current) {
+      initializedRef.current = true;
       return;
     }
 

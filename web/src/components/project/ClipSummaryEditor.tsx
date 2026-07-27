@@ -19,6 +19,7 @@ export function ClipSummaryEditor({ projectId, projectRevision, clip, setMessage
   const [baseline, setBaseline] = useState(incomingSummary);
   const [saving, setSaving] = useState(false);
   const identityRef = useRef(`${projectId}:${clip.video_id}`);
+  const initializedRef = useRef(false);
   const dirty = text !== baseline;
   const dirtyRef = useRef(dirty);
   const fallbackControlsRef = useRef<ProjectMutationControls | null>(null);
@@ -38,7 +39,20 @@ export function ClipSummaryEditor({ projectId, projectRevision, clip, setMessage
   useEffect(() => {
     const identity = `${projectId}:${clip.video_id}`;
     const identityChanged = identityRef.current !== identity;
-    if (identityChanged) identityRef.current = identity;
+    if (identityChanged) {
+      identityRef.current = identity;
+      setText(incomingSummary);
+      setBaseline(incomingSummary);
+      setSaving(false);
+      initializedRef.current = true;
+      return;
+    }
+    // State is initialized from the first props already. Skipping this first
+    // sync prevents a fast user edit from being overwritten by the mount effect.
+    if (!initializedRef.current) {
+      initializedRef.current = true;
+      return;
+    }
     if (!identityChanged && dirtyRef.current) return;
 
     setText(incomingSummary);

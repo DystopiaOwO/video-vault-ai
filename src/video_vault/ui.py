@@ -1416,7 +1416,7 @@ def _script_panel(detail: dict) -> str:
 def _bgm_library_panel(bgm: list[dict]) -> str:
     rows = "\n\n".join(f"#{t['id']} {t['title']} - {t.get('artist', '')}\n{t.get('license_name', '')} {t.get('source_url', '')}" for t in bgm) or "尚無 BGM"
     return f"""<div class="card"><h3>BGM 資料庫總覽</h3>
-<form method="post" action="/ui/upload-bgm" enctype="multipart/form-data" class="stack"><div class="row"><input name="file" type="file" accept="audio/*"><input name="title" placeholder="曲名"><input name="artist" placeholder="作者"><input name="source_url" placeholder="來源 URL"><input name="license_name" placeholder="授權"><button>登錄 BGM</button></div><textarea name="attribution_text" placeholder="署名文字"></textarea></form>
+<form method="post" action="/ui/upload-bgm" enctype="multipart/form-data" class="stack"><div class="row"><input name="file" type="file" accept="audio/*"><input name="title" placeholder="曲名"><input name="artist" placeholder="作者"><input name="source_url" placeholder="來源 URL"><input name="license_url" placeholder="授權 URL"><input name="license_name" placeholder="授權名稱"><select name="attribution_status"><option value="unknown">署名狀態：未確認</option><option value="required">需要署名</option><option value="not_required">不需署名</option></select><button>登錄 BGM</button></div><textarea name="attribution_text" placeholder="署名文字"></textarea></form>
 <pre>{h(rows)}</pre></div>"""
 
 
@@ -1815,7 +1815,7 @@ def upload_bgm(handler: BaseHTTPRequestHandler, cfg: dict, db: Path) -> dict:
         item = items[0]
         name = Path(item.filename).name
         staged = _stage_upload(item, Path(cfg["library_root"]) / "04_audio" / "_incoming_bgm", name)
-        info = {k: _form_value(form, k) for k in ("title", "artist", "source_url", "license_name", "license_url", "attribution_text", "mood")}
+        info = {k: _form_value(form, k) for k in ("title", "artist", "source_url", "license_name", "license_url", "license_source_url", "attribution_text", "attribution_status", "license_status", "verification_source", "verification_provenance", "mood")}
         info["attribution_required"] = _form_value(form, "attribution_required") == "on"
         return {"ok": True, "id": import_bgm(cfg, db, staged, info)}
     except Exception as exc:

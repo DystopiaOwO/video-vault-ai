@@ -25,6 +25,7 @@ from .color_consistency import effective_color_settings, has_color_state, load_p
 from .project import project_dir, project_segments
 from .render_profiles import get_render_profile
 from .render_settings import load_render_settings
+from .visual_timeline import build_visual_timeline, validate_visual_timeline
 
 
 ALLOWED_AUDIO_ROLES = {"keep_original", "lower_original", "mute", "keep", "lower", "bgm_only"}
@@ -101,6 +102,17 @@ def build_render_manifest(
     # fingerprinted during approval/preflight, rather than turning a current
     # manifest-hash invalidation into an unrelated early media-probe error.
     bgm = _manifest_bgm(cfg, db, project_id, settings, audio_state, validate_selected_bgm=audio_file_exists or audio_state_override is not None)
+    bgm_credits = [
+        str(track.get("attribution_text") or track.get("source_url") or "")
+        for track in bgm
+        if str(track.get("attribution_status") or "unknown") == "required"
+    ]
+    unresolved_bgm_licenses = [
+        int(track.get("track_id") or 0)
+        for track in bgm
+        if str(track.get("license_status") or "unverified") != "verified"
+        or str(track.get("attribution_status") or "unknown") == "unknown"
+    ]
     manifest: dict[str, Any] = {
         "schema_version": "2.0",
         "project_id": int(project_id),
@@ -109,8 +121,12 @@ def build_render_manifest(
         "profile": profile,
         "settings": settings,
         "storyboard_render_state": storyboard_render_state(storyboard_state, raw_segments),
+        "visual_timeline": plan.get("visual_timeline") or build_visual_timeline(plan.get("groups") or []),
+        "visual_items": plan.get("visual_items") or (plan.get("visual_timeline") or {}).get("items", []),
         "segments": segments,
         "bgm": bgm,
+        "bgm_credits": bgm_credits,
+        "unresolved_bgm_licenses": unresolved_bgm_licenses,
         "expected_duration_seconds": round(sum(float(item["timeline_duration_seconds"]) for item in segments), 6),
         "manifest_hash": "",
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -225,6 +241,10 @@ def validate_render_manifest(manifest: dict[str, Any], check_files: bool = False
         missing = [key for key in ("source_url", "license_name", "attribution_text") if not str(track.get(key) or "").strip()]
         if missing:
             warnings.append(f"BGM {track.get('title', 'untitled')} license incomplete: {', '.join(missing)}")
+        if str(track.get("attribution_status") or "unknown") == "unknown":
+            warnings.append(f"BGM {track.get('title', 'untitled')} attribution status is unknown")
+        if str(track.get("license_status") or "unverified") != "verified":
+            warnings.append(f"BGM {track.get('title', 'untitled')} license is not verified")
     color_values = [(manifest.get("settings") or {}).get("color") or {}]
     color_values.extend(segment.get("color") or {} for segment in segments if isinstance(segment, dict))
     for color in color_values:
@@ -242,6 +262,8 @@ def validate_render_manifest(manifest: dict[str, Any], check_files: bool = False
                 number = _number(color.get(field), f"color {field}", errors)
                 if number is not None and not lower <= number <= upper:
                     errors.append(f"color {field} must be between {lower} and {upper}")
+    visual_validation = validate_visual_timeline(manifest.get("visual_timeline"))
+    errors.extend(f"visual timeline: {item}" for item in visual_validation["errors"])
     return {"valid": not errors, "errors": errors, "warnings": warnings}
 
 
@@ -368,6 +390,13 @@ def _manifest_bgm(
             "source_path": str(item.get("file_path") or ""),
             "source_url": str(item.get("source_url") or ""),
             "license_name": str(item.get("license_name") or ""),
+            "license_url": str(item.get("license_url") or ""),
+            "license_source_url": str(item.get("license_source_url") or item.get("license_url") or ""),
+            "attribution_status": str(item.get("attribution_status") or "unknown"),
+            "license_status": str(item.get("license_status") or "unverified"),
+            "license_verified_at": str(item.get("license_verified_at") or ""),
+            "verification_source": str(item.get("verification_source") or ""),
+            "verification_provenance": str(item.get("verification_provenance") or ""),
             "attribution_text": str(item.get("attribution_text") or ""),
             "gain_db": float(override.get("gain_db", settings.get("audio", {}).get("bgm_gain_db", -18.0))),
             "start_seconds": float(override.get("start_seconds", 0.0)),

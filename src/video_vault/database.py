@@ -60,6 +60,23 @@ create table if not exists analysis_runs (
   status text,
   raw_output_path text
 );
+create table if not exists analysis_run_frames (
+  run_uuid text not null,
+  ordinal integer not null,
+  video_id integer not null,
+  timestamp_seconds real not null,
+  frame_path text not null,
+  payload_json text not null,
+  primary key(run_uuid, ordinal)
+);
+create table if not exists analysis_run_segments (
+  run_uuid text not null,
+  ordinal integer not null,
+  video_id integer not null,
+  segment_uuid text,
+  payload_json text not null,
+  primary key(run_uuid, ordinal)
+);
 create table if not exists segment_identity_migrations (
   id integer primary key,
   video_id integer not null,
@@ -76,6 +93,12 @@ create table if not exists bgm_tracks (
   license_url text,
   attribution_required integer default 0,
   attribution_text text,
+  attribution_status text default 'unknown',
+  license_status text default 'unverified',
+  license_verified_at text,
+  license_source_url text,
+  verification_source text,
+  verification_provenance text,
   mood text,
   duration_seconds real default 0,
   added_at text default current_timestamp
@@ -106,6 +129,9 @@ create table if not exists project_videos (
   analysis_status text,
   perception_revision integer default 0,
   perceived_at text,
+  source_fingerprint_json text default '{}',
+  ownership_state text default 'project_owned',
+  migration_generation integer default 0,
   sort_order integer default 0,
   primary key(project_id, video_id)
 );
@@ -171,8 +197,34 @@ def init_db(db: Path) -> None:
                 "analysis_status": "text",
                 "perception_revision": "integer default 0",
                 "perceived_at": "text",
+                "source_fingerprint_json": "text default '{}'",
+                "ownership_state": "text default 'project_owned'",
+                "migration_generation": "integer default 0",
             },
         )
+        _ensure_columns(
+            con,
+            "analysis_runs",
+            {
+                "base_revision": "integer",
+                "provider_contract_json": "text default '{}'",
+                "interrupted_at": "text",
+                "published_revision": "integer",
+            },
+        )
+        _ensure_columns(
+            con,
+            "bgm_tracks",
+            {
+                "attribution_status": "text default 'unknown'",
+                "license_status": "text default 'unverified'",
+                "license_verified_at": "text",
+                "license_source_url": "text",
+                "verification_source": "text",
+                "verification_provenance": "text",
+            },
+        )
+        _migrate_bgm_license_state(con)
         for row in con.execute(
             "select id, video_id from segments where segment_uuid is null or segment_uuid=''"
         ).fetchall():
@@ -217,6 +269,12 @@ def _backfill_project_media_snapshots(con: sqlite3.Connection) -> None:
             user_summary=coalesce(user_summary, ''),
             summary_migration_state=coalesce(nullif(summary_migration_state, ''), 'none'),
             perception_revision=coalesce(perception_revision, 0)"""
+    )
+    con.execute(
+        """update project_videos
+        set ownership_state=coalesce(nullif(ownership_state, ''), 'project_owned'),
+            source_fingerprint_json=coalesce(nullif(source_fingerprint_json, ''), '{}'),
+            migration_generation=coalesce(migration_generation, 0)"""
     )
 
 
@@ -267,6 +325,37 @@ def _migrate_legacy_summary_ownership(con: sqlite3.Connection) -> None:
                 where project_id=? and video_id=?""",
                 (int(row["project_id"]), int(row["video_id"])),
             )
+
+
+def _migrate_bgm_license_state(con: sqlite3.Connection) -> None:
+    """Map legacy attribution booleans without treating every zero as safe."""
+    rows = con.execute(
+        "select id, license_name, license_url, source_url, attribution_required, attribution_status, license_status, verification_source from bgm_tracks"
+    ).fetchall()
+    for row in rows:
+        attribution_status = str(row["attribution_status"] or "").strip()
+        license_status = str(row["license_status"] or "").strip()
+        verification_source = str(row["verification_source"] or "").strip()
+        if verification_source not in {"", "legacy_migration"}:
+            continue
+        if attribution_status and license_status and license_status not in {"unverified", ""}:
+            continue
+        name = str(row["license_name"] or "").strip().lower()
+        license_url = str(row["license_url"] or "").strip()
+        source_url = str(row["source_url"] or "").strip()
+        if any(token in name for token in ("cc0", "public domain", "public-domain", "自有", "self-owned")):
+            next_attribution = "not_required"
+            next_license = "verified" if name and (license_url or source_url) else "unverified"
+        elif int(row["attribution_required"] or 0):
+            next_attribution = "required"
+            next_license = "verified" if name and license_url else "unverified"
+        else:
+            next_attribution = "unknown"
+            next_license = "unverified"
+        con.execute(
+            "update bgm_tracks set attribution_status=case when attribution_status is null or attribution_status='' or attribution_status='unknown' then ? else attribution_status end, license_status=case when license_status is null or license_status='' or license_status='unverified' then ? else license_status end, verification_source=coalesce(nullif(verification_source, ''), 'legacy_migration'), verification_provenance=coalesce(nullif(verification_provenance, ''), 'derived from legacy license fields') where id=?",
+            (next_attribution, next_license, int(row["id"])),
+        )
 
 
 def _legacy_segment_uuid(video_id: int, row_id: int) -> str:
@@ -899,6 +988,9 @@ def project_videos(db: Path, project_id: int) -> list[sqlite3.Row]:
               pv.summary_override as legacy_summary_override,
               pv.analysis_status as project_analysis_status,
               coalesce(pv.perception_revision, 0) as perception_revision,
+              coalesce(pv.source_fingerprint_json, '{}') as source_fingerprint_json,
+              coalesce(pv.ownership_state, 'project_owned') as ownership_state,
+              coalesce(pv.migration_generation, 0) as migration_generation,
               pv.perceived_at,
               pv.sort_order
             from project_videos pv

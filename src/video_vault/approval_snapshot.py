@@ -74,6 +74,26 @@ def build_approval_snapshot(
     if selected_bgm is None and len(manifest.get("bgm") or []) == 1:
         # Legacy project_bgm rows are already resolved into the manifest.
         selected_bgm = manifest["bgm"][0]
+    unresolved_license = [
+        track for track in manifest.get("bgm") or []
+        if str(track.get("license_status") or "unverified") != "verified"
+        or str(track.get("attribution_status") or "unknown") == "unknown"
+    ]
+    invalid_license = [
+        track for track in unresolved_license
+        if str(track.get("license_status") or "unverified") == "invalid"
+    ]
+    if invalid_license:
+        raise ApprovalSnapshotError("存在無效 BGM 授權；請移除該曲目或補上有效授權證據後再核准")
+    acknowledgement = (manifest.get("settings") or {}).get("license_acknowledgement") or {}
+    if not isinstance(acknowledgement, Mapping):
+        acknowledgement = {}
+    acknowledged_ids = {int(value) for value in acknowledgement.get("track_ids", []) if str(value).isdigit()}
+    if unresolved_license and not (
+        bool(acknowledgement.get("accepted"))
+        and all(int(track.get("track_id") or 0) in acknowledged_ids for track in unresolved_license)
+    ):
+        raise ApprovalSnapshotError("存在未確認 BGM 授權；請補齊授權證據，或以一次性的明確 acknowledgement 允許繼續")
     color_state = load_project_color_state(dict(cfg), int(project_id))
     effective_color = {
         str(item.get("segment_id")): effective_color_settings(color_state, str(item.get("segment_id")))
@@ -200,7 +220,21 @@ def _manifest_assets(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
         key = ("bgm", source)
         if key not in seen:
             seen.add(key)
-            assets.append(asset_fingerprint(source, kind="bgm", asset_id=str(track.get("track_id") or Path(source).name), metadata={key: track.get(key) for key in ("license_name", "license_url", "source_url", "attribution_text")}))
+            assets.append(asset_fingerprint(source, kind="bgm", asset_id=str(track.get("track_id") or Path(source).name), metadata={key: track.get(key) for key in ("license_name", "license_url", "license_source_url", "source_url", "attribution_text", "attribution_status", "license_status", "verification_source", "verification_provenance")}))
+    for item in manifest.get("visual_items") or []:
+        if not isinstance(item, Mapping):
+            continue
+        for asset in item.get("runtime_assets") or []:
+            if isinstance(asset, Mapping):
+                source = str(asset.get("path") or asset.get("source_path") or "").strip()
+            else:
+                source = str(asset or "").strip()
+            if not source:
+                raise ApprovalSnapshotError(f"visual item {item.get('stable_id', '')} 缺少 runtime asset path")
+            key = ("visual", str(Path(source).expanduser().resolve()))
+            if key not in seen:
+                seen.add(key)
+                assets.append(asset_fingerprint(source, kind="visual", asset_id=str(item.get("stable_id") or Path(source).name)))
     return assets
 
 
@@ -233,7 +267,7 @@ def _asset_mismatch(asset: Mapping[str, Any]) -> dict[str, Any] | None:
 def _public_bgm(track: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if track is None:
         return None
-    allowed = ("track_id", "title", "artist", "license_name", "license_url", "source_url", "gain_db", "start_seconds", "loop", "fade_in_seconds", "fade_out_seconds")
+    allowed = ("track_id", "title", "artist", "license_name", "license_url", "license_source_url", "source_url", "attribution_status", "license_status", "license_verified_at", "verification_source", "verification_provenance", "gain_db", "start_seconds", "loop", "fade_in_seconds", "fade_out_seconds")
     return {key: track.get(key) for key in allowed}
 
 

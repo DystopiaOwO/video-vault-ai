@@ -15,6 +15,7 @@ def migrate_segment_state_for_video(
     db: Path,
     video_id: int,
     identity_report: Mapping[str, Any] | None = None,
+    project_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """Migrate all projects that reference ``video_id`` and return project reports.
 
@@ -24,7 +25,7 @@ def migrate_segment_state_for_video(
     being silently discarded.
     """
     with connect(db) as con:
-        project_ids = [
+        project_ids = [int(project_id)] if project_id is not None else [
             int(row["project_id"])
             for row in con.execute(
                 "select project_id from project_videos where video_id=? order by project_id",
@@ -167,7 +168,8 @@ def migrate_project_segment_state(
         or plan_changed
     )
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "migration_contract": "stable-segment-state-v2",
         "project_id": int(project_id),
         "video_id": int(video_id) if video_id is not None else None,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -179,6 +181,7 @@ def migrate_project_segment_state(
         "conflicts": conflicts,
         "upstream_identity_report": upstream,
         "requires_review": requires_review,
+        "rollback_supported": True,
     }
     if alias_map or upstream or migrated_files:
         validation = root / "validation"

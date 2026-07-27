@@ -14,6 +14,8 @@ from .bgm import recommend_bgm_for_groups
 from .database import connect, create_project_row, frames, init_db, project, project_bgm_tracks, project_videos, projects, segments, set_project_status, set_project_videos
 from .story_context import story_context
 from .project_lifecycle import check_base_revision, current_revision, project_commit
+from .duration_budget import apply_duration_budget
+from .visual_timeline import build_visual_timeline
 
 
 def create_project(db: Path, name: str, video_ids: list[int], kind: str = "auto", category: str = "unknown", content_type: str = "diary_montage", platform: str = "YouTube", target_duration_seconds: float = 0) -> int:
@@ -205,6 +207,9 @@ def _build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
                     "tags": [tag for tag in (seg.get("tags") or "").split(",") if tag],
                     "score": seg["score"],
                     "story_context": context,
+                    "speed": 1.0,
+                    "estimated_output_seconds": round(max(0.1, float(seg["end_seconds"] or 0) - float(seg["start_seconds"] or 0)), 3),
+                    "include": bool(seg.get("include", True)),
                 }
             )
     ordered = sorted(groups.values(), key=lambda g: (int(g.get("order", 999)), _time_rank(g["time_of_day"]), g["activity"], g["label"]))
@@ -212,6 +217,38 @@ def _build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
         group["clips"] = _dedupe(group["clips"])
         group["story_context"] = _dedupe_story_context(group["story_context"])
         group["segments"].sort(key=lambda s: (s["clip_id"], float(s["start_seconds"] or 0)) if itinerary or project_info_is_travel(row) else (-float(s["score"] or 0), s["clip_id"], float(s["start_seconds"] or 0)))
+    from .storyboard import load_storyboard
+
+    project_info = dict(row)
+    storyboard = load_storyboard(cfg, project_id) or {}
+    storyboard_segments = storyboard.get("segments") if isinstance(storyboard, dict) else {}
+    effective_segments = {
+        str(item.get("segment_id")): item
+        for item in project_segments(cfg, project_id, {"groups": ordered}, apply_storyboard=True, db=db)
+        if str(item.get("segment_id") or "")
+    }
+    for group in ordered:
+        for segment in group.get("segments", []) or []:
+            effective = effective_segments.get(str(segment.get("segment_id") or ""))
+            if not effective:
+                continue
+            for key in ("start_seconds", "end_seconds", "speed", "include", "locked"):
+                if key in effective:
+                    segment[key] = effective[key]
+            speed = max(0.25, float(segment.get("speed") or 1.0))
+            segment["estimated_output_seconds"] = round(
+                max(
+                    0.1,
+                    (float(segment.get("end_seconds") or 0) - float(segment.get("start_seconds") or 0)) / speed,
+                ),
+                3,
+            )
+    duration_budget = apply_duration_budget(
+        ordered,
+        float(project_info.get("target_duration_seconds") or 0),
+        locked_segments=storyboard_segments if isinstance(storyboard_segments, dict) else {},
+    )
+    visual_timeline = build_visual_timeline(ordered)
     story_context_usage = _dedupe_story_context(
         [
             context
@@ -220,7 +257,6 @@ def _build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
             if context.get("user_summary")
         ]
     )
-    project_info = dict(row)
     pipeline = pipeline_for_project(project_info)
     bgm_recommendations = recommend_bgm_for_groups(cfg, db, project_id, project_info, ordered)
     by_group = {item["group"]: item for item in bgm_recommendations}
@@ -246,6 +282,9 @@ def _build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
         "bgm": bgm,
         "bgm_recommendations": bgm_recommendations,
         "title_cards": _title_cards(project_info, ordered),
+        "duration_budget": duration_budget,
+        "visual_timeline": visual_timeline,
+        "visual_items": visual_timeline["items"],
         "revision_notes": revision_notes,
         "feedback_applied": [
             f"{item['clip_id']} 使用 user_summary 指引故事分組"
@@ -281,6 +320,8 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
             for key in (
                 "id", "title", "artist", "source_url", "license_name", "license_url",
                 "attribution_required", "attribution_text", "mood", "duration_seconds",
+                "attribution_status", "license_status", "license_verified_at", "license_source_url",
+                "verification_source", "verification_provenance",
             )
         })
 
@@ -361,6 +402,8 @@ def _public_bgm_row(row: dict) -> dict:
         for key in (
             "id", "track_id", "title", "artist", "source_url", "license_name", "license_url",
             "attribution_required", "attribution_text", "mood", "duration_seconds",
+            "attribution_status", "license_status", "license_verified_at", "license_source_url",
+            "verification_source", "verification_provenance",
         )
         if key in row
     }
@@ -390,7 +433,7 @@ def project_segments(cfg: dict, project_id: int, plan: dict, *, apply_storyboard
                     "manual_order": len(rows) + 1,
                     "scene_role": _scene_role(seg),
                     "story_position": group.get("activity", ""),
-                    "include": True,
+                    "include": bool(seg.get("include", True)),
                     "audio_role": "lower_original",
                     "speed": 1.0,
                     "user_notes": "",
@@ -882,6 +925,10 @@ def pre_render_validation(cfg: dict, db: Path, project_id: int) -> dict:
     for track in project_bgm_tracks(db, project_id):
         if not track["source_url"] or not track["license_name"] or not track["attribution_text"]:
             warnings.append(f"BGM license incomplete: {track['title']}")
+        if str(track["attribution_status"] or "unknown") == "unknown":
+            warnings.append(f"BGM license attribution unresolved: {track['title']}")
+        if str(track["license_status"] or "unverified") != "verified":
+            warnings.append(f"BGM license not verified: {track['title']}")
     report = {"project_id": project_id, "plan_id": plan.get("plan_id", ""), "status": "failed" if errors else "passed", "created_at": datetime.now().isoformat(timespec="seconds"), "errors": errors, "warnings": warnings}
     out = folder / "validation"
     out.mkdir(parents=True, exist_ok=True)

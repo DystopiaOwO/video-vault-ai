@@ -6,10 +6,10 @@ import threading
 
 import pytest
 
-from video_vault.approval_snapshot import load_approval_snapshot, validate_snapshot
+from video_vault.approval_snapshot import ApprovalSnapshotError, build_approval_snapshot, load_approval_snapshot, validate_snapshot
 from video_vault.database import add_analysis, add_bgm_track, add_project_bgm, init_db, project, project_revision, upsert_video
-from video_vault.project import can_project_render, create_project, mark_project_needs_review, project_dir, set_review_status
-from video_vault.project import build_project_plan
+from video_vault.project import build_project_plan, can_project_render, create_project, mark_project_needs_review, project_dir, set_review_status
+from video_vault.render_manifest import build_render_manifest, manifest_hash
 from video_vault.project_lifecycle import ProjectRevisionConflict
 
 
@@ -214,3 +214,31 @@ def test_explicit_storyboard_initialization_then_approval_advances_one_revision(
     assert project_revision(db, project_id) == base_revision + 1
     review = json.loads((project_dir(cfg, project_id) / "review_status.json").read_text(encoding="utf-8"))
     assert review["approved_project_revision"] == base_revision + 1
+
+
+def test_invalid_bgm_cannot_be_acknowledged_for_approval(tmp_path: Path):
+    cfg, db, project_id, _source = _approved_project(tmp_path)
+    bgm = tmp_path / "invalid.mp3"
+    bgm.write_bytes(b"not-audio")
+    track_id = add_bgm_track(db, {
+        "title": "Invalid", "file_path": str(bgm), "source_url": "https://example.test/invalid",
+        "license_name": "reported invalid", "attribution_text": "Invalid",
+        "attribution_status": "unknown", "license_status": "invalid",
+    })
+    add_project_bgm(db, project_id, track_id)
+    manifest = build_render_manifest(cfg, db, project_id)
+    manifest["settings"]["license_acknowledgement"] = {"accepted": True, "track_ids": [track_id]}
+    manifest["manifest_hash"] = manifest_hash(manifest)
+    with pytest.raises(ApprovalSnapshotError, match="無效 BGM"):
+        build_approval_snapshot(cfg, db, project_id, approved_revision=project_revision(db, project_id), manifest=manifest)
+
+
+def test_missing_visual_runtime_asset_fails_approval(tmp_path: Path):
+    cfg, db, project_id, _source = _approved_project(tmp_path)
+    manifest = build_render_manifest(cfg, db, project_id)
+    manifest["visual_items"] = [{
+        "stable_id": "chapter-card-001", "runtime_assets": [{"path": str(tmp_path / "missing-font.ttf")}],
+    }]
+    manifest["manifest_hash"] = manifest_hash(manifest)
+    with pytest.raises(ApprovalSnapshotError, match="visual resource is missing"):
+        build_approval_snapshot(cfg, db, project_id, approved_revision=project_revision(db, project_id), manifest=manifest)
