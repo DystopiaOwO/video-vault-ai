@@ -57,6 +57,7 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
   const [segmentQuery, setSegmentQuery] = useState("");
   const [busy, setBusy] = useState<BusyAction>("");
   const projectIdRef = useRef(detail.project.id);
+  const initializedRef = useRef(false);
   const dirty = useMemo(() => colorSignature(state) !== colorSignature(baseline), [baseline, state]);
   const dirtyRef = useRef(dirty);
   const fallbackControlsRef = useRef<ProjectMutationControls | null>(null);
@@ -103,6 +104,13 @@ export function ColorConsistencyWorkspace({ detail, setMessage, refreshProject, 
       setPreviews([]);
       setSegmentQuery("");
       setBusy("");
+      initializedRef.current = true;
+      return;
+    }
+    // State is initialized from the first props. Do not let the mount effect
+    // overwrite an edit made before passive effects have run.
+    if (!initializedRef.current) {
+      initializedRef.current = true;
       return;
     }
     if (!dirtyRef.current) {

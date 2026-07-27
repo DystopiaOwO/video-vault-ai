@@ -64,6 +64,7 @@ export function AudioMixingWorkspace({ detail, bgmTracks, setMessage, refreshPro
   const [busy, setBusy] = useState<"" | "save" | "preview">("");
   const [segmentQuery, setSegmentQuery] = useState("");
   const projectIdRef = useRef(detail.project.id);
+  const initializedRef = useRef(false);
   const dirty = useMemo(() => audioSignature(state) !== audioSignature(baseline), [baseline, state]);
   const dirtyRef = useRef(dirty);
   const fallbackControlsRef = useRef<ProjectMutationControls | null>(null);
@@ -100,6 +101,13 @@ export function AudioMixingWorkspace({ detail, bgmTracks, setMessage, refreshPro
       clearPreview();
       setSegmentQuery("");
       setBusy("");
+      initializedRef.current = true;
+      return;
+    }
+    // State is initialized from the first props. Do not let the mount effect
+    // overwrite an edit made before passive effects have run.
+    if (!initializedRef.current) {
+      initializedRef.current = true;
       return;
     }
     if (!dirtyRef.current) {
