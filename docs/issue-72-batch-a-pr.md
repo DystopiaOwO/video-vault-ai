@@ -88,4 +88,13 @@ Commit `bfb9276`：
 - Frontend：`30 files / 223 tests passed`；production build passed。
 - FFmpeg E2E：`12 passed`。
 - Encoding check、`py -3.10 -m compileall -q src` 與 `git diff --check origin/main...HEAD` passed。
-- 未重跑 Windows 真實專案 smoke；本輪未修改 FFmpeg runtime 或 Windows path 行為，CI Windows authoritative job 仍負責平台驗證。
+## Windows real-project smoke
+
+- Environment：Windows 10 build 26200；Python 3.10.11；FFmpeg/ffprobe 8.1.2。
+- Source media：1 支真實 HEVC/AAC MP4，58.234 秒；同一實體來源建立 Project A/B，project media identity 不同。
+- Perception：A/B 均成功發布 persistent run、generation 1 與 12 frames；取消 B 的下一次 run 後，上一個 successful run 與 live frames/segments 保留，restart recovery 後沒有 running/publishing 殘留。
+- Duration/visual：target 改變確實改變 selection；trim/speed 影響 estimated duration；locked conflict 正確保留並回報；visual item 進入 plan、Manifest、approval snapshot/hash；缺少 runtime asset 時 approval fail closed；正式 overlay composition 不在本 PR。
+- BGM：verified + required 可核准並產生 credits；unknown + unverified 預設阻擋且 acknowledgement 綁定 track ID；invalid 永久阻擋。
+- Approval snapshot：Project A smoke manifest hash `124a230e31c4f48bcda9754d8abc0e4967e74b573c85dd9677753055b1ef0ca3`。
+- Existing user data modified：No；原始素材 SHA-256 前後一致；mock provider 與 CPU frame extraction，未執行正式 GPU render。
+- Result：Passed
