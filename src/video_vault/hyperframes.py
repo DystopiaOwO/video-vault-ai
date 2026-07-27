@@ -7,18 +7,32 @@ import shutil
 import subprocess
 
 from .color import run_ffmpeg, video_decode_args, video_encode_args
+from .handoff import HandoffError, build_handoff_manifest, escape_ffconcat_path
 from .opencut import export_opencut_handoff
 from .project import assert_project_approved, project_dir
 
 
-def export_hyperframes_project(cfg: dict, db: Path, project_id: int, render_clips: bool = True, max_segments: int = 20, *, base_revision: int | None = None) -> Path:
+def export_hyperframes_project(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    render_clips: bool = True,
+    max_segments: int = 20,
+    *,
+    base_revision: int | None = None,
+    mode: str = "diagnostic_first_n",
+    first_n: int | None = None,
+) -> Path:
     if render_clips:
         unload_local_llm_model(cfg)
     # ponytail: avoid CPU-heavy LUT pre-render here; dedicated OpenCut graded clips can do that when explicitly requested.
-    if base_revision is None:
-        handoff = export_opencut_handoff(cfg, db, project_id, render_clips=False, max_segments=max_segments)
-    else:
-        handoff = export_opencut_handoff(cfg, db, project_id, render_clips=False, max_segments=max_segments, base_revision=base_revision)
+    handoff_kwargs = {}
+    if base_revision is not None:
+        handoff_kwargs["base_revision"] = base_revision
+    if mode != "diagnostic_first_n" or first_n is not None:
+        handoff_kwargs["mode"] = mode
+        handoff_kwargs["first_n"] = first_n
+    handoff = export_opencut_handoff(cfg, db, project_id, render_clips=False, max_segments=max_segments, **handoff_kwargs)
     data = json.loads((handoff / "opencut_handoff.json").read_text(encoding="utf-8"))
     out = project_dir(cfg, project_id) / "output" / "hyperframes"
     media = out / "media"
@@ -36,7 +50,8 @@ def export_hyperframes_project(cfg: dict, db: Path, project_id: int, render_clip
         t += duration
 
     bgm = _copy_bgm(data, media)
-    (out / "timeline.json").write_text(json.dumps({"project": data["project"], "clips": clips, "bgm": bgm, "duration": round(t, 3)}, ensure_ascii=False, indent=2), encoding="utf-8")
+    timeline = {"project": data["project"], "clips": clips, "bgm": bgm, "duration": round(t, 3), "handoff_manifest": data.get("handoff_manifest", {})}
+    (out / "timeline.json").write_text(json.dumps(timeline, ensure_ascii=False, indent=2), encoding="utf-8")
     (out / "index.html").write_text(_html(data["project"]["name"], clips, bgm, t), encoding="utf-8")
     (out / "README.md").write_text(_readme(out), encoding="utf-8")
     return out
@@ -50,8 +65,10 @@ def render_hyperframes_project(project: Path, output: Path | None = None, cfg: d
     output = output or project / "story_draft.mp4"
     npx = shutil.which("npx.cmd") or shutil.which("npx")
     if not npx:
-        return {"ok": False, "output": str(output), "stdout": "", "stderr": "找不到 npx，請確認 Node.js/npm 已安裝並在 PATH 裡"}
-    cmd = [npx, "-y", "hyperframes", "render", "--gpu", "--browser-gpu", "--output", str(output)]
+        return {"ok": False, "code": "dependency_missing", "output": str(output), "stdout": "", "stderr": "找不到 npx。請先在交付專案內完成固定版本的 HyperFrames 安裝；正式 render 不會自動下載依賴"}
+    # --no-install prevents npx from reaching the network or changing the
+    # dependency graph during a formal render.
+    cmd = [npx, "--no-install", "hyperframes", "render", "--gpu", "--browser-gpu", "--output", str(output)]
     proc = subprocess.run(cmd, cwd=project, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return {"ok": proc.returncode == 0, "output": str(output), "stdout": proc.stdout, "stderr": proc.stderr}
 
@@ -66,7 +83,7 @@ def render_fast_draft(project: Path, cfg: dict, output: Path | None = None, db: 
     fast_dir.mkdir(exist_ok=True)
     segment_files = [_fast_segment(project, fast_dir, clip, cfg, i) for i, clip in enumerate(timeline["clips"], 1)]
     list_file = project / "concat.txt"
-    list_file.write_text("".join(f"file '{path.as_posix()}'\n" for path in segment_files), encoding="utf-8")
+    list_file.write_text("".join(f"file '{escape_ffconcat_path(path)}'\n" for path in segment_files), encoding="utf-8")
     bgm = timeline.get("bgm")
     if bgm:
         run_ffmpeg(
@@ -183,16 +200,17 @@ html,body,#root{{margin:0;width:100%;height:100%;background:#050607;overflow:hid
 {''.join(cards)}
 {audio}
 </div>
-<script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
 <script>
-const tl = gsap.timeline({{ paused: true }});
-gsap.utils.toArray(".card").forEach(el => {{
+const cards = Array.from(document.querySelectorAll(".card"));
+const update = () => cards.forEach(el => {{
   const start = Number(el.dataset.start || 0);
-  tl.fromTo(el, {{ opacity: 0, y: 20 }}, {{ opacity: 1, y: 0, duration: .35 }}, start);
-  tl.to(el, {{ opacity: 0, y: -12, duration: .35 }}, start + Math.max(1.4, Number(el.dataset.duration || 2) - .35));
+  const duration = Math.max(1.4, Number(el.dataset.duration || 2));
+  const visible = (window.__storyTime || 0) >= start && (window.__storyTime || 0) <= start + duration;
+  el.style.opacity = visible ? "1" : "0";
 }});
 window.__timelines = window.__timelines || {{}};
-window.__timelines["story"] = tl;
+window.__timelines["story"] = {{ update, setTime: time => {{ window.__storyTime = Number(time) || 0; update(); }} }};
+update();
 </script>
 </body>
 </html>"""

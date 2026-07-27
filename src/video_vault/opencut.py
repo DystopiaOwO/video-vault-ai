@@ -9,7 +9,9 @@ import urllib.request
 
 from .color import color_filter, run_ffmpeg, video_encode_args
 from .database import project_bgm_tracks
+from .handoff import HandoffError, build_handoff_manifest, load_approved_handoff_snapshot, register_handoff_file, write_handoff_manifest
 from .project import assert_project_approved, build_project_plan, project_detail, project_dir
+from .segment_renderer import render_segment
 
 OPENCUT_URL = "http://127.0.0.1:3000/projects"
 
@@ -42,14 +44,29 @@ def _bun() -> Path | None:
     return next(base.glob("Oven-sh.Bun_*/*/bun.exe"), None) if base.exists() else None
 
 
-def export_opencut_handoff(cfg: dict, db: Path, project_id: int, render_clips: bool = False, max_segments: int = 20, *, base_revision: int | None = None) -> Path:
+def export_opencut_handoff(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    render_clips: bool = False,
+    max_segments: int = 20,
+    *,
+    base_revision: int | None = None,
+    mode: str = "diagnostic_first_n",
+    first_n: int | None = None,
+) -> Path:
     if render_clips:
         assert_project_approved(cfg, db, project_id, "OpenCut 調色片段輸出")
-    detail = project_detail(cfg, db, project_id)
+        if mode == "diagnostic_first_n":
+            mode = "complete"
+    delivery = build_handoff_manifest(cfg, db, project_id, mode=mode, first_n=first_n if first_n is not None else max_segments)
+    approved = None
+    source_manifest = None
+    if delivery.get("handoff_type") == "formal":
+        approved = load_approved_handoff_snapshot(cfg, db, project_id)
+        source_manifest = approved["manifest"]
+    detail = project_detail(cfg, db, project_id) if delivery.get("handoff_type") == "diagnostic" else {"project": {"name": source_manifest.get("project_name", f"project_{project_id}")}, "clips": []}
     plan = detail.get("plan") or {}
-    if not plan.get("groups"):
-        plan = build_project_plan(cfg, db, project_id, base_revision=base_revision)
-        detail = project_detail(cfg, db, project_id)
     out = project_dir(cfg, project_id) / "output" / "opencut_handoff"
     assets = out / "assets"
     clips_dir = out / "graded_clips"
@@ -59,16 +76,24 @@ def export_opencut_handoff(cfg: dict, db: Path, project_id: int, render_clips: b
     lut = Path(cfg.get("color", {}).get("dji_lut_path", ""))
     if lut.is_file():
         shutil.copy2(lut, assets / lut.name)
-    # The WebUI detail intentionally omits local paths; handoff artifacts are
-    # local project files, so resolve BGM sources from the database here.
-    handoff_bgm = [dict(row) for row in project_bgm_tracks(db, project_id)]
+    # Diagnostic previews may resolve current BGM rows. Formal handoffs use
+    # the BGM contract embedded in the immutable approved manifest.
+    handoff_bgm = [dict(row) for row in (source_manifest.get("bgm", []) if source_manifest else project_bgm_tracks(db, project_id))]
     for track in handoff_bgm:
         src = Path(track.get("file_path", ""))
         if src.exists():
             shutil.copy2(src, assets / src.name)
 
-    segments = _segments(detail, max_segments)
-    handoff = {"project": detail["project"], "clips": detail["clips"], "bgm": handoff_bgm, "bgm_recommendations": plan.get("bgm_recommendations", []), "title_cards": plan.get("title_cards", []), "segments": segments}
+    segments = [dict(item) for item in delivery.get("timeline_items", [])]
+    handoff = {
+        "project": detail["project"],
+        "clips": detail.get("clips", []),
+        "bgm": handoff_bgm,
+        "bgm_recommendations": plan.get("bgm_recommendations", []),
+        "title_cards": plan.get("title_cards", []),
+        "segments": segments,
+        "handoff_manifest": delivery,
+    }
     (out / "opencut_handoff.json").write_text(json.dumps(handoff, ensure_ascii=False, indent=2), encoding="utf-8")
     _write_csv(out / "recommended_segments.csv", segments)
     (out / "README.md").write_text(_readme(detail, segments, render_clips), encoding="utf-8")
@@ -78,13 +103,30 @@ def export_opencut_handoff(cfg: dict, db: Path, project_id: int, render_clips: b
         for i, seg in enumerate(segments, 1):
             target = clips_dir / f"{i:03}_{seg['clip_id']}_{int(float(seg['start_seconds']) * 10):05d}_{_safe(seg['title'])}.mp4"
             targets.add(target.name)
-            seg["graded_clip"] = str(target if _has_video_track(target, cfg) else _render_segment(cfg, seg, target))
+            if _has_video_track(target, cfg):
+                seg["graded_clip"] = str(target)
+            elif source_manifest is not None:
+                original = next((item for item in source_manifest.get("segments", []) if str(item.get("segment_id")) == str(seg.get("stable_id") or seg.get("segment_id"))), None)
+                if original is None:
+                    raise HandoffError("mapping_missing", f"找不到核准片段：{seg.get('stable_id')}", action="重新建立 approval snapshot")
+                rendered = render_segment(cfg, source_manifest, dict(original))
+                shutil.copy2(rendered.output_path, target)
+                seg["cache_key"] = rendered.cache_key
+                seg["graded_clip"] = str(target)
+            else:
+                seg["graded_clip"] = str(_render_segment(cfg, seg, target))
         for stale in clips_dir.glob("*.mp4"):
             if stale.name not in targets:
                 stale.unlink(missing_ok=True)
         handoff["segments"] = segments
         (out / "opencut_handoff.json").write_text(json.dumps(handoff, ensure_ascii=False, indent=2), encoding="utf-8")
         _write_csv(out / "recommended_segments.csv", segments)
+    manifest_path = out / "handoff_manifest.json"
+    for item in sorted(out.rglob("*")):
+        if item.is_file() and item.name not in {"handoff_manifest.json"}:
+            stable_id = next((str(seg.get("stable_id") or "") for seg in segments if seg.get("graded_clip") and Path(str(seg["graded_clip"])).name == item.name), "")
+            register_handoff_file(delivery, item, stable_id=stable_id)
+    write_handoff_manifest(manifest_path, delivery)
     return out
 
 
