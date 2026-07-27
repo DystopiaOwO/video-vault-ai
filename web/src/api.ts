@@ -127,7 +127,8 @@ export type StorageArtifact = {
   artifact_id: string;
   project_id: number;
   type: string;
-  path: string;
+  path?: string;
+  display_name?: string;
   size: number;
   pinned: boolean;
   lifecycle_state: string;

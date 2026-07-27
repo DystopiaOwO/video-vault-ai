@@ -97,6 +97,7 @@ def test_hyperframes_render_export_skips_graded_clip_prerender(tmp_path, monkeyp
     monkeypatch.setattr("video_vault.hyperframes.unload_local_llm_model", lambda cfg: {"ok": True})
     monkeypatch.setattr("video_vault.hyperframes.export_opencut_handoff", lambda cfg, db, project_id, render_clips, max_segments: calls.append(render_clips) or real_opencut_handoff(cfg, db, project_id, render_clips, max_segments))
 
-    export_hyperframes_project({"library_root": str(tmp_path)}, db, project_id, render_clips=True)
+    with pytest.raises(PermissionError, match="正式交付"):
+        export_hyperframes_project({"library_root": str(tmp_path)}, db, project_id, render_clips=True)
 
-    assert calls == [False]
+    assert calls == []

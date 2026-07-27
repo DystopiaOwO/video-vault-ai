@@ -1,4 +1,6 @@
 from pathlib import Path
+import hashlib
+import json
 
 from video_vault.handoff import build_handoff_manifest, escape_ffconcat_path, import_handoff_package
 
@@ -89,3 +91,25 @@ def test_import_hash_conflict_does_not_modify_project(tmp_path):
     assert result["code"] == "manifest_conflict"
     assert result["report"]["status"] == "needs-review"
     assert not (tmp_path / "source").exists()
+
+
+def test_import_checks_each_file_hash(tmp_path):
+    package = tmp_path / "handoff"
+    package.mkdir()
+    media = package / "clip '中文'.mp4"
+    media.write_bytes(b"approved")
+    manifest = {
+        "contract_version": "handoff-v1",
+        "handoff_id": "handoff-test",
+        "created_at": "now",
+        "files": [{"path": media.name, "size": media.stat().st_size, "sha256": hashlib.sha256(media.read_bytes()).hexdigest()}],
+        "exported_ids": ["clip-1"],
+    }
+    payload = {key: value for key, value in manifest.items() if key not in {"contract_hash", "created_at", "handoff_id"}}
+    manifest["contract_hash"] = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    (package / "handoff_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    assert import_handoff_package({"library_root": str(tmp_path)}, 1, package)["ok"] is True
+    media.write_bytes(b"tampered")
+    result = import_handoff_package({"library_root": str(tmp_path)}, 1, package)
+    assert result["ok"] is False
+    assert media.name in result["report"]["changed"]

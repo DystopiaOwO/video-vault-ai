@@ -71,3 +71,36 @@ def test_cleanup_never_removes_project_source_media(tmp_path):
     plan = build_cleanup_plan(cfg, 1, {"preview_max_age_days": 0, "cache_max_age_days": 0})
     assert not any(item["path"] == str(source.resolve()) for item in plan["candidates"])
     assert source.exists()
+
+
+def test_current_lifecycle_is_protected_without_explicit_references(tmp_path):
+    cfg = {"library_root": str(tmp_path)}
+    project_dir(cfg, 1)
+    output = project_dir(cfg, 1) / "output" / "final.mp4"
+    output.write_bytes(b"final")
+    record = register_artifact(cfg, 1, output, "formal_output", state="current")
+    inventory = load_inventory(cfg, 1)
+    next(item for item in inventory["artifacts"] if item["artifact_id"] == record["artifact_id"])["updated_at"] = _old()
+    save_inventory(cfg, 1, inventory)
+    plan = build_cleanup_plan(cfg, 1, {"preview_max_age_days": 1, "cache_max_age_days": 1})
+    assert all(item["artifact_id"] != record["artifact_id"] for item in plan["candidates"])
+    assert output.exists()
+
+
+def test_active_producer_job_protects_artifact_without_status_metadata(tmp_path):
+    cfg = {"library_root": str(tmp_path)}
+    project_dir(cfg, 1)
+    preview = project_dir(cfg, 1) / "output" / "active-preview.mp4"
+    preview.write_bytes(b"preview")
+    record = register_artifact(cfg, 1, preview, "preview", producer_job_id="job-42")
+    inventory = load_inventory(cfg, 1)
+    stored = next(item for item in inventory["artifacts"] if item["artifact_id"] == record["artifact_id"])
+    stored["updated_at"] = _old()
+    stored["producer_job_status"] = ""
+    save_inventory(cfg, 1, inventory)
+
+    plan = build_cleanup_plan(cfg, 1, {"preview_max_age_days": 1}, active_job_ids={"job-42"})
+
+    assert all(item["artifact_id"] != record["artifact_id"] for item in plan["candidates"])
+    assert any(item["artifact_id"] == record["artifact_id"] for item in plan["protected"])
+    assert preview.exists()

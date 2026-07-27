@@ -123,10 +123,12 @@ def export_opencut_handoff(
         _write_csv(out / "recommended_segments.csv", segments)
     manifest_path = out / "handoff_manifest.json"
     for item in sorted(out.rglob("*")):
-        if item.is_file() and item.name not in {"handoff_manifest.json"}:
+        if item.is_file() and item.name not in {"handoff_manifest.json", "opencut_handoff.json"}:
             stable_id = next((str(seg.get("stable_id") or "") for seg in segments if seg.get("graded_clip") and Path(str(seg["graded_clip"])).name == item.name), "")
             register_handoff_file(delivery, item, stable_id=stable_id)
     write_handoff_manifest(manifest_path, delivery)
+    handoff["handoff_manifest"] = delivery
+    (out / "opencut_handoff.json").write_text(json.dumps(handoff, ensure_ascii=False, indent=2), encoding="utf-8")
     return out
 
 

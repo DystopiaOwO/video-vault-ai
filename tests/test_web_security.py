@@ -12,6 +12,12 @@ def test_non_loopback_bind_is_rejected():
         validate_local_bind_host("192.168.1.20")
 
 
+def test_localhost_must_resolve_to_loopback(monkeypatch):
+    monkeypatch.setattr("video_vault.web_security.socket.getaddrinfo", lambda *args, **kwargs: [(None, None, None, None, ("192.168.1.20", 0))])
+    with pytest.raises(WebSecurityError, match="local-only"):
+        validate_local_bind_host("localhost")
+
+
 def test_range_parser_supports_open_ended_and_suffix_ranges():
     assert parse_single_range("bytes=10-19", 100) == (10, 19)
     assert parse_single_range("bytes=10-", 100) == (10, 99)

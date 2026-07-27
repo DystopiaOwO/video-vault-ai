@@ -24,6 +24,10 @@ def export_hyperframes_project(
     first_n: int | None = None,
 ) -> Path:
     if render_clips:
+        assert_project_approved(cfg, db, project_id, "HyperFrames 正式交付")
+        if mode == "diagnostic_first_n":
+            mode = "complete"
+    if render_clips:
         unload_local_llm_model(cfg)
     # ponytail: avoid CPU-heavy LUT pre-render here; dedicated OpenCut graded clips can do that when explicitly requested.
     handoff_kwargs = {}
@@ -66,9 +70,14 @@ def render_hyperframes_project(project: Path, output: Path | None = None, cfg: d
     npx = shutil.which("npx.cmd") or shutil.which("npx")
     if not npx:
         return {"ok": False, "code": "dependency_missing", "output": str(output), "stdout": "", "stderr": "找不到 npx。請先在交付專案內完成固定版本的 HyperFrames 安裝；正式 render 不會自動下載依賴"}
-    # --no-install prevents npx from reaching the network or changing the
-    # dependency graph during a formal render.
-    cmd = [npx, "--no-install", "hyperframes", "render", "--gpu", "--browser-gpu", "--output", str(output)]
+    runtime = Path(__file__).resolve().parents[2] / "tools" / "hyperframes"
+    package_lock = runtime / "package-lock.json"
+    modules = runtime / "node_modules"
+    if not package_lock.is_file() or not modules.is_dir():
+        return {"ok": False, "code": "dependency_missing", "output": str(output), "stdout": "", "stderr": "缺少 pinned HyperFrames runtime。請在 tools/hyperframes 執行 npm ci；正式 render 不會自動下載依賴"}
+    # --no-install and --prefix keep formal rendering offline and tied to the
+    # committed lockfile/runtime instead of the user's global npm state.
+    cmd = [npx, "--no-install", "--prefix", str(runtime), "hyperframes", "render", "--gpu", "--browser-gpu", "--output", str(output)]
     proc = subprocess.run(cmd, cwd=project, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return {"ok": proc.returncode == 0, "output": str(output), "stdout": proc.stdout, "stderr": proc.stderr}
 
@@ -221,11 +230,15 @@ def _readme(out: Path) -> str:
         [
             "# HyperFrames 初剪專案",
             "",
-            "預覽：",
-            "npx hyperframes preview",
+            "本交付包要求 tools/hyperframes 已依 package-lock 安裝；正式 render 不會使用 npx 自動下載。",
             "",
-            "輸出 MP4：",
-            "npx hyperframes render --output story_draft.mp4",
+            "預覽（offline/no-install）：",
+            "npx --no-install --prefix tools/hyperframes hyperframes preview",
+            "",
+            "輸出 MP4（offline/no-install）：",
+            "npx --no-install --prefix tools/hyperframes hyperframes render --output story_draft.mp4",
+            "",
+            "若本機缺少固定版本 dependency，請先完成受控 setup；缺少時正式流程會 fail closed。",
             "",
             f"資料夾：{out}",
         ]

@@ -136,6 +136,18 @@ def test_static_file_serving_stays_inside_web_dist():
     assert _static_file("/../config.yaml") is None
 
 
+def test_classic_forms_receive_valid_csrf_hidden_input(monkeypatch, tmp_path):
+    monkeypatch.setattr(ui, "FORM_CSRF_TOKEN", "test-token")
+    from video_vault.database import init_db
+
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    html = ui.render_bgm_page(db)
+    assert "<form <input" not in html
+    assert '<form method="post"' in html
+    assert '<input type="hidden" name="csrf_token" value="test-token">' in html
+
+
 def test_project_jobs_tracks_percent_and_stop(monkeypatch):
     monkeypatch.setattr(ui, "_kill_video_vault_processes", lambda: None)
     with JOBS_LOCK:

@@ -129,14 +129,11 @@ def reconcile_inventory(cfg: Mapping[str, Any], project_id: int) -> dict[str, An
     roots = {
         "source_media": folder / "source",
         "proxy": folder / "proxy",
-        "preview": folder / "output",
         "frame": folder / "frames",
         "perception_history": folder / "perception_runs",
         "segment_cache": folder / "cache" / "segments",
         "render_cache": folder / "cache",
-        "draft_output": folder / "output",
         "formal_output": folder / "output",
-        "handoff_package": folder / "output",
         "approval_snapshot": folder / "approvals",
         "manifest": folder / "render_manifest.json",
         "log": folder / "logs",
@@ -191,7 +188,7 @@ def set_artifact_pinned(cfg: Mapping[str, Any], project_id: int, artifact_id: st
     raise RetentionError("artifact_missing", "找不到指定 artifact", action="重新整理儲存空間清單")
 
 
-def build_cleanup_plan(cfg: Mapping[str, Any], project_id: int, policy: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def build_cleanup_plan(cfg: Mapping[str, Any], project_id: int, policy: Mapping[str, Any] | None = None, *, active_job_ids: set[str] | None = None) -> dict[str, Any]:
     reconcile_inventory(cfg, project_id)
     inventory = load_inventory(cfg, project_id)
     rules = {**DEFAULT_POLICY, **dict(policy or {})}
@@ -199,7 +196,7 @@ def build_cleanup_plan(cfg: Mapping[str, Any], project_id: int, policy: Mapping[
     candidates: list[dict[str, Any]] = []
     protected: list[dict[str, Any]] = []
     for record in inventory.get("artifacts", []):
-        reason = _protection_reason(record)
+        reason = _protection_reason(record, active_job_ids=active_job_ids)
         if reason:
             protected.append({"artifact_id": record.get("artifact_id"), "reason": reason, "type": record.get("type")})
             continue
@@ -227,7 +224,7 @@ def build_cleanup_plan(cfg: Mapping[str, Any], project_id: int, policy: Mapping[
     return plan
 
 
-def execute_cleanup_plan(cfg: Mapping[str, Any], plan: Mapping[str, Any]) -> dict[str, Any]:
+def execute_cleanup_plan(cfg: Mapping[str, Any], plan: Mapping[str, Any], *, active_job_ids: set[str] | None = None) -> dict[str, Any]:
     project_id = int(plan.get("project_id") or 0)
     inventory = load_inventory(cfg, project_id)
     if plan.get("graph_hash") != _graph_hash(inventory):
@@ -246,7 +243,7 @@ def execute_cleanup_plan(cfg: Mapping[str, Any], plan: Mapping[str, Any]) -> dic
         try:
             if record is None or record.get("path") != str(path):
                 raise RetentionError("artifact_changed", "artifact identity 已改變", action="重新建立 cleanup plan")
-            if _protection_reason(record):
+            if _protection_reason(record, active_job_ids=active_job_ids):
                 raise RetentionError("protected_artifact", "artifact 在清理前已受到保護", action="保留 artifact")
             resolved = path.resolve(strict=False)
             if root not in resolved.parents or resolved == root or path.is_symlink():
@@ -273,15 +270,17 @@ def execute_cleanup_plan(cfg: Mapping[str, Any], plan: Mapping[str, Any]) -> dic
     return {"ok": True, "plan_id": plan.get("plan_id"), "results": results, "reclaimed_bytes": sum(int(item.get("size") or 0) for item, result in zip(plan.get("candidates", []), results) if result.get("status") in {"deleted", "already_missing"})}
 
 
-def _protection_reason(record: Mapping[str, Any]) -> str:
+def _protection_reason(record: Mapping[str, Any], *, active_job_ids: set[str] | None = None) -> str:
     if str(record.get("type")) in PROTECTED_TYPES:
         return "immutable or approval artifact"
     if bool(record.get("pinned")):
         return "user pinned"
     if str(record.get("producer_job_status")) in {"queued", "running", "cancelling"}:
         return "producer job is active"
-    if str(record.get("lifecycle_state")) in {"current", "approved", "formal", "active"} and record.get("references"):
-        return "referenced by current/approved state"
+    if active_job_ids and str(record.get("producer_job_id") or "") in active_job_ids:
+        return "producer job is active"
+    if str(record.get("lifecycle_state")) in {"current", "approved", "formal", "active"}:
+        return "current/approved/formal lifecycle"
     if record.get("references"):
         return "referenced artifact"
     return ""
@@ -316,10 +315,12 @@ def _specific_type(default: str, path: Path, folder: Path) -> str:
         return "approval_snapshot"
     if relative.name == "render_manifest.json":
         return "manifest"
-    if "graded_clips" in relative.parts:
+    if "graded_clips" in relative.parts or "opencut_handoff" in relative.parts or "hyperframes" in relative.parts:
         return "handoff_package"
     if "color_previews" in relative.parts or "storyboard_previews" in relative.parts:
         return "preview"
+    if path.name.startswith("story_draft"):
+        return "draft_output"
     return default
 
 

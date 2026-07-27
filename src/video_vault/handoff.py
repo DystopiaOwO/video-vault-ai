@@ -225,16 +225,33 @@ def import_handoff_package(cfg: Mapping[str, Any], project_id: int, package: str
         raise HandoffError("unsupported_handoff", "不支援的 handoff contract", action="使用相同版本重新匯出")
     expected = manifest.get("contract_hash")
     actual = _hash({key: value for key, value in manifest.items() if key not in {"contract_hash", "created_at", "handoff_id"}})
-    status = "matched" if expected == actual else "needs-review"
+    missing: list[str] = []
+    changed: list[str] = []
+    unsupported: list[str] = []
+    for file_entry in manifest.get("files") or []:
+        relative = str(file_entry.get("path") or "") if isinstance(file_entry, Mapping) else ""
+        candidate = (root / relative).resolve() if relative else Path()
+        if not relative or candidate == root or root not in candidate.parents or candidate.is_symlink() or Path(relative).is_absolute():
+            unsupported.append(relative or "<empty>")
+            continue
+        if not candidate.is_file():
+            missing.append(relative)
+            continue
+        try:
+            if int(file_entry.get("size") or -1) != candidate.stat().st_size or str(file_entry.get("sha256") or "") != _file_hash(candidate):
+                changed.append(relative)
+        except OSError:
+            changed.append(relative)
+    status = "matched" if expected == actual and not missing and not changed and not unsupported else "needs-review"
     report = {
         "project_id": int(project_id),
         "status": status,
         "matched": list(manifest.get("exported_ids") or []) if status == "matched" else [],
-        "changed": [],
-        "missing": list(manifest.get("omitted_ids") or []) if status != "matched" else [],
+        "changed": changed,
+        "missing": missing + (list(manifest.get("omitted_ids") or []) if status != "matched" else []),
         "added": [],
         "ambiguous": [],
-        "unsupported": [],
+        "unsupported": unsupported,
         "manifest_hash": manifest.get("approved_manifest_hash"),
         "source_handoff": str(manifest_path.name),
     }

@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import json
 import mimetypes
 import os
+import re
 import secrets
 import subprocess
 import tempfile
@@ -344,10 +345,11 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 project_id = int(query.get("project_id", ["0"])[0] or 0)
                 inventory = reconcile_inventory(cfg, project_id)
                 artifacts = inventory.get("artifacts", [])
+                public_artifacts = [{**{key: value for key, value in item.items() if key != "path"}, "display_name": Path(str(item.get("path") or "")).name} for item in artifacts]
                 self._json({
                     "ok": True,
                     "project_id": project_id,
-                    "artifacts": artifacts,
+                    "artifacts": public_artifacts,
                     "total_bytes": sum(int(item.get("size") or 0) for item in artifacts),
                     "protected_bytes": sum(int(item.get("size") or 0) for item in artifacts if item.get("pinned") or item.get("type") in {"source_media", "approval_snapshot", "formal_output", "manifest"}),
                     "pinned_count": sum(1 for item in artifacts if item.get("pinned")),
@@ -606,14 +608,16 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json(reconcile_inventory(cfg, project_id))
             elif path == "/api/project/storage/plan":
                 project_id = int(data.get("project_id", 0))
-                self._json({"ok": True, "plan": build_cleanup_plan(cfg, project_id, data.get("policy") if isinstance(data.get("policy"), dict) else None)})
+                active_ids = {str(job.get("job_id")) for job in project_jobs(project_id, render_manager, db) if job.get("status") in {"queued", "running", "cancelling"} and job.get("job_id")}
+                self._json({"ok": True, "plan": build_cleanup_plan(cfg, project_id, data.get("policy") if isinstance(data.get("policy"), dict) else None, active_job_ids=active_ids)})
             elif path == "/api/project/storage/cleanup":
                 project_id = int(data.get("project_id", 0))
                 plan_id = Path(str(data.get("plan_id") or "")).name
                 plan_path = project_dir(cfg, project_id) / "storage" / f"{plan_id}.json"
                 if not plan_id or plan_path.parent.resolve() not in plan_path.resolve().parents or not plan_path.is_file():
                     raise RetentionError("invalid_cleanup_plan", "找不到指定 cleanup plan", action="重新建立 dry-run plan")
-                self._json(execute_cleanup_plan(cfg, json.loads(plan_path.read_text(encoding="utf-8"))))
+                active_ids = {str(job.get("job_id")) for job in project_jobs(project_id, render_manager, db) if job.get("status") in {"queued", "running", "cancelling"} and job.get("job_id")}
+                self._json(execute_cleanup_plan(cfg, json.loads(plan_path.read_text(encoding="utf-8")), active_job_ids=active_ids))
             elif path == "/api/project/storage/pin":
                 project_id = int(data.get("project_id", 0))
                 self._json({"ok": True, "artifact": set_artifact_pinned(cfg, project_id, str(data.get("artifact_id") or ""), bool(data.get("pinned")))})
@@ -989,7 +993,7 @@ def _inject_csrf_fields(html: str) -> str:
     if not FORM_CSRF_TOKEN:
         return html
     hidden = f'<input type="hidden" name="csrf_token" value="{h(FORM_CSRF_TOKEN)}">'
-    return html.replace("<form ", f"<form {hidden}")
+    return re.sub(r"(<form\b[^>]*>)", rf"\1{hidden}", html)
 
 
 def _nav() -> str:

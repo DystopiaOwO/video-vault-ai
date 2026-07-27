@@ -22,8 +22,6 @@ class WebSecurityError(ValueError):
 
 def validate_local_bind_host(host: str) -> str:
     value = str(host or "").strip()
-    if value.lower() == "localhost":
-        return value
     try:
         addresses = {ipaddress.ip_address(info[4][0]) for info in socket.getaddrinfo(value, None, type=socket.SOCK_STREAM)}
     except OSError as exc:
