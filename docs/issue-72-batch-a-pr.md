@@ -51,13 +51,21 @@ Commit `bfb9276`：
 
 ## CI
 
-最新 PR CI Run：`30266783392`，全部成功：
+最新 PR CI Run：`30278232260`，全部成功：
 
 - Windows authoritative / Python 3.11：success
 - Ubuntu portability / Python 3.13：success
 - Media Smoke / Ubuntu：success
 - Frontend：success
 - Select PR test layers：success
+
+## Frontend CI follow-up
+
+- 原始失敗：CI Run `30271751749` 的 `pr52-gate1-final.test.tsx` 在共享 mutation busy 測試中，依序於 Clip Summary、後續本機重跑於 Audio 出現儲存按鈕仍 disabled；失敗集中在工作區初次 props 同步 effect 與快速輸入的競態。
+- 修正 commit：`98ae673`。
+- 修正範圍：Clip Summary、Audio、Color、Storyboard 在初次 mount 跳過不必要的 server state sync；後續同專案更新仍照 dirty state 與 project identity 同步，避免快速輸入被覆蓋。
+- 回歸測試：`pr52-gate1-final.test.tsx` 連續 5 次通過；完整 Frontend `30 files / 223 tests passed`；production build passed。
+- 修正後 CI Run `30278232260`：Frontend、Windows authoritative、Ubuntu portability、Media Smoke、Select PR test layers 全部 success。
 
 ## Known Limitations
 
