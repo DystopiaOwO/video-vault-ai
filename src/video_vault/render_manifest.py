@@ -25,6 +25,7 @@ from .color_consistency import effective_color_settings, has_color_state, load_p
 from .project import project_dir, project_segments
 from .render_profiles import get_render_profile
 from .render_settings import load_render_settings
+from .visual_timeline import build_visual_timeline, validate_visual_timeline
 
 
 ALLOWED_AUDIO_ROLES = {"keep_original", "lower_original", "mute", "keep", "lower", "bgm_only"}
@@ -109,6 +110,8 @@ def build_render_manifest(
         "profile": profile,
         "settings": settings,
         "storyboard_render_state": storyboard_render_state(storyboard_state, raw_segments),
+        "visual_timeline": plan.get("visual_timeline") or build_visual_timeline(plan.get("groups") or []),
+        "visual_items": plan.get("visual_items") or (plan.get("visual_timeline") or {}).get("items", []),
         "segments": segments,
         "bgm": bgm,
         "expected_duration_seconds": round(sum(float(item["timeline_duration_seconds"]) for item in segments), 6),
@@ -242,6 +245,8 @@ def validate_render_manifest(manifest: dict[str, Any], check_files: bool = False
                 number = _number(color.get(field), f"color {field}", errors)
                 if number is not None and not lower <= number <= upper:
                     errors.append(f"color {field} must be between {lower} and {upper}")
+    visual_validation = validate_visual_timeline(manifest.get("visual_timeline"))
+    errors.extend(f"visual timeline: {item}" for item in visual_validation["errors"])
     return {"valid": not errors, "errors": errors, "warnings": warnings}
 
 

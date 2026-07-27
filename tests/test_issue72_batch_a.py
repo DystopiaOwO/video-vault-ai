@@ -13,6 +13,8 @@ from video_vault.perception_runs import (
 )
 from video_vault.project import create_project
 from video_vault.project_media import ensure_project_media_ownership, rollback_project_media_ownership
+from video_vault.duration_budget import apply_duration_budget
+from video_vault.visual_timeline import build_visual_timeline, validate_visual_timeline
 
 
 def _fixture(tmp_path: Path):
@@ -75,3 +77,32 @@ def test_perception_results_are_recorded_in_run_scope_before_finalize(tmp_path):
     assert dict(project_videos(db, project_id)[0])["source_fingerprint_json"] != "{}"
     assert finalize_perception_run(db, run["run_uuid"])["status"] == "succeeded"
     assert video_id > 0
+
+
+def test_duration_budget_keeps_group_coverage_and_is_deterministic():
+    def groups():
+        return [
+            {"label": "早上", "order": 1, "segments": [
+                {"segment_id": "a", "clip_id": "clip_001", "start_seconds": 0, "end_seconds": 8, "score": 0.8},
+            ]},
+            {"label": "下午", "order": 2, "segments": [
+                {"segment_id": "b", "clip_id": "clip_002", "start_seconds": 0, "end_seconds": 8, "score": 0.7},
+            ]},
+        ]
+
+    first = groups()
+    second = groups()
+    result_a = apply_duration_budget(first, 10)
+    result_b = apply_duration_budget(second, 10)
+    assert result_a == result_b
+    assert {segment["segment_id"] for group in first for segment in group["segments"] if segment["include"]} == {"a", "b"}
+    assert all(group["covered"] for group in result_a["groups"])
+    assert result_a["estimated_seconds"] == 16
+
+
+def test_visual_timeline_is_versioned_and_manifest_ready():
+    timeline = build_visual_timeline([
+        {"label": "南港車站", "segments": [{"include": True, "estimated_output_seconds": 4}]},
+    ])
+    assert timeline["items"][0]["type"] == "chapter_card"
+    assert validate_visual_timeline(timeline)["valid"] is True

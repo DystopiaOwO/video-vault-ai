@@ -14,6 +14,8 @@ from .bgm import recommend_bgm_for_groups
 from .database import connect, create_project_row, frames, init_db, project, project_bgm_tracks, project_videos, projects, segments, set_project_status, set_project_videos
 from .story_context import story_context
 from .project_lifecycle import check_base_revision, current_revision, project_commit
+from .duration_budget import apply_duration_budget
+from .visual_timeline import build_visual_timeline
 
 
 def create_project(db: Path, name: str, video_ids: list[int], kind: str = "auto", category: str = "unknown", content_type: str = "diary_montage", platform: str = "YouTube", target_duration_seconds: float = 0) -> int:
@@ -205,6 +207,9 @@ def _build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
                     "tags": [tag for tag in (seg.get("tags") or "").split(",") if tag],
                     "score": seg["score"],
                     "story_context": context,
+                    "speed": 1.0,
+                    "estimated_output_seconds": round(max(0.1, float(seg["end_seconds"] or 0) - float(seg["start_seconds"] or 0)), 3),
+                    "include": bool(seg.get("include", True)),
                 }
             )
     ordered = sorted(groups.values(), key=lambda g: (int(g.get("order", 999)), _time_rank(g["time_of_day"]), g["activity"], g["label"]))
@@ -212,6 +217,17 @@ def _build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
         group["clips"] = _dedupe(group["clips"])
         group["story_context"] = _dedupe_story_context(group["story_context"])
         group["segments"].sort(key=lambda s: (s["clip_id"], float(s["start_seconds"] or 0)) if itinerary or project_info_is_travel(row) else (-float(s["score"] or 0), s["clip_id"], float(s["start_seconds"] or 0)))
+    from .storyboard import load_storyboard
+
+    project_info = dict(row)
+    storyboard = load_storyboard(cfg, project_id) or {}
+    storyboard_segments = storyboard.get("segments") if isinstance(storyboard, dict) else {}
+    duration_budget = apply_duration_budget(
+        ordered,
+        float(project_info.get("target_duration_seconds") or 0),
+        locked_segments=storyboard_segments if isinstance(storyboard_segments, dict) else {},
+    )
+    visual_timeline = build_visual_timeline(ordered)
     story_context_usage = _dedupe_story_context(
         [
             context
@@ -220,7 +236,6 @@ def _build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
             if context.get("user_summary")
         ]
     )
-    project_info = dict(row)
     pipeline = pipeline_for_project(project_info)
     bgm_recommendations = recommend_bgm_for_groups(cfg, db, project_id, project_info, ordered)
     by_group = {item["group"]: item for item in bgm_recommendations}
@@ -246,6 +261,9 @@ def _build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
         "bgm": bgm,
         "bgm_recommendations": bgm_recommendations,
         "title_cards": _title_cards(project_info, ordered),
+        "duration_budget": duration_budget,
+        "visual_timeline": visual_timeline,
+        "visual_items": visual_timeline["items"],
         "revision_notes": revision_notes,
         "feedback_applied": [
             f"{item['clip_id']} 使用 user_summary 指引故事分組"
@@ -390,7 +408,7 @@ def project_segments(cfg: dict, project_id: int, plan: dict, *, apply_storyboard
                     "manual_order": len(rows) + 1,
                     "scene_role": _scene_role(seg),
                     "story_position": group.get("activity", ""),
-                    "include": True,
+                    "include": bool(seg.get("include", True)),
                     "audio_role": "lower_original",
                     "speed": 1.0,
                     "user_notes": "",
