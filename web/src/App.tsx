@@ -186,7 +186,13 @@ export function App() {
         ? await (detail.project_revision === undefined ? api.approve(requestedProjectId, submittedNotes) : api.approve(requestedProjectId, submittedNotes, detail.project_revision))
         : await (detail.project_revision === undefined ? api.reject(requestedProjectId, submittedNotes) : api.reject(requestedProjectId, submittedNotes, detail.project_revision));
       if (result.ok === false) {
-        if (isCurrentProjectOperation(operation)) setMessage(`${action === "approve" ? "核准" : "退回"}失敗：操作未成功`);
+        if (isCurrentProjectOperation(operation)) {
+          const error = result.error || "操作未成功";
+          const guidance = action === "approve" && result.code === "storyboard_required"
+            ? "請先到「分鏡審核」執行「建立分鏡」，完成後再核准。"
+            : "";
+          setMessage(`${action === "approve" ? "核准" : "退回"}失敗：${error}${guidance && !error.includes(guidance) ? ` ${guidance}` : ""}`);
+        }
         return;
       }
       if (isCurrentProjectOperation(operation) && notesRef.current === submittedNotes) setNotes("");

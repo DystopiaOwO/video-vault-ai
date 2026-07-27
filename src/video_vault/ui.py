@@ -84,6 +84,33 @@ def _require_api_base_revision(data: dict) -> int:
     return revision
 
 
+def _approve_project_api(cfg: dict, db: Path, data: dict) -> dict:
+    """Apply the project approval API contract without swallowing conflicts.
+
+    Missing storyboard initialization is a user-actionable validation result,
+    while optimistic-lock conflicts must continue to propagate to ``do_POST``
+    so callers receive the established HTTP 409 response.
+    """
+    try:
+        set_review_status(
+            cfg,
+            db,
+            int(data.get("project_id", 0)),
+            "approved",
+            data.get("notes", ""),
+            base_revision=_base_revision(data),
+        )
+    except ValueError as exc:
+        if not str(exc).startswith("缺少 storyboard.json"):
+            raise
+        return {
+            "ok": False,
+            "code": "storyboard_required",
+            "error": "尚未建立 storyboard.json，請先到「分鏡審核」執行「建立分鏡」，完成後再核准。",
+        }
+    return {"ok": True}
+
+
 class _UploadPart:
     def __init__(self, filename: str, file, value: str = ""):
         self.filename = filename
@@ -706,8 +733,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif path == "/api/render-job/cancel":
                 self._json(render_api.cancel(str(data.get("job_id", ""))))
             elif path == "/api/project/approve":
-                set_review_status(cfg, db, int(data.get("project_id", 0)), "approved", data.get("notes", ""), base_revision=_base_revision(data))
-                self._json({"ok": True})
+                self._json(_approve_project_api(cfg, db, data))
             elif path == "/api/project/reject":
                 set_review_status(cfg, db, int(data.get("project_id", 0)), "rejected", data.get("notes", ""), base_revision=_base_revision(data))
                 self._json({"ok": True})

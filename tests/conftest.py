@@ -33,6 +33,7 @@ PR_CORE_TESTS = frozenset(
         "test_render_profiles.py",
         "test_segment_cache.py",
         "test_stable_identities.py",
+        "test_approval_api.py",
         "test_ui_static.py",
         "test_ui_upload_parser.py",
         "test_user_summary_clear_fallback.py",
