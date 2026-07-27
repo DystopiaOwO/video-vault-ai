@@ -64,3 +64,28 @@ Commit `bfb9276`：
 - Batch B 的正式 visual overlay composition、字型/資產 runtime rendering 與完整輸出階段不在本 PR。
 - BGM 專用授權證據編輯畫面仍可在後續 UI 工作補強；本批已提供 server-side upload 欄位、狀態顯示與 approval fail-closed contract。
 - 本 PR 沒有接外部素材、雲端 provider 或新的 perception/timeline/approval 平行系統。
+
+## Final adversarial review
+
+由一個唯讀 `gpt-5.6-luna` high-reasoning 子代理完成；子代理未修改檔案、未建立 commit/branch/PR，也未執行完整測試。審查範圍限定 PR #73 相對 `main` 的 diff 與直接呼叫鏈。
+
+### Confirmed findings and fixes
+
+- `38565e3`：正式 project perception 遇到同一 `video_id` 被多個專案共用時 fail closed，避免感知、命名與 migration 污染其他專案；migration 正式流程也固定只處理目標 project。
+- `38565e3`：perception rollback snapshot 補上 project rows，失敗/取消時還原 project status、revision 與 workflow state。
+- `38565e3`：metadata rollback snapshot 補上 storyboard、segment review、audio、color 等 user-authored state。
+- `38565e3`：project plan 重新建立時先合併目前人工 trim/speed/include/lock，再計算有效 duration budget。
+- `38565e3`：`license_status=invalid` 永久 fail closed，不受 acknowledgement 繞過；visual runtime assets 納入 approval asset fingerprint，缺失時拒絕核准。
+
+### False positive / out of scope
+
+- visual overlay 的正式合成、overlay duration 是否佔用 timeline 與 final parity 屬 Batch B；本 PR 只保留 versioned visual contract、manifest/hash/approval 與 runtime asset fail-closed，不宣稱已有正式 overlay render。
+- legacy 直接呼叫 `migrate_segment_state_for_video(video_id)` 仍保留相容行為；正式 project perception 已不走跨 project migration，並對 shared legacy ownership fail closed。
+
+### Final tests
+
+- Python full suite：`401 passed, 2 skipped`；skip 為 Windows 不執行 POSIX process-group semantics。
+- Frontend：`30 files / 223 tests passed`；production build passed。
+- FFmpeg E2E：`12 passed`。
+- Encoding check、`py -3.10 -m compileall -q src` 與 `git diff --check origin/main...HEAD` passed。
+- 未重跑 Windows 真實專案 smoke；本輪未修改 FFmpeg runtime 或 Windows path 行為，CI Windows authoritative job 仍負責平台驗證。
