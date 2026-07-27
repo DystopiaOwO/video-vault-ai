@@ -79,6 +79,12 @@ def build_approval_snapshot(
         if str(track.get("license_status") or "unverified") != "verified"
         or str(track.get("attribution_status") or "unknown") == "unknown"
     ]
+    invalid_license = [
+        track for track in unresolved_license
+        if str(track.get("license_status") or "unverified") == "invalid"
+    ]
+    if invalid_license:
+        raise ApprovalSnapshotError("存在無效 BGM 授權；請移除該曲目或補上有效授權證據後再核准")
     acknowledgement = (manifest.get("settings") or {}).get("license_acknowledgement") or {}
     if not isinstance(acknowledgement, Mapping):
         acknowledgement = {}
@@ -215,6 +221,20 @@ def _manifest_assets(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
         if key not in seen:
             seen.add(key)
             assets.append(asset_fingerprint(source, kind="bgm", asset_id=str(track.get("track_id") or Path(source).name), metadata={key: track.get(key) for key in ("license_name", "license_url", "license_source_url", "source_url", "attribution_text", "attribution_status", "license_status", "verification_source", "verification_provenance")}))
+    for item in manifest.get("visual_items") or []:
+        if not isinstance(item, Mapping):
+            continue
+        for asset in item.get("runtime_assets") or []:
+            if isinstance(asset, Mapping):
+                source = str(asset.get("path") or asset.get("source_path") or "").strip()
+            else:
+                source = str(asset or "").strip()
+            if not source:
+                raise ApprovalSnapshotError(f"visual item {item.get('stable_id', '')} 缺少 runtime asset path")
+            key = ("visual", str(Path(source).expanduser().resolve()))
+            if key not in seen:
+                seen.add(key)
+                assets.append(asset_fingerprint(source, kind="visual", asset_id=str(item.get("stable_id") or Path(source).name)))
     return assets
 
 

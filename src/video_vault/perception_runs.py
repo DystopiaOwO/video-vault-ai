@@ -335,6 +335,7 @@ def capture_live_results(db: Path, video_id: int) -> dict:
             "frames": [dict(row) for row in con.execute("select * from frames where video_id=? order by id", (int(video_id),)).fetchall()],
             "segments": [dict(row) for row in con.execute("select * from segments where video_id=? order by id", (int(video_id),)).fetchall()],
             "project_videos": [dict(row) for row in con.execute("select * from project_videos where video_id=? order by project_id", (int(video_id),)).fetchall()],
+            "projects": [dict(row) for row in con.execute("select p.* from projects p join project_videos pv on pv.project_id=p.id where pv.video_id=? order by p.id", (int(video_id),)).fetchall()],
             "migration_ids": migration_ids,
         }
 
@@ -460,6 +461,7 @@ def restore_live_results(
         )
         con.execute("delete from project_videos where video_id=?", (video_id,))
         _restore_rows(con, "project_videos", snapshot.get("project_videos", []))
+        _restore_project_rows(con, snapshot.get("projects", []))
         con.execute(
             """update project_videos
             set current_analysis_run_uuid=?, analysis_generation=?, analysis_status=?
@@ -479,6 +481,19 @@ def _restore_rows(con, table: str, rows: list[dict]) -> None:
         con.execute(
             f"insert into {table}({', '.join(columns)}) values({', '.join('?' for _ in columns)})",
             tuple(row[column] for column in columns),
+        )
+
+
+def _restore_project_rows(con, rows: list[dict]) -> None:
+    for row in rows:
+        project_id = row.get("id")
+        values = {key: value for key, value in row.items() if key != "id"}
+        if project_id is None or not values:
+            continue
+        assignments = ", ".join(f"{key}=?" for key in values)
+        con.execute(
+            f"update projects set {assignments} where id=?",
+            [*values.values(), int(project_id)],
         )
 
 

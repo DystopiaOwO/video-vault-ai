@@ -222,6 +222,27 @@ def _build_project_plan(cfg: dict, db: Path, project_id: int) -> dict:
     project_info = dict(row)
     storyboard = load_storyboard(cfg, project_id) or {}
     storyboard_segments = storyboard.get("segments") if isinstance(storyboard, dict) else {}
+    effective_segments = {
+        str(item.get("segment_id")): item
+        for item in project_segments(cfg, project_id, {"groups": ordered}, apply_storyboard=True, db=db)
+        if str(item.get("segment_id") or "")
+    }
+    for group in ordered:
+        for segment in group.get("segments", []) or []:
+            effective = effective_segments.get(str(segment.get("segment_id") or ""))
+            if not effective:
+                continue
+            for key in ("start_seconds", "end_seconds", "speed", "include", "locked"):
+                if key in effective:
+                    segment[key] = effective[key]
+            speed = max(0.25, float(segment.get("speed") or 1.0))
+            segment["estimated_output_seconds"] = round(
+                max(
+                    0.1,
+                    (float(segment.get("end_seconds") or 0) - float(segment.get("start_seconds") or 0)) / speed,
+                ),
+                3,
+            )
     duration_budget = apply_duration_budget(
         ordered,
         float(project_info.get("target_duration_seconds") or 0),

@@ -15,6 +15,7 @@ def migrate_segment_state_for_video(
     db: Path,
     video_id: int,
     identity_report: Mapping[str, Any] | None = None,
+    project_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """Migrate all projects that reference ``video_id`` and return project reports.
 
@@ -24,7 +25,7 @@ def migrate_segment_state_for_video(
     being silently discarded.
     """
     with connect(db) as con:
-        project_ids = [
+        project_ids = [int(project_id)] if project_id is not None else [
             int(row["project_id"])
             for row in con.execute(
                 "select project_id from project_videos where video_id=? order by project_id",

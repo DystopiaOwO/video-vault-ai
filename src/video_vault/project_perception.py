@@ -31,6 +31,10 @@ from .segment_state_migration import migrate_segment_state_for_video
 from .project_media import ensure_project_media_ownership
 
 
+class ProjectMediaOwnershipError(RuntimeError):
+    """Raised when legacy shared media cannot be safely perceived in one project."""
+
+
 def run_project_perception(
     cfg: dict,
     db: Path,
@@ -48,8 +52,12 @@ def run_project_perception(
     restored while the newest run remains persistently failed/cancelled.
     """
     _raise_if_cancelled(should_cancel)
-    ensure_project_media_ownership(cfg, db, project_id)
     linked_project_ids = project_ids_for_video(db, int(video["id"]))
+    if len(linked_project_ids) > 1:
+        raise ProjectMediaOwnershipError(
+            "此素材仍被多個專案共用；為避免感知結果污染其他專案，請先建立專案專屬素材後再感知"
+        )
+    ensure_project_media_ownership(cfg, db, project_id)
     if project_id not in linked_project_ids:
         linked_project_ids.append(project_id)
     captured_revisions = {int(item): current_revision(db, int(item)) for item in linked_project_ids}
@@ -110,6 +118,7 @@ def run_project_perception(
             db,
             int(video["id"]),
             migration,
+            project_id=project_id,
         )
         current_video = next(
             (
@@ -169,6 +178,11 @@ def _metadata_paths(cfg: dict, project_ids: list[int], video_id: int) -> list[Pa
                 project_root / "project_plan.json",
                 project_root / "project_script.md",
                 project_root / "review_status.json",
+                project_root / "feedback" / "segment_review.json",
+                project_root / "segment_review.json",
+                project_root / "storyboard.json",
+                project_root / "audio_settings.json",
+                project_root / "color_consistency.json",
                 project_root / "plans",
                 project_root / "clips",
                 project_root / "decisions",
