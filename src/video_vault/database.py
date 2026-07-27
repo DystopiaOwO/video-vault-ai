@@ -60,6 +60,23 @@ create table if not exists analysis_runs (
   status text,
   raw_output_path text
 );
+create table if not exists analysis_run_frames (
+  run_uuid text not null,
+  ordinal integer not null,
+  video_id integer not null,
+  timestamp_seconds real not null,
+  frame_path text not null,
+  payload_json text not null,
+  primary key(run_uuid, ordinal)
+);
+create table if not exists analysis_run_segments (
+  run_uuid text not null,
+  ordinal integer not null,
+  video_id integer not null,
+  segment_uuid text,
+  payload_json text not null,
+  primary key(run_uuid, ordinal)
+);
 create table if not exists segment_identity_migrations (
   id integer primary key,
   video_id integer not null,
@@ -106,6 +123,9 @@ create table if not exists project_videos (
   analysis_status text,
   perception_revision integer default 0,
   perceived_at text,
+  source_fingerprint_json text default '{}',
+  ownership_state text default 'project_owned',
+  migration_generation integer default 0,
   sort_order integer default 0,
   primary key(project_id, video_id)
 );
@@ -171,6 +191,19 @@ def init_db(db: Path) -> None:
                 "analysis_status": "text",
                 "perception_revision": "integer default 0",
                 "perceived_at": "text",
+                "source_fingerprint_json": "text default '{}'",
+                "ownership_state": "text default 'project_owned'",
+                "migration_generation": "integer default 0",
+            },
+        )
+        _ensure_columns(
+            con,
+            "analysis_runs",
+            {
+                "base_revision": "integer",
+                "provider_contract_json": "text default '{}'",
+                "interrupted_at": "text",
+                "published_revision": "integer",
             },
         )
         for row in con.execute(
@@ -217,6 +250,12 @@ def _backfill_project_media_snapshots(con: sqlite3.Connection) -> None:
             user_summary=coalesce(user_summary, ''),
             summary_migration_state=coalesce(nullif(summary_migration_state, ''), 'none'),
             perception_revision=coalesce(perception_revision, 0)"""
+    )
+    con.execute(
+        """update project_videos
+        set ownership_state=coalesce(nullif(ownership_state, ''), 'project_owned'),
+            source_fingerprint_json=coalesce(nullif(source_fingerprint_json, ''), '{}'),
+            migration_generation=coalesce(migration_generation, 0)"""
     )
 
 
@@ -899,6 +938,9 @@ def project_videos(db: Path, project_id: int) -> list[sqlite3.Row]:
               pv.summary_override as legacy_summary_override,
               pv.analysis_status as project_analysis_status,
               coalesce(pv.perception_revision, 0) as perception_revision,
+              coalesce(pv.source_fingerprint_json, '{}') as source_fingerprint_json,
+              coalesce(pv.ownership_state, 'project_owned') as ownership_state,
+              coalesce(pv.migration_generation, 0) as migration_generation,
               pv.perceived_at,
               pv.sort_order
             from project_videos pv

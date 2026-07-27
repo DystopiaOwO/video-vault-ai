@@ -167,7 +167,8 @@ def migrate_project_segment_state(
         or plan_changed
     )
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "migration_contract": "stable-segment-state-v2",
         "project_id": int(project_id),
         "video_id": int(video_id) if video_id is not None else None,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -179,6 +180,7 @@ def migrate_project_segment_state(
         "conflicts": conflicts,
         "upstream_identity_report": upstream,
         "requires_review": requires_review,
+        "rollback_supported": True,
     }
     if alias_map or upstream or migrated_files:
         validation = root / "validation"

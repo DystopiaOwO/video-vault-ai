@@ -24,6 +24,10 @@ RUN_COLUMNS = {
     "frame_manifest_json": "text",
     "staging_path": "text",
     "previous_success_run_uuid": "text",
+    "base_revision": "integer",
+    "provider_contract_json": "text default '{}'",
+    "interrupted_at": "text",
+    "published_revision": "integer",
 }
 
 PROJECT_MEDIA_RUN_COLUMNS = {
@@ -34,6 +38,7 @@ PROJECT_MEDIA_RUN_COLUMNS = {
 
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 ACTIVE_STATUSES = {"queued", "running", "publishing"}
+PERCEPTION_CONTRACT_VERSION = "perception-run-v2"
 
 
 class PerceptionCancelled(RuntimeError):
@@ -91,8 +96,8 @@ def recover_interrupted_perception_runs(db: Path) -> int:
         run_ids = [str(row["run_uuid"]) for row in rows]
         placeholders = ",".join("?" for _ in run_ids)
         con.execute(
-            f"update analysis_runs set status='failed', finished_at=?, error=coalesce(nullif(error,''), 'application restarted before completion') where run_uuid in ({placeholders})",
-            (_now(), *run_ids),
+            f"update analysis_runs set status='failed', finished_at=?, interrupted_at=?, error=coalesce(nullif(error,''), 'application restarted before completion') where run_uuid in ({placeholders})",
+            (_now(), _now(), *run_ids),
         )
         con.execute(
             f"update project_videos set analysis_status='failed' where current_analysis_run_uuid in ({placeholders})",
@@ -155,6 +160,13 @@ def create_perception_run(
     staging = run_staging_dir(cfg, run_uuid)
     video_id = int(video["id"])
     project_media_uuid = str(video.get("project_media_uuid") or "")
+    input_snapshot = build_input_snapshot(video, cfg)
+    provider_contract = {
+        "contract_version": PERCEPTION_CONTRACT_VERSION,
+        "provider": str(cfg.get("ai", {}).get("provider", "mock")),
+        "model": str(cfg.get("ai", {}).get("model", "")),
+        "extractor": input_snapshot.get("extractor", {}),
+    }
     with connect(db) as con:
         generation = int(
             con.execute(
@@ -172,8 +184,9 @@ def create_perception_run(
                 """insert into analysis_runs(
                     video_id, provider, model, status, raw_output_path, run_uuid, project_id,
                     project_media_uuid, generation, requested_at, started_at,
-                    input_snapshot_json, staging_path, previous_success_run_uuid
-                ) values(?, ?, ?, 'running', '', ?, ?, ?, ?, ?, ?, '{}', ?, ?)""",
+                    input_snapshot_json, staging_path, previous_success_run_uuid,
+                    provider_contract_json
+                ) values(?, ?, ?, 'running', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     video_id,
                     str(cfg.get("ai", {}).get("provider", "mock")),
@@ -184,8 +197,10 @@ def create_perception_run(
                     generation,
                     created,
                     created,
+                    json.dumps(input_snapshot, ensure_ascii=False, sort_keys=True),
                     str(staging),
                     previous_uuid,
+                    json.dumps(provider_contract, ensure_ascii=False, sort_keys=True),
                 ),
             )
         except sqlite3.IntegrityError as exc:
@@ -202,16 +217,6 @@ def create_perception_run(
             set status='needs_review', updated_at=current_timestamp
             where id in (select project_id from project_videos where video_id=?)""",
             (video_id,),
-        )
-    try:
-        input_snapshot = build_input_snapshot(video, cfg)
-    except Exception as exc:
-        mark_perception_run_terminal(db, run_uuid, "failed", str(exc))
-        raise
-    with connect(db) as con:
-        con.execute(
-            "update analysis_runs set input_snapshot_json=? where run_uuid=?",
-            (json.dumps(input_snapshot, ensure_ascii=False, sort_keys=True), run_uuid),
         )
     return analysis_run(db, run_uuid)
 
@@ -329,6 +334,7 @@ def publish_staged_results(
         raise RuntimeError(f"run is not publishable: {run.get('status')}")
     video_id = int(run["video_id"])
     with connect(db) as con:
+        _stage_run_results_in_connection(con, run_uuid, video_id, frame_results, segment_results)
         con.execute(
             "update analysis_runs set status='publishing' where run_uuid=?",
             (str(run_uuid),),
@@ -357,6 +363,12 @@ def publish_staged_results(
                 ),
             )
         migration = _replace_segments_in_connection(con, video_id, segment_results)
+        source_snapshot = run.get("input_snapshot", {}).get("source") if isinstance(run.get("input_snapshot"), dict) else None
+        if source_snapshot:
+            con.execute(
+                "update project_videos set source_fingerprint_json=?, ownership_state='project_owned', migration_generation=coalesce(migration_generation, 0)+1 where video_id=? and current_analysis_run_uuid=?",
+                (json.dumps(source_snapshot, ensure_ascii=False, sort_keys=True), video_id, str(run_uuid)),
+            )
         con.execute("update videos set status='analyzed' where id=?", (video_id,))
     return migration
 
@@ -369,7 +381,7 @@ def finalize_perception_run(db: Path, run_uuid: str) -> dict:
     now = _now()
     with connect(db) as con:
         con.execute(
-            "update analysis_runs set status='succeeded', finished_at=?, published_at=?, error='' where run_uuid=?",
+            "update analysis_runs set status='succeeded', finished_at=?, published_at=?, published_revision=(select project_revision from projects where id=analysis_runs.project_id), error='' where run_uuid=?",
             (now, now, str(run_uuid)),
         )
         con.execute(
@@ -382,14 +394,14 @@ def finalize_perception_run(db: Path, run_uuid: str) -> dict:
 
 
 def mark_perception_run_terminal(db: Path, run_uuid: str, status: str, error: str = "") -> dict:
-    if status not in {"failed", "cancelled"}:
+    if status not in {"failed", "cancelled", "interrupted"}:
         raise ValueError(status)
     ensure_perception_schema(db)
     run = analysis_run(db, run_uuid)
     with connect(db) as con:
         con.execute(
-            "update analysis_runs set status=?, finished_at=?, error=? where run_uuid=?",
-            (status, _now(), str(error), str(run_uuid)),
+            "update analysis_runs set status=?, finished_at=?, interrupted_at=case when ?='interrupted' then ? else interrupted_at end, error=? where run_uuid=?",
+            (status, _now(), status, _now() if status == "interrupted" else None, str(error), str(run_uuid)),
         )
         con.execute(
             "update project_videos set analysis_status=? where video_id=? and current_analysis_run_uuid=?",
@@ -450,6 +462,34 @@ def _restore_rows(con, table: str, rows: list[dict]) -> None:
         con.execute(
             f"insert into {table}({', '.join(columns)}) values({', '.join('?' for _ in columns)})",
             tuple(row[column] for column in columns),
+        )
+
+
+def _stage_run_results_in_connection(
+    con,
+    run_uuid: str,
+    video_id: int,
+    frame_results: list[dict],
+    segment_results: list[dict],
+) -> None:
+    """Keep a durable run-scoped copy before publishing live rows."""
+    con.execute("delete from analysis_run_frames where run_uuid=?", (str(run_uuid),))
+    con.execute("delete from analysis_run_segments where run_uuid=?", (str(run_uuid),))
+    for ordinal, row in enumerate(frame_results):
+        con.execute(
+            "insert into analysis_run_frames(run_uuid, ordinal, video_id, timestamp_seconds, frame_path, payload_json) values(?,?,?,?,?,?)",
+            (
+                str(run_uuid), ordinal, int(video_id), float(row.get("timestamp_seconds") or 0),
+                str(row.get("frame_path") or ""), json.dumps(row, ensure_ascii=False, sort_keys=True),
+            ),
+        )
+    for ordinal, row in enumerate(segment_results):
+        con.execute(
+            "insert into analysis_run_segments(run_uuid, ordinal, video_id, segment_uuid, payload_json) values(?,?,?,?,?)",
+            (
+                str(run_uuid), ordinal, int(video_id), str(row.get("segment_uuid") or ""),
+                json.dumps(row, ensure_ascii=False, sort_keys=True),
+            ),
         )
 
 

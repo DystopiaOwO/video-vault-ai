@@ -28,6 +28,7 @@ from .planner import draft_plan, perceive_output, video_dir, write_plan_files
 from .project import build_project_plan, project_dir
 from .project_lifecycle import ProjectRevisionConflict, current_revision
 from .segment_state_migration import migrate_segment_state_for_video
+from .project_media import ensure_project_media_ownership
 
 
 def run_project_perception(
@@ -47,6 +48,7 @@ def run_project_perception(
     restored while the newest run remains persistently failed/cancelled.
     """
     _raise_if_cancelled(should_cancel)
+    ensure_project_media_ownership(cfg, db, project_id)
     linked_project_ids = project_ids_for_video(db, int(video["id"]))
     if project_id not in linked_project_ids:
         linked_project_ids.append(project_id)
