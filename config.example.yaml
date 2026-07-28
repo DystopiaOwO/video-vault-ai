@@ -7,6 +7,21 @@ default_ingest_mode: "copy"
 ffmpeg_path: "ffmpeg"
 ffprobe_path: "ffprobe"
 
+sampling:
+  policy_name: "adaptive-balanced"
+  policy_version: 1
+  mode: "adaptive"
+  preset: "balanced"
+  baseline_interval_seconds: 5
+  prescan_interval_seconds: 0.5
+  dense_interval_seconds: 1
+  scene_threshold: 0.32
+  motion_threshold: 0.06
+  min_interval_seconds: 0.25
+  max_frames_per_clip: 180
+  max_frames_per_minute: 30
+  visual_dedupe_threshold: 0.985
+
 render:
   max_concurrent_jobs: 1
   minimum_free_disk_bytes: 0
@@ -17,7 +32,8 @@ render:
 ai:
   provider: "mock"
   local:
-    ollama_url: "http://localhost:11434"
+    # Canonical OpenAI-compatible endpoint. Legacy lmstudio_url remains accepted.
+    base_url: "http://127.0.0.1:1234/v1"
     model: "gemma4:12b"
   cloud:
     provider: "openai"

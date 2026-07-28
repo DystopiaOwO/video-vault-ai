@@ -35,6 +35,26 @@
   border-top: 1px solid color-mix(in srgb, var(--border, #2d3548) 82%, transparent);
 }
 
+#root .perception-sampling {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--border, #d8dee6);
+  border-radius: 8px;
+  background: var(--surface-subtle, #f8fafc);
+}
+
+#root .perception-sampling label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+}
+
+#root .perception-sampling input {
+  width: 92px;
+}
+
 #root .clip-summary-heading,
 #root .clip-summary-actions {
   display: flex;

@@ -79,6 +79,36 @@ def _base_revision(data: dict) -> int | None:
         raise ValueError("base_revision 必須是整數") from exc
 
 
+def _sampling_override(data: dict) -> dict | None:
+    raw = data.get("sampling")
+    if raw in (None, ""):
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("sampling 必須是物件")
+    result: dict[str, object] = {}
+    if "mode" in raw:
+        mode = str(raw["mode"]).lower()
+        if mode not in {"fixed", "adaptive"}:
+            raise ValueError("sampling.mode 必須是 fixed 或 adaptive")
+        result["mode"] = mode
+    if "preset" in raw:
+        preset = str(raw["preset"]).lower()
+        if preset not in {"balanced", "dense"}:
+            raise ValueError("sampling.preset 必須是 balanced 或 dense")
+        result["preset"] = preset
+    if "baseline_interval_seconds" in raw:
+        interval = float(raw["baseline_interval_seconds"])
+        if not 0.5 <= interval <= 60:
+            raise ValueError("baseline_interval_seconds 必須介於 0.5 和 60")
+        result["baseline_interval_seconds"] = interval
+    if "max_frames_per_clip" in raw:
+        maximum = int(raw["max_frames_per_clip"])
+        if not 1 <= maximum <= 2000:
+            raise ValueError("max_frames_per_clip 必須介於 1 和 2000")
+        result["max_frames_per_clip"] = maximum
+    return result or None
+
+
 class ProjectRevisionRequired(ValueError):
     """A modern API writer was called without its optimistic-lock token."""
 
@@ -595,7 +625,26 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json({"ok": started, "message": "內容感知已開始" if started else "內容感知已在執行中"})
             elif path == "/api/project/analyze-video":
                 project_id = int(data.get("project_id", 0))
-                started = start_analyze_video_job(cfg, db, project_id, int(data.get("video_id", 0)), base_revision=_base_revision(data))
+                try:
+                    sampling_override = _sampling_override(data)
+                except (TypeError, ValueError) as exc:
+                    self._json(
+                        {
+                            "ok": False,
+                            "code": "invalid_sampling",
+                            "error": str(exc),
+                        },
+                        status=400,
+                    )
+                    return
+                started = start_analyze_video_job(
+                    cfg,
+                    db,
+                    project_id,
+                    int(data.get("video_id", 0)),
+                    base_revision=_base_revision(data),
+                    sampling_override=sampling_override,
+                )
                 self._json({"ok": started, "message": "單支素材感知已開始" if started else "內容感知已在執行中"})
             elif path == "/api/project/clip-summary":
                 project_id = int(data.get("project_id", 0))
@@ -1226,7 +1275,15 @@ def start_analyze_job(cfg: dict, db: Path, project_id: int, force: bool, *, base
     return True
 
 
-def start_analyze_video_job(cfg: dict, db: Path, project_id: int, video_id: int, *, base_revision: int | None = None) -> bool:
+def start_analyze_video_job(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    video_id: int,
+    *,
+    base_revision: int | None = None,
+    sampling_override: dict | None = None,
+) -> bool:
     key = (project_id, "analyze")
     with JOBS_LOCK:
         current = JOBS.get(key)
@@ -1234,7 +1291,11 @@ def start_analyze_video_job(cfg: dict, db: Path, project_id: int, video_id: int,
             return False
         coordinated = _enqueue_legacy_job(db, project_id, "analyze", "內容感知", {"source_analysis_writer"}, {"ai_provider"}, base_revision)
         JOBS[key] = {"kind": "內容感知", "status": "queued", "state": coordinated.state.value, "queue_reason": coordinated.queue_reason, "coordinator_job_id": coordinated.job_id, "base_revision": coordinated.base_revision, "message": coordinated.queue_reason or "等待開始", "done": 0, "total": 1, "percent": 0, "updated_at": time.time()}
-    thread = threading.Thread(target=_analyze_video_job, args=(cfg, db, project_id, video_id), daemon=True)
+    thread = threading.Thread(
+        target=_analyze_video_job,
+        args=(cfg, db, project_id, video_id, sampling_override),
+        daemon=True,
+    )
     thread.start()
     return True
 
@@ -1428,7 +1489,13 @@ def _analyze_job(cfg: dict, db: Path, project_id: int, force: bool) -> None:
         _set_job(project_id, "analyze", status="failed", message=f"內容感知失敗：{exc}")
 
 
-def _analyze_video_job(cfg: dict, db: Path, project_id: int, video_id: int) -> None:
+def _analyze_video_job(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    video_id: int,
+    sampling_override: dict | None = None,
+) -> None:
     try:
         if not _wait_for_coordinated_job(project_id, "analyze"):
             _set_job(project_id, "analyze", status="stopped", message="單支素材感知已由使用者停止")
@@ -1448,6 +1515,7 @@ def _analyze_video_job(cfg: dict, db: Path, project_id: int, video_id: int) -> N
             _analyze_progress(project_id, video.get("filename", ""), 0, 1),
             should_cancel=lambda: _job_stopped(project_id, "analyze"),
             base_revision=base_revision,
+            sampling_override=sampling_override,
         )
         _set_job(project_id, "analyze", status="done", message=f"單支素材感知完成：{video.get('filename', '')}", done=1, total=1, percent=100)
     except PerceptionCancelled:
@@ -2169,11 +2237,30 @@ def analyze_project(cfg: dict, db: Path, project_id: int, force: bool = False, *
     return {"ok": True, "processed": processed}
 
 
-def analyze_project_video(cfg: dict, db: Path, project_id: int, video_id: int, progress=None, should_cancel=None, *, base_revision: int | None = None) -> dict:
+def analyze_project_video(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    video_id: int,
+    progress=None,
+    should_cancel=None,
+    *,
+    base_revision: int | None = None,
+    sampling_override: dict | None = None,
+) -> dict:
     video = next((dict(v) for v in project_videos(db, project_id) if int(v["id"]) == video_id), None)
     if not video:
         return {"ok": False, "error": "video not found in project"}
-    result = run_project_perception(cfg, db, project_id, video, progress, should_cancel, base_revision=base_revision)
+    result = run_project_perception(
+        cfg,
+        db,
+        project_id,
+        video,
+        progress,
+        should_cancel,
+        base_revision=base_revision,
+        sampling_override=sampling_override,
+    )
     return {"ok": True, **result}
 
 

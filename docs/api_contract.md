@@ -13,7 +13,7 @@
 - `POST /api/project/revise`：儲存備註並重建故事整理，`{"project_id": 1, "notes": "..."}`
 - `POST /api/project/analyze`：`{"project_id": 1, "force": false}`
 - `POST /api/project/analyze-job`：背景內容感知，`{"project_id": 1, "force": false}`
-- `POST /api/project/analyze-video`：單支素材感知，`{"project_id": 1, "video_id": 2}`
+- `POST /api/project/analyze-video`：單支素材感知，可覆寫本次 sampling，`{"project_id": 1, "video_id": 2, "sampling": {"mode": "adaptive", "preset": "dense", "baseline_interval_seconds": 3, "max_frames_per_clip": 240}}`
 - `POST /api/project/build-plan`：`{"project_id": 1}`
 - `POST /api/project/segments`：儲存片段審核、順序與時間微調，`{"project_id": 1, "segments": [...]}`
 - `POST /api/project/bgm`：把 BGM 加到專案，`{"project_id": 1, "bgm_id": 1}`

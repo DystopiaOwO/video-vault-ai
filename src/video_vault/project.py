@@ -16,6 +16,7 @@ from .story_context import story_context
 from .project_lifecycle import check_base_revision, current_revision, project_commit
 from .duration_budget import apply_duration_budget
 from .visual_timeline import build_visual_timeline
+from .sampling import estimate_sampling_count, resolved_sampling_policy
 
 
 def create_project(db: Path, name: str, video_ids: list[int], kind: str = "auto", category: str = "unknown", content_type: str = "diary_montage", platform: str = "YouTube", target_duration_seconds: float = 0) -> int:
@@ -53,6 +54,8 @@ def sync_project_files(cfg: dict, db: Path, project_id: int) -> list[dict]:
         display_clip_dir.mkdir(parents=True, exist_ok=True)
         display_name = str(video.get("filename") or src.name)
         perception_state = perception_states.get(int(video["id"]), {})
+        default_sampling_policy = resolved_sampling_policy(cfg)
+        current_sampling = perception_state.get("current_sampling_manifest") or {}
         ai_visual_summary = _visual_summary(db, int(video["id"]))
         user_summary = str(video.get("user_summary") or "").strip()
         effective_summary = user_summary or ai_visual_summary
@@ -83,6 +86,14 @@ def sync_project_files(cfg: dict, db: Path, project_id: int) -> list[dict]:
             "effective_summary_source": effective_summary_source,
             "analysis_current": bool(perception_state.get("analysis_current")),
             "perception_run": perception_state,
+            "sampling": {
+                "default_policy": default_sampling_policy,
+                "estimated_frame_count": estimate_sampling_count(
+                    float(video.get("duration_seconds") or 0),
+                    default_sampling_policy,
+                ),
+                "current": current_sampling,
+            },
         }
         payload = json.dumps(data, ensure_ascii=False, indent=2)
         _atomic_write_text(stable_clip_dir / "clip.json", payload)

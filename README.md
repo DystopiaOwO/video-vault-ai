@@ -43,6 +43,11 @@ frame_interval_seconds: 5
 default_ingest_mode: "copy"
 ffmpeg_path: "ffmpeg"
 ffprobe_path: "ffprobe"
+sampling:
+  mode: "adaptive"
+  preset: "balanced"
+  baseline_interval_seconds: 5
+  max_frames_per_clip: 180
 ai:
   provider: "mock"
 ```
@@ -59,6 +64,9 @@ ai:
 ```
 
 每次只上傳抽出的 frame，不上傳整支影片；raw response 快取在 `05_index/raw_ai_outputs`。
+`adaptive` 會先用本機 FFmpeg 找 scene／motion 候選，再產生可稽核的 sampling manifest；
+舊設定檔若只有 `frame_interval_seconds`，會維持 fixed 模式，不會無聲改變既有取樣結果。
+WebUI 可針對單支素材切換 fixed／adaptive 或較密集取樣，每次重跑都建立新的 perception generation。
 
 ## Human-in-the-loop Project Flow
 

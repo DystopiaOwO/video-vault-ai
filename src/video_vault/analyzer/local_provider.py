@@ -18,7 +18,15 @@ class LocalProvider:
 
     def __init__(self, cfg: dict | None = None):
         local = (cfg or {}).get("ai", {}).get("local", {})
-        self.base_url = str(local.get("base_url") or local.get("lmstudio_url") or "http://127.0.0.1:1234/v1").rstrip("/")
+        legacy_ollama = str(local.get("ollama_url") or "").rstrip("/")
+        if legacy_ollama and not legacy_ollama.endswith("/v1"):
+            legacy_ollama += "/v1"
+        self.base_url = str(
+            local.get("base_url")
+            or local.get("lmstudio_url")
+            or legacy_ollama
+            or "http://127.0.0.1:1234/v1"
+        ).rstrip("/")
         self.model = str(local.get("model") or "local-vision")
         ensure_local_model_server(cfg or {}, self.base_url, self.model)
 

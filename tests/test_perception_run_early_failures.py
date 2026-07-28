@@ -18,6 +18,7 @@ from video_vault.database import (
 from video_vault.perception_runs import analysis_run, create_perception_run, perception_states_for_project
 from video_vault.project import create_project
 from video_vault.project_perception import run_project_perception
+from video_vault.sampling import SamplingError
 import video_vault.project_perception as project_perception
 
 
@@ -130,3 +131,27 @@ def test_partial_extraction_failure_keeps_old_published_results(tmp_path, monkey
     assert segments(db, video_id)[0]["title"] == "old segment"
     assert state["current_status"] == "failed"
     assert state["analysis_current"] is False
+
+
+def test_adaptive_prescan_failure_keeps_old_published_results(tmp_path, monkeypatch):
+    db, project_id, video_id, video, cfg, _source = _setup(
+        tmp_path, with_old_results=True
+    )
+    cfg["sampling"] = {"mode": "adaptive", "baseline_interval_seconds": 5}
+    monkeypatch.setattr(
+        project_perception,
+        "build_sampling_plan",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            SamplingError("adaptive sampling prescan failed")
+        ),
+    )
+
+    with pytest.raises(SamplingError, match="prescan failed"):
+        run_project_perception(cfg, db, project_id, video)
+
+    run_uuid = _latest_run_uuid(db, video_id)
+    state = perception_states_for_project(db, project_id)[video_id]
+    assert analysis_run(db, run_uuid)["status"] == "failed"
+    assert frames(db, video_id)[0]["vision_summary"] == "old summary"
+    assert segments(db, video_id)[0]["title"] == "old segment"
+    assert state["current_status"] == "failed"

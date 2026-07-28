@@ -36,6 +36,8 @@ def analyze_frame_manifest(
     raw_dir = Path(cfg["library_root"]) / "05_index" / "raw_ai_outputs"
     analyzed = []
     total = len(frame_manifest)
+    cache_hits = 0
+    vision_calls = 0
     for index, frame in enumerate(frame_manifest, 1):
         if should_cancel and should_cancel():
             raise AnalysisCancelled("perception cancelled by user")
@@ -50,8 +52,10 @@ def analyze_frame_manifest(
         raw_path = raw_dir / f"{key}.json"
         if raw_path.exists():
             result = json.loads(raw_path.read_text(encoding="utf-8"))["parsed"]
+            cache_hits += 1
         else:
             result, raw = provider.analyze_frame(frame_path, timestamp, video)
+            vision_calls += 1
             raw_path.parent.mkdir(parents=True, exist_ok=True)
             raw_path.write_text(
                 json.dumps(
@@ -81,6 +85,8 @@ def analyze_frame_manifest(
         "model": provider.model,
         "frames": analyzed,
         "segments": perceived_segments,
+        "cache_hits": cache_hits,
+        "vision_calls": vision_calls,
     }
 
 
