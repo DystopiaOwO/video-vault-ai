@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
+import shutil
 from typing import Any, Mapping
 import uuid
 
@@ -19,6 +20,8 @@ DEFAULT_POLICY: dict[str, Any] = {
     "preview_max_age_days": 14,
     "failed_grace_days": 7,
     "logs_max_age_days": 30,
+    "max_cache_size_bytes": 0,
+    "keep_last_n": 0,
     "minimum_free_disk_bytes": 0,
     "pinned_exemption": True,
 }
@@ -174,8 +177,24 @@ def reconcile_inventory(cfg: Mapping[str, Any], project_id: int) -> dict[str, An
             inventory.setdefault("artifacts", []).append(record)
             existing[str(resolved)] = record
             discovered += 1
+    recovered = 0
+    for record in inventory.get("artifacts", []):
+        path = Path(str(record.get("path") or ""))
+        if (
+            str(record.get("deletion_status") or "active") == "active"
+            and not path.is_file()
+        ):
+            record["deletion_status"] = "missing"
+            record["lifecycle_state"] = "missing"
+            recovered += 1
     save_inventory(cfg, project_id, inventory)
-    return {"ok": True, "project_id": int(project_id), "discovered": discovered, "artifacts": inventory["artifacts"]}
+    return {
+        "ok": True,
+        "project_id": int(project_id),
+        "discovered": discovered,
+        "recovered": recovered,
+        "artifacts": inventory["artifacts"],
+    }
 
 
 def set_artifact_pinned(cfg: Mapping[str, Any], project_id: int, artifact_id: str, pinned: bool) -> dict[str, Any]:
@@ -195,14 +214,22 @@ def build_cleanup_plan(cfg: Mapping[str, Any], project_id: int, policy: Mapping[
     now = datetime.now(timezone.utc)
     candidates: list[dict[str, Any]] = []
     protected: list[dict[str, Any]] = []
+    records = list(inventory.get("artifacts", []))
+    keep_ids = _keep_last_ids(records, int(rules.get("keep_last_n") or 0))
+    capacity_ids = _capacity_candidate_ids(records, rules, project_dir(dict(cfg), int(project_id)))
     for record in inventory.get("artifacts", []):
         reason = _protection_reason(record, active_job_ids=active_job_ids)
         if reason:
             protected.append({"artifact_id": record.get("artifact_id"), "reason": reason, "type": record.get("type")})
             continue
-        if _eligible(record, now, rules):
+        artifact_id = str(record.get("artifact_id") or "")
+        if artifact_id in keep_ids:
+            protected.append({"artifact_id": artifact_id, "reason": "retention keep last N", "type": record.get("type")})
+            continue
+        if _eligible(record, now, rules) or artifact_id in capacity_ids:
             candidate = {"artifact_id": record.get("artifact_id"), "project_id": int(project_id), "path": record.get("path"), "type": record.get("type"), "size": int(record.get("size") or 0), "reason": _deletion_reason(record, rules)}
             candidates.append(candidate)
+    free_bytes = shutil.disk_usage(project_dir(dict(cfg), int(project_id))).free
     plan = {
         "plan_id": "cleanup-" + uuid.uuid4().hex,
         "schema_version": INVENTORY_SCHEMA_VERSION,
@@ -217,6 +244,8 @@ def build_cleanup_plan(cfg: Mapping[str, Any], project_id: int, policy: Mapping[
         "candidate_count": len(candidates),
         "candidate_size": sum(int(item["size"]) for item in candidates),
         "estimated_free_space": sum(int(item["size"]) for item in candidates),
+        "current_free_space": int(free_bytes),
+        "projected_free_space": int(free_bytes) + sum(int(item["size"]) for item in candidates),
     }
     plan_path = project_dir(dict(cfg), int(project_id)) / "storage" / f"{plan['plan_id']}.json"
     plan_path.parent.mkdir(parents=True, exist_ok=True)
@@ -250,7 +279,9 @@ def execute_cleanup_plan(cfg: Mapping[str, Any], plan: Mapping[str, Any], *, act
                 raise RetentionError("path_boundary", "artifact path 不在核准 project root 內", action="保留 artifact")
             if not path.exists():
                 record["deletion_status"] = "missing"
+                record["lifecycle_state"] = "missing"
                 result["status"] = "already_missing"
+                changed = True
             elif _sha256(path) != record.get("sha256"):
                 raise RetentionError("artifact_changed", "artifact hash 已改變", action="重新建立 cleanup plan")
             else:
@@ -265,8 +296,11 @@ def execute_cleanup_plan(cfg: Mapping[str, Any], plan: Mapping[str, Any], *, act
         except OSError as exc:
             result.update({"status": "blocked", "code": "delete_failed", "reason": str(exc)})
         results.append(result)
-    if changed:
-        save_inventory(cfg, project_id, inventory)
+        if changed:
+            # Journal every completed item so an interrupted cleanup can be
+            # reconciled without claiming that a deleted file is still active.
+            save_inventory(cfg, project_id, inventory)
+            changed = False
     return {"ok": True, "plan_id": plan.get("plan_id"), "results": results, "reclaimed_bytes": sum(int(item.get("size") or 0) for item, result in zip(plan.get("candidates", []), results) if result.get("status") in {"deleted", "already_missing"})}
 
 
@@ -301,6 +335,112 @@ def _eligible(record: Mapping[str, Any], now: datetime, policy: Mapping[str, Any
     if artifact_type in {"segment_cache", "render_cache", "log"}:
         return now - updated >= timedelta(days=float(policy["cache_max_age_days"]))
     return False
+
+
+def free_disk_bytes(path: str | Path) -> int:
+    target = Path(path).expanduser().resolve()
+    while not target.exists() and target != target.parent:
+        target = target.parent
+    return int(shutil.disk_usage(target).free)
+
+
+def estimate_render_required_bytes(manifest: Mapping[str, Any]) -> int:
+    """Conservative temporary + output estimate before starting FFmpeg."""
+
+    source_bytes = 0
+    seen: set[str] = set()
+    for segment in manifest.get("segments") or []:
+        if not isinstance(segment, Mapping):
+            continue
+        source = str(segment.get("source_file") or "")
+        if not source or source in seen:
+            continue
+        seen.add(source)
+        try:
+            source_bytes += Path(source).stat().st_size
+        except OSError:
+            continue
+    expected_seconds = sum(
+        float(item.get("timeline_duration_seconds") or 0)
+        for item in manifest.get("segments") or []
+        if isinstance(item, Mapping)
+    )
+    timeline_floor = int(max(1.0, expected_seconds) * 4 * 1024 * 1024)
+    return max(64 * 1024 * 1024, timeline_floor, source_bytes * 2)
+
+
+def ensure_render_free_space(
+    cfg: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    output_path: str | Path,
+) -> dict[str, int]:
+    render = cfg.get("render") if isinstance(cfg.get("render"), Mapping) else {}
+    reserve = int(render.get("minimum_free_disk_bytes") or 0)
+    required = estimate_render_required_bytes(manifest)
+    free = free_disk_bytes(Path(output_path).parent)
+    if free < required + reserve:
+        raise RetentionError(
+            "insufficient_disk_space",
+            "磁碟空間不足，已在開始昂貴的正式輸出前停止",
+            action="先到儲存空間工作區清理未引用 cache，或改用其他輸出磁碟",
+            details={
+                "free_bytes": free,
+                "required_bytes": required,
+                "reserve_bytes": reserve,
+            },
+        )
+    return {"free_bytes": free, "required_bytes": required, "reserve_bytes": reserve}
+
+
+def _keep_last_ids(records: list[Mapping[str, Any]], keep_last_n: int) -> set[str]:
+    if keep_last_n <= 0:
+        return set()
+    result: set[str] = set()
+    cache_types = {"segment_cache", "render_cache", "preview", "proxy", "draft_output"}
+    for artifact_type in cache_types:
+        eligible = [
+            item
+            for item in records
+            if str(item.get("type") or "") == artifact_type
+            and not _protection_reason(item)
+            and str(item.get("deletion_status") or "active") == "active"
+        ]
+        eligible.sort(
+            key=lambda item: str(item.get("last_accessed_at") or item.get("updated_at") or ""),
+            reverse=True,
+        )
+        result.update(str(item.get("artifact_id") or "") for item in eligible[:keep_last_n])
+    return result
+
+
+def _capacity_candidate_ids(
+    records: list[Mapping[str, Any]],
+    policy: Mapping[str, Any],
+    root: Path,
+) -> set[str]:
+    cache_types = {"segment_cache", "render_cache", "preview", "proxy", "draft_output"}
+    available = [
+        item
+        for item in records
+        if str(item.get("type") or "") in cache_types
+        and not _protection_reason(item)
+        and str(item.get("deletion_status") or "active") == "active"
+    ]
+    available.sort(key=lambda item: str(item.get("last_accessed_at") or item.get("updated_at") or ""))
+    total = sum(int(item.get("size") or 0) for item in available)
+    max_bytes = int(policy.get("max_cache_size_bytes") or 0)
+    free = shutil.disk_usage(root).free
+    minimum_free = int(policy.get("minimum_free_disk_bytes") or 0)
+    need = max(0, total - max_bytes) if max_bytes > 0 else 0
+    need = max(need, max(0, minimum_free - int(free)))
+    selected: set[str] = set()
+    reclaimed = 0
+    for item in available:
+        if reclaimed >= need:
+            break
+        selected.add(str(item.get("artifact_id") or ""))
+        reclaimed += int(item.get("size") or 0)
+    return selected
 
 
 def _deletion_reason(record: Mapping[str, Any], policy: Mapping[str, Any]) -> str:
@@ -345,4 +485,19 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-__all__ = ["DEFAULT_POLICY", "INVENTORY_SCHEMA_VERSION", "RetentionError", "build_cleanup_plan", "execute_cleanup_plan", "inventory_path", "load_inventory", "reconcile_inventory", "register_artifact", "save_inventory", "set_artifact_pinned"]
+__all__ = [
+    "DEFAULT_POLICY",
+    "INVENTORY_SCHEMA_VERSION",
+    "RetentionError",
+    "build_cleanup_plan",
+    "ensure_render_free_space",
+    "estimate_render_required_bytes",
+    "execute_cleanup_plan",
+    "free_disk_bytes",
+    "inventory_path",
+    "load_inventory",
+    "reconcile_inventory",
+    "register_artifact",
+    "save_inventory",
+    "set_artifact_pinned",
+]

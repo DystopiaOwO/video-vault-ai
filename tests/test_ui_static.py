@@ -83,6 +83,25 @@ def test_project_workspace_exposes_search_loading_and_anchor_navigation():
     assert 'aria-label="專案工作區導覽"' in source
     assert "workspace-storyboard" in source
     assert "已有同名專案" in source
+    assert "const confirmed = window.confirm(localAction)" in source
+    assert "if (confirmed === false) return" in source
+
+
+def test_local_app_actions_require_confirmation_and_write_audit_log(tmp_path):
+    cfg = {"library_root": str(tmp_path)}
+
+    try:
+        ui._require_local_action_confirmation({})
+    except ValueError as exc:
+        assert "明確確認" in str(exc)
+    else:
+        raise AssertionError("unconfirmed local actions must be rejected")
+
+    ui._require_local_action_confirmation({"confirm_local_action": True})
+    ui._audit_local_action(cfg, 7, "open_test_folder", tmp_path / "target")
+    record = (tmp_path / "08_projects" / "project_7" / "decisions" / "local_actions.jsonl").read_text(encoding="utf-8")
+    assert '"action": "open_test_folder"' in record
+    assert '"confirmed": true' in record
 
 
 def test_audio_ui_exposes_polling_safe_drafts_and_preview_controls():

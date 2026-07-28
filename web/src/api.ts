@@ -143,6 +143,8 @@ export type StorageSummary = {
   total_bytes: number;
   protected_bytes: number;
   pinned_count: number;
+  free_bytes: number;
+  recovered_count: number;
 };
 
 export type CleanupPlan = {
@@ -395,9 +397,9 @@ export const api = {
   hyperframesExport: (projectId: number, render = false) =>
     json<{ ok: boolean; folder?: string; output?: string; error?: string }>("/api/project/hyperframes-export", post({ project_id: projectId, render, max_segments: 20 })),
   opencutJob: (projectId: number, renderClips = false, baseRevision?: number) =>
-    json<{ ok: boolean; message?: string; error?: string }>("/api/project/opencut-job", post({ project_id: projectId, render_clips: renderClips, max_segments: 20, base_revision: baseRevision })),
+    json<{ ok: boolean; message?: string; error?: string }>("/api/project/opencut-job", post({ project_id: projectId, render_clips: renderClips, max_segments: 20, base_revision: baseRevision, confirm_local_action: true })),
   hyperframesJob: (projectId: number, render = false, baseRevision?: number) =>
-    json<{ ok: boolean; message?: string; error?: string }>("/api/project/hyperframes-job", post({ project_id: projectId, render, max_segments: 20, base_revision: baseRevision })),
+    json<{ ok: boolean; message?: string; error?: string }>("/api/project/hyperframes-job", post({ project_id: projectId, render, max_segments: 20, base_revision: baseRevision, confirm_local_action: true })),
   createRenderJob: (projectId: number, outputPath = "") =>
     json<{ ok: boolean; created: boolean; job?: Job; error?: string }>("/api/project/render-job", post({ project_id: projectId, output_path: outputPath })),
   cancelRenderJob: (jobId: string) =>

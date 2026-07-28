@@ -106,6 +106,7 @@ def build_project_audio_filter(
     normalization: Mapping[str, Any] | None = None,
     *,
     bgm_label: str | None = None,
+    duration_seconds: float | None = None,
 ) -> str:
     """Build the shared final project-audio filter used by preview and final render."""
     if bgm_label:
@@ -113,6 +114,9 @@ def build_project_audio_filter(
     else:
         graph = "[0:a]anull"
     graph += f",aresample={int(profile['audio_sample_rate'])},aformat=sample_fmts=fltp:channel_layouts=stereo"
+    if duration_seconds is not None:
+        duration = max(0.001, float(duration_seconds))
+        graph += f",apad,atrim=duration={duration:.6f},asetpts=PTS-STARTPTS"
     norm = dict(normalization or {})
     if bool(norm.get("enabled", False)):
         target = float(norm.get("target_lufs", -14.0))

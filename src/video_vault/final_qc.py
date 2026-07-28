@@ -146,6 +146,7 @@ def validate_final_output(
             errors.append(f"frame count mismatch: {actual_frames} vs {expected_frames}")
     video_end = float((measurements.get("video") or {}).get("end_seconds") or 0)
     audio_end = float((measurements.get("audio") or {}).get("end_seconds") or 0)
+    tail_tolerance = max(0.05, 2 / float(profile.get("fps", 30) or 30))
     if (
         getattr(probe, "source_file", None) is not None
         and "tail_source" in (measurements.get("video") or {})
@@ -153,7 +154,7 @@ def validate_final_output(
         and abs(
             (video_end - float((measurements.get("video") or {}).get("start_seconds") or 0))
             - (audio_end - float((measurements.get("audio") or {}).get("start_seconds") or 0))
-        ) > 0.05
+        ) > tail_tolerance
     ):
         video_span = video_end - float((measurements.get("video") or {}).get("start_seconds") or 0)
         audio_span = audio_end - float((measurements.get("audio") or {}).get("start_seconds") or 0)

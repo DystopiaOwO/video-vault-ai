@@ -1,8 +1,19 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from video_vault.artifact_retention import RetentionError, build_cleanup_plan, execute_cleanup_plan, load_inventory, register_artifact, save_inventory
+from video_vault.artifact_retention import (
+    RetentionError,
+    build_cleanup_plan,
+    ensure_render_free_space,
+    execute_cleanup_plan,
+    load_inventory,
+    reconcile_inventory,
+    register_artifact,
+    save_inventory,
+)
 from video_vault.project import project_dir
 
 
@@ -104,3 +115,99 @@ def test_active_producer_job_protects_artifact_without_status_metadata(tmp_path)
     assert all(item["artifact_id"] != record["artifact_id"] for item in plan["candidates"])
     assert any(item["artifact_id"] == record["artifact_id"] for item in plan["protected"])
     assert preview.exists()
+
+
+def test_reconcile_recovers_inventory_after_file_disappears(tmp_path):
+    cfg = {"library_root": str(tmp_path)}
+    preview = project_dir(cfg, 1) / "output" / "interrupted.mp4"
+    preview.write_bytes(b"preview")
+    record = register_artifact(cfg, 1, preview, "preview")
+    preview.unlink()
+
+    result = reconcile_inventory(cfg, 1)
+
+    assert result["recovered"] == 1
+    stored = next(
+        item
+        for item in load_inventory(cfg, 1)["artifacts"]
+        if item["artifact_id"] == record["artifact_id"]
+    )
+    assert stored["deletion_status"] == "missing"
+    assert stored["lifecycle_state"] == "missing"
+
+
+def test_cleanup_journals_each_deleted_file_before_next_candidate(monkeypatch, tmp_path):
+    cfg = {"library_root": str(tmp_path)}
+    folder = project_dir(cfg, 1) / "output"
+    first = folder / "first.mp4"
+    second = folder / "second.mp4"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    first_record = register_artifact(cfg, 1, first, "preview")
+    register_artifact(cfg, 1, second, "preview")
+    inventory = load_inventory(cfg, 1)
+    for item in inventory["artifacts"]:
+        item["updated_at"] = _old()
+    save_inventory(cfg, 1, inventory)
+    plan = build_cleanup_plan(
+        cfg,
+        1,
+        {"preview_max_age_days": 1, "keep_last_n": 0},
+    )
+    real_unlink = Path.unlink
+
+    def interrupt_second(path, *args, **kwargs):
+        if path == second:
+            raise KeyboardInterrupt()
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", interrupt_second)
+    with pytest.raises(KeyboardInterrupt):
+        execute_cleanup_plan(cfg, plan)
+
+    stored = next(
+        item
+        for item in load_inventory(cfg, 1)["artifacts"]
+        if item["artifact_id"] == first_record["artifact_id"]
+    )
+    assert stored["deletion_status"] == "deleted"
+    assert not first.exists()
+    assert second.exists()
+
+
+def test_capacity_policy_selects_oldest_unreferenced_cache(tmp_path):
+    cfg = {"library_root": str(tmp_path)}
+    cache = project_dir(cfg, 1) / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    old = cache / "old.mp4"
+    recent = cache / "recent.mp4"
+    old.write_bytes(b"1234")
+    recent.write_bytes(b"5678")
+    old_record = register_artifact(cfg, 1, old, "segment_cache")
+    register_artifact(cfg, 1, recent, "segment_cache")
+    inventory = load_inventory(cfg, 1)
+    inventory["artifacts"][0]["last_accessed_at"] = _old()
+    save_inventory(cfg, 1, inventory)
+
+    plan = build_cleanup_plan(
+        cfg,
+        1,
+        {"max_cache_size_bytes": 4, "keep_last_n": 0},
+    )
+
+    assert [item["artifact_id"] for item in plan["candidates"]] == [
+        old_record["artifact_id"]
+    ]
+
+
+def test_render_preflight_stops_before_expensive_work_when_disk_is_low(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "video_vault.artifact_retention.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=1024),
+    )
+    with pytest.raises(RetentionError, match="磁碟空間不足"):
+        ensure_render_free_space(
+            {"render": {"minimum_free_disk_bytes": 2048}},
+            {"segments": [{"timeline_duration_seconds": 1, "source_file": ""}]},
+            tmp_path / "out.mp4",
+        )

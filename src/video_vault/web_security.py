@@ -94,4 +94,49 @@ def parse_single_range(value: str | None, size: int) -> tuple[int, int] | None:
     return start, end
 
 
-__all__ = ["WebSecurityError", "parse_single_range", "validate_host_header", "validate_local_bind_host", "validate_origin_headers"]
+def parse_content_length(
+    value: str | None,
+    *,
+    maximum: int,
+    required: bool = False,
+) -> int:
+    raw = str(value or "").strip()
+    if not raw:
+        if required:
+            raise WebSecurityError(
+                "content_length_required",
+                "缺少 Content-Length，已拒絕請求",
+                action="請重新送出請求",
+            )
+        return 0
+    try:
+        length = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise WebSecurityError(
+            "invalid_content_length",
+            "Content-Length 無效",
+            action="請重新送出請求",
+        ) from exc
+    if length < 0:
+        raise WebSecurityError(
+            "invalid_content_length",
+            "Content-Length 不可為負數",
+            action="請重新送出請求",
+        )
+    if length > int(maximum):
+        raise WebSecurityError(
+            "request_too_large",
+            "請求內容超過本機服務允許的大小",
+            action="請縮小請求或調整本機上傳限制",
+        )
+    return length
+
+
+__all__ = [
+    "WebSecurityError",
+    "parse_content_length",
+    "parse_single_range",
+    "validate_host_header",
+    "validate_local_bind_host",
+    "validate_origin_headers",
+]

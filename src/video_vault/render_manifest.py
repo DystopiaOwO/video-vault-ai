@@ -25,7 +25,13 @@ from .color_consistency import effective_color_settings, has_color_state, load_p
 from .project import project_dir, project_segments
 from .render_profiles import get_render_profile
 from .render_settings import load_render_settings
-from .visual_timeline import build_visual_timeline, validate_visual_timeline
+from .visual_timeline import (
+    align_visual_timeline_to_segments,
+    build_visual_timeline,
+    reconcile_visual_timeline_with_segments,
+    resolve_visual_runtime_assets,
+    validate_visual_timeline,
+)
 
 
 ALLOWED_AUDIO_ROLES = {"keep_original", "lower_original", "mute", "keep", "lower", "bgm_only"}
@@ -113,6 +119,16 @@ def build_render_manifest(
         if str(track.get("license_status") or "unverified") != "verified"
         or str(track.get("attribution_status") or "unknown") == "unknown"
     ]
+    visual_timeline = align_visual_timeline_to_segments(
+        resolve_visual_runtime_assets(
+            reconcile_visual_timeline_with_segments(
+                plan.get("visual_timeline") or build_visual_timeline(plan.get("groups") or []),
+                segments,
+            ),
+            cfg,
+        ),
+        segments,
+    )
     manifest: dict[str, Any] = {
         "schema_version": "2.0",
         "project_id": int(project_id),
@@ -121,8 +137,8 @@ def build_render_manifest(
         "profile": profile,
         "settings": settings,
         "storyboard_render_state": storyboard_render_state(storyboard_state, raw_segments),
-        "visual_timeline": plan.get("visual_timeline") or build_visual_timeline(plan.get("groups") or []),
-        "visual_items": plan.get("visual_items") or (plan.get("visual_timeline") or {}).get("items", []),
+        "visual_timeline": visual_timeline,
+        "visual_items": visual_timeline.get("items", []),
         "segments": segments,
         "bgm": bgm,
         "bgm_credits": bgm_credits,
@@ -319,6 +335,8 @@ def _manifest_segment(
         "audio_role": legacy_role,
         "scene_role": str(segment.get("scene_role") or ""),
         "story_position": str(segment.get("story_position") or ""),
+        "group": str(segment.get("group") or ""),
+        "group_id": str(segment.get("storyboard_group_id") or segment.get("group") or ""),
         "user_notes": str(segment.get("user_notes") or ""),
         "title": str(segment.get("title") or ""),
         "suggested_use": str(segment.get("suggested_use") or ""),

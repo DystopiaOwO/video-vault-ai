@@ -13,6 +13,10 @@ import hashlib
 from typing import Any, Callable, Mapping
 
 from .bgm_pipeline import BgmPipelineError, bgm_fingerprint, build_bgm_mix_command, validate_bgm_track
+from .artifact_retention import (
+    RetentionError,
+    ensure_render_free_space,
+)
 from .final_qc import FinalQCResult, sha256_file, validate_final_output
 from .loudness import LoudnessError, build_second_pass_command, measure_loudness
 from .project import can_project_render, project_dir
@@ -20,6 +24,11 @@ from .render_manifest import manifest_hash, validate_render_manifest
 from .segment_cache import build_segment_cache_key, cache_paths
 from .segment_renderer import SegmentRenderResult, render_segment
 from .timeline_assembler import TimelineAssemblyError, build_concat_file, build_timeline_command, run_command
+from .visual_renderer import (
+    VisualRenderError,
+    cleanup_visual_filter,
+    prepare_visual_filter,
+)
 
 
 class ProjectRenderError(RuntimeError):
@@ -177,12 +186,17 @@ def render_project(
     output.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        disk_preflight = ensure_render_free_space(cfg, manifest, output)
+    except RetentionError as exc:
+        raise ProjectRenderError(exc.message) from exc
     expected = sum(float(item["timeline_duration_seconds"]) for item in segments)
 
     work_dir = folder / "work" / approved_hash
     segment_results: list[SegmentRenderResult] = []
     command: list[str] | None = None
     concat_path = work_dir / "timeline.ffconcat"
+    visual_filter = None
     partial_created = False
     report_temp_created = False
     output_published = False
@@ -193,6 +207,7 @@ def render_project(
     completed_segment_duration = 0.0
     try:
         work_dir.mkdir(parents=True, exist_ok=True)
+        visual_filter = prepare_visual_filter(manifest, work_dir)
         for index, segment in enumerate(segments, 1):
             _execution_check(execution)
             segment_duration = float(segment["timeline_duration_seconds"])
@@ -223,6 +238,8 @@ def render_project(
                 duration_seconds=expected,
                 normalization=None if normalization.get("enabled") else normalization,
                 profile=manifest["profile"],
+                video_filter=visual_filter.expression if visual_filter else None,
+                encoder_contract=dict(encoder_contract or {}) if visual_filter else None,
             )
         else:
             command = build_bgm_mix_command(
@@ -233,6 +250,8 @@ def render_project(
                 expected,
                 manifest["profile"],
                 normalization=None if normalization.get("enabled") else normalization,
+                video_filter=visual_filter.expression if visual_filter else None,
+                encoder_contract=encoder_contract if visual_filter else None,
             )
         partial_created = True
         try:
@@ -265,7 +284,7 @@ def render_project(
             "analysis": loudness_analysis.to_dict() if loudness_analysis is not None else {},
             "final": loudness_final.to_dict() if loudness_final is not None else {},
         }
-        report = build_render_report(project_id, manifest, output, qc, segment_results, track, bgm_fp, output_size=partial.stat().st_size, approval_snapshot=snapshot, encoder_contract=encoder_contract, loudness=report_loudness, loudness_policy=normalization, bgm_source="new" if (folder / "audio_settings.json").is_file() else "legacy", cache_miss_reason=paths.cache_miss_reason)
+        report = build_render_report(project_id, manifest, output, qc, segment_results, track, bgm_fp, output_size=partial.stat().st_size, approval_snapshot=snapshot, encoder_contract=encoder_contract, loudness=report_loudness, loudness_policy=normalization, bgm_source="new" if (folder / "audio_settings.json").is_file() else "legacy", cache_miss_reason=paths.cache_miss_reason, disk_preflight=disk_preflight)
         report_temp_created = True
         report_temp.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         _execution_check(execution)
@@ -277,14 +296,16 @@ def render_project(
             output_published, report_published = publish()
         _write_log(log_path, project_id, approved_hash, segment_results, concat_path, command, result, qc, track, None)
         concat_path.unlink(missing_ok=True)
+        cleanup_visual_filter(visual_filter)
         _execution_update(execution, stage="done", percent=100, message="正式輸出完成")
         return ProjectRenderResult(project_id, output, approved_hash, False, qc.duration_seconds, tuple(segment_results), track is not None, tuple(qc.warnings))
     except Exception as exc:
+        cleanup_visual_filter(visual_filter)
         _cleanup_render_files(paths, concat_path, partial_created, report_temp_created, output_published, report_published)
         _write_log(log_path, project_id, approved_hash, segment_results, concat_path, command, locals().get("result"), locals().get("qc"), track, exc)
         if isinstance(exc, (ProjectRenderError, PermissionError)):
             raise
-        if isinstance(exc, (TimelineAssemblyError, BgmPipelineError, LoudnessError)):
+        if isinstance(exc, (TimelineAssemblyError, BgmPipelineError, LoudnessError, VisualRenderError)):
             raise ProjectRenderError(str(exc)) from exc
         if isinstance(exc, OSError):
             raise ProjectRenderError(f"project render failed: {exc}") from exc
@@ -439,6 +460,7 @@ def build_render_report(
     loudness_policy: Mapping[str, Any] | None = None,
     bgm_source: str = "",
     cache_miss_reason: str = "",
+    disk_preflight: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "project_id": project_id,
@@ -457,6 +479,16 @@ def build_render_report(
             "segments": {str(item.get("segment_id")): dict(item.get("color") or {}) for item in manifest.get("segments", []) if isinstance(item, Mapping)},
         },
         "timing": {"expected_duration_seconds": manifest.get("expected_duration_seconds"), "measured_duration_seconds": qc.duration_seconds},
+        "visual_timeline": {
+            "contract_version": (manifest.get("visual_timeline") or {}).get("contract_version"),
+            "item_count": len(manifest.get("visual_items") or []),
+            "item_ids": [
+                str(item.get("stable_id") or "")
+                for item in manifest.get("visual_items") or []
+                if isinstance(item, Mapping)
+            ],
+            "composed": bool(manifest.get("visual_items")),
+        },
         "qc_schema_version": 2,
         "cache": {
             "qc_policy_version": 2,
@@ -466,6 +498,7 @@ def build_render_report(
             "snapshot_hash": (approval_snapshot or {}).get("snapshot_hash", ""),
             "encoder_contract_hash": (encoder_contract or {}).get("contract_hash") or _stable_hash(dict(encoder_contract or {})),
         },
+        "disk_preflight": dict(disk_preflight or {}),
         "measurements": dict(qc.measurements or {}),
         "profile_id": manifest["profile"]["profile_id"],
         "output_path": str(Path(output_path).resolve()),

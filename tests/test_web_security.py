@@ -2,7 +2,7 @@ import ipaddress
 
 import pytest
 
-from video_vault.web_security import WebSecurityError, parse_single_range, validate_host_header, validate_local_bind_host, validate_origin_headers
+from video_vault.web_security import WebSecurityError, parse_content_length, parse_single_range, validate_host_header, validate_local_bind_host, validate_origin_headers
 
 
 def test_non_loopback_bind_is_rejected():
@@ -49,3 +49,11 @@ def test_mutation_requires_same_origin_and_csrf():
         validate_origin_headers({**headers, "origin": "http://evil.example:8765"}, "127.0.0.1", 8765, csrf_token="token", supplied_token="token")
     with pytest.raises(WebSecurityError, match="Origin/Referer"):
         validate_origin_headers({"host": "127.0.0.1:8765"}, "127.0.0.1", 8765, csrf_token="token", supplied_token="token")
+
+
+def test_request_body_size_is_bounded_before_reading():
+    assert parse_content_length("1024", maximum=2048, required=True) == 1024
+    with pytest.raises(WebSecurityError, match="超過"):
+        parse_content_length("2049", maximum=2048, required=True)
+    with pytest.raises(WebSecurityError, match="缺少"):
+        parse_content_length(None, maximum=2048, required=True)
