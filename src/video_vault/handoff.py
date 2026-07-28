@@ -191,15 +191,42 @@ def build_handoff_manifest(
     }
     if mode == "diagnostic_first_n":
         payload["non_formal_reason"] = "diagnostic_first_n 只供診斷，不代表完整核准時間軸"
-    payload["contract_hash"] = _hash(payload)
+    payload["contract_hash"] = _contract_hash(payload)
     return payload
 
 
-def register_handoff_file(manifest: dict[str, Any], path: Path, *, stable_id: str = "") -> None:
+def register_handoff_file(
+    manifest: dict[str, Any],
+    path: Path,
+    *,
+    package_root: Path | None = None,
+    stable_id: str = "",
+) -> None:
     path = path.resolve()
-    manifest.setdefault("files", []).append({"path": str(path.name), "stable_id": stable_id, "sha256": _file_hash(path), "size": path.stat().st_size})
-    manifest.setdefault("file_hashes", {})[path.name] = _file_hash(path)
-    manifest["contract_hash"] = _hash({key: value for key, value in manifest.items() if key not in {"contract_hash", "created_at", "handoff_id"}})
+    if package_root is None:
+        relative = Path(path.name)
+    else:
+        root = package_root.resolve()
+        try:
+            relative = path.relative_to(root)
+        except ValueError as exc:
+            raise HandoffError(
+                "path_boundary",
+                "handoff file 不在交付包根目錄內",
+                action="只登錄交付包內的檔案",
+            ) from exc
+    relative_text = relative.as_posix()
+    digest = _file_hash(path)
+    manifest.setdefault("files", []).append(
+        {
+            "path": relative_text,
+            "stable_id": stable_id,
+            "sha256": digest,
+            "size": path.stat().st_size,
+        }
+    )
+    manifest.setdefault("file_hashes", {})[relative_text] = digest
+    manifest["contract_hash"] = _contract_hash(manifest)
 
 
 def write_handoff_manifest(path: Path, manifest: Mapping[str, Any]) -> None:
@@ -224,7 +251,7 @@ def import_handoff_package(cfg: Mapping[str, Any], project_id: int, package: str
     if not isinstance(manifest, dict) or manifest.get("contract_version") != HANDOFF_CONTRACT_VERSION:
         raise HandoffError("unsupported_handoff", "不支援的 handoff contract", action="使用相同版本重新匯出")
     expected = manifest.get("contract_hash")
-    actual = _hash({key: value for key, value in manifest.items() if key not in {"contract_hash", "created_at", "handoff_id"}})
+    actual = _contract_hash(manifest)
     missing: list[str] = []
     changed: list[str] = []
     unsupported: list[str] = []
@@ -276,6 +303,16 @@ def _timeline_item(item: Mapping[str, Any], order: int) -> dict[str, Any]:
 
 def _hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _contract_hash(manifest: Mapping[str, Any]) -> str:
+    return _hash(
+        {
+            key: value
+            for key, value in manifest.items()
+            if key not in {"contract_hash", "created_at", "handoff_id"}
+        }
+    )
 
 
 def _file_hash(path: Path) -> str:

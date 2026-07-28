@@ -136,8 +136,8 @@ def render_fast_draft(project: Path, cfg: dict, output: Path | None = None, db: 
 
 def _fast_segment(project: Path, out_dir: Path, clip: dict, cfg: dict, index: int) -> Path:
     src = project / "media" / clip["file"]
-    start = float(clip.get("start_seconds") or 0)
-    duration = max(0.1, float(clip.get("end_seconds") or start + clip.get("duration", 0.1)) - start)
+    start, end = _source_range(clip)
+    duration = max(0.1, end - start)
     out = out_dir / f"{index:03}_{int(start * 10):06d}_{src.name}"
     if out.exists() and out.stat().st_size > 1024 * 1024:
         return out
@@ -162,9 +162,19 @@ def stop_local_llm_server(cfg: dict) -> dict:
 
 
 def _duration(seg: dict) -> float:
-    if seg.get("graded_clip") and Path(seg["graded_clip"]).exists():
-        return max(0.1, float(seg["end_seconds"]) - float(seg["start_seconds"]))
-    return max(0.1, float(seg["end_seconds"]) - float(seg["start_seconds"]))
+    timeline_duration = seg.get("timeline_duration_seconds")
+    if timeline_duration is not None:
+        return max(0.1, float(timeline_duration))
+    start, end = _source_range(seg)
+    return max(0.1, (end - start) / max(0.01, float(seg.get("speed") or 1)))
+
+
+def _source_range(segment: dict) -> tuple[float, float]:
+    start = float(segment.get("source_in_seconds", segment.get("start_seconds", 0)) or 0)
+    raw_end = segment.get("source_out_seconds", segment.get("end_seconds"))
+    if raw_end is None:
+        raw_end = start + float(segment.get("duration") or 0.1)
+    return start, float(raw_end)
 
 
 def _copy_bgm(data: dict, media: Path) -> dict | None:
@@ -182,7 +192,7 @@ def _copy_bgm(data: dict, media: Path) -> dict | None:
 
 def _html(title: str, clips: list[dict], bgm: dict | None, duration: float) -> str:
     videos = "\n".join(
-        f'<video class="clip scene" data-start="{clip["timeline_start"]}" data-duration="{clip["duration"]}" data-track-index="0" data-media-start="0" src="media/{escape(clip["file"], quote=True)}" muted playsinline></video>'
+        f'<video class="clip scene" data-start="{clip["timeline_start"]}" data-duration="{clip["duration"]}" data-track-index="0" data-media-start="{_source_range(clip)[0]}" src="media/{escape(clip["file"], quote=True)}" muted playsinline></video>'
         for clip in clips
     )
     cards = []

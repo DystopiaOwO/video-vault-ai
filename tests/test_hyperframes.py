@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import json
 import pytest
 
 from video_vault.database import add_analysis, init_db, upsert_video
@@ -101,3 +102,49 @@ def test_hyperframes_render_export_skips_graded_clip_prerender(tmp_path, monkeyp
         export_hyperframes_project({"library_root": str(tmp_path)}, db, project_id, render_clips=True)
 
     assert calls == []
+
+
+def test_hyperframes_export_accepts_canonical_source_range(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    opencut = tmp_path / "opencut"
+    opencut.mkdir()
+    (opencut / "opencut_handoff.json").write_text(
+        json.dumps(
+            {
+                "project": {"name": "canonical"},
+                "segments": [
+                    {
+                        "clip_id": "clip-1",
+                        "source_file": str(source),
+                        "source_in_seconds": 1.25,
+                        "source_out_seconds": 5.25,
+                        "timeline_duration_seconds": 2.0,
+                        "speed": 2.0,
+                        "group": "day",
+                    }
+                ],
+                "bgm": [],
+                "handoff_manifest": {"contract_version": "handoff-v1"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "video_vault.hyperframes.export_opencut_handoff",
+        lambda *args, **kwargs: opencut,
+    )
+
+    out = export_hyperframes_project(
+        {"library_root": str(tmp_path)},
+        tmp_path / "db.sqlite3",
+        1,
+        render_clips=False,
+    )
+
+    timeline = json.loads((out / "timeline.json").read_text(encoding="utf-8"))
+    assert timeline["duration"] == 2.0
+    assert timeline["clips"][0]["duration"] == 2.0
+    assert 'data-media-start="1.25"' in (out / "index.html").read_text(
+        encoding="utf-8"
+    )

@@ -38,6 +38,8 @@ def test_host_allowlist_rejects_dns_rebinding_and_wrong_port():
         validate_host_header("evil.example:8765", "127.0.0.1", 8765)
     with pytest.raises(WebSecurityError):
         validate_host_header("127.0.0.1:9999", "127.0.0.1", 8765)
+    with pytest.raises(WebSecurityError):
+        validate_host_header("127.0.0.1", "127.0.0.1", 8765)
 
 
 def test_mutation_requires_same_origin_and_csrf():
@@ -47,6 +49,10 @@ def test_mutation_requires_same_origin_and_csrf():
         validate_origin_headers(headers, "127.0.0.1", 8765, csrf_token="token", supplied_token="wrong")
     with pytest.raises(WebSecurityError, match="Origin"):
         validate_origin_headers({**headers, "origin": "http://evil.example:8765"}, "127.0.0.1", 8765, csrf_token="token", supplied_token="token")
+    with pytest.raises(WebSecurityError, match="Origin"):
+        validate_origin_headers({**headers, "origin": "http://127.0.0.1"}, "127.0.0.1", 8765, csrf_token="token", supplied_token="token")
+    with pytest.raises(WebSecurityError, match="Origin"):
+        validate_origin_headers({**headers, "origin": "http://localhost:8765"}, "127.0.0.1", 8765, csrf_token="token", supplied_token="token")
     with pytest.raises(WebSecurityError, match="Origin/Referer"):
         validate_origin_headers({"host": "127.0.0.1:8765"}, "127.0.0.1", 8765, csrf_token="token", supplied_token="token")
 

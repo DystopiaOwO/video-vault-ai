@@ -174,6 +174,21 @@ def test_cleanup_journals_each_deleted_file_before_next_candidate(monkeypatch, t
     assert not first.exists()
     assert second.exists()
 
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    resumed = execute_cleanup_plan(cfg, plan)
+    assert [item["status"] for item in resumed["results"]] == [
+        "already_deleted",
+        "deleted",
+    ]
+    assert not second.exists()
+
+    retried = execute_cleanup_plan(cfg, plan)
+    assert [item["status"] for item in retried["results"]] == [
+        "already_deleted",
+        "already_deleted",
+    ]
+    assert retried["reclaimed_bytes"] == 0
+
 
 def test_capacity_policy_selects_oldest_unreferenced_cache(tmp_path):
     cfg = {"library_root": str(tmp_path)}

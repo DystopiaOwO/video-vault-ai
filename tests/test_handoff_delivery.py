@@ -1,8 +1,16 @@
+from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
 import json
+from types import SimpleNamespace
 
-from video_vault.handoff import build_handoff_manifest, escape_ffconcat_path, import_handoff_package
+from video_vault.handoff import (
+    build_handoff_manifest,
+    escape_ffconcat_path,
+    import_handoff_package,
+    register_handoff_file,
+    write_handoff_manifest,
+)
 
 
 def _snapshot(segments):
@@ -67,8 +75,19 @@ def test_diagnostic_first_n_is_explicit(monkeypatch, tmp_path):
 def test_same_approved_input_has_same_handoff_identity_and_contract_hash(monkeypatch, tmp_path):
     snapshot = _snapshot(_segments(2))
     monkeypatch.setattr("video_vault.handoff.load_approved_handoff_snapshot", lambda *args: {"snapshot": snapshot, "manifest": snapshot["manifest"]})
+    timestamps = iter(
+        [
+            datetime(2026, 7, 28, 1, tzinfo=timezone.utc),
+            datetime(2026, 7, 28, 2, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(
+        "video_vault.handoff.datetime",
+        SimpleNamespace(now=lambda _timezone: next(timestamps)),
+    )
     first = build_handoff_manifest({}, tmp_path / "db.sqlite3", 1, mode="complete")
     second = build_handoff_manifest({}, tmp_path / "db.sqlite3", 1, mode="complete")
+    assert first["created_at"] != second["created_at"]
     assert first["handoff_id"] == second["handoff_id"]
     assert first["contract_hash"] == second["contract_hash"]
 
@@ -113,3 +132,32 @@ def test_import_checks_each_file_hash(tmp_path):
     result = import_handoff_package({"library_root": str(tmp_path)}, 1, package)
     assert result["ok"] is False
     assert media.name in result["report"]["changed"]
+
+
+def test_nested_handoff_file_round_trips_with_relative_path(tmp_path):
+    package = tmp_path / "handoff"
+    nested = package / "graded_clips" / "nested.mp4"
+    nested.parent.mkdir(parents=True)
+    nested.write_bytes(b"approved nested clip")
+    manifest = {
+        "contract_version": "handoff-v1",
+        "handoff_id": "handoff-nested",
+        "created_at": "2026-07-28T00:00:00+00:00",
+        "exported_ids": ["clip-1"],
+        "files": [],
+        "file_hashes": {},
+    }
+
+    register_handoff_file(
+        manifest,
+        nested,
+        package_root=package,
+        stable_id="clip-1",
+    )
+    write_handoff_manifest(package / "handoff_manifest.json", manifest)
+
+    assert manifest["files"][0]["path"] == "graded_clips/nested.mp4"
+    assert "graded_clips/nested.mp4" in manifest["file_hashes"]
+    result = import_handoff_package({"library_root": str(tmp_path)}, 1, package)
+    assert result["ok"] is True
+    assert result["report"]["status"] == "matched"

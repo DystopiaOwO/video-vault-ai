@@ -101,7 +101,8 @@ def export_opencut_handoff(
     if render_clips:
         targets = set()
         for i, seg in enumerate(segments, 1):
-            target = clips_dir / f"{i:03}_{seg['clip_id']}_{int(float(seg['start_seconds']) * 10):05d}_{_safe(seg['title'])}.mp4"
+            start, _ = _source_range(seg)
+            target = clips_dir / f"{i:03}_{seg['clip_id']}_{int(start * 10):05d}_{_safe(seg['title'])}.mp4"
             targets.add(target.name)
             if _has_video_track(target, cfg):
                 seg["graded_clip"] = str(target)
@@ -125,7 +126,7 @@ def export_opencut_handoff(
     for item in sorted(out.rglob("*")):
         if item.is_file() and item.name not in {"handoff_manifest.json", "opencut_handoff.json"}:
             stable_id = next((str(seg.get("stable_id") or "") for seg in segments if seg.get("graded_clip") and Path(str(seg["graded_clip"])).name == item.name), "")
-            register_handoff_file(delivery, item, stable_id=stable_id)
+            register_handoff_file(delivery, item, package_root=out, stable_id=stable_id)
     write_handoff_manifest(manifest_path, delivery)
     handoff["handoff_manifest"] = delivery
     (out / "opencut_handoff.json").write_text(json.dumps(handoff, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -141,12 +142,15 @@ def _write_csv(path: Path, segments: list[dict]) -> None:
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(segments)
+        for segment in segments:
+            start, end = _source_range(segment)
+            writer.writerow({**segment, "start_seconds": start, "end_seconds": end})
 
 
 def _render_segment(cfg: dict, seg: dict, out: Path) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
-    duration = max(0.1, float(seg["end_seconds"]) - float(seg["start_seconds"]))
+    start, end = _source_range(seg)
+    duration = max(0.1, end - start)
     cmd = [
         cfg["ffmpeg_path"],
         "-hide_banner",
@@ -154,7 +158,7 @@ def _render_segment(cfg: dict, seg: dict, out: Path) -> Path:
         "error",
         "-y",
         "-ss",
-        str(seg["start_seconds"]),
+        str(start),
         "-t",
         str(duration),
         "-i",
@@ -172,6 +176,14 @@ def _render_segment(cfg: dict, seg: dict, out: Path) -> Path:
     ]
     run_ffmpeg(cmd, cfg)
     return out
+
+
+def _source_range(segment: dict) -> tuple[float, float]:
+    start = float(segment.get("source_in_seconds", segment.get("start_seconds", 0)) or 0)
+    raw_end = segment.get("source_out_seconds", segment.get("end_seconds"))
+    if raw_end is None:
+        raw_end = start + float(segment.get("timeline_duration_seconds") or 0.1) * float(segment.get("speed") or 1)
+    return start, float(raw_end)
 
 
 def _has_video_track(path: Path, cfg: dict) -> bool:

@@ -45,22 +45,26 @@ def validate_host_header(host_header: str | None, bind_host: str, bind_port: int
     host, port = _authority(str(host_header or ""))
     allowed_host = "localhost" if bind_host.lower() == "localhost" else bind_host.lower().strip("[]")
     allowed = {allowed_host, "127.0.0.1", "::1", "localhost"}
-    if host not in allowed or (port is not None and int(port) != int(bind_port)):
+    effective_port = 80 if port is None else int(port)
+    if host not in allowed or effective_port != int(bind_port):
         raise WebSecurityError("invalid_host", "拒絕未核准的 Host header", action="請從本機 UI 位址重新開啟")
 
 
 def validate_origin_headers(headers, bind_host: str, bind_port: int, *, csrf_token: str | None, supplied_token: str | None) -> None:
     validate_host_header(headers.get("host"), bind_host, bind_port)
+    request_host, request_port = _authority(headers.get("host"))
+    request_port = 80 if request_port is None else request_port
     origin = headers.get("origin")
     referer = headers.get("referer")
-    target_hosts = {"localhost", "127.0.0.1", "[::1]", "::1", bind_host.lower()}
     if origin:
         parsed = urlsplit(origin)
-        if parsed.scheme != "http" or parsed.hostname is None or parsed.hostname.lower() not in target_hosts or (parsed.port is not None and parsed.port != bind_port):
+        origin_port = 80 if parsed.port is None else parsed.port
+        if parsed.scheme != "http" or parsed.hostname is None or parsed.hostname.lower() != request_host or origin_port != request_port:
             raise WebSecurityError("invalid_origin", "Origin 與本機 UI 不一致，已拒絕變更操作", action="請從同一個本機 UI 分頁操作")
     elif referer:
         parsed = urlsplit(referer)
-        if parsed.scheme != "http" or parsed.hostname is None or parsed.hostname.lower() not in target_hosts or (parsed.port is not None and parsed.port != bind_port):
+        referer_port = 80 if parsed.port is None else parsed.port
+        if parsed.scheme != "http" or parsed.hostname is None or parsed.hostname.lower() != request_host or referer_port != request_port:
             raise WebSecurityError("invalid_referer", "Referer 與本機 UI 不一致，已拒絕變更操作", action="請從同一個本機 UI 分頁操作")
     else:
         raise WebSecurityError("missing_origin", "缺少 Origin/Referer，已拒絕瀏覽器變更操作", action="請重新從本機 UI 送出")

@@ -317,7 +317,10 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             validate_origin_headers(self.headers, host, port, csrf_token=FORM_CSRF_TOKEN, supplied_token=supplied_token or self.headers.get("x-video-vault-csrf"))
 
         def do_GET(self) -> None:
-            self._head_only = False
+            self._handle_get(head_only=False)
+
+        def _handle_get(self, *, head_only: bool) -> None:
+            self._head_only = head_only
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
             try:
@@ -423,8 +426,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self.send_error(404)
 
         def do_HEAD(self) -> None:
-            self._head_only = True
-            self.do_GET()
+            self._handle_get(head_only=True)
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
@@ -927,7 +929,8 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             self.send_header("cache-control", "no-store")
             self.send_header("content-length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if not getattr(self, "_head_only", False):
+                self.wfile.write(body)
 
         def _html(self, html: str) -> None:
             body = html.encode("utf-8")
@@ -936,7 +939,8 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             self.send_header("cache-control", "no-store")
             self.send_header("content-length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if not getattr(self, "_head_only", False):
+                self.wfile.write(body)
 
         def _file(self, path: Path) -> None:
             try:

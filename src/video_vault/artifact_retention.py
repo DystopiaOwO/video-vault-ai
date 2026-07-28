@@ -238,6 +238,12 @@ def build_cleanup_plan(cfg: Mapping[str, Any], project_id: int, policy: Mapping[
         "created_at": _now(),
         "expires_at": (now + timedelta(minutes=15)).isoformat(timespec="seconds"),
         "graph_hash": _graph_hash(inventory),
+        "resume_graph_hash": _graph_hash(
+            inventory,
+            ignore_candidate_state={
+                str(item.get("artifact_id") or "") for item in candidates
+            },
+        ),
         "policy": rules,
         "candidates": candidates,
         "protected": protected,
@@ -256,7 +262,15 @@ def build_cleanup_plan(cfg: Mapping[str, Any], project_id: int, policy: Mapping[
 def execute_cleanup_plan(cfg: Mapping[str, Any], plan: Mapping[str, Any], *, active_job_ids: set[str] | None = None) -> dict[str, Any]:
     project_id = int(plan.get("project_id") or 0)
     inventory = load_inventory(cfg, project_id)
-    if plan.get("graph_hash") != _graph_hash(inventory):
+    candidate_ids = {
+        str(item.get("artifact_id") or "") for item in plan.get("candidates", [])
+    }
+    graph_matches = plan.get("graph_hash") == _graph_hash(inventory)
+    resume_graph_matches = plan.get("resume_graph_hash") == _graph_hash(
+        inventory,
+        ignore_candidate_state=candidate_ids,
+    )
+    if not graph_matches and not resume_graph_matches:
         raise RetentionError("stale_cleanup_plan", "cleanup plan 已過期，引用圖已改變", action="重新建立 dry-run cleanup plan")
     if str(plan.get("expires_at") or "") < _now():
         raise RetentionError("stale_cleanup_plan", "cleanup plan 已過期", action="重新建立 dry-run cleanup plan")
@@ -277,6 +291,13 @@ def execute_cleanup_plan(cfg: Mapping[str, Any], plan: Mapping[str, Any], *, act
             resolved = path.resolve(strict=False)
             if root not in resolved.parents or resolved == root or path.is_symlink():
                 raise RetentionError("path_boundary", "artifact path 不在核准 project root 內", action="保留 artifact")
+            deletion_status = str(record.get("deletion_status") or "active")
+            if deletion_status in {"deleted", "missing"}:
+                if path.exists():
+                    raise RetentionError("artifact_changed", "已處理的 artifact 路徑重新出現", action="重新建立 cleanup plan")
+                result["status"] = f"already_{deletion_status}"
+                results.append(result)
+                continue
             if not path.exists():
                 record["deletion_status"] = "missing"
                 record["lifecycle_state"] = "missing"
@@ -468,8 +489,32 @@ def _artifact_id(path: Path, size: int, digest: str) -> str:
     return "artifact-" + hashlib.sha256(f"{path}\0{size}\0{digest}".encode("utf-8")).hexdigest()[:24]
 
 
-def _graph_hash(inventory: Mapping[str, Any]) -> str:
-    payload = [{key: item.get(key) for key in ("artifact_id", "path", "sha256", "size", "references", "pinned", "lifecycle_state", "producer_job_status", "deletion_status")} for item in inventory.get("artifacts", [])]
+def _graph_hash(
+    inventory: Mapping[str, Any],
+    *,
+    ignore_candidate_state: set[str] | None = None,
+) -> str:
+    ignored = ignore_candidate_state or set()
+    payload = []
+    for item in inventory.get("artifacts", []):
+        keys = [
+            "artifact_id",
+            "path",
+            "sha256",
+            "size",
+            "references",
+            "pinned",
+            "lifecycle_state",
+            "producer_job_status",
+            "deletion_status",
+        ]
+        if str(item.get("artifact_id") or "") in ignored:
+            keys = [
+                key
+                for key in keys
+                if key not in {"lifecycle_state", "deletion_status"}
+            ]
+        payload.append({key: item.get(key) for key in keys})
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
