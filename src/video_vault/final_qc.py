@@ -96,7 +96,12 @@ def validate_final_output(
         elif expected and actual != expected:
             errors.append(f"{label} mismatch: {actual}")
 
-    expected_duration = sum(float(item.get("timeline_duration_seconds", 0)) for item in manifest.get("segments", []))
+    visual_timeline = manifest.get("visual_timeline") if isinstance(manifest.get("visual_timeline"), dict) else {}
+    expected_duration = float(
+        visual_timeline.get("resolved_duration_seconds")
+        or manifest.get("expected_duration_seconds")
+        or sum(float(item.get("timeline_duration_seconds", 0)) for item in manifest.get("segments", []))
+    )
     tolerance = max(0.15, 3 / float(profile.get("fps", 30)))
     if abs(probe.duration_seconds - expected_duration) > tolerance:
         errors.append(f"duration mismatch: {probe.duration_seconds:.3f} vs {expected_duration:.3f}")

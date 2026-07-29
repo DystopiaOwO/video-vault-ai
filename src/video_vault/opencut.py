@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import csv
+import hashlib
 import json
 import shutil
 import subprocess
@@ -80,11 +81,88 @@ def export_opencut_handoff(
     # the BGM contract embedded in the immutable approved manifest.
     handoff_bgm = [dict(row) for row in (source_manifest.get("bgm", []) if source_manifest else project_bgm_tracks(db, project_id))]
     for track in handoff_bgm:
-        src = Path(track.get("file_path", ""))
+        # Approved manifests use the immutable render contract's source_path;
+        # file_path remains a compatibility fallback for legacy diagnostics.
+        src = Path(str(track.get("source_path") or track.get("file_path") or ""))
         if src.exists():
-            shutil.copy2(src, assets / src.name)
+            target = assets / src.name
+            shutil.copy2(src, target)
+            if delivery.get("handoff_type") == "formal":
+                track["source_path"] = target.relative_to(out).as_posix()
+                track.pop("file_path", None)
+        elif delivery.get("handoff_type") == "formal":
+            raise HandoffError("file_missing", f"核准 BGM 不存在：{src}", action="恢復配樂檔案後重新匯出交付包")
 
     segments = [dict(item) for item in delivery.get("timeline_items", [])]
+    source_media: list[dict] = []
+    if delivery.get("handoff_type") == "formal":
+        media_dir = assets / "media"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        source_by_id: dict[str, str] = {}
+        for segment in segments:
+            stable_id = str(segment.get("stable_id") or segment.get("segment_id") or "").strip()
+            source = Path(str(segment.get("source_file") or "")).expanduser().resolve()
+            if not stable_id or not source.is_file():
+                raise HandoffError("file_missing", f"核准片段來源不存在：{source}", action="恢復原始素材後重新匯出交付包")
+            target = media_dir / f"{_safe(stable_id)}_{_safe(source.stem)}{source.suffix.lower()}"
+            if not target.exists():
+                shutil.copy2(source, target)
+            relative = target.relative_to(out).as_posix()
+            source_by_id[stable_id] = relative
+            segment["source_file"] = relative
+            segment["source_media_path"] = relative
+            source_media.append({"stable_id": stable_id, "path": relative, "filename": target.name, "size": target.stat().st_size, "sha256": _file_hash(target)})
+        for item in delivery.get("timeline_items", []) or []:
+            stable_id = str(item.get("stable_id") or item.get("segment_id") or "")
+            if stable_id in source_by_id:
+                item["source_file"] = source_by_id[stable_id]
+                item["source_media_path"] = source_by_id[stable_id]
+        delivery["source_media"] = source_media
+        delivery["bgm"] = handoff_bgm
+        runtime_dir = assets / "runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        asset_paths: dict[str, str] = {}
+        packaged_runtime: list[dict] = []
+        for asset in delivery.get("runtime_assets", []) or []:
+            if not isinstance(asset, dict):
+                continue
+            source = Path(str(asset.get("path") or asset.get("source_path") or "")).expanduser().resolve()
+            if not source.is_file():
+                raise HandoffError("file_missing", f"核准 runtime asset 不存在：{source}", action="補齊 visual runtime asset 後重新匯出交付包")
+            target = runtime_dir / f"{_safe(str(asset.get('asset_id') or source.stem))}_{_safe(source.name)}"
+            if not target.exists():
+                shutil.copy2(source, target)
+            relative = target.relative_to(out).as_posix()
+            asset_paths[str(source)] = relative
+            packaged = dict(asset)
+            packaged["path"] = relative
+            packaged.pop("source_path", None)
+            packaged_runtime.append(packaged)
+        delivery["runtime_assets"] = packaged_runtime
+        delivery["source_fingerprints"] = [
+            {**dict(asset), "path": asset_paths.get(str(Path(str(asset.get("path") or "")).expanduser().resolve()), str(asset.get("path") or ""))}
+            for asset in delivery.get("source_fingerprints", []) or []
+            if isinstance(asset, dict)
+        ]
+        visual_timeline = delivery.get("visual_timeline")
+        if isinstance(visual_timeline, dict):
+            for item in list(visual_timeline.get("items") or []) + list(visual_timeline.get("resolved_items") or []):
+                if not isinstance(item, dict):
+                    continue
+                if item.get("font_path"):
+                    item["font_path"] = asset_paths.get(str(Path(str(item["font_path"])).expanduser().resolve()), str(item["font_path"]))
+                for fingerprint in item.get("asset_fingerprints") or []:
+                    if isinstance(fingerprint, dict) and fingerprint.get("path"):
+                        fingerprint["path"] = asset_paths.get(str(Path(str(fingerprint["path"])).expanduser().resolve()), str(fingerprint["path"]))
+        if approved and Path(str(approved.get("path") or "")).is_file():
+            approval_target = out / "approval" / "approval_snapshot.json"
+            approval_target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(Path(str(approved["path"])), approval_target)
+            delivery["approval_snapshot"] = {
+                "path": approval_target.relative_to(out).as_posix(),
+                "snapshot_id": str(approved["snapshot"].get("snapshot_id") or ""),
+                "snapshot_hash": str(approved["snapshot"].get("snapshot_hash") or ""),
+            }
     handoff = {
         "project": detail["project"],
         "clips": detail.get("clips", []),
@@ -92,6 +170,8 @@ def export_opencut_handoff(
         "bgm_recommendations": plan.get("bgm_recommendations", []),
         "title_cards": plan.get("title_cards", []),
         "segments": segments,
+        "visual_timeline": delivery.get("visual_timeline", {}),
+        "source_media": source_media,
         "handoff_manifest": delivery,
     }
     (out / "opencut_handoff.json").write_text(json.dumps(handoff, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -126,6 +206,8 @@ def export_opencut_handoff(
     for item in sorted(out.rglob("*")):
         if item.is_file() and item.name not in {"handoff_manifest.json", "opencut_handoff.json"}:
             stable_id = next((str(seg.get("stable_id") or "") for seg in segments if seg.get("graded_clip") and Path(str(seg["graded_clip"])).name == item.name), "")
+            if not stable_id:
+                stable_id = next((str(media.get("stable_id") or "") for media in source_media if str(media.get("path")) == item.relative_to(out).as_posix()), "")
             register_handoff_file(delivery, item, package_root=out, stable_id=stable_id)
     write_handoff_manifest(manifest_path, delivery)
     handoff["handoff_manifest"] = delivery
@@ -206,8 +288,9 @@ def _readme(detail: dict, segments: list[dict], render_clips: bool) -> str:
             "1. 在 OpenCut 建立新專案。",
             "2. 匯入本專案 source 資料夾的原始影片。",
             "3. 匯入 assets 內的 BGM / LUT。",
-            "4. 依照 recommended_segments.csv 的時間碼剪片。",
-            "5. 如果有 graded_clips，可先用這些已套 LUT 片段快速拼剪。",
+            "4. 正式交付請匯入 assets/media 內的原始素材，不依賴本機絕對路徑。",
+            "5. 依照 recommended_segments.csv 的時間碼剪片。",
+            "6. 如果有 graded_clips，可先用這些已套 LUT 片段快速拼剪。",
             "",
             f"- 推薦片段數: {len(segments)}",
             f"- 已產生調色片段: {'yes' if render_clips else 'no'}",
@@ -218,3 +301,11 @@ def _readme(detail: dict, segments: list[dict], render_clips: bool) -> str:
 
 def _safe(text: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in (text or "clip"))[:40]
+
+
+def _file_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

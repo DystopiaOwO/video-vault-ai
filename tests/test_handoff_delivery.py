@@ -11,6 +11,7 @@ from video_vault.handoff import (
     register_handoff_file,
     write_handoff_manifest,
 )
+from video_vault.opencut import export_opencut_handoff
 
 
 def _snapshot(segments):
@@ -28,6 +29,11 @@ def _snapshot(segments):
             "settings": {},
             "segments": segments,
             "visual_items": [{"stable_id": "title-1", "runtime_assets": []}],
+            "visual_timeline": {
+                "contract_version": "visual-timeline-v1",
+                "resolved_duration_seconds": 3,
+                "items": [{"stable_id": "title-1", "type": "chapter_card", "duration_seconds": 1}],
+            },
             "bgm": [],
             "bgm_credits": [],
             "manifest_hash": "manifest-hash",
@@ -90,6 +96,44 @@ def test_same_approved_input_has_same_handoff_identity_and_contract_hash(monkeyp
     assert first["created_at"] != second["created_at"]
     assert first["handoff_id"] == second["handoff_id"]
     assert first["contract_hash"] == second["contract_hash"]
+
+
+def test_complete_handoff_preserves_visual_timeline_contract(monkeypatch, tmp_path):
+    snapshot = _snapshot(_segments(2))
+    monkeypatch.setattr("video_vault.handoff.load_approved_handoff_snapshot", lambda *args: {"snapshot": snapshot, "manifest": snapshot["manifest"]})
+    result = build_handoff_manifest({}, tmp_path / "db.sqlite3", 1, mode="complete")
+    assert [item["stable_id"] for item in result["visual_items"]] == ["title-1"]
+    assert [item["stable_id"] for item in result["visual_timeline"]["items"]] == ["title-1"]
+    assert result["visual_timeline_duration_seconds"] == 3
+
+
+def test_opencut_formal_handoff_copies_manifest_bgm_source_path(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    bgm = tmp_path / "verified [中文] 'bgm.m4a"
+    bgm.write_bytes(b"audio")
+    source = tmp_path / "source [中文] 'clip.mp4"
+    source.write_bytes(b"video")
+    snapshot = _snapshot(_segments(1))
+    snapshot["manifest"]["segments"][0]["source_file"] = str(source)
+    snapshot["manifest"]["bgm"] = [{"track_id": 7, "title": "Verified", "source_path": str(bgm)}]
+    delivery = {
+        "handoff_type": "formal",
+        "timeline_items": [dict(snapshot["manifest"]["segments"][0], stable_id="clip_001")],
+        "visual_timeline": snapshot["manifest"]["visual_timeline"],
+        "visual_items": snapshot["manifest"]["visual_items"],
+    }
+    monkeypatch.setattr("video_vault.opencut.build_handoff_manifest", lambda *args, **kwargs: dict(delivery))
+    monkeypatch.setattr("video_vault.opencut.load_approved_handoff_snapshot", lambda *args: {"snapshot": snapshot, "manifest": snapshot["manifest"]})
+    monkeypatch.setattr("video_vault.opencut.project_dir", lambda cfg, project_id: project)
+
+    out = export_opencut_handoff({"library_root": str(tmp_path)}, tmp_path / "db.sqlite3", 1, mode="complete")
+
+    assert (out / "assets" / bgm.name).read_bytes() == b"audio"
+    assert (out / "assets" / "media").is_dir()
+    package_media = list((out / "assets" / "media").glob("*.mp4"))
+    assert len(package_media) == 1 and package_media[0].read_bytes() == b"video"
+    assert "C:" not in (out / "opencut_handoff.json").read_text(encoding="utf-8")
 
 
 def test_ffconcat_path_handles_unicode_apostrophe_and_windows_style(tmp_path):

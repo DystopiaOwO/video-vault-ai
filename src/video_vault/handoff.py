@@ -173,6 +173,9 @@ def build_handoff_manifest(
         "profile": source.get("profile") or {},
         "timeline_items": timeline_items,
         "visual_items": visual_items,
+        "visual_timeline": source.get("visual_timeline") or {},
+        "visual_timeline_duration_seconds": float((source.get("visual_timeline") or {}).get("resolved_duration_seconds") or source.get("expected_duration_seconds") or 0),
+        "license_acknowledgement": dict((source.get("settings") or {}).get("license_acknowledgement") or {}),
         "audio": (snapshot.get("effective") or {}).get("audio") if snapshot else source.get("settings", {}).get("audio", {}),
         "bgm": [dict(item) for item in source.get("bgm", []) if isinstance(item, Mapping)],
         "credits": source.get("bgm_credits", []),
@@ -255,6 +258,22 @@ def import_handoff_package(cfg: Mapping[str, Any], project_id: int, package: str
     missing: list[str] = []
     changed: list[str] = []
     unsupported: list[str] = []
+    if manifest.get("handoff_type") == "formal":
+        if not isinstance(manifest.get("visual_timeline"), Mapping):
+            unsupported.append("visual_timeline")
+        if not manifest.get("approved_snapshot_id") or not manifest.get("approved_manifest_hash"):
+            unsupported.append("approval_snapshot")
+        if not isinstance(manifest.get("source_media"), list) or not manifest.get("source_media"):
+            unsupported.append("source_media")
+        acknowledgement = manifest.get("license_acknowledgement") if isinstance(manifest.get("license_acknowledgement"), Mapping) else {}
+        acknowledged_ids = {int(value) for value in acknowledgement.get("track_ids", []) if str(value).isdigit()}
+        if bool(acknowledgement.get("accepted")) is not True:
+            acknowledged_ids = set()
+        for track in manifest.get("bgm") or []:
+            status = str(track.get("license_status") or "unverified") if isinstance(track, Mapping) else "unverified"
+            track_id = int(track.get("track_id") or 0) if isinstance(track, Mapping) else 0
+            if status == "invalid" or (status != "verified" and track_id not in acknowledged_ids):
+                unsupported.append(f"bgm_license:{track_id}")
     for file_entry in manifest.get("files") or []:
         relative = str(file_entry.get("path") or "") if isinstance(file_entry, Mapping) else ""
         candidate = (root / relative).resolve() if relative else Path()

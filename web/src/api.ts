@@ -23,6 +23,7 @@ export type Clip = {
   user_summary_migration_state?: string;
   effective_summary: string;
   effective_summary_source: "user" | "ai" | "none";
+  media_url?: string;
 };
 
 export type BgmTrack = {
@@ -83,6 +84,7 @@ export type Segment = {
   user_notes: string;
   source_file?: string;
   source_filename?: string;
+  media_url?: string;
   thumbnail_time_ratio?: number;
   storyboard_group_id?: string;
   storyboard_order?: number;

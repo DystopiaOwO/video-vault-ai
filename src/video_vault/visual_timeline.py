@@ -11,8 +11,10 @@ from typing import Any, Mapping
 VISUAL_TIMELINE_SCHEMA_VERSION = 1
 VISUAL_TIMELINE_CONTRACT_VERSION = "visual-timeline-v1"
 VISUAL_TYPES = {"intro", "outro", "chapter_card", "lower_third"}
-SUPPORTED_STYLE_IDS = {"location-lower-left"}
-SUPPORTED_ANIMATION_IDS = {"fade-in-out"}
+# Keep the versioned contract in sync with the formal compositor. Unknown
+# styles/animations still fail closed during approval and render.
+SUPPORTED_STYLE_IDS = {"location-lower-left", "title-center", "lower-third"}
+SUPPORTED_ANIMATION_IDS = {"static", "fade-in-out"}
 
 
 def build_visual_timeline(groups: list[Mapping[str, Any]]) -> dict[str, Any]:
@@ -23,8 +25,9 @@ def build_visual_timeline(groups: list[Mapping[str, Any]]) -> dict[str, Any]:
         if not segments:
             continue
         group_id = str(group.get("group_id") or group.get("label") or f"group_{group_index:03d}")
-        first_duration = max(0.5, float(segments[0].get("estimated_output_seconds") or 1.5))
-        duration = round(min(1.5, first_duration), 3)
+        # Generated chapter cards use a stable 1.5s presentation window. A
+        # manually authored shorter card is still preserved by reconciliation.
+        duration = 1.5
         items.append({
             "stable_id": f"chapter-card-{group_index:03d}",
             "type": "chapter_card",
@@ -136,10 +139,11 @@ def align_visual_timeline_to_segments(
         group = str(item.get("group_id") or "")
         if group in starts:
             item["start_seconds"] = round(starts[group], 6)
-            item["duration_seconds"] = round(
-                min(float(item.get("duration_seconds") or 0), durations[group]),
-                6,
-            )
+            if str(item.get("type") or "") != "chapter_card":
+                item["duration_seconds"] = round(
+                    min(float(item.get("duration_seconds") or 0), durations[group]),
+                    6,
+                )
         else:
             start = max(0.0, float(item.get("start_seconds") or 0))
             item["start_seconds"] = round(start, 6)
@@ -187,7 +191,10 @@ def reconcile_visual_timeline_with_segments(
         updated["group_id"] = target["group_id"]
         updated["text"] = target["text"]
         updated["start_seconds"] = target["start_seconds"]
-        updated["duration_seconds"] = target["duration_seconds"]
+        # Reconcile the chapter to the current included group, but preserve a
+        # shorter user-authored duration instead of expanding it silently.
+        requested_duration = float(updated.get("duration_seconds") or target["duration_seconds"])
+        updated["duration_seconds"] = round(min(requested_duration, float(target["duration_seconds"])), 6)
         reconciled.append(updated)
         chapter_index += 1
     reconciled.extend(generated_chapters[chapter_index:])

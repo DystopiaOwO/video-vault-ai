@@ -44,19 +44,56 @@ def export_hyperframes_project(
 
     clips = []
     t = 0.0
-    for i, seg in enumerate(data.get("segments", []), 1):
-        src = Path(seg.get("graded_clip") or seg["source_file"])
-        dst = media / f"{i:03}_{src.name}"
-        if src.exists() and not dst.exists():
-            shutil.copy2(src, dst)
-        duration = _duration(seg)
-        clips.append({**seg, "file": dst.name, "timeline_start": round(t, 3), "duration": round(duration, 3)})
-        t += duration
+    source_segments = {str(seg.get("stable_id") or seg.get("segment_id") or seg.get("clip_id") or ""): seg for seg in data.get("segments", [])}
+    visual_timeline = data.get("visual_timeline") or data.get("handoff_manifest", {}).get("visual_timeline", {}) or {}
+    visual_items = {str(item.get("stable_id") or ""): dict(item) for item in visual_timeline.get("resolved_items") or visual_timeline.get("items") or [] if isinstance(item, dict)}
+    visual_events = []
+    sequence = visual_timeline.get("sequence") or []
+    if sequence:
+        for entry in sequence:
+            stable_id = str(entry.get("stable_id") or "")
+            if entry.get("kind") == "visual":
+                item = visual_items.get(stable_id)
+                if item:
+                    visual_events.append({**item, "timeline_start": float(entry.get("start_seconds") or 0), "duration": float(entry.get("duration_seconds") or item.get("duration_seconds") or 0)})
+                continue
+            seg = source_segments.get(stable_id)
+            if seg is None:
+                continue
+            src = Path(seg.get("graded_clip") or seg["source_file"])
+            index = len(clips) + 1
+            dst = media / f"{index:03}_{src.name}"
+            if src.exists() and not dst.exists():
+                shutil.copy2(src, dst)
+            clips.append({**seg, "file": dst.name, "timeline_start": round(float(entry.get("start_seconds") or 0), 3), "duration": round(float(entry.get("duration_seconds") or _duration(seg)), 3)})
+        t = float(visual_timeline.get("resolved_duration_seconds") or max((item["timeline_start"] + item["duration"] for item in clips), default=0))
+    else:
+        for i, seg in enumerate(data.get("segments", []), 1):
+            src = Path(seg.get("graded_clip") or seg["source_file"])
+            dst = media / f"{i:03}_{src.name}"
+            if src.exists() and not dst.exists():
+                shutil.copy2(src, dst)
+            duration = _duration(seg)
+            clips.append({**seg, "file": dst.name, "timeline_start": round(t, 3), "duration": round(duration, 3)})
+            t += duration
+    # Lower thirds are overlays rather than sequence entries, but they remain
+    # first-class native events in the same approved visual contract.
+    for item in visual_items.values():
+        if item.get("type") == "lower_third" and not any(event.get("stable_id") == item.get("stable_id") for event in visual_events):
+            visual_events.append({**item, "timeline_start": float(item.get("resolved_start_seconds", item.get("start_seconds", 0)) or 0), "duration": float(item.get("duration_seconds") or 0)})
 
     bgm = _copy_bgm(data, media)
-    timeline = {"project": data["project"], "clips": clips, "bgm": bgm, "duration": round(t, 3), "handoff_manifest": data.get("handoff_manifest", {})}
+    timeline = {
+        "project": data["project"],
+        "clips": clips,
+        "bgm": bgm,
+        "duration": round(float(data.get("handoff_manifest", {}).get("visual_timeline_duration_seconds") or t), 3),
+        "visual_timeline": visual_timeline,
+        "visual_items": visual_events,
+        "handoff_manifest": data.get("handoff_manifest", {}),
+    }
     (out / "timeline.json").write_text(json.dumps(timeline, ensure_ascii=False, indent=2), encoding="utf-8")
-    (out / "index.html").write_text(_html(data["project"]["name"], clips, bgm, t), encoding="utf-8")
+    (out / "index.html").write_text(_html(data["project"]["name"], clips, bgm, t, visual_events), encoding="utf-8")
     (out / "README.md").write_text(_readme(out), encoding="utf-8")
     return out
 
@@ -181,7 +218,7 @@ def _copy_bgm(data: dict, media: Path) -> dict | None:
     tracks = data.get("bgm") or []
     if not tracks:
         return None
-    src = Path(tracks[0].get("file_path", ""))
+    src = Path(str(tracks[0].get("source_path") or tracks[0].get("file_path") or ""))
     if not src.exists():
         return None
     dst = media / src.name
@@ -190,18 +227,27 @@ def _copy_bgm(data: dict, media: Path) -> dict | None:
     return {**tracks[0], "file": dst.name}
 
 
-def _html(title: str, clips: list[dict], bgm: dict | None, duration: float) -> str:
+def _html(title: str, clips: list[dict], bgm: dict | None, duration: float, visual_items: list[dict] | None = None) -> str:
     videos = "\n".join(
         f'<video class="clip scene" data-start="{clip["timeline_start"]}" data-duration="{clip["duration"]}" data-track-index="0" data-media-start="{_source_range(clip)[0]}" src="media/{escape(clip["file"], quote=True)}" muted playsinline></video>'
         for clip in clips
     )
     cards = []
-    seen = set()
-    for clip in clips:
-        group = clip.get("group", "")
-        if group and group not in seen:
-            seen.add(group)
-            cards.append(f'<div class="clip card" data-start="{clip["timeline_start"]}" data-duration="2" data-track-index="1">{escape(group)}</div>')
+    if visual_items:
+        for item in visual_items:
+            visual_type = str(item.get("type") or "visual")
+            class_name = "lower-third" if visual_type == "lower_third" else "card"
+            cards.append(
+                f'<div class="clip {class_name}" data-visual-id="{escape(str(item.get("stable_id") or ""), quote=True)}" '
+                f'data-start="{float(item.get("timeline_start") or 0):.3f}" data-duration="{float(item.get("duration") or 0):.3f}" data-animation="{escape(str(item.get("animation_id") or "static"), quote=True)}" data-track-index="1">{escape(str(item.get("text") or ""))}</div>'
+            )
+    else:
+        seen = set()
+        for clip in clips:
+            group = clip.get("group", "")
+            if group and group not in seen:
+                seen.add(group)
+                cards.append(f'<div class="clip card" data-start="{clip["timeline_start"]}" data-duration="2" data-track-index="1">{escape(group)}</div>')
     audio = f'<audio class="clip" data-start="0" data-duration="{duration}" data-track-index="2" data-volume="0.35" src="media/{escape(bgm["file"], quote=True)}"></audio>' if bgm else ""
     return f"""<!doctype html>
 <html>
@@ -210,7 +256,8 @@ def _html(title: str, clips: list[dict], bgm: dict | None, duration: float) -> s
 <style>
 html,body,#root{{margin:0;width:100%;height:100%;background:#050607;overflow:hidden;font-family:"Microsoft JhengHei",sans-serif}}
 .scene{{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}}
-.card{{position:absolute;left:56px;bottom:56px;color:white;background:rgba(0,0,0,.62);padding:18px 24px;border-radius:8px;font-size:44px;font-weight:700;letter-spacing:0;text-shadow:0 2px 10px #000}}
+.card,.lower-third{{position:absolute;left:56px;bottom:56px;color:white;background:rgba(0,0,0,.62);padding:18px 24px;border-radius:8px;font-size:44px;font-weight:700;letter-spacing:0;text-shadow:0 2px 10px #000}}
+.lower-third{{bottom:18%;font-size:38px}}
 </style>
 </head>
 <body>
@@ -220,12 +267,16 @@ html,body,#root{{margin:0;width:100%;height:100%;background:#050607;overflow:hid
 {audio}
 </div>
 <script>
-const cards = Array.from(document.querySelectorAll(".card"));
+const cards = Array.from(document.querySelectorAll(".card,.lower-third"));
 const update = () => cards.forEach(el => {{
   const start = Number(el.dataset.start || 0);
   const duration = Math.max(1.4, Number(el.dataset.duration || 2));
   const visible = (window.__storyTime || 0) >= start && (window.__storyTime || 0) <= start + duration;
-  el.style.opacity = visible ? "1" : "0";
+  if (!visible) {{ el.style.opacity = "0"; return; }}
+  if (el.dataset.animation !== "fade-in-out") {{ el.style.opacity = "1"; return; }}
+  const fade = Math.min(0.2, duration / 2);
+  const elapsed = (window.__storyTime || 0) - start;
+  el.style.opacity = String(Math.max(0, Math.min(1, Math.min(elapsed / fade, (duration - elapsed) / fade))));
 }});
 window.__timelines = window.__timelines || {{}};
 window.__timelines["story"] = {{ update, setTime: time => {{ window.__storyTime = Number(time) || 0; update(); }} }};

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from email import policy
 from email.parser import BytesParser
+from copy import deepcopy
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -346,7 +347,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif parsed.path == "/api/projects":
                 self._json(list_projects(db))
             elif parsed.path == "/api/project":
-                self._json(project_detail(cfg, db, int(query.get("id", ["0"])[0])))
+                self._json(_project_detail_for_api(cfg, project_detail(cfg, db, int(query.get("id", ["0"])[0]))))
             elif parsed.path == "/api/project/storyboard":
                 self._json(storyboard_for_api(cfg, db, int(query.get("project_id", ["0"])[0] or 0)))
             elif parsed.path == "/api/project/storage":
@@ -417,6 +418,17 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif parsed.path == "/api/project/color-reference-file":
                 try:
                     path = reference_file_path(cfg, int(query.get("project_id", ["0"])[0] or 0), query.get("file", [""])[0])
+                    self._file(path)
+                except (FileNotFoundError, ValueError):
+                    self.send_error(404)
+            elif parsed.path == "/api/project/media":
+                try:
+                    path = registered_project_media_path(
+                        cfg,
+                        db,
+                        int(query.get("project_id", ["0"])[0] or 0),
+                        query.get("media_id", [""])[0],
+                    )
                     self._file(path)
                 except (FileNotFoundError, ValueError):
                     self.send_error(404)
@@ -993,6 +1005,69 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
 
 def _web_dist() -> Path:
     return Path(__file__).resolve().parents[2] / "web" / "dist"
+
+
+def registered_project_media_path(cfg: dict, db: Path, project_id: int, media_id: str) -> Path:
+    """Resolve only a source file registered in the requested project."""
+
+    token = str(media_id or "").strip()
+    if not token or any(char in token for char in ("/", "\\", "..")):
+        raise ValueError("invalid project media id")
+    source_dir = project_dir(cfg, int(project_id)) / "source"
+    source_dir = source_dir.resolve()
+    for row in project_videos(db, int(project_id)):
+        row = dict(row)
+        project_media_id = str(row.get("project_media_uuid") or f"video_{row.get('id')}")
+        if project_media_id != token:
+            continue
+        source = Path(str(row.get("current_path") or "")).expanduser().resolve()
+        candidate = source if source.parent == source_dir else source_dir / f"media_{project_media_id}_{source.name}"
+        candidate = candidate.resolve()
+        if source_dir not in candidate.parents or candidate.is_symlink() or not candidate.is_file():
+            raise FileNotFoundError("registered project media is unavailable")
+        return candidate
+    raise FileNotFoundError("registered project media not found")
+
+
+def _project_detail_for_api(cfg: dict, detail: dict) -> dict:
+    """Expose project-scoped media URLs without leaking local filesystem paths."""
+
+    result = deepcopy(detail or {})
+    project = result.get("project") or {}
+    project_id = int(project.get("id") or 0)
+
+    def media_url(media_id: object) -> str:
+        return f"/api/project/media?project_id={project_id}&media_id={str(media_id or '')}"
+
+    for clip in result.get("clips") or []:
+        if not isinstance(clip, dict):
+            continue
+        clip["media_url"] = media_url(clip.get("project_media_id") or clip.get("video_id"))
+        for key in ("source_path", "original_source_path", "physical_filename"):
+            clip.pop(key, None)
+    for segment in result.get("segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        segment["media_url"] = media_url(segment.get("project_media_id") or segment.get("video_id"))
+        segment.pop("source_file", None)
+
+    def scrub(value: object) -> object:
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        cleaned = {}
+        for key, item in value.items():
+            if key in {"source_file", "source_path", "original_source_path", "file_path"}:
+                continue
+            cleaned[key] = scrub(item)
+        if "project_media_id" in cleaned and "media_url" not in cleaned:
+            cleaned["media_url"] = media_url(cleaned["project_media_id"])
+        return cleaned
+
+    result["plan"] = scrub(result.get("plan"))
+    result.pop("folder", None)
+    return result
 
 
 def _static_file(url_path: str) -> Path | None:

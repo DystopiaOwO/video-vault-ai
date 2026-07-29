@@ -145,7 +145,11 @@ def build_bgm_mix_command(
         command += encoder_arguments(encoder_contract)
         command += ["-pix_fmt", str(profile["pixel_format"])]
     else:
-        command += ["-c:v", "copy"]
+        if encoder_contract:
+            command += encoder_arguments(encoder_contract)
+            command += ["-r", str(profile["fps"]), "-fps_mode", "cfr", "-pix_fmt", str(profile["pixel_format"])]
+        else:
+            command += ["-c:v", "copy"]
     command += [
         "-c:a",
         str(profile["audio_codec"]),
