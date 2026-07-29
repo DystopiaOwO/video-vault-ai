@@ -141,6 +141,26 @@ def test_runtime_asset_fingerprint_change_fails_closed(tmp_path: Path):
         resolve_visual_timeline(resolved, _segments(), PROFILE, require_assets=False)
 
 
+def test_pinned_runtime_font_asset_is_used_on_portable_platforms(tmp_path: Path):
+    font = tmp_path / "portable-font.ttf"
+    font.write_bytes(b"font fixture")
+    timeline = {
+        "schema_version": 1,
+        "items": [{
+            "stable_id": "chapter",
+            "type": "chapter_card",
+            "group_id": "morning",
+            "duration_seconds": 1,
+            "text": "Morning",
+            "style_id": "location-lower-left",
+            "animation_id": "static",
+            "runtime_assets": [{"kind": "font", "path": str(font)}],
+        }],
+    }
+    resolved = resolve_visual_timeline(timeline, _segments(), PROFILE, require_assets=True)
+    assert resolved["resolved_items"][0]["font_path"] == str(font.resolve())
+
+
 def test_visual_hash_changes_when_text_or_duration_changes():
     base = {"items": [{"stable_id": "intro", "type": "intro", "text": "A", "duration_seconds": 1}]}
     changed = {"items": [{"stable_id": "intro", "type": "intro", "text": "B", "duration_seconds": 1}]}

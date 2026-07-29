@@ -333,7 +333,12 @@ def _normalize_visual_item(item: Mapping[str, Any], index: int, segment_starts: 
         raise VisualCompositionError("visual_duration_invalid", f"visual item {stable_id} duration 無效", action="重新產生 visual timeline")
     if not str(item.get("text") or "").strip():
         raise VisualCompositionError("visual_text_missing", f"visual item {stable_id} 缺少文字", action="補上 visual item 文字")
-    font_path = _font_path(item.get("font_path"), str(item.get("text") or ""))
+    # ``resolve_visual_runtime_assets`` pins the portable/system font in the
+    # approved runtime asset list.  On Linux that font is often DejaVu, while
+    # the compositor's platform fallback list intentionally excludes it for
+    # CJK text.  Prefer the pinned font asset so approval and render use the
+    # same cross-platform contract.
+    font_path = _font_path(item.get("font_path"), str(item.get("text") or ""), item.get("runtime_assets"))
     asset_fingerprints: list[dict[str, Any]] = []
     for asset in item.get("runtime_assets") or []:
         path = Path(str(asset.get("path") if isinstance(asset, Mapping) else asset)).expanduser().resolve()
@@ -503,12 +508,21 @@ def _filter_graph_path(value: str | Path) -> Path:
     return path
 
 
-def _font_path(explicit: Any, text: str) -> Path | None:
+def _font_path(explicit: Any, text: str, runtime_assets: Any = None) -> Path | None:
     if str(explicit or "").strip():
         path = Path(str(explicit)).expanduser().resolve()
         if not path.is_file():
             raise VisualCompositionError("font_missing", f"指定字型不存在：{path}", action="補齊指定字型後重新核准")
         return path
+    for asset in runtime_assets or []:
+        if not isinstance(asset, Mapping):
+            continue
+        if str(asset.get("kind") or "").lower() != "font":
+            continue
+        path = Path(str(asset.get("path") or "")).expanduser().resolve()
+        if path.is_file() and not path.is_symlink():
+            return path
+        raise VisualCompositionError("font_missing", f"指定字型不存在：{path}", action="補齊指定字型後重新核准")
     has_cjk = bool(re.search(r"[\u2e80-\u9fff\uf900-\ufaff]", text))
     windows = [Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / name for name in ("msjh.ttc", "mingliu.ttc", "arial.ttf")]
     portable = [Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"), Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"), Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")]
