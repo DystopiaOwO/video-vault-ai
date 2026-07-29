@@ -126,7 +126,12 @@ def export_opencut_handoff(
         for asset in delivery.get("runtime_assets", []) or []:
             if not isinstance(asset, dict):
                 continue
-            source = Path(str(asset.get("path") or asset.get("source_path") or "")).expanduser().resolve()
+            # Approval snapshots keep one asset inventory for source media,
+            # BGM and visual runtime files. Source/BGM are packaged by their
+            # own contracts above and must not be treated as runtime assets.
+            if str(asset.get("kind") or "").lower() in {"source", "bgm"}:
+                continue
+            source = Path(str(asset.get("path") or asset.get("source_path") or asset.get("canonical_path") or "")).expanduser().resolve()
             if not source.is_file():
                 raise HandoffError("file_missing", f"核准 runtime asset 不存在：{source}", action="補齊 visual runtime asset 後重新匯出交付包")
             target = runtime_dir / f"{_safe(str(asset.get('asset_id') or source.stem))}_{_safe(source.name)}"

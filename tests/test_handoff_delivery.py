@@ -122,6 +122,10 @@ def test_opencut_formal_handoff_copies_manifest_bgm_source_path(monkeypatch, tmp
         "timeline_items": [dict(snapshot["manifest"]["segments"][0], stable_id="clip_001")],
         "visual_timeline": snapshot["manifest"]["visual_timeline"],
         "visual_items": snapshot["manifest"]["visual_items"],
+        "runtime_assets": [
+            {"kind": "source", "canonical_path": str(source)},
+            {"kind": "bgm", "canonical_path": str(bgm)},
+        ],
     }
     monkeypatch.setattr("video_vault.opencut.build_handoff_manifest", lambda *args, **kwargs: dict(delivery))
     monkeypatch.setattr("video_vault.opencut.load_approved_handoff_snapshot", lambda *args: {"snapshot": snapshot, "manifest": snapshot["manifest"]})
