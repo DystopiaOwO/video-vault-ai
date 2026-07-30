@@ -297,7 +297,11 @@ def _candidate(
     score: float,
     duration: float,
 ) -> None:
-    end_guard = min(0.25, max(0.05, duration * 0.05))
+    end_guard = (
+        0.25
+        if duration <= 5.0
+        else min(0.25, max(0.05, duration * 0.05))
+    )
     timestamp = min(max(0.0, float(timestamp)), max(0.0, duration - end_guard))
     candidates.append(
         {

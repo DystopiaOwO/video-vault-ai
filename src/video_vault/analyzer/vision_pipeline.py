@@ -21,7 +21,9 @@ def provider_from_config(cfg: dict):
         return CloudProvider(cfg)
     if name == "local":
         return LocalProvider(cfg)
-    return MockProvider(cfg)
+    if name == "mock":
+        return MockProvider(cfg)
+    raise ValueError(f"unsupported AI provider: {name}")
 
 
 def analyze_frame_manifest(

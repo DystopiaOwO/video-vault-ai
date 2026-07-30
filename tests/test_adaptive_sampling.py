@@ -204,7 +204,7 @@ def test_short_clip_keeps_boundaries_and_estimate_respects_cap(monkeypatch):
         ),
     )
     plan = build_sampling_plan(Path("short.mp4"), 0.8, _cfg())
-    assert [row["timestamp_seconds"] for row in plan["samples"]] == [0.0, 0.75]
+    assert [row["timestamp_seconds"] for row in plan["samples"]] == [0.0, 0.55]
     policy = resolved_sampling_policy(_cfg(max_frames_per_clip=3))
     assert estimate_sampling_count(60, policy) == 3
 
