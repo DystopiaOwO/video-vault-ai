@@ -224,6 +224,12 @@ def _manifest_assets(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
     for item in manifest.get("visual_items") or []:
         if not isinstance(item, Mapping):
             continue
+        font_path = str(item.get("font_path") or "").strip()
+        if font_path:
+            key = ("font", str(Path(font_path).expanduser().resolve()))
+            if key not in seen:
+                seen.add(key)
+                assets.append(asset_fingerprint(font_path, kind="font", asset_id=str(item.get("stable_id") or Path(font_path).name), metadata={"style_id": item.get("style_id"), "style_version": item.get("style_version"), "font_sha256": item.get("font_sha256") or ""}))
         for asset in item.get("runtime_assets") or []:
             if isinstance(asset, Mapping):
                 source = str(asset.get("path") or asset.get("source_path") or "").strip()

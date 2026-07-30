@@ -175,7 +175,7 @@ def test_independent_process_group_survives_runner_cancel(tmp_path: Path):
         thread.join(timeout=8)
         assert not thread.is_alive()
         assert isinstance(result.get("error"), RenderCancelled)
-        assert _wait_for_pid_running(helper_pid, timeout=1.0)
+        assert helper_process.poll() is None
         assert not signal_file.exists(), "independent process group received runner termination signal"
     finally:
         if helper_process.poll() is None:
@@ -194,20 +194,3 @@ def _pid_exists(pid: int) -> bool:
     except PermissionError:
         return True
     return True
-
-
-def _wait_for_pid_running(pid: int, timeout: float) -> bool:
-    """Wait briefly for a live, non-zombie process after cancellation."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if _pid_exists(pid):
-            if os.name != "nt":
-                try:
-                    state = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[2]
-                    if state == "Z":
-                        return False
-                except (FileNotFoundError, OSError, IndexError):
-                    continue
-            return True
-        time.sleep(0.02)
-    return False

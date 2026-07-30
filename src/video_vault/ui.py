@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from email import policy
 from email.parser import BytesParser
+from copy import deepcopy
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -9,6 +10,8 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import json
 import mimetypes
 import os
+import re
+import secrets
 import subprocess
 import tempfile
 import threading
@@ -16,6 +19,7 @@ import time
 
 from .analyzer.vision_pipeline import analyze_video_frames
 from .audio_state import audio_state_for_api, update_audio_state
+from .artifact_retention import RetentionError, build_cleanup_plan, execute_cleanup_plan, free_disk_bytes, load_inventory, reconcile_inventory, set_artifact_pinned
 from .audio_preview import AudioPreviewError, audio_preview_file_path, render_project_audio_preview
 from .bgm_pipeline import BgmPipelineError, validate_bgm_track
 from .bgm import import_bgm, list_bgm
@@ -40,12 +44,15 @@ from .renderer import render_approved
 from .scanner import scan_inbox
 from .storyboard import generate_storyboard, generate_thumbnail, storyboard_for_api, storyboard_thumbnail_path, update_storyboard
 from .storyboard_preview import StoryboardPreviewError, render_storyboard_preview, storyboard_preview_path
+from .web_security import WebSecurityError, parse_content_length, parse_single_range, validate_local_bind_host, validate_origin_headers
 
 
 JOBS: dict[tuple[int, str], dict] = {}
 JOBS_LOCK = threading.Lock()
 JOB_COORDINATOR = DEFAULT_COORDINATOR
 JOB_TOKENS: dict[tuple[int, str], CancellationToken] = {}
+FORM_CSRF_TOKEN = ""
+MEDIA_STREAM_CHUNK = 64 * 1024
 
 
 class MultipartFormError(ValueError):
@@ -56,6 +63,10 @@ UPLOAD_READ_CHUNK = 64 * 1024
 UPLOAD_SPOOL_THRESHOLD = 8 * 1024 * 1024
 MAX_MULTIPART_HEADER = 64 * 1024
 MAX_TEXT_FIELD = 1024 * 1024
+MAX_JSON_BODY = 2 * 1024 * 1024
+MAX_FORM_BODY = 2 * 1024 * 1024
+MAX_UPLOAD_BODY = 100 * 1024 * 1024 * 1024
+UPLOAD_SEMAPHORE = threading.BoundedSemaphore(2)
 
 
 def _base_revision(data: dict) -> int | None:
@@ -219,13 +230,14 @@ def _close_form(form: dict[str, list[_UploadPart]]) -> None:
 
 
 def _multipart_form(handler: BaseHTTPRequestHandler) -> dict[str, list[_UploadPart]]:
-    raw_length = handler.headers.get("content-length", "")
     try:
-        length = int(str(raw_length or "").strip())
-    except (TypeError, ValueError) as exc:
-        raise MultipartFormError("Content-Length 無效") from exc
-    if length < 0:
-        raise MultipartFormError("Content-Length 不可為負數")
+        length = parse_content_length(
+            handler.headers.get("content-length"),
+            maximum=MAX_UPLOAD_BODY,
+            required=True,
+        )
+    except WebSecurityError as exc:
+        raise MultipartFormError(exc.message) from exc
     content_type = str(handler.headers.get("content-type", "") or "")
     header = BytesParser(policy=policy.default).parsebytes(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
     boundary_text = header.get_boundary()
@@ -286,6 +298,9 @@ def _form_value(form: dict[str, list[_UploadPart]], name: str) -> str:
 
 
 def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
+    validate_local_bind_host(host)
+    global FORM_CSRF_TOKEN
+    FORM_CSRF_TOKEN = secrets.token_urlsafe(32)
     db = db_path(cfg)
     init_db(db)
     ensure_perception_schema(db)
@@ -296,10 +311,31 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
     render_api = RenderAPI(render_manager)
 
     class Handler(BaseHTTPRequestHandler):
+        def _check_host(self) -> None:
+            validate_origin_headers(self.headers, host, port, csrf_token=None, supplied_token=None)
+
+        def _check_mutation(self, supplied_token: str | None = None) -> None:
+            validate_origin_headers(self.headers, host, port, csrf_token=FORM_CSRF_TOKEN, supplied_token=supplied_token or self.headers.get("x-video-vault-csrf"))
+
         def do_GET(self) -> None:
+            self._handle_get(head_only=False)
+
+        def _handle_get(self, *, head_only: bool) -> None:
+            self._head_only = head_only
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
-            if parsed.path == "/" and _web_dist().exists():
+            try:
+                # GET requests do not need CSRF, but Host validation still
+                # prevents DNS-rebinding access to this local service.
+                from .web_security import validate_host_header
+
+                validate_host_header(self.headers.get("host"), host, port)
+            except WebSecurityError as exc:
+                self._json(exc.as_dict(), status=400)
+                return
+            if parsed.path == "/api/security":
+                self._json({"ok": True, "csrf_token": FORM_CSRF_TOKEN})
+            elif parsed.path == "/" and _web_dist().exists():
                 self._file(_web_dist() / "index.html")
             elif parsed.path == "/classic" or (parsed.path == "/" and not _web_dist().exists()):
                 project_id = int(query.get("project_id", ["0"])[0] or 0)
@@ -311,9 +347,24 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif parsed.path == "/api/projects":
                 self._json(list_projects(db))
             elif parsed.path == "/api/project":
-                self._json(project_detail(cfg, db, int(query.get("id", ["0"])[0])))
+                self._json(_project_detail_for_api(cfg, project_detail(cfg, db, int(query.get("id", ["0"])[0]))))
             elif parsed.path == "/api/project/storyboard":
                 self._json(storyboard_for_api(cfg, db, int(query.get("project_id", ["0"])[0] or 0)))
+            elif parsed.path == "/api/project/storage":
+                project_id = int(query.get("project_id", ["0"])[0] or 0)
+                inventory = reconcile_inventory(cfg, project_id)
+                artifacts = inventory.get("artifacts", [])
+                public_artifacts = [{**{key: value for key, value in item.items() if key != "path"}, "display_name": Path(str(item.get("path") or "")).name} for item in artifacts]
+                self._json({
+                    "ok": True,
+                    "project_id": project_id,
+                    "artifacts": public_artifacts,
+                    "total_bytes": sum(int(item.get("size") or 0) for item in artifacts),
+                    "protected_bytes": sum(int(item.get("size") or 0) for item in artifacts if item.get("pinned") or item.get("type") in {"source_media", "approval_snapshot", "formal_output", "manifest"}),
+                    "pinned_count": sum(1 for item in artifacts if item.get("pinned")),
+                    "free_bytes": free_disk_bytes(project_dir(cfg, project_id)),
+                    "recovered_count": int(inventory.get("recovered") or 0),
+                })
             elif parsed.path == "/api/videos":
                 self._json(video_list(cfg, db))
             elif parsed.path == "/api/bgm":
@@ -370,27 +421,42 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     self._file(path)
                 except (FileNotFoundError, ValueError):
                     self.send_error(404)
+            elif parsed.path == "/api/project/media":
+                try:
+                    path = registered_project_media_path(
+                        cfg,
+                        db,
+                        int(query.get("project_id", ["0"])[0] or 0),
+                        query.get("media_id", [""])[0],
+                    )
+                    self._file(path)
+                except (FileNotFoundError, ValueError):
+                    self.send_error(404)
             elif _web_dist().exists() and _static_file(parsed.path):
                 self._file(_static_file(parsed.path))
             else:
                 self.send_error(404)
+
+        def do_HEAD(self) -> None:
+            self._handle_get(head_only=True)
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path.startswith("/ui/"):
                 self._ui_post(parsed.path)
                 return
-            if parsed.path == "/api/upload":
-                self._json(upload(self, cfg))
-                return
-            if parsed.path == "/api/project/upload":
-                self._json(upload_project(self, cfg, db))
-                return
-            if parsed.path == "/api/upload-bgm":
-                self._json(upload_bgm(self, cfg, db))
-                return
-            data = self._json_body()
             try:
+                self._check_mutation()
+                if parsed.path == "/api/upload":
+                    self._json(self._bounded_upload(lambda: upload(self, cfg)))
+                    return
+                if parsed.path == "/api/project/upload":
+                    self._json(self._bounded_upload(lambda: upload_project(self, cfg, db)))
+                    return
+                if parsed.path == "/api/upload-bgm":
+                    self._json(self._bounded_upload(lambda: upload_bgm(self, cfg, db)))
+                    return
+                data = self._json_body()
                 self._api_post(parsed.path, data)
             except ProjectRevisionConflict as exc:
                 self._json({
@@ -400,19 +466,34 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     "project_revision": exc.current,
                     "current_revision": exc.current,
                 }, status=409)
+            except WebSecurityError as exc:
+                self._json(exc.as_dict(), status=403)
+            except RetentionError as exc:
+                self._json(exc.as_dict(), status=409 if exc.code == "stale_cleanup_plan" else 400)
 
         def _ui_post(self, path: str) -> None:
             if path in {"/ui/upload-project", "/ui/upload-bgm"}:
                 if path == "/ui/upload-project":
-                    result = upload_project(self, cfg, db)
+                    result = self._bounded_upload(lambda: upload_project(self, cfg, db))
                     project_id = int(result.get("project_id") or 0)
+                    if not result.get("ok", True):
+                        self._redirect(project_id, str(result.get("error") or "上傳失敗"))
+                        return
                     self._redirect(project_id, f"已匯入 {len(result.get('files', []))} 支素材")
                 else:
-                    upload_bgm(self, cfg, db)
+                    result = self._bounded_upload(lambda: upload_bgm(self, cfg, db))
+                    if not result.get("ok", True):
+                        self._redirect(0, str(result.get("error") or "上傳失敗"))
+                        return
                     self._redirect(0, "BGM 已登錄")
                 return
 
             data = self._form_body()
+            try:
+                self._check_mutation(data.get("csrf_token"))
+            except WebSecurityError as exc:
+                self._redirect(project_id if "project_id" in locals() else 0, f"安全性驗證失敗：{exc.message}")
+                return
             project_id = int(data.get("project_id", "0") or 0)
             try:
                 if path == "/ui/create":
@@ -447,14 +528,24 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     out = export_opencut_handoff(cfg, db, project_id, render_clips, int(data.get("max_segments", 20)))
                     self._redirect(project_id, f"OpenCut 匯出完成：{out}")
                 elif path == "/ui/opencut-handoff":
-                    started = start_opencut_job(cfg, db, project_id, data.get("render_clips") == "1", int(data.get("max_segments", 20)))
+                    started = start_opencut_job(
+                        cfg,
+                        db,
+                        project_id,
+                        data.get("render_clips") == "1",
+                        int(data.get("max_segments", 20)),
+                        confirm_local_action=data.get("confirm_local_action") == "1",
+                    )
                     self._redirect(project_id, "正在準備 OpenCut" if started else "OpenCut 準備工作已在執行中")
                 elif path == "/ui/opencut-folder":
+                    _require_local_action_confirmation(data)
                     out = Path(data.get("folder", ""))
                     if out.exists():
-                        _open_folder(out)
+                        _open_folder(cfg, project_id, out, "open_opencut_folder")
                     self._redirect(project_id, f"已打開資料夾：{out}" if out.exists() else "找不到 OpenCut 素材包，請先準備素材")
                 elif path == "/ui/opencut-start":
+                    _require_local_action_confirmation(data)
+                    _audit_local_action(cfg, project_id, "start_opencut", OPENCUT_URL)
                     status = start_opencut()
                     self._redirect(project_id, "OpenCut 已啟動" if status.get("running") else f"OpenCut 啟動失敗：{status.get('error', '')}")
                 elif path == "/ui/hyperframes-export":
@@ -463,12 +554,20 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                         if not ok:
                             self._redirect(project_id, f"正式輸出被擋下：{reason}")
                             return
-                    started = start_hyperframes_job(cfg, db, project_id, data.get("render") == "1", int(data.get("max_segments", 20)))
+                    started = start_hyperframes_job(
+                        cfg,
+                        db,
+                        project_id,
+                        data.get("render") == "1",
+                        int(data.get("max_segments", 20)),
+                        confirm_local_action=data.get("confirm_local_action") == "1",
+                    )
                     self._redirect(project_id, "正在產生 HyperFrames 初剪" if started else "HyperFrames 工作已在執行中")
                 elif path == "/ui/hyperframes-folder":
+                    _require_local_action_confirmation(data)
                     out = project_dir(cfg, project_id) / "output" / "hyperframes"
                     if out.exists():
-                        _open_folder(out)
+                        _open_folder(cfg, project_id, out, "open_hyperframes_folder")
                     self._redirect(project_id, f"已打開資料夾：{out}" if out.exists() else "尚未產生 HyperFrames 專案")
                 elif path == "/ui/stop-jobs":
                     stop_project_jobs(project_id, render_manager)
@@ -549,6 +648,24 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     self._json({"ok": True, "storyboard": storyboard_for_api(cfg, db, project_id), "state": state})
                 except (OSError, TypeError, ValueError) as exc:
                     self._json({"ok": False, "code": "storyboard_generation_failed", "error": str(exc)})
+            elif path == "/api/project/storage/reconcile":
+                project_id = int(data.get("project_id", 0))
+                self._json(reconcile_inventory(cfg, project_id))
+            elif path == "/api/project/storage/plan":
+                project_id = int(data.get("project_id", 0))
+                active_ids = {str(job.get("job_id")) for job in project_jobs(project_id, render_manager, db) if job.get("status") in {"queued", "running", "cancelling"} and job.get("job_id")}
+                self._json({"ok": True, "plan": build_cleanup_plan(cfg, project_id, data.get("policy") if isinstance(data.get("policy"), dict) else None, active_job_ids=active_ids)})
+            elif path == "/api/project/storage/cleanup":
+                project_id = int(data.get("project_id", 0))
+                plan_id = Path(str(data.get("plan_id") or "")).name
+                plan_path = project_dir(cfg, project_id) / "storage" / f"{plan_id}.json"
+                if not plan_id or plan_path.parent.resolve() not in plan_path.resolve().parents or not plan_path.is_file():
+                    raise RetentionError("invalid_cleanup_plan", "找不到指定 cleanup plan", action="重新建立 dry-run plan")
+                active_ids = {str(job.get("job_id")) for job in project_jobs(project_id, render_manager, db) if job.get("status") in {"queued", "running", "cancelling"} and job.get("job_id")}
+                self._json(execute_cleanup_plan(cfg, json.loads(plan_path.read_text(encoding="utf-8")), active_job_ids=active_ids))
+            elif path == "/api/project/storage/pin":
+                project_id = int(data.get("project_id", 0))
+                self._json({"ok": True, "artifact": set_artifact_pinned(cfg, project_id, str(data.get("artifact_id") or ""), bool(data.get("pinned")))})
             elif path == "/api/project/storyboard/thumbnail":
                 try:
                     project_id = int(data.get("project_id", 0))
@@ -696,7 +813,15 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json({"ok": True, "folder": str(out)})
             elif path == "/api/project/opencut-job":
                 project_id = int(data.get("project_id", 0))
-                started = start_opencut_job(cfg, db, project_id, bool(data.get("render_clips")), int(data.get("max_segments", 20)), base_revision=_base_revision(data))
+                started = start_opencut_job(
+                    cfg,
+                    db,
+                    project_id,
+                    bool(data.get("render_clips")),
+                    int(data.get("max_segments", 20)),
+                    base_revision=_base_revision(data),
+                    confirm_local_action=bool(data.get("confirm_local_action")),
+                )
                 self._json({"ok": started, "message": "OpenCut 工作已開始" if started else "OpenCut 工作已在執行中"})
             elif path == "/api/project/hyperframes-export":
                 project_id = int(data.get("project_id", 0))
@@ -721,7 +846,15 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json({"ok": True, "folder": str(out), "output": result["output"] if result else ""})
             elif path == "/api/project/hyperframes-job":
                 project_id = int(data.get("project_id", 0))
-                started = start_hyperframes_job(cfg, db, project_id, bool(data.get("render")), int(data.get("max_segments", 20)), base_revision=_base_revision(data))
+                started = start_hyperframes_job(
+                    cfg,
+                    db,
+                    project_id,
+                    bool(data.get("render")),
+                    int(data.get("max_segments", 20)),
+                    base_revision=_base_revision(data),
+                    confirm_local_action=bool(data.get("confirm_local_action")),
+                )
                 self._json({"ok": started, "message": "HyperFrames 工作已開始" if started else "HyperFrames 工作已在執行中"})
             elif path == "/api/project/stop-jobs":
                 stop_project_jobs(int(data.get("project_id", 0)), render_manager)
@@ -765,13 +898,31 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self.send_error(404)
 
         def _form_body(self) -> dict:
-            length = int(self.headers.get("content-length", "0"))
+            length = parse_content_length(
+                self.headers.get("content-length"),
+                maximum=MAX_FORM_BODY,
+            )
             body = self.rfile.read(length).decode("utf-8") if length else ""
             return {k: v[-1] for k, v in parse_qs(body).items()}
 
         def _json_body(self) -> dict:
-            length = int(self.headers.get("content-length", "0"))
+            length = parse_content_length(
+                self.headers.get("content-length"),
+                maximum=MAX_JSON_BODY,
+            )
             return json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+
+        def _bounded_upload(self, callback):
+            if not UPLOAD_SEMAPHORE.acquire(blocking=False):
+                return {
+                    "ok": False,
+                    "code": "upload_busy",
+                    "error": "同時上傳數已達上限，請稍後重試",
+                }
+            try:
+                return callback()
+            finally:
+                UPLOAD_SEMAPHORE.release()
 
         def _redirect(self, project_id: int = 0, message: str = "") -> None:
             query = {}
@@ -790,7 +941,8 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             self.send_header("cache-control", "no-store")
             self.send_header("content-length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if not getattr(self, "_head_only", False):
+                self.wfile.write(body)
 
         def _html(self, html: str) -> None:
             body = html.encode("utf-8")
@@ -799,16 +951,50 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             self.send_header("cache-control", "no-store")
             self.send_header("content-length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if not getattr(self, "_head_only", False):
+                self.wfile.write(body)
 
         def _file(self, path: Path) -> None:
-            body = path.read_bytes()
-            self.send_response(200)
+            try:
+                size = path.stat().st_size
+                requested = parse_single_range(self.headers.get("range"), size)
+            except (OSError, WebSecurityError) as exc:
+                if isinstance(exc, WebSecurityError):
+                    self.send_response(416)
+                    self.send_header("content-type", "application/json; charset=utf-8")
+                    self.send_header("content-range", f"bytes */{path.stat().st_size if path.exists() else 0}")
+                    body = json.dumps(exc.as_dict(), ensure_ascii=False).encode("utf-8")
+                    self.send_header("content-length", str(len(body)))
+                    self.end_headers()
+                    if not getattr(self, "_head_only", False):
+                        self.wfile.write(body)
+                    return
+                self.send_error(404)
+                return
+            start, end = requested or (0, max(0, size - 1))
+            status = 206 if requested else 200
+            self.send_response(status)
             self.send_header("content-type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
             self.send_header("cache-control", "no-store")
-            self.send_header("content-length", str(len(body)))
+            self.send_header("accept-ranges", "bytes")
+            self.send_header("content-length", str(end - start + 1 if size else 0))
+            if requested:
+                self.send_header("content-range", f"bytes {start}-{end}/{size}")
             self.end_headers()
-            self.wfile.write(body)
+            if getattr(self, "_head_only", False) or size == 0:
+                return
+            try:
+                with path.open("rb") as stream:
+                    stream.seek(start)
+                    remaining = end - start + 1
+                    while remaining:
+                        chunk = stream.read(min(MEDIA_STREAM_CHUNK, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
         def log_message(self, fmt: str, *args) -> None:
             return
@@ -819,6 +1005,69 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
 
 def _web_dist() -> Path:
     return Path(__file__).resolve().parents[2] / "web" / "dist"
+
+
+def registered_project_media_path(cfg: dict, db: Path, project_id: int, media_id: str) -> Path:
+    """Resolve only a source file registered in the requested project."""
+
+    token = str(media_id or "").strip()
+    if not token or any(char in token for char in ("/", "\\", "..")):
+        raise ValueError("invalid project media id")
+    source_dir = project_dir(cfg, int(project_id)) / "source"
+    source_dir = source_dir.resolve()
+    for row in project_videos(db, int(project_id)):
+        row = dict(row)
+        project_media_id = str(row.get("project_media_uuid") or f"video_{row.get('id')}")
+        if project_media_id != token:
+            continue
+        source = Path(str(row.get("current_path") or "")).expanduser().resolve()
+        candidate = source if source.parent == source_dir else source_dir / f"media_{project_media_id}_{source.name}"
+        candidate = candidate.resolve()
+        if source_dir not in candidate.parents or candidate.is_symlink() or not candidate.is_file():
+            raise FileNotFoundError("registered project media is unavailable")
+        return candidate
+    raise FileNotFoundError("registered project media not found")
+
+
+def _project_detail_for_api(cfg: dict, detail: dict) -> dict:
+    """Expose project-scoped media URLs without leaking local filesystem paths."""
+
+    result = deepcopy(detail or {})
+    project = result.get("project") or {}
+    project_id = int(project.get("id") or 0)
+
+    def media_url(media_id: object) -> str:
+        return f"/api/project/media?project_id={project_id}&media_id={str(media_id or '')}"
+
+    for clip in result.get("clips") or []:
+        if not isinstance(clip, dict):
+            continue
+        clip["media_url"] = media_url(clip.get("project_media_id") or clip.get("video_id"))
+        for key in ("source_path", "original_source_path", "physical_filename"):
+            clip.pop(key, None)
+    for segment in result.get("segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        segment["media_url"] = media_url(segment.get("project_media_id") or segment.get("video_id"))
+        segment.pop("source_file", None)
+
+    def scrub(value: object) -> object:
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        cleaned = {}
+        for key, item in value.items():
+            if key in {"source_file", "source_path", "original_source_path", "file_path"}:
+                continue
+            cleaned[key] = scrub(item)
+        if "project_media_id" in cleaned and "media_url" not in cleaned:
+            cleaned["media_url"] = media_url(cleaned["project_media_id"])
+        return cleaned
+
+    result["plan"] = scrub(result.get("plan"))
+    result.pop("folder", None)
+    return result
 
 
 def _static_file(url_path: str) -> Path | None:
@@ -835,7 +1084,7 @@ def render_page(cfg: dict, db: Path, project_id: int = 0, message: str = "", ren
     bgm = list_bgm(db)
     jobs = project_jobs(project_id, render_manager, db) if project_id else []
     refresh = '<meta http-equiv="refresh" content="3">' if any(j.get("status") in {"running", "queued"} for j in jobs) else ""
-    return f"""<!doctype html>
+    html = f"""<!doctype html>
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
@@ -859,10 +1108,11 @@ def render_page(cfg: dict, db: Path, project_id: int = 0, message: str = "", ren
   </main>
 </body>
 </html>"""
+    return _inject_csrf_fields(html)
 
 
 def render_bgm_page(db: Path, message: str = "") -> str:
-    return f"""<!doctype html>
+    return _inject_csrf_fields(f"""<!doctype html>
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
@@ -880,7 +1130,14 @@ def render_bgm_page(db: Path, message: str = "") -> str:
     </section>
   </main>
 </body>
-</html>"""
+</html>""")
+
+
+def _inject_csrf_fields(html: str) -> str:
+    if not FORM_CSRF_TOKEN:
+        return html
+    hidden = f'<input type="hidden" name="csrf_token" value="{h(FORM_CSRF_TOKEN)}">'
+    return re.sub(r"(<form\b[^>]*>)", rf"\1{hidden}", html)
 
 
 def _nav() -> str:
@@ -995,7 +1252,17 @@ def start_color_job(cfg: dict, db: Path, project_id: int, mode: str, *, base_rev
     return True
 
 
-def start_opencut_job(cfg: dict, db: Path, project_id: int, render_clips: bool, max_segments: int, *, base_revision: int | None = None) -> bool:
+def start_opencut_job(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    render_clips: bool,
+    max_segments: int,
+    *,
+    base_revision: int | None = None,
+    confirm_local_action: bool = False,
+) -> bool:
+    _require_local_action_confirmation({"confirm_local_action": confirm_local_action})
     key = (project_id, "opencut")
     with JOBS_LOCK:
         current = JOBS.get(key)
@@ -1010,7 +1277,17 @@ def start_opencut_job(cfg: dict, db: Path, project_id: int, render_clips: bool, 
     return True
 
 
-def start_hyperframes_job(cfg: dict, db: Path, project_id: int, render: bool, max_segments: int, *, base_revision: int | None = None) -> bool:
+def start_hyperframes_job(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    render: bool,
+    max_segments: int,
+    *,
+    base_revision: int | None = None,
+    confirm_local_action: bool = False,
+) -> bool:
+    _require_local_action_confirmation({"confirm_local_action": confirm_local_action})
     key = (project_id, "hyperframes")
     with JOBS_LOCK:
         current = JOBS.get(key)
@@ -1223,6 +1500,7 @@ def _opencut_job(cfg: dict, db: Path, project_id: int, render_clips: bool, max_s
         if _job_stopped(project_id, "opencut"):
             return
         _set_job(project_id, "opencut", status="running", message="正在檢查並啟動 OpenCut", done=0, percent=5)
+        _audit_local_action(cfg, project_id, "start_opencut", OPENCUT_URL)
         status = start_opencut()
         if not status.get("running"):
             _set_job(project_id, "opencut", status="failed", message=f"OpenCut 啟動失敗：{status.get('error', '')}", done=0)
@@ -1234,7 +1512,7 @@ def _opencut_job(cfg: dict, db: Path, project_id: int, render_clips: bool, max_s
         if _job_stopped(project_id, "opencut"):
             return
         _set_job(project_id, "opencut", message="正在打開素材包資料夾", done=2)
-        _open_folder(out)
+        _open_folder(cfg, project_id, out, "open_opencut_folder")
         _set_job(project_id, "opencut", status="done", message=f"OpenCut 已啟動，素材包已完成：{out}", done=3, folder=str(out), percent=100)
     except Exception as exc:
         if _job_stopped(project_id, "opencut"):
@@ -1258,7 +1536,7 @@ def _hyperframes_job(cfg: dict, db: Path, project_id: int, render: bool, max_seg
         if _job_stopped(project_id, "hyperframes"):
             return
         _set_job(project_id, "hyperframes", message="正在打開初剪資料夾", done=1, percent=60 if render else 80)
-        _open_folder(out)
+        _open_folder(cfg, project_id, out, "open_hyperframes_folder")
         if render:
             _set_job(project_id, "hyperframes", message="正在快速輸出 story_draft_fast.mp4", done=2, percent=75)
             result = render_fast_draft(out, cfg, db=db, project_id=project_id)
@@ -1351,16 +1629,16 @@ def _opencut_panel(detail: dict) -> str:
     state = "已啟動" if status["running"] else "未啟動"
     folder = Path(detail["folder"]) / "output" / "opencut_handoff"
     open_link = f'<a class="buttonlink primary" href="{OPENCUT_URL}" target="_blank">開啟 OpenCut</a>' if status["running"] else ""
-    folder_button = _button('/ui/opencut-folder', pid, '打開素材包資料夾', '', {'folder': str(folder)}) if folder.exists() else ""
+    folder_button = _button('/ui/opencut-folder', pid, '確認並打開素材包資料夾', '', {'folder': str(folder), 'confirm_local_action': '1'}) if folder.exists() else ""
     return f"""<div class="card"><h3>OpenCut 剪輯</h3>
 <p class="muted">狀態：{state}</p>
 <div class="item"><b>建議流程</b><p class="muted">按「一鍵交給 OpenCut」後，OpenCut 會開在專案列表，Windows 也會打開素材包資料夾；把資料夾內影片拖進 OpenCut 即可。</p>
-{_button('/ui/opencut-handoff', pid, '一鍵交給 OpenCut', 'primary', {'render_clips': '1'})}</div>
+{_button('/ui/opencut-handoff', pid, '確認並一鍵交給 OpenCut', 'primary', {'render_clips': '1', 'confirm_local_action': '1'})}</div>
 <div class="row">
 {_button('/ui/opencut-export', pid, '只產生素材包')}
 {_button('/ui/opencut-export', pid, '只產生調色片段', '', {'render_clips': '1'})}
 {folder_button}
-{_button('/ui/opencut-start', pid, '啟動 OpenCut')}
+{_button('/ui/opencut-start', pid, '確認並啟動 OpenCut', '', {'confirm_local_action': '1'})}
 {open_link}
 </div>
 <p class="muted">匯出資料夾：{h(folder)}</p>
@@ -1372,13 +1650,13 @@ def _hyperframes_panel(detail: dict) -> str:
         return ""
     pid = int(detail["project"]["id"])
     folder = Path(detail["folder"]) / "output" / "hyperframes"
-    folder_button = _button('/ui/hyperframes-folder', pid, '打開初剪資料夾') if folder.exists() else ""
+    folder_button = _button('/ui/hyperframes-folder', pid, '確認並打開初剪資料夾', '', {'confirm_local_action': '1'}) if folder.exists() else ""
     preview = f'<span class="pill ok">已輸出 story_draft_fast.mp4</span>' if (folder / "story_draft_fast.mp4").exists() else ""
     return f"""<div class="card"><h3>HyperFrames 初剪</h3>
 <div class="item"><b>主流程</b><p class="muted">照行程腳本自動串片、加地點字卡、套 BGM。先產生可預覽的 HTML timeline，需要成片再 render MP4。</p>
 <div class="row">
-{_button('/ui/hyperframes-export', pid, '產生初剪專案', 'primary')}
-{_button('/ui/hyperframes-export', pid, '快速輸出 MP4', 'good', {'render': '1'})}
+{_button('/ui/hyperframes-export', pid, '確認並產生初剪專案', 'primary', {'confirm_local_action': '1'})}
+{_button('/ui/hyperframes-export', pid, '確認並快速輸出 MP4', 'good', {'render': '1', 'confirm_local_action': '1'})}
 {folder_button}
 {preview}
 </div></div>
@@ -1386,7 +1664,26 @@ def _hyperframes_panel(detail: dict) -> str:
 </div>"""
 
 
-def _open_folder(path: Path) -> None:
+def _require_local_action_confirmation(data: dict) -> None:
+    if data.get("confirm_local_action") not in {True, "1", 1}:
+        raise ValueError("此操作會啟動本機應用程式或開啟資料夾，必須先明確確認")
+
+
+def _audit_local_action(cfg: dict, project_id: int, action: str, target: object) -> None:
+    audit_path = project_dir(cfg, project_id) / "decisions" / "local_actions.jsonl"
+    record = {
+        "timestamp": time.time(),
+        "project_id": project_id,
+        "action": action,
+        "target": str(target),
+        "confirmed": True,
+    }
+    with audit_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _open_folder(cfg: dict, project_id: int, path: Path, action: str) -> None:
+    _audit_local_action(cfg, project_id, action, path)
     subprocess.Popen(["explorer", str(path)])
 
 
@@ -1453,6 +1750,12 @@ def _parse_upload_form(handler: BaseHTTPRequestHandler) -> tuple[dict[str, list[
         return _multipart_form(handler), None
     except MultipartFormError as exc:
         return None, {"ok": False, "error": str(exc)}
+
+
+def _verify_form_csrf(form: dict[str, list[_UploadPart]]) -> dict | None:
+    if FORM_CSRF_TOKEN and _form_value(form, "csrf_token") != FORM_CSRF_TOKEN:
+        return {"ok": False, "code": "csrf_failed", "error": "CSRF token 無效或缺失，已拒絕變更操作", "action": "重新整理頁面後再試"}
+    return None
 
 
 class DuplicateUploadError(ValueError):
@@ -1639,6 +1942,10 @@ def upload(handler: BaseHTTPRequestHandler, cfg: dict) -> dict:
     if error:
         return error | {"files": []}
     assert form is not None
+    csrf_error = _verify_form_csrf(form)
+    if csrf_error:
+        _close_form(form)
+        return csrf_error | {"files": []}
     saved = []
     try:
         items = _form_items(form, "file")
@@ -1669,6 +1976,10 @@ def upload_project(handler: BaseHTTPRequestHandler, cfg: dict, db: Path) -> dict
     if error:
         return error | {"project_id": 0, "files": []}
     assert form is not None
+    csrf_error = _verify_form_csrf(form)
+    if csrf_error:
+        _close_form(form)
+        return csrf_error | {"project_id": 0, "files": []}
     saved = []
     try:
         try:
@@ -1807,6 +2118,10 @@ def upload_bgm(handler: BaseHTTPRequestHandler, cfg: dict, db: Path) -> dict:
     if error:
         return error
     assert form is not None
+    csrf_error = _verify_form_csrf(form)
+    if csrf_error:
+        _close_form(form)
+        return csrf_error
     staged: Path | None = None
     try:
         items = _form_items(form, "file")

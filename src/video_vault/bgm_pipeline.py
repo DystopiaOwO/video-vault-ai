@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 from .media_probe import MediaProbe
 from .audio_pipeline import build_project_audio_filter
+from .encoder_contract import encoder_arguments
 
 
 class BgmPipelineError(ValueError):
@@ -90,6 +91,8 @@ def build_bgm_mix_command(
     normalization: Mapping[str, Any] | None = None,
     timeline_offset_seconds: float = 0.0,
     project_duration_seconds: float | None = None,
+    video_filter: str | None = None,
+    encoder_contract: Mapping[str, Any] | None = None,
 ) -> list[str]:
     source = Path(str(track.get("source_path") or "")).expanduser().resolve()
     command = [
@@ -119,7 +122,12 @@ def build_bgm_mix_command(
         timeline_offset_seconds=timeline_offset,
         project_duration_seconds=project_duration_seconds,
     )
-    graph = f"[1:a]{bgm_filter}[bgm];" + build_project_audio_filter(profile, normalization, bgm_label="bgm")
+    graph = f"[1:a]{bgm_filter}[bgm];" + build_project_audio_filter(
+        profile,
+        normalization,
+        bgm_label="bgm",
+        duration_seconds=timeline_duration,
+    )
     command += [
         "-filter_complex",
         graph,
@@ -127,8 +135,22 @@ def build_bgm_mix_command(
         "0:v:0",
         "-map",
         "[aout]",
-        "-c:v",
-        "copy",
+    ]
+    if video_filter:
+        if not encoder_contract:
+            raise BgmPipelineError(
+                "visual composition requires a resolved encoder contract"
+            )
+        command += ["-vf", video_filter]
+        command += encoder_arguments(encoder_contract)
+        command += ["-pix_fmt", str(profile["pixel_format"])]
+    else:
+        if encoder_contract:
+            command += encoder_arguments(encoder_contract)
+            command += ["-r", str(profile["fps"]), "-fps_mode", "cfr", "-pix_fmt", str(profile["pixel_format"])]
+        else:
+            command += ["-c:v", "copy"]
+    command += [
         "-c:a",
         str(profile["audio_codec"]),
         "-ar",

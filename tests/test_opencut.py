@@ -1,7 +1,9 @@
 from pathlib import Path
 
+import csv
 import json
 import pytest
+from types import SimpleNamespace
 
 from video_vault.database import add_analysis, init_db, upsert_video
 from video_vault.opencut import export_opencut_handoff
@@ -92,3 +94,75 @@ def test_opencut_preview_keeps_approved_project_approved(tmp_path):
     export_opencut_handoff(cfg, db, project_id, render_clips=False)
 
     assert can_project_render(cfg, db, project_id)[0] is True
+
+
+def test_formal_opencut_uses_canonical_source_range_and_nested_manifest_paths(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    rendered = tmp_path / "rendered.mp4"
+    rendered.write_bytes(b"rendered")
+    segment = {
+        "segment_id": "segment-1",
+        "stable_id": "segment-1",
+        "clip_id": "clip-1",
+        "source_file": str(source),
+        "source_in_seconds": 1.25,
+        "source_out_seconds": 3.75,
+        "timeline_duration_seconds": 2.5,
+        "speed": 1,
+        "title": "canonical",
+        "group": "day",
+    }
+    delivery = {
+        "contract_version": "handoff-v1",
+        "handoff_id": "handoff-formal",
+        "handoff_type": "formal",
+        "created_at": "2026-07-28T00:00:00+00:00",
+        "timeline_items": [segment],
+        "exported_ids": ["segment-1"],
+        "files": [],
+        "file_hashes": {},
+        "contract_hash": "initial",
+    }
+    approved_manifest = {
+        "project_name": "formal",
+        "segments": [segment],
+        "bgm": [],
+    }
+    monkeypatch.setattr("video_vault.opencut.assert_project_approved", lambda *args: None)
+    monkeypatch.setattr(
+        "video_vault.opencut.build_handoff_manifest",
+        lambda *args, **kwargs: json.loads(json.dumps(delivery)),
+    )
+    monkeypatch.setattr(
+        "video_vault.opencut.load_approved_handoff_snapshot",
+        lambda *args: {"manifest": approved_manifest},
+    )
+    monkeypatch.setattr(
+        "video_vault.opencut.render_segment",
+        lambda *args: SimpleNamespace(output_path=rendered, cache_key="cache-1"),
+    )
+
+    out = export_opencut_handoff(
+        {"library_root": str(tmp_path)},
+        tmp_path / "db.sqlite3",
+        1,
+        render_clips=True,
+        mode="complete",
+    )
+
+    graded = next((out / "graded_clips").glob("*.mp4"))
+    assert "_00012_" in graded.name
+    with (out / "recommended_segments.csv").open(
+        newline="", encoding="utf-8-sig"
+    ) as stream:
+        row = next(csv.DictReader(stream))
+    assert row["start_seconds"] == "1.25"
+    assert row["end_seconds"] == "3.75"
+    manifest = json.loads((out / "handoff_manifest.json").read_text(encoding="utf-8"))
+    assert any(
+        item["path"].startswith("graded_clips/")
+        for item in manifest["files"]
+    )

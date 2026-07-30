@@ -75,6 +75,12 @@ def _sample_rgb(path: Path, seconds: float) -> tuple[float, float, float]:
     return tuple(sum(values[index::3]) / max(1, len(values[index::3])) for index in range(3))
 
 
+def _max_gray(path: Path, seconds: float) -> int:
+    result = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-ss", str(seconds), "-i", str(path), "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, check=False)
+    assert result.returncode == 0 and result.stdout
+    return max(result.stdout)
+
+
 def _tone_amplitude(path: Path, seconds: float, frequency: float) -> float:
     result = subprocess.run(
         [FFMPEG, "-hide_banner", "-loglevel", "error", "-ss", str(seconds), "-i", str(path), "-t", "0.3", "-vn", "-map", "0:a:0", "-ac", "1", "-ar", "8000", "-f", "f32le", "-"],
@@ -103,9 +109,9 @@ def test_project_renderer_assembles_order_bgm_and_final_cache(tmp_path: Path):
     project_id = _create_project(cfg, db, [red, blue])
     first = render_project(cfg, db, project_id)
     assert not first.cache_hit
-    assert first.duration_seconds == pytest.approx(3, abs=0.2)
-    assert _sample_rgb(first.output_path, 0.5)[0] > _sample_rgb(first.output_path, 0.5)[2]
-    assert _sample_rgb(first.output_path, 2.0)[2] > _sample_rgb(first.output_path, 2.0)[0]
+    assert first.duration_seconds == pytest.approx(4.5, abs=0.2)
+    assert _sample_rgb(first.output_path, 2.0)[0] > _sample_rgb(first.output_path, 2.0)[2]
+    assert _sample_rgb(first.output_path, 3.5)[2] > _sample_rgb(first.output_path, 3.5)[0]
     assert first.output_path.with_name(first.output_path.name + ".render.json").exists()
 
     hit = render_project(cfg, db, project_id)
@@ -122,17 +128,65 @@ def test_project_renderer_assembles_order_bgm_and_final_cache(tmp_path: Path):
     _make_bgm(bgm)
     loop_project = _create_project(cfg, db, [red], bgm=bgm, loop=True)
     loop_result = render_project(cfg, db, loop_project)
-    assert loop_result.bgm_used and loop_result.duration_seconds == pytest.approx(1.5, abs=0.2)
+    assert loop_result.bgm_used and loop_result.duration_seconds == pytest.approx(3, abs=0.2)
     assert _tone_amplitude(loop_result.output_path, 1.1, 220) > 0.002
     nonloop_project = _create_project(cfg, db, [red], bgm=bgm, loop=False)
     nonloop_result = render_project(cfg, db, nonloop_project)
-    assert nonloop_result.bgm_used and nonloop_result.duration_seconds == pytest.approx(1.5, abs=0.2)
-    assert _tone_amplitude(nonloop_result.output_path, 1.1, 880) > _tone_amplitude(nonloop_result.output_path, 1.1, 220) * 1.5
+    assert nonloop_result.bgm_used and nonloop_result.duration_seconds == pytest.approx(3, abs=0.2)
+    assert _tone_amplitude(nonloop_result.output_path, 2.1, 880) > _tone_amplitude(nonloop_result.output_path, 2.1, 220) * 1.5
     gain_zero_project = _create_project(cfg, db, [red], bgm=bgm, gain_db=0)
     gain_zero_result = render_project(cfg, db, gain_zero_project)
     gain_low_project = _create_project(cfg, db, [red], bgm=bgm, gain_db=-18)
     gain_low_result = render_project(cfg, db, gain_low_project)
     assert _tone_amplitude(gain_zero_result.output_path, 0.3, 220) > _tone_amplitude(gain_low_result.output_path, 0.3, 220) * 1.5
+
+
+def test_formal_renderer_composes_visual_timeline_and_reports_evidence(tmp_path: Path):
+    library = tmp_path / "visual-formal"
+    library.mkdir()
+    cfg = {"library_root": str(library), "ffmpeg_path": FFMPEG, "ffprobe_path": FFPROBE}
+    db = library / "video_vault.sqlite3"
+    init_db(db)
+    source = tmp_path / "visual-source.mp4"
+    before = None
+    _make_color_source(source, "green", 30, 880)
+    before = source.read_bytes()
+    project_id = _create_project(cfg, db, [source])
+    detail = project_detail(cfg, db, project_id)
+    segment_id = detail["segments"][0]["segment_id"]
+    plan_path = project_dir(cfg, project_id) / "project_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan["visual_timeline"] = {
+        "schema_version": 1,
+        "contract_version": "visual-timeline-v1",
+        "items": [
+            {"stable_id": "intro-1", "type": "intro", "duration_seconds": 0.5, "text": "Intro", "style_id": "title-center", "animation_id": "static"},
+            {"stable_id": "chapter-1", "type": "chapter_card", "group_id": plan["groups"][0]["label"], "start_seconds": 0, "duration_seconds": 0.5, "text": "Chapter", "style_id": "location-lower-left", "animation_id": "static"},
+            {"stable_id": "lower-1", "type": "lower_third", "segment_id": segment_id, "offset_seconds": 0.1, "duration_seconds": 0.5, "text": "Location", "style_id": "lower-third", "animation_id": "static"},
+            {"stable_id": "outro-1", "type": "outro", "duration_seconds": 0.5, "text": "Outro", "style_id": "title-center", "animation_id": "static"},
+        ],
+    }
+    plan["visual_items"] = plan["visual_timeline"]["items"]
+    plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    set_review_status(cfg, db, project_id, "approved")
+    result = render_project(cfg, db, project_id)
+    report = json.loads(result.output_path.with_name(result.output_path.name + ".render.json").read_text(encoding="utf-8"))
+    visual = report["visual_timeline"]
+    assert result.duration_seconds == pytest.approx(3.0, abs=0.2)
+    assert visual["duration_seconds"] == pytest.approx(3.0, abs=0.001)
+    assert {item["stable_id"] for item in visual["items"]} == {"intro-1", "chapter-1", "lower-1", "outro-1"}
+    assert {item["type"] for item in visual["items"]} == {"intro", "chapter_card", "lower_third", "outro"}
+    assert next(item for item in visual["items"] if item["stable_id"] == "lower-1")["composition"] == "overlay"
+    assert _max_gray(result.output_path, 0.2) > 200
+    assert _max_gray(result.output_path, 1.2) > 200
+    assert _max_gray(result.output_path, 2.7) > 200
+    assert source.read_bytes() == before
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan["visual_timeline"]["items"][0]["text"] = "Changed intro"
+    plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    set_review_status(cfg, db, project_id, "approved")
+    changed = render_project(cfg, db, project_id)
+    assert not changed.cache_hit
 
 
 def _create_audio_role_project(cfg, db: Path, source: Path, role: str, *, speed: float = 1.0, bgm: Path | None = None) -> int:
@@ -167,7 +221,7 @@ def test_real_ffmpeg_original_audio_roles(tmp_path: Path, role: str):
     audio = next(stream for stream in probe["streams"] if stream.get("codec_type") == "audio")
     assert audio.get("sample_rate") == "48000"
     assert int(audio.get("channels") or 0) == 2
-    amplitude = _tone_amplitude(result.output_path, 0.3, 880)
+    amplitude = _tone_amplitude(result.output_path, 2.0, 880)
     if role == "mute":
         assert amplitude < 0.01
     else:
@@ -190,7 +244,7 @@ def test_real_ffmpeg_bgm_only_uses_unattached_global_track(tmp_path: Path):
     assert _tone_amplitude(result.output_path, 0.4, 220) > 0.01
 
 
-@pytest.mark.parametrize(("speed", "expected"), [(0.5, 3.0), (2.0, 0.75)])
+@pytest.mark.parametrize(("speed", "expected"), [(0.5, 4.5), (2.0, 2.25)])
 def test_real_ffmpeg_speed_keeps_audio_video_aligned(tmp_path: Path, speed: float, expected: float):
     library = tmp_path / f"speed-{speed}"
     library.mkdir()

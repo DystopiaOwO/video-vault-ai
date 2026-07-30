@@ -172,11 +172,12 @@ def test_thumbnail_ratio_save_preserves_approved_project(tmp_path: Path):
     assert project_detail(cfg, db, project_id)["can_render"] is True
 
 
-def test_group_title_save_preserves_approved_project(tmp_path: Path):
+def test_group_title_save_invalidates_approved_visual_output(tmp_path: Path):
     cfg, db, project_id, state = _approved_storyboard(tmp_path)
     state["groups"][0]["title"] = "抵達車站"
-    update_storyboard(cfg, db, project_id, state)
-    assert project_detail(cfg, db, project_id)["can_render"] is True
+    result = update_storyboard(cfg, db, project_id, state, return_result=True)
+    assert result["approval_invalidated"] is True
+    assert project_detail(cfg, db, project_id)["can_render"] is False
 
 
 def test_order_save_invalidates_approved_project(tmp_path: Path):

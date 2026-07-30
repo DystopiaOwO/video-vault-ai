@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .database import project
 from .audio_state import (
@@ -25,7 +25,14 @@ from .color_consistency import effective_color_settings, has_color_state, load_p
 from .project import project_dir, project_segments
 from .render_profiles import get_render_profile
 from .render_settings import load_render_settings
-from .visual_timeline import build_visual_timeline, validate_visual_timeline
+from .visual_timeline import (
+    align_visual_timeline_to_segments,
+    build_visual_timeline,
+    reconcile_visual_timeline_with_segments,
+    resolve_visual_runtime_assets,
+    validate_visual_timeline,
+)
+from .visual_compositor import resolve_visual_timeline, stable_visual_hash
 
 
 ALLOWED_AUDIO_ROLES = {"keep_original", "lower_original", "mute", "keep", "lower", "bgm_only"}
@@ -113,6 +120,20 @@ def build_render_manifest(
         if str(track.get("license_status") or "unverified") != "verified"
         or str(track.get("attribution_status") or "unknown") == "unknown"
     ]
+    visual_source = plan.get("visual_timeline") or build_visual_timeline(plan.get("groups") or [])
+    visual_timeline_input_hash = stable_visual_hash(visual_source) if isinstance(visual_source, Mapping) else ""
+    visual_plan = align_visual_timeline_to_segments(
+        resolve_visual_runtime_assets(
+            reconcile_visual_timeline_with_segments(
+                visual_source,
+                segments,
+            ),
+            cfg,
+        ),
+        segments,
+    )
+    visual_timeline = visual_plan
+    visual_timeline = resolve_visual_timeline(visual_timeline, segments, profile, require_assets=True)
     manifest: dict[str, Any] = {
         "schema_version": "2.0",
         "project_id": int(project_id),
@@ -121,13 +142,14 @@ def build_render_manifest(
         "profile": profile,
         "settings": settings,
         "storyboard_render_state": storyboard_render_state(storyboard_state, raw_segments),
-        "visual_timeline": plan.get("visual_timeline") or build_visual_timeline(plan.get("groups") or []),
-        "visual_items": plan.get("visual_items") or (plan.get("visual_timeline") or {}).get("items", []),
+        "visual_timeline": visual_timeline,
+        "visual_timeline_input_hash": visual_timeline_input_hash,
+        "visual_items": visual_timeline.get("resolved_items", visual_timeline.get("items", [])),
         "segments": segments,
         "bgm": bgm,
         "bgm_credits": bgm_credits,
         "unresolved_bgm_licenses": unresolved_bgm_licenses,
-        "expected_duration_seconds": round(sum(float(item["timeline_duration_seconds"]) for item in segments), 6),
+        "expected_duration_seconds": round(float(visual_timeline.get("resolved_duration_seconds") or 0), 6),
         "manifest_hash": "",
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
@@ -234,9 +256,13 @@ def validate_render_manifest(manifest: dict[str, Any], check_files: bool = False
         if timeline_duration is not None:
             duration += timeline_duration
 
+    visual_timeline = manifest.get("visual_timeline") if isinstance(manifest.get("visual_timeline"), dict) else {}
+    resolved_visual_duration = _number(visual_timeline.get("resolved_duration_seconds"), "visual_timeline.resolved_duration_seconds", errors) if visual_timeline.get("resolved_duration_seconds") is not None else duration
+    if resolved_visual_duration is not None and resolved_visual_duration < duration - 0.001:
+        errors.append("visual timeline duration cannot be shorter than segment duration")
     expected = _number(manifest.get("expected_duration_seconds"), "expected_duration_seconds", errors)
-    if expected is not None and abs(expected - duration) > 0.001:
-        errors.append("expected_duration_seconds does not match segment durations")
+    if expected is not None and resolved_visual_duration is not None and abs(expected - resolved_visual_duration) > 0.001:
+        errors.append("expected_duration_seconds does not match resolved visual timeline duration")
     for track in manifest.get("bgm", []) or []:
         missing = [key for key in ("source_url", "license_name", "attribution_text") if not str(track.get(key) or "").strip()]
         if missing:
@@ -319,9 +345,14 @@ def _manifest_segment(
         "audio_role": legacy_role,
         "scene_role": str(segment.get("scene_role") or ""),
         "story_position": str(segment.get("story_position") or ""),
+        "group": str(segment.get("group") or ""),
+        "group_id": str(segment.get("storyboard_group_id") or segment.get("group") or ""),
         "user_notes": str(segment.get("user_notes") or ""),
         "title": str(segment.get("title") or ""),
         "suggested_use": str(segment.get("suggested_use") or ""),
+        # Group titles are display metadata.  Use the stable storyboard group
+        # identity so renaming a group cannot change the approved render.
+        "group_id": str(segment.get("storyboard_group_id") or segment.get("group_id") or ""),
     }
     if audio_state is not None:
         result["audio"] = audio

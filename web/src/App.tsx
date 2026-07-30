@@ -19,6 +19,7 @@ import {
 import { AudioMixingWorkspace } from "./workspaces/audio/AudioMixingWorkspace";
 import { ColorConsistencyWorkspace } from "./workspaces/color/ColorConsistencyWorkspace";
 import { StoryboardWorkspaceController } from "./workspaces/storyboard/StoryboardWorkspaceController";
+import { StorageWorkspace } from "./workspaces/storage/StorageWorkspace";
 import "./project-detail-polish.css";
 
 export function App() {
@@ -459,6 +460,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
       <RenderJobPanel jobs={jobs} projectId={detail.project.id} setMessage={setMessage} refreshProject={refreshCurrentProject} mutationControls={mutationControls} />
       <ProjectWorkflow detail={detail} jobs={jobs} />
       <WorkflowSkeleton detail={detail} />
+      <StorageWorkspace projectId={detail.project.id} setMessage={setMessage} />
     </div>
 
     <div className="workspace-section" id="workspace-storyboard" tabIndex={-1}>
@@ -526,6 +528,11 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
   </>;
 
   async function exportProject(kind: "hyperframes" | "hyperframes-render" | "opencut" | "opencut-render") {
+    const localAction = kind.startsWith("hyperframes")
+      ? "這會在本機產生 HyperFrames 交接檔並開啟輸出資料夾，是否繼續？"
+      : "這會在本機啟動 OpenCut 並開啟素材包資料夾，是否繼續？";
+    const confirmed = window.confirm(localAction);
+    if (confirmed === false) return;
     const mutation = mutationControls.beginProjectMutation(detail.project.id, "export");
     if (!mutation) return;
     const operation = beginProjectOperation(detail.project.id);

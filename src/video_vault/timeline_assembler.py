@@ -8,6 +8,7 @@ import subprocess
 from typing import Any, Callable, Sequence
 
 from .audio_pipeline import build_project_audio_filter
+from .encoder_contract import encoder_arguments
 
 
 class TimelineAssemblyError(RuntimeError):
@@ -54,6 +55,8 @@ def build_timeline_command(
     duration_seconds: float | None = None,
     normalization: dict[str, Any] | None = None,
     profile: dict[str, Any] | None = None,
+    video_filter: str | None = None,
+    encoder_contract: dict[str, Any] | None = None,
 ) -> list[str]:
     command = [
         str(ffmpeg_path),
@@ -73,11 +76,39 @@ def build_timeline_command(
     ]
     if include_audio and not (normalization and normalization.get("enabled")):
         command += ["-map", "0:a:0"]
-    command += ["-c:v", "copy"]
+    if video_filter:
+        if not profile or not encoder_contract:
+            raise TimelineAssemblyError(
+                "visual composition requires profile and encoder contract"
+            )
+        command += ["-vf", video_filter]
+        command += encoder_arguments(encoder_contract)
+        command += ["-pix_fmt", str(profile["pixel_format"])]
+    else:
+        if profile and encoder_contract:
+            command += encoder_arguments(encoder_contract)
+            command += ["-r", str(profile["fps"]), "-fps_mode", "cfr", "-pix_fmt", str(profile["pixel_format"])]
+        else:
+            command += ["-c:v", "copy"]
     if include_audio and normalization and normalization.get("enabled"):
         if not profile:
             raise TimelineAssemblyError("audio normalization requires a render profile")
-        command += ["-filter_complex", build_project_audio_filter(profile, normalization), "-map", "[aout]", "-c:a", str(profile["audio_codec"]), "-ar", str(profile["audio_sample_rate"]), "-ac", str(profile["audio_channels"])]
+        command += [
+            "-filter_complex",
+            build_project_audio_filter(
+                profile,
+                normalization,
+                duration_seconds=duration_seconds,
+            ),
+            "-map",
+            "[aout]",
+            "-c:a",
+            str(profile["audio_codec"]),
+            "-ar",
+            str(profile["audio_sample_rate"]),
+            "-ac",
+            str(profile["audio_channels"]),
+        ]
     elif include_audio:
         command += ["-c:a", "copy"]
     else:

@@ -296,7 +296,11 @@ def apply_storyboard_state(rows: list[dict[str, Any]], state: Mapping[str, Any])
 def storyboard_render_state(state: Mapping[str, Any], rows: list[Mapping[str, Any]] | None = None) -> dict[str, Any]:
     """Project the storyboard to fields that can change formal output."""
     groups = [
-        {"group_id": str(group.get("group_id") or ""), "order": _positive_int(group.get("order"), index)}
+        {
+            "group_id": str(group.get("group_id") or ""),
+            "title": str(group.get("title") or ""),
+            "order": _positive_int(group.get("order"), index),
+        }
         for index, group in enumerate(state.get("groups") or [], 1)
         if isinstance(group, Mapping) and str(group.get("group_id") or "")
     ]

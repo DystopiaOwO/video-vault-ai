@@ -7,6 +7,13 @@ default_ingest_mode: "copy"
 ffmpeg_path: "ffmpeg"
 ffprobe_path: "ffprobe"
 
+render:
+  max_concurrent_jobs: 1
+  minimum_free_disk_bytes: 0
+  # Optional. If omitted, a supported local system font is fingerprinted into
+  # each approval snapshot before title-card composition.
+  visual_font_path: ""
+
 ai:
   provider: "mock"
   local:

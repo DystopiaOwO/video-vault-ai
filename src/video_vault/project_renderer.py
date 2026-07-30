@@ -13,6 +13,10 @@ import hashlib
 from typing import Any, Callable, Mapping
 
 from .bgm_pipeline import BgmPipelineError, bgm_fingerprint, build_bgm_mix_command, validate_bgm_track
+from .artifact_retention import (
+    RetentionError,
+    ensure_render_free_space,
+)
 from .final_qc import FinalQCResult, sha256_file, validate_final_output
 from .loudness import LoudnessError, build_second_pass_command, measure_loudness
 from .project import can_project_render, project_dir
@@ -20,6 +24,12 @@ from .render_manifest import manifest_hash, validate_render_manifest
 from .segment_cache import build_segment_cache_key, cache_paths
 from .segment_renderer import SegmentRenderResult, render_segment
 from .timeline_assembler import TimelineAssemblyError, build_concat_file, build_timeline_command, run_command
+from .visual_renderer import (
+    VisualRenderError,
+    cleanup_visual_filter,
+    prepare_visual_filter,
+)
+from .visual_compositor import VisualCompositionError, apply_lower_thirds, render_visual_cards, resolve_visual_timeline, stable_visual_hash
 
 
 class ProjectRenderError(RuntimeError):
@@ -117,6 +127,30 @@ def render_project(
     if validation["errors"]:
         raise ProjectRenderError("approved render manifest is invalid: " + "; ".join(validation["errors"]))
     _validate_phase4a_settings(manifest)
+    raw_visual_timeline = manifest.get("visual_timeline") if isinstance(manifest.get("visual_timeline"), Mapping) else {}
+    if raw_visual_timeline.get("items"):
+        try:
+            visual_timeline = resolve_visual_timeline(raw_visual_timeline, manifest["segments"], manifest["profile"], require_assets=True)
+        except VisualCompositionError as exc:
+            raise ProjectRenderError(f"visual composition 被擋下：{exc.message}") from exc
+        if raw_visual_timeline.get("resolution_hash") != visual_timeline.get("resolution_hash"):
+            raise ProjectRenderError("visual composition resolution 與 approved manifest 不一致，請重新核准")
+        if abs(float(manifest.get("expected_duration_seconds") or 0) - float(visual_timeline.get("resolved_duration_seconds") or 0)) > 0.001:
+            raise ProjectRenderError("visual timeline duration 與 approved manifest 不一致，請重新核准")
+    else:
+        base_duration = round(sum(float(item.get("timeline_duration_seconds") or 0) for item in manifest["segments"]), 6)
+        visual_timeline = {
+            "contract_version": "visual-timeline-v1",
+            "resolution_version": "visual-composition-v1",
+            "items": [],
+            "resolved_items": [],
+            "sequence": [
+                {"kind": "segment", "stable_id": str(item.get("segment_id") or ""), "type": "segment", "start_seconds": 0, "duration_seconds": float(item.get("timeline_duration_seconds") or 0)}
+                for item in manifest["segments"]
+            ],
+            "resolved_duration_seconds": base_duration,
+        }
+        visual_timeline["resolution_hash"] = stable_visual_hash(visual_timeline)
     _execution_check(execution)
     _execution_update(execution, stage="validating", percent=5, message="核准與 Manifest 驗證完成")
     segments = sorted(manifest["segments"], key=lambda item: int(item["order"]))
@@ -177,12 +211,20 @@ def render_project(
     output.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    expected = sum(float(item["timeline_duration_seconds"]) for item in segments)
+    try:
+        disk_preflight = ensure_render_free_space(cfg, manifest, output)
+    except RetentionError as exc:
+        raise ProjectRenderError(exc.message) from exc
+    # Formal manifests carry the resolved visual sequence. Legacy fixtures that
+    # only have visual_items still use the drawtext contract for compatibility;
+    # resolved timelines are composed by visual_compositor exactly once.
+    expected = float(visual_timeline["resolved_duration_seconds"])
 
     work_dir = folder / "work" / approved_hash
     segment_results: list[SegmentRenderResult] = []
     command: list[str] | None = None
     concat_path = work_dir / "timeline.ffconcat"
+    visual_filter = None
     partial_created = False
     report_temp_created = False
     output_published = False
@@ -193,6 +235,8 @@ def render_project(
     completed_segment_duration = 0.0
     try:
         work_dir.mkdir(parents=True, exist_ok=True)
+        if manifest.get("visual_items") and not visual_timeline.get("resolved_items"):
+            visual_filter = prepare_visual_filter(manifest, work_dir)
         for index, segment in enumerate(segments, 1):
             _execution_check(execution)
             segment_duration = float(segment["timeline_duration_seconds"])
@@ -212,7 +256,26 @@ def render_project(
             completed_segment_duration += segment_duration
             _execution_check(execution)
             _execution_update(execution, stage="segments", percent=5 + 70 * (completed_segment_duration / total_segment_duration), message=f"已完成片段 {index}/{len(segments)}", current_segment_id=str(segment.get("segment_id") or ""), current_segment_index=index)
-        concat_path = build_concat_file([item.output_path for item in segment_results], concat_path)
+        # Production results carry the stable segment id.  Keep a positional
+        # fallback for legacy callers/test doubles that only return one shared
+        # placeholder id; the manifest order remains authoritative.
+        segment_paths = {
+            str(segment.get("segment_id") or ""): result.output_path
+            for segment, result in zip(segments, segment_results)
+        }
+        segment_paths.update(
+            {item.segment_id: item.output_path for item in segment_results if item.segment_id}
+        )
+        sequence_paths, visual_evidence, visual_overlays = render_visual_cards(
+            visual_timeline,
+            segment_paths,
+            folder / "cache" / "visual",
+            work_dir,
+            manifest["profile"],
+            ffmpeg_path,
+            runner=runner or getattr(execution, "runner", None),
+        )
+        concat_path = build_concat_file(sequence_paths, concat_path)
         _execution_check(execution)
         _execution_begin_ffmpeg(execution, "assembling", 75, 20, expected, "正在組合時間軸與混音")
         if track is None:
@@ -223,6 +286,8 @@ def render_project(
                 duration_seconds=expected,
                 normalization=None if normalization.get("enabled") else normalization,
                 profile=manifest["profile"],
+                video_filter=visual_filter.expression if visual_filter else None,
+                encoder_contract=dict(encoder_contract or {}) if encoder_contract else None,
             )
         else:
             command = build_bgm_mix_command(
@@ -233,6 +298,8 @@ def render_project(
                 expected,
                 manifest["profile"],
                 normalization=None if normalization.get("enabled") else normalization,
+                video_filter=visual_filter.expression if visual_filter else None,
+                encoder_contract=encoder_contract if encoder_contract else None,
             )
         partial_created = True
         try:
@@ -244,6 +311,10 @@ def render_project(
             result = run_command(command, runner)
         if int(getattr(result, "returncode", 0) or 0) != 0:
             raise ProjectRenderError(str(getattr(result, "stderr", "") or "FFmpeg project render failed"))
+        if visual_overlays:
+            visual_partial = partial.with_name(f".{partial.stem}.visual.mp4")
+            apply_lower_thirds(ffmpeg_path, partial, visual_partial, visual_overlays, manifest["profile"], work_dir, expected, runner=runner or getattr(execution, "runner", None))
+            visual_partial.replace(partial)
         if normalization.get("enabled"):
             _execution_check(execution)
             _execution_update(execution, stage="assembling", percent=92, message="正在量測並套用正式音量")
@@ -265,7 +336,7 @@ def render_project(
             "analysis": loudness_analysis.to_dict() if loudness_analysis is not None else {},
             "final": loudness_final.to_dict() if loudness_final is not None else {},
         }
-        report = build_render_report(project_id, manifest, output, qc, segment_results, track, bgm_fp, output_size=partial.stat().st_size, approval_snapshot=snapshot, encoder_contract=encoder_contract, loudness=report_loudness, loudness_policy=normalization, bgm_source="new" if (folder / "audio_settings.json").is_file() else "legacy", cache_miss_reason=paths.cache_miss_reason)
+        report = build_render_report(project_id, manifest, output, qc, segment_results, track, bgm_fp, output_size=partial.stat().st_size, approval_snapshot=snapshot, encoder_contract=encoder_contract, loudness=report_loudness, loudness_policy=normalization, bgm_source="new" if (folder / "audio_settings.json").is_file() else "legacy", cache_miss_reason=paths.cache_miss_reason, disk_preflight=disk_preflight, visual_timeline=visual_timeline, visual_evidence=visual_evidence)
         report_temp_created = True
         report_temp.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         _execution_check(execution)
@@ -276,15 +347,19 @@ def render_project(
         else:
             output_published, report_published = publish()
         _write_log(log_path, project_id, approved_hash, segment_results, concat_path, command, result, qc, track, None)
+        _cleanup_visual_work(work_dir)
         concat_path.unlink(missing_ok=True)
+        cleanup_visual_filter(visual_filter)
         _execution_update(execution, stage="done", percent=100, message="正式輸出完成")
         return ProjectRenderResult(project_id, output, approved_hash, False, qc.duration_seconds, tuple(segment_results), track is not None, tuple(qc.warnings))
     except Exception as exc:
+        cleanup_visual_filter(visual_filter)
         _cleanup_render_files(paths, concat_path, partial_created, report_temp_created, output_published, report_published)
+        _cleanup_visual_work(work_dir)
         _write_log(log_path, project_id, approved_hash, segment_results, concat_path, command, locals().get("result"), locals().get("qc"), track, exc)
         if isinstance(exc, (ProjectRenderError, PermissionError)):
             raise
-        if isinstance(exc, (TimelineAssemblyError, BgmPipelineError, LoudnessError)):
+        if isinstance(exc, (TimelineAssemblyError, BgmPipelineError, LoudnessError, VisualRenderError)):
             raise ProjectRenderError(str(exc)) from exc
         if isinstance(exc, OSError):
             raise ProjectRenderError(f"project render failed: {exc}") from exc
@@ -412,6 +487,15 @@ def _cleanup_render_files(paths: FinalOutputPaths, concat_path: Path, partial_cr
         _unlink_if_exists(paths.report)
 
 
+def _cleanup_visual_work(work_dir: Path) -> None:
+    for path in work_dir.glob("visual-text-*.txt"):
+        _unlink_if_exists(path)
+    for path in work_dir.glob("card-*.txt"):
+        _unlink_if_exists(path)
+    for path in work_dir.glob("*.visual.mp4"):
+        _unlink_if_exists(path)
+
+
 def _unlink_if_exists(path: Path) -> None:
     try:
         Path(path).unlink(missing_ok=True)
@@ -439,7 +523,11 @@ def build_render_report(
     loudness_policy: Mapping[str, Any] | None = None,
     bgm_source: str = "",
     cache_miss_reason: str = "",
+    disk_preflight: Mapping[str, Any] | None = None,
+    visual_timeline: Mapping[str, Any] | None = None,
+    visual_evidence: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] | None = None,
 ) -> dict[str, Any]:
+    visual = dict(visual_timeline or {})
     return {
         "project_id": project_id,
         "manifest_hash": manifest["manifest_hash"],
@@ -457,6 +545,16 @@ def build_render_report(
             "segments": {str(item.get("segment_id")): dict(item.get("color") or {}) for item in manifest.get("segments", []) if isinstance(item, Mapping)},
         },
         "timing": {"expected_duration_seconds": manifest.get("expected_duration_seconds"), "measured_duration_seconds": qc.duration_seconds},
+        "visual_timeline": {
+            "contract_version": visual.get("contract_version", ""),
+            "resolution_version": visual.get("resolution_version", ""),
+            "resolution_hash": visual.get("resolution_hash", ""),
+            "duration_seconds": visual.get("resolved_duration_seconds", manifest.get("expected_duration_seconds")),
+            "items": [dict(item) for item in (visual_evidence or [])],
+            "item_count": len(visual_evidence or manifest.get("visual_items") or []),
+            "item_ids": [str(item.get("stable_id") or "") for item in (visual_evidence or manifest.get("visual_items") or []) if isinstance(item, Mapping)],
+            "composed": bool(visual_evidence or manifest.get("visual_items")),
+        },
         "qc_schema_version": 2,
         "cache": {
             "qc_policy_version": 2,
@@ -465,7 +563,9 @@ def build_render_report(
             "snapshot_id": (approval_snapshot or {}).get("snapshot_id", ""),
             "snapshot_hash": (approval_snapshot or {}).get("snapshot_hash", ""),
             "encoder_contract_hash": (encoder_contract or {}).get("contract_hash") or _stable_hash(dict(encoder_contract or {})),
+            "visual_timeline_hash": stable_visual_hash(visual) if visual else "",
         },
+        "disk_preflight": dict(disk_preflight or {}),
         "measurements": dict(qc.measurements or {}),
         "profile_id": manifest["profile"]["profile_id"],
         "output_path": str(Path(output_path).resolve()),
@@ -533,6 +633,10 @@ def _final_cache_miss_reason(output: Path, report_path: Path, manifest: Mapping[
                 return "encoder_contract_changed"
         if _policy_key(loudness_policy) != str(cache.get("loudness_policy_key") or _policy_key(report.get("loudness_policy") or {})):
             return "loudness_policy_changed"
+        current_visual = manifest.get("visual_timeline")
+        current_visual_hash = stable_visual_hash(current_visual) if isinstance(current_visual, Mapping) and current_visual else ""
+        if str(cache.get("visual_timeline_hash") or "") != current_visual_hash:
+            return "visual_timeline_changed"
         expected_keys = [build_segment_cache_key(manifest, segment) for segment in sorted(manifest["segments"], key=lambda item: int(item["order"]))]
         actual_keys = [item.get("cache_key") for item in report.get("segments", [])]
         if actual_keys != expected_keys:

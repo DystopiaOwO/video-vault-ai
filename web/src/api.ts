@@ -23,6 +23,7 @@ export type Clip = {
   user_summary_migration_state?: string;
   effective_summary: string;
   effective_summary_source: "user" | "ai" | "none";
+  media_url?: string;
 };
 
 export type BgmTrack = {
@@ -83,6 +84,7 @@ export type Segment = {
   user_notes: string;
   source_file?: string;
   source_filename?: string;
+  media_url?: string;
   thumbnail_time_ratio?: number;
   storyboard_group_id?: string;
   storyboard_order?: number;
@@ -121,6 +123,38 @@ export type Job = {
   approval_snapshot_id?: string;
   approval_snapshot_hash?: string;
   encoder_contract?: { implementation?: string; fallback_reason?: string; [key: string]: unknown };
+};
+
+export type StorageArtifact = {
+  artifact_id: string;
+  project_id: number;
+  type: string;
+  path?: string;
+  display_name?: string;
+  size: number;
+  pinned: boolean;
+  lifecycle_state: string;
+  deletion_status: string;
+  references?: string[];
+};
+
+export type StorageSummary = {
+  ok: boolean;
+  project_id: number;
+  artifacts: StorageArtifact[];
+  total_bytes: number;
+  protected_bytes: number;
+  pinned_count: number;
+  free_bytes: number;
+  recovered_count: number;
+};
+
+export type CleanupPlan = {
+  plan_id: string;
+  candidate_count: number;
+  candidate_size: number;
+  candidates: Array<{ artifact_id: string; type: string; size: number; reason: string }>;
+  protected: Array<{ artifact_id: string; type: string; reason: string }>;
 };
 
 export type RenderReport = {
@@ -269,8 +303,31 @@ export function formatApiError(error: unknown): string {
   return error instanceof Error ? error.message : "網路或服務錯誤";
 }
 
+let csrfToken: string | null = null;
+let csrfRequest: Promise<string> | null = null;
+
+async function getCsrfToken(): Promise<string> {
+  if (csrfToken) return csrfToken;
+  csrfRequest ||= fetch("/api/security", { headers: { accept: "application/json" } })
+    .then(async (response) => {
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || typeof payload.csrf_token !== "string" || !payload.csrf_token) throw new Error("無法取得本機安全 token");
+      csrfToken = payload.csrf_token;
+      return payload.csrf_token;
+    })
+    .finally(() => { csrfRequest = null; });
+  return csrfRequest;
+}
+
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
+  let request = init;
+  if (String(init?.method || "GET").toUpperCase() !== "GET" && url !== "/api/security") {
+    const token = await getCsrfToken();
+    const headers = new Headers(init?.headers);
+    headers.set("x-video-vault-csrf", token);
+    request = { ...init, headers };
+  }
+  const res = await fetch(url, request);
   const payload = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError(res.status, payload && typeof payload === "object" ? payload : {});
   return payload as T;
@@ -281,6 +338,10 @@ export const api = {
   project: (id: number, signal?: AbortSignal) => json<ProjectDetail>(`/api/project?id=${id}`, { signal }),
   jobs: (projectId: number, signal?: AbortSignal, sinceRevision?: number) => json<Job[] | JobsSnapshot>(`/api/jobs?project_id=${projectId}&meta=1${sinceRevision === undefined ? "" : `&since_revision=${sinceRevision}`}`, { signal }).then((result) => Array.isArray(result) ? { jobs: result } : result),
   bgm: () => json<BgmTrack[]>("/api/bgm"),
+  storage: (projectId: number) => json<StorageSummary>(`/api/project/storage?project_id=${projectId}`),
+  storagePlan: (projectId: number) => json<{ ok: boolean; plan?: CleanupPlan; error?: string }>("/api/project/storage/plan", post({ project_id: projectId })),
+  storageCleanup: (projectId: number, planId: string) => json<{ ok: boolean; results?: Array<{ artifact_id: string; status: string; code?: string }>; reclaimed_bytes?: number; error?: string }>("/api/project/storage/cleanup", post({ project_id: projectId, plan_id: planId })),
+  storagePin: (projectId: number, artifactId: string, pinned: boolean) => json<{ ok: boolean; artifact?: StorageArtifact; error?: string }>("/api/project/storage/pin", post({ project_id: projectId, artifact_id: artifactId, pinned })),
   createProject: (name: string) =>
     json<{ ok: boolean; id: number }>("/api/projects", post({ name, video_ids: [], category: "unknown", content_type: "diary_montage", platform: "YouTube" })),
   uploadProject: (projectId: number, files: ReadonlyArray<File>, baseRevision?: number) => {
@@ -338,9 +399,9 @@ export const api = {
   hyperframesExport: (projectId: number, render = false) =>
     json<{ ok: boolean; folder?: string; output?: string; error?: string }>("/api/project/hyperframes-export", post({ project_id: projectId, render, max_segments: 20 })),
   opencutJob: (projectId: number, renderClips = false, baseRevision?: number) =>
-    json<{ ok: boolean; message?: string; error?: string }>("/api/project/opencut-job", post({ project_id: projectId, render_clips: renderClips, max_segments: 20, base_revision: baseRevision })),
+    json<{ ok: boolean; message?: string; error?: string }>("/api/project/opencut-job", post({ project_id: projectId, render_clips: renderClips, max_segments: 20, base_revision: baseRevision, confirm_local_action: true })),
   hyperframesJob: (projectId: number, render = false, baseRevision?: number) =>
-    json<{ ok: boolean; message?: string; error?: string }>("/api/project/hyperframes-job", post({ project_id: projectId, render, max_segments: 20, base_revision: baseRevision })),
+    json<{ ok: boolean; message?: string; error?: string }>("/api/project/hyperframes-job", post({ project_id: projectId, render, max_segments: 20, base_revision: baseRevision, confirm_local_action: true })),
   createRenderJob: (projectId: number, outputPath = "") =>
     json<{ ok: boolean; created: boolean; job?: Job; error?: string }>("/api/project/render-job", post({ project_id: projectId, output_path: outputPath })),
   cancelRenderJob: (jobId: string) =>

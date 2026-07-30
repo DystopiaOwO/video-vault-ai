@@ -83,6 +83,17 @@ def test_manifest_hash_is_deterministic_and_created_at_independent(tmp_path):
     assert changed["manifest_hash"] != first["manifest_hash"]
 
 
+def test_visual_item_change_changes_approved_manifest_hash(tmp_path):
+    cfg, db, project_id = _project(tmp_path, count=1)
+    first = compile_render_manifest(cfg, db, project_id)
+    plan_path = Path(tmp_path, "08_projects", f"project_{project_id}", "project_plan.json")
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan["visual_timeline"]["items"][0]["text"] = "changed visual text"
+    plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    changed = compile_render_manifest(cfg, db, project_id)
+    assert changed["manifest_hash"] != first["manifest_hash"]
+
+
 def test_build_manifest_does_not_write_snapshot(tmp_path):
     cfg, db, project_id = _project(tmp_path, count=1)
     path = Path(tmp_path, "08_projects", f"project_{project_id}", "render_manifest.json")

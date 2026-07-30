@@ -356,6 +356,8 @@ class RenderJobManager:
                 job = self.store.get(job_id)
                 status = str(job.get("status")) if job else ""
             if status not in ACTIVE_JOB_STATUSES:
+                if status == "cancelled" and bool(job.get("cancel_requested")):
+                    return {"ok": True, "job": job}
                 return {"ok": False, "reason": "job is already finished", "job": job}
             runtime = self._active.get(job_id)
             if runtime is not None and not runtime.execution.request_cancel():
@@ -383,6 +385,8 @@ class RenderJobManager:
                     status = str(job.get("status")) if job else ""
                     if status == "cancelling":
                         updated = job
+                    elif status == "cancelled" and bool(job.get("cancel_requested")):
+                        return {"ok": True, "job": job}
                     elif status not in ACTIVE_JOB_STATUSES:
                         return {"ok": False, "reason": "job is already finished", "job": job}
                     else:
@@ -529,13 +533,13 @@ class RenderJobManager:
             if coordinator_id:
                 self.coordinator.finish_cancel(coordinator_id)
             self.store.append_log(job_id, "result: cancelled")
-            self.store.update(job_id, status="cancelled", stage="done", message="正式輸出已取消", error="", process_id=None, finished_at=utc_now())
+            self.store.update(job_id, status="cancelled", stage="done", message="正式輸出已取消", error="", cancel_requested=True, process_id=None, finished_at=utc_now())
         except Exception as exc:
             if cancel_event.is_set():
                 if coordinator_id:
                     self.coordinator.finish_cancel(coordinator_id)
                 self.store.append_log(job_id, "result: cancelled\n" + traceback.format_exc())
-                self.store.update(job_id, status="cancelled", stage="done", message="正式輸出已取消", error="", process_id=None, finished_at=utc_now())
+                self.store.update(job_id, status="cancelled", stage="done", message="正式輸出已取消", error="", cancel_requested=True, process_id=None, finished_at=utc_now())
             else:
                 if coordinator_id:
                     self.coordinator.fail(coordinator_id, str(exc))
