@@ -134,7 +134,7 @@ def run_project_perception(
 
         result = analyze_frame_manifest(
             video,
-            cfg,
+            {**cfg, "_sampling_policy": sampling["policy"]},
             manifest,
             progress,
             should_cancel=should_cancel,

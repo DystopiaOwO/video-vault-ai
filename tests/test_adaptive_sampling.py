@@ -15,6 +15,7 @@ from video_vault.sampling import (
     sampling_contract_hash,
 )
 from video_vault.analyzer.frame_analysis import merge_frames_to_segments
+from video_vault.analyzer.vision_pipeline import provider_from_config
 from video_vault.ui import _sampling_override
 
 
@@ -81,6 +82,22 @@ def test_migrated_fixed_mode_preserves_legacy_integer_duration_boundary():
     cfg = {"frame_interval_seconds": 5, "frame_height": 720}
     plan = build_sampling_plan(Path("legacy.mp4"), 10.9, cfg)
     assert [sample["timestamp_seconds"] for sample in plan["samples"]] == [0.0, 5.0]
+
+
+def test_fixed_sampling_applies_clip_and_minute_caps():
+    cfg = {
+        "frame_interval_seconds": 1,
+        "frame_height": 720,
+        "sampling": {
+            "mode": "fixed",
+            "max_frames_per_clip": 5,
+            "max_frames_per_minute": 3,
+        },
+    }
+    plan = build_sampling_plan(Path("legacy.mp4"), 60, cfg)
+
+    assert len(plan["samples"]) == 3
+    assert plan["candidate_counts"]["baseline"] == 60
 
 
 def test_stable_minute_uses_far_fewer_calls_than_one_second_sampling(monkeypatch):
@@ -154,6 +171,28 @@ def test_sampling_is_deterministic_and_hard_capped(monkeypatch):
     )
 
 
+def test_sampling_hash_ignores_path_and_mtime_but_tracks_content():
+    policy = resolved_sampling_policy(_cfg())
+    samples = [{"timestamp_seconds": 0, "reasons": ["boundary"]}]
+    first = {"path": "C:/one/clip.mp4", "size": 10, "mtime_ns": 1, "sample_sha256": "same"}
+    moved = {"path": "D:/two/clip.mp4", "size": 10, "mtime_ns": 2, "sample_sha256": "same"}
+    changed = {**moved, "sample_sha256": "changed"}
+
+    assert sampling_contract_hash(first, policy, samples) == sampling_contract_hash(moved, policy, samples)
+    assert sampling_contract_hash(first, policy, samples) != sampling_contract_hash(changed, policy, samples)
+
+
+def test_adaptive_grouping_uses_effective_baseline_interval():
+    frames = [
+        {"timestamp_seconds": 0.0, "usefulness_score": 0.9, "tags": ["travel"], "summary": "一"},
+        {"timestamp_seconds": 1.0, "usefulness_score": 0.9, "tags": ["landscape"], "summary": "二"},
+    ]
+
+    segments = merge_frames_to_segments(frames, 0.5, duration_seconds=2.0)
+
+    assert len(segments) == 2
+
+
 def test_short_clip_keeps_boundaries_and_estimate_respects_cap(monkeypatch):
     monkeypatch.setattr(
         sampling.subprocess,
@@ -212,6 +251,12 @@ def test_provider_model_comes_from_active_provider_branch():
     cloud["ai"] = {"provider": "cloud", "cloud": {"model": "gpt-4.1-mini"}}
     assert resolved_ai_model(local) == "qwen-vl"
     assert resolved_ai_model(cloud) == "gpt-4.1-mini"
+
+
+def test_mock_provider_audit_model_matches_provider():
+    cfg = _cfg()
+
+    assert resolved_ai_model(cfg) == provider_from_config(cfg).model == "rules"
 
 
 def test_web_sampling_override_is_bounded_and_versionable():

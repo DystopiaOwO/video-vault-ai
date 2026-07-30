@@ -96,7 +96,7 @@ def resolved_ai_model(cfg: dict) -> str:
     provider = str(ai.get("provider") or "mock")
     if provider in {"local", "cloud"}:
         return str((ai.get(provider) or {}).get("model") or "")
-    return str(ai.get("model") or "mock-v1")
+    return str((ai.get("mock") or {}).get("model") or "rules")
 
 
 def estimate_sampling_count(duration_seconds: float, policy: dict) -> int:
@@ -121,13 +121,14 @@ def build_sampling_plan(
     policy = resolved_sampling_policy(cfg, override)
     duration = max(0.0, float(duration_seconds or 0))
     if policy["mode"] == "fixed":
-        samples = [
+        candidates = [
             {"timestamp_seconds": timestamp, "reasons": ["baseline"], "activity_score": 0.0}
             for timestamp in _fixed_timestamp_range(
                 duration, policy["baseline_interval_seconds"]
             )
         ]
-        return _plan_payload(policy, duration, samples, {"baseline": len(samples), "scene": 0, "motion": 0, "boundary": 0})
+        samples = _apply_cap(candidates, _sampling_cap(duration, policy))
+        return _plan_payload(policy, duration, samples, {"baseline": len(candidates), "scene": 0, "motion": 0, "boundary": 0})
 
     candidates: list[dict] = []
     counts = {"baseline": 0, "scene": 0, "motion": 0, "boundary": 0}
@@ -205,7 +206,11 @@ def dedupe_visual_samples(
 
 def sampling_contract_hash(source: dict, policy: dict, samples: list[dict]) -> str:
     payload = {
-        "source": source,
+        "source": {
+            key: source[key]
+            for key in ("size", "sample_sha256", "sha256", "content_sha256")
+            if key in source
+        },
         "policy": policy,
         "samples": [
             {

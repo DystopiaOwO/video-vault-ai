@@ -21,7 +21,7 @@ def provider_from_config(cfg: dict):
         return CloudProvider(cfg)
     if name == "local":
         return LocalProvider(cfg)
-    return MockProvider()
+    return MockProvider(cfg)
 
 
 def analyze_frame_manifest(
@@ -77,9 +77,14 @@ def analyze_frame_manifest(
             progress(index, total, frame)
         if should_cancel and should_cancel():
             raise AnalysisCancelled("perception cancelled by user")
+    sampling_policy = cfg.get("_sampling_policy") or {}
+    grouping_interval = float(
+        sampling_policy.get("baseline_interval_seconds")
+        or cfg["frame_interval_seconds"]
+    )
     perceived_segments = merge_frames_to_segments(
         analyzed,
-        float(cfg["frame_interval_seconds"]),
+        grouping_interval,
         duration_seconds=(
             float(video.get("duration_seconds") or 0)
             if duration_seconds is None
