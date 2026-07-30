@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 import { api, type BgmTrack, type Job, type Project, type ProjectDetail } from "./api";
 import { ClipSummaryEditor } from "./components/project/ClipSummaryEditor";
+import { PerceptionSamplingControls } from "./components/project/PerceptionSamplingControls";
 import { ProjectLocation } from "./components/project/ProjectLocation";
 import { ProjectWorkflow, projectWorkflowSteps } from "./components/project/ProjectWorkflow";
 import { RenderJobPanel } from "./components/render/RenderJobPanel";
@@ -503,13 +504,13 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
             <button type="button" disabled={projectMutationBusy} onClick={() => void analyze(true)}>全部重跑感知</button>
             <button type="button" disabled={projectMutationBusy || !detail.clips.length} onClick={() => void buildPlan()}>產生故事整理</button>
           </div>
-          {detail.clips.map((clip) => <div className="item" key={clip.clip_id}>
+          {detail.clips.map((clip) => <div className="item" key={`${detail.project.id}:${clip.clip_id}`}>
             <div className="row">
               <b>{clip.clip_id}</b>
-              <button type="button" disabled={projectMutationBusy} onClick={() => void analyzeOne(clip.video_id)}>重跑感知</button>
             </div>
             {clip.filename}
             <span>{projectStatusLabel(clip.status)} · {clip.segment_count} 段 · {Math.round(clip.duration_seconds || 0)} 秒 · {clip.time_of_day || "未分類時段"}</span>
+            <PerceptionSamplingControls clip={clip} disabled={projectMutationBusy} onAnalyze={(sampling) => analyzeOne(clip.video_id, sampling)} />
             <ClipSummaryEditor projectId={detail.project.id} projectRevision={detail.project_revision} clip={clip} setMessage={setMessage} refreshProject={refreshCurrentProject} mutationControls={mutationControls} />
           </div>)}
           {!detail.clips.length && <div className="inline-empty">尚無素材。先選擇多支影片匯入，再進行內容感知。</div>}
@@ -654,13 +655,13 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
     }
   }
 
-  async function analyzeOne(videoId: number) {
+  async function analyzeOne(videoId: number, sampling?: import("./api").SamplingOverride) {
     const mutation = mutationControls.beginProjectMutation(detail.project.id, "analyze");
     if (!mutation) return;
     const operation = beginProjectOperation(detail.project.id);
     setMessage("已送出單支素材感知，請看工作狀態百分比。");
     try {
-      const result = await api.analyzeVideo(detail.project.id, videoId, detail.project_revision);
+      const result = await api.analyzeVideo(detail.project.id, videoId, detail.project_revision, sampling);
       if (!result.ok) {
         if (isCurrentProjectOperation(operation)) setMessage(`單支素材感知啟動失敗：${result.message || "操作未成功"}`);
         return;

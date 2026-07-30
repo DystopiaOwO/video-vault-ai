@@ -7,8 +7,11 @@ FRAME_TAGS = ["coffee", "food", "closeup", "hands", "dripping"]
 
 class MockProvider:
     provider = "mock"
-    model = "rules"
     prompt_version = "perception_zh_tw_v1"
+
+    def __init__(self, cfg: dict | None = None):
+        mock = ((cfg or {}).get("ai") or {}).get("mock") or {}
+        self.model = str(mock.get("model") or "rules")
 
     def analyze(self, video: dict) -> dict:
         duration = float(video.get("duration_seconds") or 60)

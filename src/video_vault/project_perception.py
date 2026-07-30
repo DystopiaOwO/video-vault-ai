@@ -21,8 +21,14 @@ from .perception_runs import (
     run_staging_dir,
     set_run_frame_manifest,
     set_run_output_path,
+    set_run_sampling_manifest,
     snapshot_metadata_paths,
     validate_run_inputs,
+)
+from .sampling import (
+    build_sampling_plan,
+    dedupe_visual_samples,
+    sampling_contract_hash,
 )
 from .planner import draft_plan, perceive_output, video_dir, write_plan_files
 from .project import build_project_plan, project_dir
@@ -43,6 +49,7 @@ def run_project_perception(
     progress=None,
     should_cancel=None,
     base_revision: int | None = None,
+    sampling_override: dict | None = None,
 ) -> dict:
     """Run one project perception generation and publish it coherently.
 
@@ -63,7 +70,13 @@ def run_project_perception(
     captured_revisions = {int(item): current_revision(db, int(item)) for item in linked_project_ids}
     if base_revision is not None and int(base_revision) != captured_revisions[int(project_id)]:
         raise ProjectRevisionConflict(project_id, int(base_revision), captured_revisions[int(project_id)])
-    run = create_perception_run(db, cfg, project_id, video)
+    run = create_perception_run(
+        db,
+        cfg,
+        project_id,
+        video,
+        sampling_override=sampling_override,
+    )
     run_uuid = str(run["run_uuid"])
     staging = run_staging_dir(cfg, run_uuid)
     published_snapshot: dict | None = None
@@ -72,21 +85,63 @@ def run_project_perception(
     try:
         _raise_if_cancelled(should_cancel)
         frame_dir = staging / "frames"
-        frame_paths = extract_frames(Path(video["current_path"]), frame_dir, cfg)
-        manifest = build_frame_manifest(frame_paths, cfg)
+        sampling = build_sampling_plan(
+            Path(video["current_path"]),
+            float(video.get("duration_seconds") or 0),
+            cfg,
+            sampling_override,
+        )
+        samples = list(sampling["samples"])
+        extract_cfg = {
+            **cfg,
+            "_frame_timestamps": [
+                float(sample["timestamp_seconds"]) for sample in samples
+            ],
+        }
+        frame_paths = extract_frames(Path(video["current_path"]), frame_dir, extract_cfg)
+        if len(frame_paths) != len(samples):
+            raise RuntimeError(
+                f"adaptive frame extraction count mismatch: expected {len(samples)}, got {len(frame_paths)}"
+            )
+        frame_paths, samples, visual_dedupe = dedupe_visual_samples(
+            frame_paths,
+            samples,
+            cfg,
+            sampling["policy"],
+        )
+        sampling["samples"] = samples
+        sampling["visual_dedupe"] = visual_dedupe
+        sampling["estimated_vision_calls"] = len(samples)
+        sampling["sample_reason_counts"] = _sample_reason_counts(samples)
+        sampling["contract_hash"] = sampling_contract_hash(
+            run["input_snapshot"]["source"],
+            sampling["policy"],
+            samples,
+        )
+        set_run_sampling_manifest(db, run_uuid, sampling)
+        manifest = build_frame_manifest(frame_paths, cfg, samples)
         set_run_frame_manifest(db, run_uuid, manifest)
-        errors = validate_run_inputs(analysis_run(db, run_uuid), video, cfg, manifest)
+        errors = validate_run_inputs(
+            analysis_run(db, run_uuid),
+            video,
+            cfg,
+            manifest,
+            sampling_override,
+        )
         if errors:
             raise RuntimeError("; ".join(errors))
         _raise_if_cancelled(should_cancel)
 
         result = analyze_frame_manifest(
             video,
-            cfg,
+            {**cfg, "_sampling_policy": sampling["policy"]},
             manifest,
             progress,
             should_cancel=should_cancel,
         )
+        sampling["actual_vision_calls"] = int(result.get("vision_calls") or 0)
+        sampling["cache_hits"] = int(result.get("cache_hits") or 0)
+        set_run_sampling_manifest(db, run_uuid, sampling)
         result_path = staging / "result.json"
         result_path.write_text(
             json.dumps(result, ensure_ascii=False, indent=2),
@@ -138,6 +193,7 @@ def run_project_perception(
         completed = finalize_perception_run(db, run_uuid)
         return {
             **result,
+            "sampling": sampling,
             "run": completed,
             "segment_identity_migration": migration,
             "project_segment_state_migrations": project_migrations,
@@ -167,6 +223,14 @@ def run_project_perception(
 def _raise_if_cancelled(should_cancel) -> None:
     if should_cancel and should_cancel():
         raise PerceptionCancelled("perception cancelled by user")
+
+
+def _sample_reason_counts(samples: list[dict]) -> dict[str, int]:
+    result = {"baseline": 0, "scene": 0, "motion": 0, "boundary": 0}
+    for sample in samples:
+        for reason in set(sample.get("reasons") or []):
+            result[str(reason)] = int(result.get(str(reason), 0)) + 1
+    return result
 
 
 def _metadata_paths(cfg: dict, project_ids: list[int], video_id: int) -> list[Path]:

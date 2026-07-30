@@ -1,6 +1,7 @@
 from video_vault.analyzer import MockProvider
 from video_vault.analyzer.vision_pipeline import analyze_video_frames
 from video_vault.database import add_frame, frames, init_db, segments, upsert_video
+import pytest
 
 
 def test_mock_analyze_returns_segments():
@@ -26,3 +27,19 @@ def test_mock_frame_pipeline_writes_cache_and_segments(tmp_path):
     assert frames(db, video_id)[0]["vision_summary"]
     assert segments(db, video_id)
     assert list((tmp_path / "05_index" / "raw_ai_outputs").glob("*.json"))
+
+
+def test_unsupported_provider_fails_closed(tmp_path):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    frame = tmp_path / "frame_00000.jpg"
+    frame.write_bytes(b"fake image")
+    video_id = upsert_video(
+        db,
+        {"original_path": "unsupported.mp4", "current_path": "unsupported.mp4", "filename": "unsupported.mp4"},
+    )
+    add_frame(db, video_id, frame, 0)
+    cfg = {"library_root": str(tmp_path), "frame_interval_seconds": 5, "ai": {"provider": "unsupported"}}
+
+    with pytest.raises(ValueError, match="unsupported AI provider"):
+        analyze_video_frames(db, {"id": video_id, "filename": "unsupported.mp4"}, cfg)

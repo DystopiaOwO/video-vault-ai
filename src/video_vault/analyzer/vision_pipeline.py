@@ -21,7 +21,9 @@ def provider_from_config(cfg: dict):
         return CloudProvider(cfg)
     if name == "local":
         return LocalProvider(cfg)
-    return MockProvider()
+    if name == "mock":
+        return MockProvider(cfg)
+    raise ValueError(f"unsupported AI provider: {name}")
 
 
 def analyze_frame_manifest(
@@ -30,12 +32,15 @@ def analyze_frame_manifest(
     frame_manifest: list[dict],
     progress=None,
     should_cancel=None,
+    duration_seconds: float | None = None,
 ) -> dict:
     """Analyze an explicit frame manifest without mutating published DB rows."""
     provider = provider_from_config(cfg)
     raw_dir = Path(cfg["library_root"]) / "05_index" / "raw_ai_outputs"
     analyzed = []
     total = len(frame_manifest)
+    cache_hits = 0
+    vision_calls = 0
     for index, frame in enumerate(frame_manifest, 1):
         if should_cancel and should_cancel():
             raise AnalysisCancelled("perception cancelled by user")
@@ -50,8 +55,10 @@ def analyze_frame_manifest(
         raw_path = raw_dir / f"{key}.json"
         if raw_path.exists():
             result = json.loads(raw_path.read_text(encoding="utf-8"))["parsed"]
+            cache_hits += 1
         else:
             result, raw = provider.analyze_frame(frame_path, timestamp, video)
+            vision_calls += 1
             raw_path.parent.mkdir(parents=True, exist_ok=True)
             raw_path.write_text(
                 json.dumps(
@@ -72,15 +79,27 @@ def analyze_frame_manifest(
             progress(index, total, frame)
         if should_cancel and should_cancel():
             raise AnalysisCancelled("perception cancelled by user")
+    sampling_policy = cfg.get("_sampling_policy") or {}
+    grouping_interval = float(
+        sampling_policy.get("baseline_interval_seconds")
+        or cfg["frame_interval_seconds"]
+    )
     perceived_segments = merge_frames_to_segments(
         analyzed,
-        float(cfg["frame_interval_seconds"]),
+        grouping_interval,
+        duration_seconds=(
+            float(video.get("duration_seconds") or 0)
+            if duration_seconds is None
+            else duration_seconds
+        ),
     )
     return {
         "provider": provider.provider,
         "model": provider.model,
         "frames": analyzed,
         "segments": perceived_segments,
+        "cache_hits": cache_hits,
+        "vision_calls": vision_calls,
     }
 
 

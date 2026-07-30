@@ -58,7 +58,8 @@ create table if not exists analysis_runs (
   model text,
   created_at text default current_timestamp,
   status text,
-  raw_output_path text
+  raw_output_path text,
+  sampling_manifest_json text default '{}'
 );
 create table if not exists analysis_run_frames (
   run_uuid text not null,
@@ -208,6 +209,7 @@ def init_db(db: Path) -> None:
             {
                 "base_revision": "integer",
                 "provider_contract_json": "text default '{}'",
+                "sampling_manifest_json": "text default '{}'",
                 "interrupted_at": "text",
                 "published_revision": "integer",
             },

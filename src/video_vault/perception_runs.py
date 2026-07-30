@@ -9,6 +9,11 @@ import shutil
 import sqlite3
 
 from .database import _replace_segments_in_connection, connect, init_db
+from .sampling import (
+    resolved_ai_model,
+    resolved_sampling_policy,
+    sampling_contract_hash,
+)
 
 RUN_COLUMNS = {
     "run_uuid": "text",
@@ -22,6 +27,7 @@ RUN_COLUMNS = {
     "error": "text",
     "input_snapshot_json": "text",
     "frame_manifest_json": "text",
+    "sampling_manifest_json": "text default '{}'",
     "staging_path": "text",
     "previous_success_run_uuid": "text",
     "base_revision": "integer",
@@ -125,19 +131,24 @@ def source_fingerprint(path: Path) -> dict:
     }
 
 
-def extractor_snapshot(cfg: dict) -> dict:
+def extractor_snapshot(cfg: dict, sampling_override: dict | None = None) -> dict:
     return {
-        "extractor_version": 1,
+        "extractor_version": 2,
         "frame_interval_seconds": float(cfg["frame_interval_seconds"]),
         "frame_height": int(cfg.get("frame_height", 720)),
         "ffmpeg_path": str(cfg.get("ffmpeg_path") or "ffmpeg"),
+        "sampling": resolved_sampling_policy(cfg, sampling_override),
     }
 
 
-def build_input_snapshot(video: dict, cfg: dict) -> dict:
+def build_input_snapshot(
+    video: dict,
+    cfg: dict,
+    sampling_override: dict | None = None,
+) -> dict:
     return {
         "source": source_fingerprint(Path(video["current_path"])),
-        "extractor": extractor_snapshot(cfg),
+        "extractor": extractor_snapshot(cfg, sampling_override),
         "duration_seconds": float(video.get("duration_seconds") or 0),
     }
 
@@ -153,6 +164,7 @@ def create_perception_run(
     cfg: dict,
     project_id: int,
     video: dict,
+    sampling_override: dict | None = None,
 ) -> dict:
     ensure_perception_schema(db)
     run_uuid = str(uuid4())
@@ -162,7 +174,7 @@ def create_perception_run(
     project_media_uuid = str(video.get("project_media_uuid") or "")
     input_error: OSError | None = None
     try:
-        input_snapshot = build_input_snapshot(video, cfg)
+        input_snapshot = build_input_snapshot(video, cfg, sampling_override)
     except OSError as exc:
         # Persist an auditable failed run even when the source disappears before
         # fingerprinting.  The original exception is re-raised after the row
@@ -170,13 +182,13 @@ def create_perception_run(
         input_error = exc
         input_snapshot = {
             "source": {"path": str(Path(video["current_path"]).expanduser().resolve()), "missing": True},
-            "extractor": extractor_snapshot(cfg),
+            "extractor": extractor_snapshot(cfg, sampling_override),
             "duration_seconds": float(video.get("duration_seconds") or 0),
         }
     provider_contract = {
         "contract_version": PERCEPTION_CONTRACT_VERSION,
         "provider": str(cfg.get("ai", {}).get("provider", "mock")),
-        "model": str(cfg.get("ai", {}).get("model", "")),
+        "model": resolved_ai_model(cfg),
         "extractor": input_snapshot.get("extractor", {}),
     }
     with connect(db) as con:
@@ -202,7 +214,7 @@ def create_perception_run(
                 (
                     video_id,
                     str(cfg.get("ai", {}).get("provider", "mock")),
-                    str(cfg.get("ai", {}).get("model", "")),
+                    resolved_ai_model(cfg),
                     "failed" if input_error else "running",
                     run_uuid,
                     int(project_id),
@@ -248,7 +260,12 @@ def analysis_run(db: Path, run_uuid: str) -> dict:
     if not row:
         raise ValueError(f"perception run not found: {run_uuid}")
     result = dict(row)
-    for key in ("input_snapshot_json", "frame_manifest_json"):
+    for key in (
+        "input_snapshot_json",
+        "frame_manifest_json",
+        "sampling_manifest_json",
+        "provider_contract_json",
+    ):
         raw = result.pop(key, "") or ""
         result[key.removesuffix("_json")] = json.loads(raw) if raw else {}
     return result
@@ -260,6 +277,18 @@ def set_run_frame_manifest(db: Path, run_uuid: str, manifest: list[dict]) -> Non
         con.execute(
             "update analysis_runs set frame_manifest_json=? where run_uuid=?",
             (json.dumps(manifest, ensure_ascii=False, sort_keys=True), str(run_uuid)),
+        )
+
+
+def set_run_sampling_manifest(db: Path, run_uuid: str, manifest: dict) -> None:
+    ensure_perception_schema(db)
+    with connect(db) as con:
+        con.execute(
+            "update analysis_runs set sampling_manifest_json=? where run_uuid=?",
+            (
+                json.dumps(manifest, ensure_ascii=False, sort_keys=True),
+                str(run_uuid),
+            ),
         )
 
 
@@ -277,15 +306,28 @@ def expected_frame_count(video: dict, cfg: dict) -> int:
     return len(range(0, max(duration, 1), interval))
 
 
-def build_frame_manifest(paths: list[Path], cfg: dict) -> list[dict]:
+def build_frame_manifest(
+    paths: list[Path],
+    cfg: dict,
+    samples: list[dict] | None = None,
+) -> list[dict]:
     interval = float(cfg["frame_interval_seconds"])
     result = []
     for index, path in enumerate(sorted(paths)):
         stat = path.stat()
+        sample = samples[index] if samples is not None else {}
         result.append(
             {
                 "frame_path": str(path.resolve()),
-                "timestamp_seconds": round(index * interval, 6),
+                "timestamp_seconds": round(
+                    float(sample.get("timestamp_seconds", index * interval)), 6
+                ),
+                "sample_reasons": sorted(
+                    str(reason) for reason in sample.get("reasons", ["baseline"])
+                ),
+                "activity_score": round(
+                    float(sample.get("activity_score") or 0), 6
+                ),
                 "size": int(stat.st_size),
                 "mtime_ns": int(stat.st_mtime_ns),
             }
@@ -293,21 +335,44 @@ def build_frame_manifest(paths: list[Path], cfg: dict) -> list[dict]:
     return result
 
 
-def validate_run_inputs(run: dict, video: dict, cfg: dict, manifest: list[dict]) -> list[str]:
+def validate_run_inputs(
+    run: dict,
+    video: dict,
+    cfg: dict,
+    manifest: list[dict],
+    sampling_override: dict | None = None,
+) -> list[str]:
     errors: list[str] = []
-    current_snapshot = build_input_snapshot(video, cfg)
+    current_snapshot = build_input_snapshot(video, cfg, sampling_override)
     if run.get("input_snapshot") != current_snapshot:
         errors.append("source or extractor configuration changed after the run started")
-    expected = expected_frame_count(video, cfg)
+    sampling_manifest = run.get("sampling_manifest") or {}
+    expected_samples = sampling_manifest.get("samples") or []
+    expected = len(expected_samples) if expected_samples else expected_frame_count(video, cfg)
     if len(manifest) != expected:
         errors.append(f"frame manifest count mismatch: expected {expected}, got {len(manifest)}")
     timestamps = [round(float(row.get("timestamp_seconds") or 0), 6) for row in manifest]
-    expected_timestamps = [
-        round(index * float(cfg["frame_interval_seconds"]), 6)
-        for index in range(expected)
-    ]
+    expected_timestamps = (
+        [
+            round(float(sample.get("timestamp_seconds") or 0), 6)
+            for sample in expected_samples
+        ]
+        if expected_samples
+        else [
+            round(index * float(cfg["frame_interval_seconds"]), 6)
+            for index in range(expected)
+        ]
+    )
     if timestamps != expected_timestamps:
         errors.append("frame manifest timestamps do not match the extractor configuration")
+    if sampling_manifest:
+        expected_hash = sampling_contract_hash(
+            current_snapshot["source"],
+            current_snapshot["extractor"]["sampling"],
+            expected_samples,
+        )
+        if str(sampling_manifest.get("contract_hash") or "") != expected_hash:
+            errors.append("sampling contract hash does not match source, policy, and timestamps")
     for row in manifest:
         path = Path(str(row.get("frame_path") or ""))
         if not path.is_file():
@@ -541,6 +606,8 @@ def perception_states_for_project(db: Path, project_id: int) -> dict[int, dict]:
                 current.requested_at as current_requested_at,
                 current.finished_at as current_finished_at,
                 current.input_snapshot_json as current_input_snapshot_json,
+                current.sampling_manifest_json as current_sampling_manifest_json,
+                current.provider_contract_json as current_provider_contract_json,
                 success.generation as last_success_generation,
                 success.finished_at as last_success_finished_at,
                 exists(select 1 from segments s where s.video_id=pv.video_id) as has_segments
@@ -564,6 +631,10 @@ def perception_states_for_project(db: Path, project_id: int) -> dict[int, dict]:
         )
         raw_snapshot = str(data.pop("current_input_snapshot_json", "") or "")
         data["current_input_snapshot"] = json.loads(raw_snapshot) if raw_snapshot else {}
+        raw_sampling = str(data.pop("current_sampling_manifest_json", "") or "")
+        data["current_sampling_manifest"] = json.loads(raw_sampling) if raw_sampling else {}
+        raw_provider = str(data.pop("current_provider_contract_json", "") or "")
+        data["current_provider_contract"] = json.loads(raw_provider) if raw_provider else {}
         data["stale_fallback_available"] = bool(
             data.get("last_successful_analysis_run_uuid")
             and not data["analysis_current"]

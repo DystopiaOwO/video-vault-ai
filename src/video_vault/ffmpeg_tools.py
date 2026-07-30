@@ -33,13 +33,22 @@ def metadata(path: Path, cfg: dict) -> dict:
     }
 
 
-def extract_frames(video: Path, out_dir: Path, cfg: dict) -> list[Path]:
+def extract_frames(
+    video: Path,
+    out_dir: Path,
+    cfg: dict,
+    timestamps: list[float] | None = None,
+) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    interval = int(cfg["frame_interval_seconds"])
-    duration = int(metadata(video, cfg)["duration_seconds"])
+    if timestamps is None and cfg.get("_frame_timestamps") is not None:
+        timestamps = [float(value) for value in cfg["_frame_timestamps"]]
+    if timestamps is None:
+        interval = int(cfg["frame_interval_seconds"])
+        duration = int(metadata(video, cfg)["duration_seconds"])
+        timestamps = list(range(0, max(duration, 1), interval))
     height = int(cfg.get("frame_height", 720))
     # ponytail: seek per frame; much faster for sparse samples on long 4K phone clips.
-    for i, timestamp in enumerate(range(0, max(duration, 1), interval)):
+    for i, timestamp in enumerate(timestamps):
         out = out_dir / f"frame_{i:05d}.jpg"
         if out.exists():
             continue
@@ -50,7 +59,7 @@ def extract_frames(video: Path, out_dir: Path, cfg: dict) -> list[Path]:
             "error",
             "-y",
             "-ss",
-            str(timestamp),
+            _timestamp_arg(timestamp),
             "-i",
             str(video),
             "-frames:v",
@@ -61,8 +70,19 @@ def extract_frames(video: Path, out_dir: Path, cfg: dict) -> list[Path]:
             "3",
             str(out),
         ]
-        subprocess.run(cmd, check=True)
+        completed = subprocess.run(cmd, check=True)
+        if completed is not None and (not out.is_file() or out.stat().st_size <= 0):
+            raise RuntimeError(
+                f"ffmpeg did not produce a frame at {float(timestamp):.6f}s"
+            )
     return sorted(out_dir.glob("frame_*.jpg"))
+
+
+def _timestamp_arg(timestamp: float) -> str:
+    value = float(timestamp)
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:.6f}".rstrip("0").rstrip(".")
 
 
 def frame_timestamp(frame: Path, cfg: dict) -> float:

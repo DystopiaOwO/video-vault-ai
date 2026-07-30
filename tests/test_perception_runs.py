@@ -223,6 +223,29 @@ def test_restart_marks_interrupted_run_failed_and_workflow_not_current(tmp_path)
     assert perception["status"] == "pending"
 
 
+def test_run_audit_records_model_from_active_provider_and_sampling_policy(tmp_path):
+    db, project_id, _video_id, video, cfg = _project_video(tmp_path)
+    cfg["ai"] = {"provider": "cloud", "cloud": {"model": "vision-current"}}
+    cfg["sampling"] = {
+        "mode": "adaptive",
+        "preset": "dense",
+        "baseline_interval_seconds": 2,
+    }
+    run = create_perception_run(
+        db,
+        cfg,
+        project_id,
+        video,
+        sampling_override={"mode": "fixed", "baseline_interval_seconds": 3},
+    )
+    assert run["provider"] == "cloud"
+    assert run["model"] == "vision-current"
+    assert run["provider_contract"]["model"] == "vision-current"
+    policy = run["input_snapshot"]["extractor"]["sampling"]
+    assert policy["mode"] == "fixed"
+    assert policy["baseline_interval_seconds"] == 3
+
+
 def test_shared_run_invalidates_every_linked_project_and_is_visible_in_jobs(tmp_path):
     db, project_a, video_id, video, cfg = _project_video(tmp_path)
     project_b = create_project(db, "B", [video_id])

@@ -8,6 +8,21 @@ DEFAULT_CONFIG = {
     "inbox_dir": "00_inbox",
     "frame_interval_seconds": 5,
     "frame_height": 720,
+    "sampling": {
+        "policy_name": "adaptive-balanced",
+        "policy_version": 1,
+        "mode": "adaptive",
+        "preset": "balanced",
+        "baseline_interval_seconds": 5,
+        "prescan_interval_seconds": 0.5,
+        "dense_interval_seconds": 1,
+        "scene_threshold": 0.32,
+        "motion_threshold": 0.06,
+        "min_interval_seconds": 0.25,
+        "max_frames_per_clip": 180,
+        "max_frames_per_minute": 30,
+        "visual_dedupe_threshold": 0.985,
+    },
     "proxy_height": 1080,
     "default_ingest_mode": "copy",
     "ffmpeg_path": "ffmpeg",
@@ -19,7 +34,10 @@ DEFAULT_CONFIG = {
     },
     "ai": {
         "provider": "mock",
-        "local": {"ollama_url": "http://localhost:11434", "model": "gemma4:12b"},
+        "local": {
+            "base_url": "http://127.0.0.1:1234/v1",
+            "model": "gemma4:12b",
+        },
         "cloud": {"provider": "openai", "model": "gpt-4.1-mini", "api_key_env": "OPENAI_API_KEY"},
     },
 }
@@ -32,7 +50,25 @@ def config_path(path: str | None = None) -> Path:
 def load_config(path: str | None = None) -> dict:
     file = config_path(path)
     data = _parse_yaml(file.read_text(encoding="utf-8")) if file.exists() else {}
-    return _merge(DEFAULT_CONFIG, data or {})
+    merged = _merge(DEFAULT_CONFIG, data or {})
+    if file.exists() and "sampling" not in (data or {}):
+        merged["sampling"] = {
+            **merged["sampling"],
+            "mode": "fixed",
+            "baseline_interval_seconds": float(
+                merged.get("frame_interval_seconds") or 5
+            ),
+            "migrated_from_fixed_interval": True,
+        }
+    local_source = ((data or {}).get("ai") or {}).get("local") or {}
+    if local_source and "base_url" not in local_source:
+        legacy_url = local_source.get("lmstudio_url") or local_source.get("ollama_url")
+        if legacy_url:
+            legacy_url = str(legacy_url).rstrip("/")
+            if local_source.get("ollama_url") and not legacy_url.endswith("/v1"):
+                legacy_url += "/v1"
+            merged["ai"]["local"]["base_url"] = legacy_url
+    return merged
 
 
 def save_default_config(path: str | None = None) -> Path:

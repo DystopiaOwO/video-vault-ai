@@ -18,3 +18,23 @@ def test_extract_frames_seeks_per_timestamp(tmp_path, monkeypatch):
 
 def test_frame_timestamp_from_sequence_name():
     assert frame_timestamp(Path("frame_00003.jpg"), {"frame_interval_seconds": 5}) == 15
+
+
+def test_extract_frames_accepts_explicit_adaptive_timestamps(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, check):
+        calls.append(cmd)
+
+    monkeypatch.setattr("video_vault.ffmpeg_tools.subprocess.run", fake_run)
+    extract_frames(
+        Path("clip.mp4"),
+        tmp_path,
+        {
+            "ffmpeg_path": "ffmpeg",
+            "frame_interval_seconds": 5,
+            "frame_height": 720,
+        },
+        [0, 1.25, 4.75],
+    )
+    assert [cmd[cmd.index("-ss") + 1] for cmd in calls] == ["0", "1.25", "4.75"]

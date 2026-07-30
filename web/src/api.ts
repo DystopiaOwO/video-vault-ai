@@ -24,6 +24,42 @@ export type Clip = {
   effective_summary: string;
   effective_summary_source: "user" | "ai" | "none";
   media_url?: string;
+  sampling?: SamplingState;
+};
+
+export type SamplingPolicy = {
+  name: string;
+  version: number;
+  mode: "fixed" | "adaptive";
+  preset: "balanced" | "dense";
+  baseline_interval_seconds: number;
+  max_frames_per_clip: number;
+  max_frames_per_minute: number;
+};
+
+export type SamplingManifest = {
+  policy?: SamplingPolicy;
+  estimated_vision_calls?: number;
+  actual_vision_calls?: number;
+  cache_hits?: number;
+  sample_reason_counts?: Record<string, number>;
+  candidate_counts?: Record<string, number>;
+  visual_dedupe?: { status?: string; removed?: number };
+  contract_hash?: string;
+  samples?: Array<{ timestamp_seconds: number; reasons: string[] }>;
+};
+
+export type SamplingState = {
+  default_policy: SamplingPolicy;
+  estimated_frame_count: number;
+  current?: SamplingManifest;
+};
+
+export type SamplingOverride = {
+  mode: "fixed" | "adaptive";
+  preset?: "balanced" | "dense";
+  baseline_interval_seconds?: number;
+  max_frames_per_clip?: number;
 };
 
 export type BgmTrack = {
@@ -353,8 +389,8 @@ export const api = {
   },
   analyzeJob: (projectId: number, force = false, baseRevision?: number) =>
     json<{ ok: boolean; message?: string }>("/api/project/analyze-job", post({ project_id: projectId, force, base_revision: baseRevision })),
-  analyzeVideo: (projectId: number, videoId: number, baseRevision?: number) =>
-    json<{ ok: boolean; message?: string }>("/api/project/analyze-video", post({ project_id: projectId, video_id: videoId, base_revision: baseRevision })),
+  analyzeVideo: (projectId: number, videoId: number, baseRevision?: number, sampling?: SamplingOverride) =>
+    json<{ ok: boolean; message?: string }>("/api/project/analyze-video", post({ project_id: projectId, video_id: videoId, base_revision: baseRevision, sampling })),
   saveClipSummary: (projectId: number, videoId: number, userSummary: string, baseRevision?: number) =>
     json<{ ok: boolean; plan_rebuilt?: boolean; error?: string; code?: string; project_revision?: number }>("/api/project/clip-summary", post({ project_id: projectId, video_id: videoId, user_summary: userSummary, base_revision: baseRevision })),
   colorAnalyze: (projectId: number, force = false, baseRevision?: number) =>
