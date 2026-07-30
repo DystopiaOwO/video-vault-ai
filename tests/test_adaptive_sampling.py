@@ -115,7 +115,7 @@ def test_stable_minute_uses_far_fewer_calls_than_one_second_sampling(monkeypatch
     assert plan["candidate_counts"]["motion"] == 0
     assert plan["candidate_counts"]["scene"] == 0
     assert plan["samples"][0]["timestamp_seconds"] == 0
-    assert plan["samples"][-1]["timestamp_seconds"] == pytest.approx(59.95)
+    assert plan["samples"][-1]["timestamp_seconds"] == pytest.approx(59.75)
 
 
 def test_short_motion_between_baselines_and_hard_cut_get_candidates(monkeypatch):
@@ -207,6 +207,21 @@ def test_short_clip_keeps_boundaries_and_estimate_respects_cap(monkeypatch):
     assert [row["timestamp_seconds"] for row in plan["samples"]] == [0.0, 0.75]
     policy = resolved_sampling_policy(_cfg(max_frames_per_clip=3))
     assert estimate_sampling_count(60, policy) == 3
+
+
+def test_long_clip_uses_a_wider_media_end_guard(monkeypatch):
+    monkeypatch.setattr(
+        sampling.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stderr=_metadata_output([(0, 0)]),
+            stdout="",
+        ),
+    )
+    plan = build_sampling_plan(Path("long.mp4"), 60, _cfg())
+
+    assert plan["samples"][-1]["timestamp_seconds"] <= 59.75 + 1e-6
 
 
 def test_prescan_failure_is_explicit(monkeypatch):

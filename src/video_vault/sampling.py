@@ -297,7 +297,8 @@ def _candidate(
     score: float,
     duration: float,
 ) -> None:
-    timestamp = min(max(0.0, float(timestamp)), max(0.0, duration - 0.05))
+    end_guard = min(0.25, max(0.05, duration * 0.05))
+    timestamp = min(max(0.0, float(timestamp)), max(0.0, duration - end_guard))
     candidates.append(
         {
             "timestamp_seconds": round(timestamp, 6),
