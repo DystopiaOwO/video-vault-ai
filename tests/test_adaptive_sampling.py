@@ -14,6 +14,7 @@ from video_vault.sampling import (
     resolved_sampling_policy,
     sampling_contract_hash,
 )
+from video_vault.analyzer.frame_analysis import merge_frames_to_segments
 from video_vault.ui import _sampling_override
 
 
@@ -233,3 +234,18 @@ def test_web_sampling_override_is_bounded_and_versionable():
         _sampling_override({"sampling": {"mode": "cloud"}})
     with pytest.raises(ValueError, match="介於"):
         _sampling_override({"sampling": {"max_frames_per_clip": 0}})
+
+
+def test_adaptive_segment_bounds_follow_manifest_timestamps():
+    frames = [
+        {"timestamp_seconds": 0.0, "usefulness_score": 0.1, "tags": [], "summary": ""},
+        {"timestamp_seconds": 1.25, "usefulness_score": 0.9, "tags": ["travel"], "summary": "第一段"},
+        {"timestamp_seconds": 9.5, "usefulness_score": 0.9, "tags": ["landscape"], "summary": "第二段"},
+    ]
+
+    segments = merge_frames_to_segments(frames, 5.0, duration_seconds=10.0)
+
+    assert segments[0]["start_seconds"] == pytest.approx(0.625)
+    assert segments[0]["end_seconds"] == pytest.approx(5.375)
+    assert segments[1]["start_seconds"] == pytest.approx(5.375)
+    assert segments[1]["end_seconds"] == pytest.approx(10.0)

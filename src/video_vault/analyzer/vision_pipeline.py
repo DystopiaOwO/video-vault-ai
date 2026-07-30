@@ -30,6 +30,7 @@ def analyze_frame_manifest(
     frame_manifest: list[dict],
     progress=None,
     should_cancel=None,
+    duration_seconds: float | None = None,
 ) -> dict:
     """Analyze an explicit frame manifest without mutating published DB rows."""
     provider = provider_from_config(cfg)
@@ -79,6 +80,11 @@ def analyze_frame_manifest(
     perceived_segments = merge_frames_to_segments(
         analyzed,
         float(cfg["frame_interval_seconds"]),
+        duration_seconds=(
+            float(video.get("duration_seconds") or 0)
+            if duration_seconds is None
+            else duration_seconds
+        ),
     )
     return {
         "provider": provider.provider,
