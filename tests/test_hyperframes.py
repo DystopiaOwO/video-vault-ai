@@ -5,7 +5,7 @@ import pytest
 
 from video_vault.database import add_analysis, init_db, upsert_video
 from video_vault.handoff import HandoffError
-from video_vault.hyperframes import export_hyperframes_project, render_fast_draft, unload_local_llm_model
+from video_vault.hyperframes import export_hyperframes_project, render_fast_draft, render_hyperframes_project, unload_local_llm_model
 from video_vault.opencut import export_opencut_handoff as real_opencut_handoff
 from video_vault.project import create_project
 
@@ -24,6 +24,8 @@ def test_hyperframes_export_writes_html_timeline(tmp_path):
     html = Path(out, "index.html").read_text(encoding="utf-8")
     assert 'data-composition-id="story"' in html
     assert "<video" in html
+    assert 'id="hf-video-1"' in html
+    assert 'data-duration="5.000"' in html
     assert Path(out, "timeline.json").exists()
 
 
@@ -212,3 +214,37 @@ def test_hyperframes_export_rejects_missing_media_instead_of_dangling_reference(
             1,
             render_clips=False,
         )
+
+
+def test_hyperframes_render_forces_offline_runtime_environment(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    (runtime / "node_modules").mkdir(parents=True)
+    (runtime / "package-lock.json").write_text("{}", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    seen = {}
+
+    class Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["env"] = kwargs["env"]
+        return Proc()
+
+    monkeypatch.setattr("video_vault.hyperframes.HYPERFRAMES_RUNTIME", runtime)
+    monkeypatch.setattr("video_vault.hyperframes.shutil.which", lambda name: "npx.cmd" if name == "npx.cmd" else None)
+    monkeypatch.setattr("video_vault.hyperframes.subprocess.run", fake_run)
+
+    result = render_hyperframes_project(project, project / "output.mp4")
+
+    assert result["ok"]
+    assert "--no-install" in seen["cmd"]
+    assert all(seen["env"][key] == "1" for key in (
+        "HYPERFRAMES_NO_TELEMETRY",
+        "HYPERFRAMES_NO_UPDATE_CHECK",
+        "HYPERFRAMES_NO_AUTO_INSTALL",
+        "DO_NOT_TRACK",
+    ))

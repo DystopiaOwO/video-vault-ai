@@ -3,6 +3,7 @@ from __future__ import annotations
 from html import escape
 from pathlib import Path
 import json
+import os
 import shutil
 import subprocess
 
@@ -10,6 +11,9 @@ from .color import run_ffmpeg, video_decode_args, video_encode_args
 from .handoff import HandoffError, build_handoff_manifest, escape_ffconcat_path
 from .opencut import export_opencut_handoff
 from .project import assert_project_approved, project_dir
+
+
+HYPERFRAMES_RUNTIME = Path(__file__).resolve().parents[2] / "tools" / "hyperframes"
 
 
 def export_hyperframes_project(
@@ -105,7 +109,7 @@ def render_hyperframes_project(project: Path, output: Path | None = None, cfg: d
     npx = shutil.which("npx.cmd") or shutil.which("npx")
     if not npx:
         return {"ok": False, "code": "dependency_missing", "output": str(output), "stdout": "", "stderr": "找不到 npx。請先在交付專案內完成固定版本的 HyperFrames 安裝；正式 render 不會自動下載依賴"}
-    runtime = Path(__file__).resolve().parents[2] / "tools" / "hyperframes"
+    runtime = HYPERFRAMES_RUNTIME
     package_lock = runtime / "package-lock.json"
     modules = runtime / "node_modules"
     if not package_lock.is_file() or not modules.is_dir():
@@ -113,7 +117,16 @@ def render_hyperframes_project(project: Path, output: Path | None = None, cfg: d
     # --no-install and --prefix keep formal rendering offline and tied to the
     # committed lockfile/runtime instead of the user's global npm state.
     cmd = [npx, "--no-install", "--prefix", str(runtime), "hyperframes", "render", "--gpu", "--browser-gpu", "--output", str(output)]
-    proc = subprocess.run(cmd, cwd=project, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    env = os.environ.copy()
+    env.update(
+        {
+            "HYPERFRAMES_NO_TELEMETRY": "1",
+            "HYPERFRAMES_NO_UPDATE_CHECK": "1",
+            "HYPERFRAMES_NO_AUTO_INSTALL": "1",
+            "DO_NOT_TRACK": "1",
+        }
+    )
+    proc = subprocess.run(cmd, cwd=project, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return {"ok": proc.returncode == 0, "output": str(output), "stdout": proc.stdout, "stderr": proc.stderr}
 
 
@@ -263,8 +276,8 @@ def _publish_media_copy(source: Path, destination: Path) -> None:
 
 def _html(title: str, clips: list[dict], bgm: dict | None, duration: float, visual_items: list[dict] | None = None) -> str:
     videos = "\n".join(
-        f'<video class="clip scene" data-start="{clip["timeline_start"]}" data-duration="{clip["duration"]}" data-track-index="0" data-media-start="{_source_range(clip)[0]}" src="media/{escape(clip["file"], quote=True)}" muted playsinline></video>'
-        for clip in clips
+        f'<video id="hf-video-{index}" class="clip scene" data-start="{clip["timeline_start"]}" data-duration="{clip["duration"]}" data-track-index="0" data-media-start="{_source_range(clip)[0]}" src="media/{escape(clip["file"], quote=True)}" muted playsinline></video>'
+        for index, clip in enumerate(clips, 1)
     )
     cards = []
     if visual_items:
@@ -295,7 +308,7 @@ html,body,#root{{margin:0;width:100%;height:100%;background:#050607;overflow:hid
 </style>
 </head>
 <body>
-<div id="root" data-composition-id="story" data-start="0" data-width="1920" data-height="1080">
+<div id="root" data-composition-id="story" data-start="0" data-duration="{duration:.3f}" data-width="1920" data-height="1080">
 {videos}
 {''.join(cards)}
 {audio}
