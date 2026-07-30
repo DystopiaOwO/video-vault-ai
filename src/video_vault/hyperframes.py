@@ -4,10 +4,12 @@ from html import escape
 from pathlib import Path
 import json
 import os
+import re
 import shutil
 import subprocess
 
 from .color import run_ffmpeg, video_decode_args, video_encode_args
+from .database import project_videos
 from .handoff import HandoffError, build_handoff_manifest, escape_ffconcat_path
 from .opencut import export_opencut_handoff
 from .project import assert_project_approved, project_dir
@@ -48,6 +50,7 @@ def export_hyperframes_project(
 
     clips = []
     t = 0.0
+    registered_sources = _registered_media_sources(db, project_id)
     source_segments = {str(seg.get("stable_id") or seg.get("segment_id") or seg.get("clip_id") or ""): seg for seg in data.get("segments", [])}
     visual_timeline = data.get("visual_timeline") or data.get("handoff_manifest", {}).get("visual_timeline", {}) or {}
     visual_items = {str(item.get("stable_id") or ""): dict(item) for item in visual_timeline.get("resolved_items") or visual_timeline.get("items") or [] if isinstance(item, dict)}
@@ -64,7 +67,7 @@ def export_hyperframes_project(
             seg = source_segments.get(stable_id)
             if seg is None:
                 continue
-            src = _resolve_media_source(seg, handoff, out)
+            src = _resolve_media_source(seg, handoff, out, registered_sources)
             index = len(clips) + 1
             dst = media / f"{index:03}_{src.name}"
             _publish_media_copy(src, dst)
@@ -72,7 +75,7 @@ def export_hyperframes_project(
         t = float(visual_timeline.get("resolved_duration_seconds") or max((item["timeline_start"] + item["duration"] for item in clips), default=0))
     else:
         for i, seg in enumerate(data.get("segments", []), 1):
-            src = _resolve_media_source(seg, handoff, out)
+            src = _resolve_media_source(seg, handoff, out, registered_sources)
             dst = media / f"{i:03}_{src.name}"
             _publish_media_copy(src, dst)
             duration = _duration(seg)
@@ -109,6 +112,14 @@ def render_hyperframes_project(project: Path, output: Path | None = None, cfg: d
     npx = shutil.which("npx.cmd") or shutil.which("npx")
     if not npx:
         return {"ok": False, "code": "dependency_missing", "output": str(output), "stdout": "", "stderr": "找不到 npx。請先在交付專案內完成固定版本的 HyperFrames 安裝；正式 render 不會自動下載依賴"}
+    node = shutil.which("node.exe") or shutil.which("node")
+    if not node:
+        return {"ok": False, "code": "dependency_missing", "output": str(output), "stdout": "", "stderr": "找不到 Node.js 22。請安裝符合 tools/hyperframes/package.json 的 Node 22 runtime"}
+    version = subprocess.run([node, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    major = _node_major(version.stdout)
+    if version.returncode != 0 or major != 22:
+        reported = version.stdout.strip() or version.stderr.strip() or "未知版本"
+        return {"ok": False, "code": "runtime_incompatible", "output": str(output), "stdout": version.stdout, "stderr": f"HyperFrames 需要 Node 22，偵測到 {reported}。請切換到 Node 22 後重試"}
     runtime = HYPERFRAMES_RUNTIME
     package_lock = runtime / "package-lock.json"
     modules = runtime / "node_modules"
@@ -238,7 +249,36 @@ def _copy_bgm(data: dict, media: Path) -> dict | None:
     return {**tracks[0], "file": dst.name}
 
 
-def _resolve_media_source(segment: dict, handoff: Path, project: Path) -> Path:
+def _registered_media_sources(db: Path, project_id: int) -> tuple[Path, ...]:
+    """Return exact project-owned source paths for absolute diagnostic inputs."""
+
+    try:
+        rows = project_videos(db, project_id)
+    except Exception:
+        return ()
+    paths = []
+    for row in rows:
+        for field in ("original_path", "current_path"):
+            value = row[field] if field in row.keys() else None
+            if value:
+                paths.append(Path(str(value)).expanduser().resolve())
+    return tuple(dict.fromkeys(paths))
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _node_major(version: str) -> int | None:
+    match = re.match(r"^v(\d+)(?:\.|$)", version.strip())
+    return int(match.group(1)) if match else None
+
+
+def _resolve_media_source(segment: dict, handoff: Path, project: Path, registered_sources: tuple[Path, ...] = ()) -> Path:
     """Resolve absolute sources and paths packaged by a prior handoff.
 
     Formal handoffs intentionally use package-relative paths such as
@@ -248,7 +288,8 @@ def _resolve_media_source(segment: dict, handoff: Path, project: Path) -> Path:
     """
 
     raw_values = [segment.get("graded_clip"), segment.get("source_file"), segment.get("source_media_path")]
-    roots = [handoff, project, project.parent / "opencut_handoff"]
+    roots = [root.resolve() for root in (handoff, project, project.parent / "opencut_handoff", project.parent.parent / "source")]
+    registered = set(registered_sources)
     for raw in raw_values:
         if not raw:
             continue
@@ -256,7 +297,11 @@ def _resolve_media_source(segment: dict, handoff: Path, project: Path) -> Path:
         candidates = [raw_path] if raw_path.is_absolute() else [root / raw_path for root in roots]
         for candidate in candidates:
             resolved = candidate.resolve()
-            if resolved.is_file():
+            # Relative package paths must stay under a known handoff/output
+            # root. Absolute diagnostic paths are allowed only when they are
+            # exact project-owned DB registrations or remain in those roots.
+            allowed = resolved in registered or any(_is_within(resolved, root) for root in roots)
+            if allowed and resolved.is_file():
                 return resolved
     display = next((str(value) for value in raw_values if value), "<empty>")
     raise HandoffError("file_missing", f"HyperFrames 來源素材不存在：{display}", action="恢復原始素材後重新匯出 HyperFrames 專案")

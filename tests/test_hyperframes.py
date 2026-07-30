@@ -110,6 +110,10 @@ def test_hyperframes_render_export_skips_graded_clip_prerender(tmp_path, monkeyp
 def test_hyperframes_export_accepts_canonical_source_range(tmp_path, monkeypatch):
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source")
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    video_id = upsert_video(db, {"original_path": str(source), "current_path": str(source), "filename": source.name, "category": "travel", "duration_seconds": 10})
+    project_id = create_project(db, "canonical", [video_id], category="travel", content_type="travel_diary")
     opencut = tmp_path / "opencut"
     opencut.mkdir()
     (opencut / "opencut_handoff.json").write_text(
@@ -140,8 +144,8 @@ def test_hyperframes_export_accepts_canonical_source_range(tmp_path, monkeypatch
 
     out = export_hyperframes_project(
         {"library_root": str(tmp_path)},
-        tmp_path / "db.sqlite3",
-        1,
+        db,
+        project_id,
         render_clips=False,
     )
 
@@ -216,6 +220,36 @@ def test_hyperframes_export_rejects_missing_media_instead_of_dangling_reference(
         )
 
 
+def test_hyperframes_export_rejects_relative_media_path_escape(tmp_path, monkeypatch):
+    handoff = tmp_path / "opencut_handoff"
+    handoff.mkdir()
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"outside")
+    (handoff / "opencut_handoff.json").write_text(
+        json.dumps({"project": {"name": "escape"}, "segments": [{"clip_id": "clip-1", "source_file": "../outside.mp4"}], "bgm": [], "handoff_manifest": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("video_vault.hyperframes.export_opencut_handoff", lambda *args, **kwargs: handoff)
+
+    with pytest.raises(HandoffError, match="HyperFrames 來源素材不存在"):
+        export_hyperframes_project({"library_root": str(tmp_path)}, tmp_path / "db.sqlite3", 1, render_clips=False)
+
+
+def test_hyperframes_export_rejects_unregistered_absolute_media_path(tmp_path, monkeypatch):
+    handoff = tmp_path / "opencut_handoff"
+    handoff.mkdir()
+    outside = tmp_path / "unregistered.mp4"
+    outside.write_bytes(b"unregistered")
+    (handoff / "opencut_handoff.json").write_text(
+        json.dumps({"project": {"name": "unregistered"}, "segments": [{"clip_id": "clip-1", "source_file": str(outside)}], "bgm": [], "handoff_manifest": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("video_vault.hyperframes.export_opencut_handoff", lambda *args, **kwargs: handoff)
+
+    with pytest.raises(HandoffError, match="HyperFrames 來源素材不存在"):
+        export_hyperframes_project({"library_root": str(tmp_path)}, tmp_path / "db.sqlite3", 1, render_clips=False)
+
+
 def test_hyperframes_render_forces_offline_runtime_environment(tmp_path, monkeypatch):
     runtime = tmp_path / "runtime"
     (runtime / "node_modules").mkdir(parents=True)
@@ -230,12 +264,18 @@ def test_hyperframes_render_forces_offline_runtime_environment(tmp_path, monkeyp
         stderr = ""
 
     def fake_run(cmd, **kwargs):
-        seen["cmd"] = cmd
+        if cmd[1:] == ["--version"]:
+            class VersionProc:
+                returncode = 0
+                stdout = "v22.23.2"
+                stderr = ""
+            return VersionProc()
         seen["env"] = kwargs["env"]
+        seen["cmd"] = cmd
         return Proc()
 
     monkeypatch.setattr("video_vault.hyperframes.HYPERFRAMES_RUNTIME", runtime)
-    monkeypatch.setattr("video_vault.hyperframes.shutil.which", lambda name: "npx.cmd" if name == "npx.cmd" else None)
+    monkeypatch.setattr("video_vault.hyperframes.shutil.which", lambda name: "npx.cmd" if name == "npx.cmd" else ("node.exe" if name == "node.exe" else None))
     monkeypatch.setattr("video_vault.hyperframes.subprocess.run", fake_run)
 
     result = render_hyperframes_project(project, project / "output.mp4")
@@ -248,3 +288,28 @@ def test_hyperframes_render_forces_offline_runtime_environment(tmp_path, monkeyp
         "HYPERFRAMES_NO_AUTO_INSTALL",
         "DO_NOT_TRACK",
     ))
+
+
+def test_hyperframes_render_rejects_non_node22_runtime(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    (runtime / "node_modules").mkdir(parents=True)
+    (runtime / "package-lock.json").write_text("{}", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    calls = []
+
+    class Proc:
+        returncode = 0
+        stdout = "v24.1.0"
+        stderr = ""
+
+    monkeypatch.setattr("video_vault.hyperframes.HYPERFRAMES_RUNTIME", runtime)
+    monkeypatch.setattr("video_vault.hyperframes.shutil.which", lambda name: "npx.cmd" if name == "npx.cmd" else ("node.exe" if name == "node.exe" else None))
+    monkeypatch.setattr("video_vault.hyperframes.subprocess.run", lambda cmd, **kwargs: calls.append(cmd) or Proc())
+
+    result = render_hyperframes_project(project, project / "output.mp4")
+
+    assert result["ok"] is False
+    assert result["code"] == "runtime_incompatible"
+    assert "Node 22" in result["stderr"]
+    assert calls == [["node.exe", "--version"]]
