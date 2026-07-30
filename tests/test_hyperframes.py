@@ -4,6 +4,7 @@ import json
 import pytest
 
 from video_vault.database import add_analysis, init_db, upsert_video
+from video_vault.handoff import HandoffError
 from video_vault.hyperframes import export_hyperframes_project, render_fast_draft, unload_local_llm_model
 from video_vault.opencut import export_opencut_handoff as real_opencut_handoff
 from video_vault.project import create_project
@@ -148,3 +149,66 @@ def test_hyperframes_export_accepts_canonical_source_range(tmp_path, monkeypatch
     assert 'data-media-start="1.25"' in (out / "index.html").read_text(
         encoding="utf-8"
     )
+
+
+def test_hyperframes_export_resolves_packaged_relative_media(tmp_path, monkeypatch):
+    handoff = tmp_path / "opencut_handoff"
+    packaged_media = handoff / "assets" / "media"
+    packaged_media.mkdir(parents=True)
+    source = packaged_media / "clip.mp4"
+    source.write_bytes(b"packaged-media")
+    (handoff / "opencut_handoff.json").write_text(
+        json.dumps(
+            {
+                "project": {"name": "packaged"},
+                "segments": [
+                    {
+                        "clip_id": "clip-1",
+                        "source_file": "assets/media/clip.mp4",
+                        "start_seconds": 0,
+                        "end_seconds": 1,
+                    }
+                ],
+                "bgm": [],
+                "handoff_manifest": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("video_vault.hyperframes.export_opencut_handoff", lambda *args, **kwargs: handoff)
+
+    out = export_hyperframes_project(
+        {"library_root": str(tmp_path)},
+        tmp_path / "db.sqlite3",
+        1,
+        render_clips=False,
+    )
+
+    packaged = out / "media" / "001_clip.mp4"
+    assert packaged.read_bytes() == source.read_bytes()
+    assert 'src="media/001_clip.mp4"' in (out / "index.html").read_text(encoding="utf-8")
+
+
+def test_hyperframes_export_rejects_missing_media_instead_of_dangling_reference(tmp_path, monkeypatch):
+    handoff = tmp_path / "opencut_handoff"
+    handoff.mkdir()
+    (handoff / "opencut_handoff.json").write_text(
+        json.dumps(
+            {
+                "project": {"name": "missing"},
+                "segments": [{"clip_id": "clip-1", "source_file": "assets/media/missing.mp4", "start_seconds": 0, "end_seconds": 1}],
+                "bgm": [],
+                "handoff_manifest": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("video_vault.hyperframes.export_opencut_handoff", lambda *args, **kwargs: handoff)
+
+    with pytest.raises(HandoffError, match="HyperFrames 來源素材不存在"):
+        export_hyperframes_project(
+            {"library_root": str(tmp_path)},
+            tmp_path / "db.sqlite3",
+            1,
+            render_clips=False,
+        )

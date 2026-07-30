@@ -60,19 +60,17 @@ def export_hyperframes_project(
             seg = source_segments.get(stable_id)
             if seg is None:
                 continue
-            src = Path(seg.get("graded_clip") or seg["source_file"])
+            src = _resolve_media_source(seg, handoff, out)
             index = len(clips) + 1
             dst = media / f"{index:03}_{src.name}"
-            if src.exists() and not dst.exists():
-                shutil.copy2(src, dst)
+            _publish_media_copy(src, dst)
             clips.append({**seg, "file": dst.name, "timeline_start": round(float(entry.get("start_seconds") or 0), 3), "duration": round(float(entry.get("duration_seconds") or _duration(seg)), 3)})
         t = float(visual_timeline.get("resolved_duration_seconds") or max((item["timeline_start"] + item["duration"] for item in clips), default=0))
     else:
         for i, seg in enumerate(data.get("segments", []), 1):
-            src = Path(seg.get("graded_clip") or seg["source_file"])
+            src = _resolve_media_source(seg, handoff, out)
             dst = media / f"{i:03}_{src.name}"
-            if src.exists() and not dst.exists():
-                shutil.copy2(src, dst)
+            _publish_media_copy(src, dst)
             duration = _duration(seg)
             clips.append({**seg, "file": dst.name, "timeline_start": round(t, 3), "duration": round(duration, 3)})
             t += duration
@@ -225,6 +223,42 @@ def _copy_bgm(data: dict, media: Path) -> dict | None:
     if not dst.exists():
         shutil.copy2(src, dst)
     return {**tracks[0], "file": dst.name}
+
+
+def _resolve_media_source(segment: dict, handoff: Path, project: Path) -> Path:
+    """Resolve absolute sources and paths packaged by a prior handoff.
+
+    Formal handoffs intentionally use package-relative paths such as
+    ``assets/media/clip.mp4``.  Diagnostic plans usually contain absolute
+    project-owned source paths.  Keep resolution bounded to those known local
+    roots so a missing asset cannot become a dangling HTML reference.
+    """
+
+    raw_values = [segment.get("graded_clip"), segment.get("source_file"), segment.get("source_media_path")]
+    roots = [handoff, project, project.parent / "opencut_handoff"]
+    for raw in raw_values:
+        if not raw:
+            continue
+        raw_path = Path(str(raw)).expanduser()
+        candidates = [raw_path] if raw_path.is_absolute() else [root / raw_path for root in roots]
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            if resolved.is_file():
+                return resolved
+    display = next((str(value) for value in raw_values if value), "<empty>")
+    raise HandoffError("file_missing", f"HyperFrames 來源素材不存在：{display}", action="恢復原始素材後重新匯出 HyperFrames 專案")
+
+
+def _publish_media_copy(source: Path, destination: Path) -> None:
+    """Copy a media asset without leaving a stale or partial destination."""
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    try:
+        shutil.copy2(source, temporary)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _html(title: str, clips: list[dict], bgm: dict | None, duration: float, visual_items: list[dict] | None = None) -> str:
