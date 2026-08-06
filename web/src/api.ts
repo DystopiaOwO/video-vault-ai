@@ -7,6 +7,39 @@ export type Project = {
   video_count?: number;
 };
 
+export type PerceptionWindowResult = {
+  window_uuid: string;
+  ordinal?: number;
+  start_seconds?: number;
+  end_seconds?: number;
+  frame_timestamps?: number[];
+  summary?: string;
+  action?: string;
+  shot_role?: string;
+  technical_quality?: { score?: number; issues?: string[] };
+  duplicate_group?: string;
+  natural_audio_recommendation?: string;
+  confidence?: number;
+  validation?: { status?: string; needs_review_reasons?: string[] };
+  evidence_urls?: {
+    contact_sheet?: string;
+    window?: string;
+    validation?: string;
+    normalized?: string;
+  };
+};
+
+export type PerceptionRunState = {
+  current_analysis_run_uuid?: string;
+  current_status?: string;
+  current_generation?: number;
+  current_window_manifest?: Array<{ window_uuid?: string; start_seconds?: number; end_seconds?: number; frames?: Array<{ timestamp_seconds?: number; sample_reasons?: string[] }> }>;
+  current_window_results?: PerceptionWindowResult[];
+  current_window_validation?: { status?: string; needs_review_reasons?: string[]; checks?: Array<Record<string, unknown>> };
+  multi_frame_contract?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
 export type Clip = {
   clip_id: string;
   video_id: number;
@@ -25,6 +58,7 @@ export type Clip = {
   effective_summary_source: "user" | "ai" | "none";
   media_url?: string;
   sampling?: SamplingState;
+  perception_run?: PerceptionRunState;
 };
 
 export type SamplingPolicy = {

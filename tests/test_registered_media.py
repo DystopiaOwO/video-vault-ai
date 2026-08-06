@@ -45,3 +45,26 @@ def test_project_detail_api_uses_scoped_media_url_without_local_paths():
     assert "D:\\private" not in encoded
     assert result["clips"][0]["media_url"].endswith("project_id=7&media_id=media-7")
     assert result["segments"][0]["media_url"].endswith("project_id=7&media_id=media-7")
+
+
+def test_project_detail_api_exposes_multiframe_evidence_without_private_paths():
+    detail = {
+        "project": {"id": 7},
+        "clips": [{
+            "project_media_id": "media-7",
+            "perception_run": {
+                "current_analysis_run_uuid": "run_abc",
+                "current_window_results": [{
+                    "window_uuid": "window_abc",
+                    "evidence": {"contact_sheet": r"D:\private\evidence.jpg"},
+                    "summary": "連續畫面",
+                }],
+            },
+        }],
+    }
+    result = _project_detail_for_api({}, detail)
+    encoded = str(result)
+    assert "D:\\private" not in encoded
+    urls = result["clips"][0]["perception_run"]["current_window_results"][0]["evidence_urls"]
+    assert urls["contact_sheet"].startswith("/api/project/perception-evidence?")
+    assert "window_abc" in urls["window"]

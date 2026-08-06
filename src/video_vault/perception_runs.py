@@ -34,6 +34,9 @@ RUN_COLUMNS = {
     "provider_contract_json": "text default '{}'",
     "interrupted_at": "text",
     "published_revision": "integer",
+    "window_manifest_json": "text default '[]'",
+    "window_results_json": "text default '[]'",
+    "window_validation_json": "text default '{}'",
 }
 
 PROJECT_MEDIA_RUN_COLUMNS = {
@@ -265,6 +268,9 @@ def analysis_run(db: Path, run_uuid: str) -> dict:
         "frame_manifest_json",
         "sampling_manifest_json",
         "provider_contract_json",
+        "window_manifest_json",
+        "window_results_json",
+        "window_validation_json",
     ):
         raw = result.pop(key, "") or ""
         result[key.removesuffix("_json")] = json.loads(raw) if raw else {}
@@ -289,6 +295,33 @@ def set_run_sampling_manifest(db: Path, run_uuid: str, manifest: dict) -> None:
                 json.dumps(manifest, ensure_ascii=False, sort_keys=True),
                 str(run_uuid),
             ),
+        )
+
+
+def set_run_window_manifest(db: Path, run_uuid: str, manifest: list[dict]) -> None:
+    ensure_perception_schema(db)
+    with connect(db) as con:
+        con.execute(
+            "update analysis_runs set window_manifest_json=? where run_uuid=?",
+            (json.dumps(manifest, ensure_ascii=False, sort_keys=True), str(run_uuid)),
+        )
+
+
+def set_run_window_results(db: Path, run_uuid: str, results: list[dict]) -> None:
+    ensure_perception_schema(db)
+    with connect(db) as con:
+        con.execute(
+            "update analysis_runs set window_results_json=? where run_uuid=?",
+            (json.dumps(results, ensure_ascii=False, sort_keys=True), str(run_uuid)),
+        )
+
+
+def set_run_window_validation(db: Path, run_uuid: str, validation: dict) -> None:
+    ensure_perception_schema(db)
+    with connect(db) as con:
+        con.execute(
+            "update analysis_runs set window_validation_json=? where run_uuid=?",
+            (json.dumps(validation, ensure_ascii=False, sort_keys=True), str(run_uuid)),
         )
 
 
@@ -433,8 +466,8 @@ def publish_staged_results(
             con.execute(
                 """insert into frames(
                     video_id, timestamp_seconds, frame_path, vision_summary, tags,
-                    score_visual_quality, score_usefulness
-                ) values(?, ?, ?, ?, ?, ?, ?)""",
+                    score_visual_quality, score_usefulness, window_uuid, window_confidence
+                ) values(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     video_id,
                     float(row.get("timestamp_seconds") or 0),
@@ -443,6 +476,8 @@ def publish_staged_results(
                     tag_text,
                     float(row.get("visual_quality_score") or row.get("score_visual_quality") or 0),
                     float(row.get("usefulness_score") or row.get("score_usefulness") or 0),
+                    str(row.get("window_uuid") or ""),
+                    float(row.get("window_confidence") or row.get("confidence") or 0),
                 ),
             )
         migration = _replace_segments_in_connection(con, video_id, segment_results)
@@ -608,6 +643,9 @@ def perception_states_for_project(db: Path, project_id: int) -> dict[int, dict]:
                 current.input_snapshot_json as current_input_snapshot_json,
                 current.sampling_manifest_json as current_sampling_manifest_json,
                 current.provider_contract_json as current_provider_contract_json,
+                current.window_manifest_json as current_window_manifest_json,
+                current.window_results_json as current_window_results_json,
+                current.window_validation_json as current_window_validation_json,
                 success.generation as last_success_generation,
                 success.finished_at as last_success_finished_at,
                 exists(select 1 from segments s where s.video_id=pv.video_id) as has_segments
@@ -635,6 +673,12 @@ def perception_states_for_project(db: Path, project_id: int) -> dict[int, dict]:
         data["current_sampling_manifest"] = json.loads(raw_sampling) if raw_sampling else {}
         raw_provider = str(data.pop("current_provider_contract_json", "") or "")
         data["current_provider_contract"] = json.loads(raw_provider) if raw_provider else {}
+        raw_window_manifest = str(data.pop("current_window_manifest_json", "") or "")
+        data["current_window_manifest"] = json.loads(raw_window_manifest) if raw_window_manifest else []
+        raw_window_results = str(data.pop("current_window_results_json", "") or "")
+        data["current_window_results"] = json.loads(raw_window_results) if raw_window_results else []
+        raw_window_validation = str(data.pop("current_window_validation_json", "") or "")
+        data["current_window_validation"] = json.loads(raw_window_validation) if raw_window_validation else {}
         data["stale_fallback_available"] = bool(
             data.get("last_successful_analysis_run_uuid")
             and not data["analysis_current"]

@@ -37,7 +37,7 @@ from .project import build_project_plan, can_project_render, create_project, lis
 from .project_lifecycle import CancellationRequested, CancellationToken, ProjectRevisionConflict, check_base_revision, current_revision, project_commit
 from .job_coordinator import DEFAULT_COORDINATOR, JobState
 from .project_perception import run_project_perception
-from .perception_runs import PerceptionCancelled, ensure_perception_schema, perception_jobs, recover_interrupted_perception_runs
+from .perception_runs import PerceptionCancelled, analysis_run, ensure_perception_schema, perception_jobs, recover_interrupted_perception_runs, run_staging_dir
 from .render_api import RenderAPI
 from .render_job_manager import RenderJobManager
 from .renderer import render_approved
@@ -458,6 +458,19 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                         db,
                         int(query.get("project_id", ["0"])[0] or 0),
                         query.get("media_id", [""])[0],
+                    )
+                    self._file(path)
+                except (FileNotFoundError, ValueError):
+                    self.send_error(404)
+            elif parsed.path == "/api/project/perception-evidence":
+                try:
+                    path = perception_evidence_path(
+                        cfg,
+                        db,
+                        int(query.get("project_id", ["0"])[0] or 0),
+                        query.get("run_uuid", [""])[0],
+                        query.get("window_uuid", [""])[0],
+                        query.get("file", [""])[0],
                     )
                     self._file(path)
                 except (FileNotFoundError, ValueError):
@@ -1078,6 +1091,42 @@ def registered_project_media_path(cfg: dict, db: Path, project_id: int, media_id
     raise FileNotFoundError("registered project media not found")
 
 
+PERCEPTION_EVIDENCE_FILES = {
+    "contact_sheet.jpg",
+    "window.json",
+    "validation.json",
+    "normalized.json",
+}
+
+
+def perception_evidence_path(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    run_uuid: str,
+    window_uuid: str,
+    file_name: str,
+) -> Path:
+    """Resolve only an evidence artifact from a run belonging to this project."""
+
+    run_token = str(run_uuid or "").strip()
+    window_token = str(window_uuid or "").strip()
+    file_token = str(file_name or "").strip()
+    token_pattern = re.compile(r"^[A-Za-z0-9_-]+$")
+    if not token_pattern.fullmatch(run_token) or not token_pattern.fullmatch(window_token):
+        raise ValueError("invalid perception evidence identity")
+    if file_token not in PERCEPTION_EVIDENCE_FILES:
+        raise ValueError("invalid perception evidence file")
+    run = analysis_run(db, run_token)
+    if int(run.get("project_id") or 0) != int(project_id):
+        raise FileNotFoundError("perception evidence is not in this project")
+    root = (run_staging_dir(cfg, run_token) / "evidence").resolve()
+    candidate = (root / window_token / file_token).resolve()
+    if root not in candidate.parents or not candidate.is_file() or candidate.is_symlink():
+        raise FileNotFoundError("perception evidence not found")
+    return candidate
+
+
 def _project_detail_for_api(cfg: dict, detail: dict) -> dict:
     """Expose project-scoped media URLs without leaking local filesystem paths."""
 
@@ -1088,17 +1137,14 @@ def _project_detail_for_api(cfg: dict, detail: dict) -> dict:
     def media_url(media_id: object) -> str:
         return f"/api/project/media?project_id={project_id}&media_id={str(media_id or '')}"
 
-    for clip in result.get("clips") or []:
-        if not isinstance(clip, dict):
-            continue
-        clip["media_url"] = media_url(clip.get("project_media_id") or clip.get("video_id"))
-        for key in ("source_path", "original_source_path", "physical_filename"):
-            clip.pop(key, None)
-    for segment in result.get("segments") or []:
-        if not isinstance(segment, dict):
-            continue
-        segment["media_url"] = media_url(segment.get("project_media_id") or segment.get("video_id"))
-        segment.pop("source_file", None)
+    def evidence_url(run_uuid: str, window_uuid: str, file_name: str) -> str:
+        query = urlencode({
+            "project_id": project_id,
+            "run_uuid": run_uuid,
+            "window_uuid": window_uuid,
+            "file": file_name,
+        })
+        return f"/api/project/perception-evidence?{query}"
 
     def scrub(value: object) -> object:
         if isinstance(value, list):
@@ -1107,14 +1153,48 @@ def _project_detail_for_api(cfg: dict, detail: dict) -> dict:
             return value
         cleaned = {}
         for key, item in value.items():
-            if key in {"source_file", "source_path", "original_source_path", "file_path"}:
+            if key in {"source_file", "source_path", "original_source_path", "file_path", "frame_path", "evidence"}:
                 continue
             cleaned[key] = scrub(item)
         if "project_media_id" in cleaned and "media_url" not in cleaned:
             cleaned["media_url"] = media_url(cleaned["project_media_id"])
         return cleaned
 
+    for clip in result.get("clips") or []:
+        if not isinstance(clip, dict):
+            continue
+        clip["media_url"] = media_url(clip.get("project_media_id") or clip.get("video_id"))
+        perception = clip.get("perception_run")
+        if isinstance(perception, dict):
+            run_uuid = str(perception.get("current_analysis_run_uuid") or "")
+            public_perception = scrub(perception)
+            public_results = []
+            for item in perception.get("current_window_results") or []:
+                if not isinstance(item, dict):
+                    continue
+                public_item = scrub(item)
+                public_item.pop("evidence", None)
+                window_uuid = str(item.get("window_uuid") or "")
+                if run_uuid and window_uuid:
+                    public_item["evidence_urls"] = {
+                        "contact_sheet": evidence_url(run_uuid, window_uuid, "contact_sheet.jpg"),
+                        "window": evidence_url(run_uuid, window_uuid, "window.json"),
+                        "validation": evidence_url(run_uuid, window_uuid, "validation.json"),
+                        "normalized": evidence_url(run_uuid, window_uuid, "normalized.json"),
+                    }
+                public_results.append(public_item)
+            public_perception["current_window_results"] = public_results
+            clip["perception_run"] = public_perception
+        for key in ("source_path", "original_source_path", "physical_filename"):
+            clip.pop(key, None)
+    for segment in result.get("segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        segment["media_url"] = media_url(segment.get("project_media_id") or segment.get("video_id"))
+        segment.pop("source_file", None)
+
     result["plan"] = scrub(result.get("plan"))
+    result["perception_runs"] = scrub(result.get("perception_runs"))
     result.pop("folder", None)
     return result
 

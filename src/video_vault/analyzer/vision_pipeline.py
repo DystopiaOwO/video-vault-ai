@@ -5,6 +5,17 @@ import json
 
 from .cloud_provider import CloudProvider
 from .frame_analysis import PROMPT_VERSION, cache_key, merge_frames_to_segments
+from .multi_frame import (
+    MULTI_FRAME_CONTRACT_VERSION,
+    MULTI_FRAME_PROMPT_VERSION,
+    MultiFrameUnsupported,
+    MultiFrameValidationError,
+    build_frame_windows,
+    normalize_window_result,
+    validate_window,
+    window_cache_key,
+    write_window_evidence,
+)
 from .mock_provider import MockProvider
 from .local_provider import LocalProvider
 from ..database import frames as db_frames, replace_segments, update_frame_analysis
@@ -98,6 +109,224 @@ def analyze_frame_manifest(
         "model": provider.model,
         "frames": analyzed,
         "segments": perceived_segments,
+        "cache_hits": cache_hits,
+        "vision_calls": vision_calls,
+    }
+
+
+def analyze_frame_windows(
+    video: dict,
+    cfg: dict,
+    frame_manifest: list[dict],
+    progress=None,
+    should_cancel=None,
+    duration_seconds: float | None = None,
+    evidence_root: Path | None = None,
+    windows: list[dict] | None = None,
+) -> dict:
+    """Analyze explicit 3-5 frame windows through a provider contract.
+
+    A short clip with fewer than three usable samples is explicitly marked
+    ``skipped`` and uses the existing frame contract for compatibility. A
+    provider that cannot consume multi-image input is always rejected.
+    """
+
+    provider = provider_from_config(cfg)
+    duration = float(video.get("duration_seconds") or 0) if duration_seconds is None else float(duration_seconds)
+    planned_windows = windows or build_frame_windows(frame_manifest, duration)
+    evidence_root = evidence_root or (Path(cfg["library_root"]) / "05_index" / "multi_frame_evidence")
+    validation_reports: list[dict] = []
+    eligible: list[dict] = []
+    for window in planned_windows:
+        validation = validate_window(window)
+        window["validation"] = validation
+        validation_reports.append({"window_uuid": window.get("window_uuid"), **validation})
+        if validation["status"] == "blocked":
+            raise MultiFrameValidationError(
+                f"multi-frame window {window.get('window_uuid')} blocked: "
+                + ", ".join(validation.get("needs_review_reasons") or [])
+            )
+        if validation["status"] == "pass":
+            eligible.append(window)
+
+    if not eligible:
+        for window in planned_windows:
+            write_window_evidence(
+                window,
+                None,
+                window.get("validation") or {},
+                evidence_root,
+                ffmpeg_path=str(cfg.get("ffmpeg_path") or "ffmpeg"),
+            )
+        legacy = analyze_frame_manifest(
+            video,
+            cfg,
+            frame_manifest,
+            progress,
+            should_cancel,
+            duration_seconds=duration,
+        )
+        legacy["window_manifest"] = planned_windows
+        legacy["window_results"] = []
+        legacy["window_validation"] = {
+            "status": "skipped",
+            "checks": validation_reports,
+            "evidence_artifact_ids": [str(window.get("window_uuid") or "") for window in planned_windows],
+            "needs_review_reasons": ["insufficient_evidence_frames"],
+        }
+        legacy["multi_frame_contract"] = {
+            "version": MULTI_FRAME_CONTRACT_VERSION,
+            "schema_version": 1,
+            "prompt_version": MULTI_FRAME_PROMPT_VERSION,
+            "provider": provider.provider,
+            "model": provider.model,
+            "status": "skipped",
+        }
+        return legacy
+
+    if not bool(getattr(provider, "supports_multi_frame", False)):
+        raise MultiFrameUnsupported(
+            f"provider {provider.provider} does not support multi-frame input; "
+            "no single-frame fallback is allowed"
+        )
+    max_images = int(getattr(provider, "multi_frame_max_images", 0) or 0)
+    if max_images < 3:
+        raise MultiFrameUnsupported(f"provider {provider.provider} allows fewer than three images per window")
+
+    raw_dir = Path(cfg["library_root"]) / "05_index" / "raw_ai_outputs" / "multiframe"
+    window_results: list[dict] = []
+    cache_hits = 0
+    vision_calls = 0
+    frame_to_result: dict[str, dict] = {}
+    for index, window in enumerate(eligible, 1):
+        if should_cancel and should_cancel():
+            raise AnalysisCancelled("perception cancelled by user")
+        frame_entries = list(window.get("frames") or [])
+        if len(frame_entries) > max_images:
+            raise MultiFrameValidationError(f"window {window.get('window_uuid')} exceeds provider image limit")
+        frame_paths = [Path(str(frame.get("frame_path") or "")) for frame in frame_entries]
+        timestamps = [float(frame.get("timestamp_seconds") or 0) for frame in frame_entries]
+        key = window_cache_key(
+            window,
+            provider=provider.provider,
+            model=provider.model,
+            prompt_version=str(getattr(provider, "multi_frame_prompt_version", MULTI_FRAME_PROMPT_VERSION)),
+        )
+        cache_path = raw_dir / f"{key}.json"
+        cache_hit = False
+        if cache_path.is_file():
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            payload = cached["parsed"]
+            raw = cached.get("raw") or {}
+            cache_hits += 1
+            cache_hit = True
+        else:
+            analyze_window = getattr(provider, "analyze_window", None)
+            if not callable(analyze_window):
+                raise MultiFrameUnsupported(f"provider {provider.provider} has no multi-frame method")
+            payload, raw = analyze_window(frame_paths, timestamps, video)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                json.dumps({"window_uuid": window.get("window_uuid"), "parsed": payload, "raw": raw}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            vision_calls += 1
+        normalized = normalize_window_result(payload, window)
+        validation = dict(window.get("validation") or validate_window(window))
+        evidence = write_window_evidence(
+            window,
+            normalized,
+            validation,
+            evidence_root,
+            ffmpeg_path=str(cfg.get("ffmpeg_path") or "ffmpeg"),
+        )
+        validation["evidence_artifact_ids"] = [str(window.get("window_uuid") or "")]
+        result = {
+            "window_uuid": str(window.get("window_uuid") or ""),
+            "ordinal": int(window.get("ordinal") or index),
+            "start_seconds": float(window.get("start_seconds") or 0),
+            "end_seconds": float(window.get("end_seconds") or 0),
+            "frame_timestamps": timestamps,
+            "frame_fingerprints": [str(frame.get("fingerprint") or "") for frame in frame_entries],
+            "cache_key": key,
+            "cache_hit": cache_hit,
+            "validation": validation,
+            "evidence": evidence,
+            **normalized,
+        }
+        window_results.append(result)
+        for frame in frame_entries:
+            frame_to_result[str(frame.get("frame_path") or "")] = result
+        if progress:
+            progress(index, len(eligible), window)
+        if should_cancel and should_cancel():
+            raise AnalysisCancelled("perception cancelled by user")
+
+    analyzed_frames = []
+    for frame in sorted(frame_manifest, key=lambda item: float(item.get("timestamp_seconds") or 0)):
+        result = frame_to_result.get(str(frame.get("frame_path") or ""))
+        if result is None:
+            continue
+        analyzed_frames.append(
+            {
+                "frame_path": str(frame.get("frame_path") or ""),
+                "timestamp_seconds": float(frame.get("timestamp_seconds") or 0),
+                "summary": result["summary"],
+                "tags": result.get("tags") or [],
+                "visual_quality_score": float(result["technical_quality"]["score"]),
+                "usefulness_score": float(result["confidence"]),
+                "suggested_use": result["shot_role"],
+                "window_uuid": result["window_uuid"],
+                "window_confidence": result["confidence"],
+                "action": result["action"],
+                "natural_audio_recommendation": result["natural_audio_recommendation"],
+            }
+        )
+    segments = []
+    for result in window_results:
+        segments.append(
+            {
+                "start_seconds": result["start_seconds"],
+                "end_seconds": result["end_seconds"],
+                "segment_type": result["shot_role"] or "multi_frame",
+                "title": result["summary"] or result["action"] or "多影格候選片段",
+                "reason": f"{result['action']}；{result['summary']}",
+                "tags": result.get("tags") or [],
+                "score": result["confidence"],
+                "suggested_use": result["shot_role"] or "補畫面",
+                "window_uuid": result["window_uuid"],
+                "action": result["action"],
+                "shot_role": result["shot_role"],
+                "technical_quality": result["technical_quality"],
+                "duplicate_group": result["duplicate_group"],
+                "natural_audio_recommendation": result["natural_audio_recommendation"],
+                "confidence": result["confidence"],
+            }
+        )
+    overall_status = "pass" if all(item.get("status") == "pass" for item in validation_reports) else "warning"
+    return {
+        "provider": provider.provider,
+        "model": provider.model,
+        "frames": analyzed_frames,
+        "segments": segments,
+        "window_manifest": planned_windows,
+        "window_results": window_results,
+        "window_validation": {
+            "status": overall_status,
+            "checks": validation_reports,
+            "evidence_artifact_ids": [str(item.get("window_uuid") or "") for item in window_results],
+            "needs_review_reasons": [] if overall_status == "pass" else ["window_validation_warning"],
+        },
+        "multi_frame_contract": {
+            "version": MULTI_FRAME_CONTRACT_VERSION,
+            "schema_version": 1,
+            "prompt_version": str(getattr(provider, "multi_frame_prompt_version", MULTI_FRAME_PROMPT_VERSION)),
+            "provider": provider.provider,
+            "model": provider.model,
+            "supports_multi_frame": True,
+            "max_images": max_images,
+            "status": overall_status,
+        },
         "cache_hits": cache_hits,
         "vision_calls": vision_calls,
     }

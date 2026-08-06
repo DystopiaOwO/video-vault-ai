@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .multi_frame import MULTI_FRAME_PROMPT_VERSION
+
 COFFEE_TAGS = ["coffee", "pour_over", "kettle", "dripping", "closeup", "calm", "asmr"]
 TRAVEL_TAGS = ["travel", "street", "food", "cafe", "landscape", "walking", "city"]
 FRAME_TAGS = ["coffee", "food", "closeup", "hands", "dripping"]
@@ -8,6 +10,9 @@ FRAME_TAGS = ["coffee", "food", "closeup", "hands", "dripping"]
 class MockProvider:
     provider = "mock"
     prompt_version = "perception_zh_tw_v1"
+    supports_multi_frame = True
+    multi_frame_max_images = 5
+    multi_frame_prompt_version = MULTI_FRAME_PROMPT_VERSION
 
     def __init__(self, cfg: dict | None = None):
         mock = ((cfg or {}).get("ai") or {}).get("mock") or {}
@@ -55,3 +60,30 @@ class MockProvider:
             "suggested_use": "短影音" if "hands" in tags or "dripping" in tags else "補畫面",
         }
         return result, {"provider": self.provider, "model": self.model, "mock": True}
+
+    def analyze_window(self, frame_paths, timestamps: list[float], video: dict) -> tuple[dict, dict]:
+        """Return a deterministic clip-level result without a single-frame fallback."""
+
+        start = float(timestamps[0])
+        end = float(timestamps[-1])
+        category = str(video.get("category") or "unknown")
+        tags = ["travel", "landscape"] if category == "travel" else ["coffee", "hands", "dripping"]
+        result = {
+            "summary": f"{start:.1f} 到 {end:.1f} 秒的{category}連續畫面。",
+            "action": "連續動作與場景變化",
+            "start_seconds": start,
+            "end_seconds": end,
+            "shot_role": "process" if category != "travel" else "context",
+            "technical_quality": {"score": 0.82, "issues": []},
+            "duplicate_group": f"{category or 'unknown'}_{int(start // 10)}",
+            "natural_audio_recommendation": "keep",
+            "confidence": 0.78,
+            "tags": tags,
+        }
+        return result, {
+            "provider": self.provider,
+            "model": self.model,
+            "mock": True,
+            "frame_count": len(frame_paths),
+            "timestamps": [float(value) for value in timestamps],
+        }

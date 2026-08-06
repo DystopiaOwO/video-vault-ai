@@ -8,11 +8,15 @@ import time
 import urllib.request
 
 from .frame_analysis import PROMPT_VERSION, TAGS, has_cjk
+from .multi_frame import MULTI_FRAME_PROMPT_VERSION, parse_window_response
 
 
 class CloudProvider:
     provider = "cloud"
     prompt_version = PROMPT_VERSION
+    supports_multi_frame = True
+    multi_frame_max_images = 5
+    multi_frame_prompt_version = MULTI_FRAME_PROMPT_VERSION
 
     def __init__(self, cfg: dict):
         cloud = cfg.get("ai", {}).get("cloud", {})
@@ -37,6 +41,20 @@ class CloudProvider:
                 time.sleep(2 ** attempt)
         raise RuntimeError(f"vision API failed after retries: {last_error}")
 
+    def analyze_window(self, frame_paths: list[Path], timestamps: list[float], video: dict) -> tuple[dict, dict]:
+        if not self.api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set")
+        body = self._window_request_body(frame_paths, timestamps, video)
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                raw = self._post(body)
+                return parse_window_response(raw), raw
+            except Exception as exc:
+                last_error = exc
+                time.sleep(2 ** attempt)
+        raise RuntimeError(f"vision multi-frame API failed after retries: {last_error}") from last_error
+
     def _request_body(self, frame_path: Path, timestamp: float, video: dict, extra: str = "") -> dict:
         image = base64.b64encode(frame_path.read_bytes()).decode("ascii")
         prompt = (
@@ -58,6 +76,26 @@ class CloudProvider:
                     ],
                 }
             ],
+        }
+
+    def _window_request_body(self, frame_paths: list[Path], timestamps: list[float], video: dict) -> dict:
+        prompt = (
+            "請分析以下同一影片區段的連續畫面，作為一個 multi-frame 感知單位。只回傳 JSON："
+            '{"summary": string, "action": string, "start_seconds": number, "end_seconds": number, '
+            '"shot_role": string, "technical_quality": {"score": number, "issues": string[]}, '
+            '"duplicate_group": string, "natural_audio_recommendation": "keep|lower|mute|unknown", '
+            '"confidence": number, "tags": string[]}. '
+            "時間範圍必須落在提供的 timestamps 內，不要自行重抽影格或合併其他區段。"
+            f"tags 只能使用：{', '.join(TAGS)}；summary、action、shot_role、issues 使用繁體中文。"
+            f"Video filename: {video.get('filename')}; timestamps: {', '.join(f'{value:.3f}' for value in timestamps)}。"
+        )
+        content = [{"type": "input_text", "text": prompt}]
+        for frame_path in frame_paths:
+            image = base64.b64encode(frame_path.read_bytes()).decode("ascii")
+            content.append({"type": "input_image", "image_url": f"data:image/jpeg;base64,{image}"})
+        return {
+            "model": self.model,
+            "input": [{"role": "user", "content": content}],
         }
 
     def _post(self, body: dict) -> dict:

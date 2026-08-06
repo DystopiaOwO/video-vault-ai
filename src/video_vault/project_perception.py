@@ -3,7 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 import json
 
-from .analyzer.vision_pipeline import AnalysisCancelled, analyze_frame_manifest
+from .analyzer.multi_frame import build_frame_windows
+from .analyzer.vision_pipeline import AnalysisCancelled, analyze_frame_manifest, analyze_frame_windows
 from .database import project_ids_for_video, project_videos
 from .ffmpeg_tools import extract_frames
 from .naming import rename_after_perception
@@ -20,6 +21,9 @@ from .perception_runs import (
     restore_metadata_paths,
     run_staging_dir,
     set_run_frame_manifest,
+    set_run_window_manifest,
+    set_run_window_results,
+    set_run_window_validation,
     set_run_output_path,
     set_run_sampling_manifest,
     snapshot_metadata_paths,
@@ -132,13 +136,45 @@ def run_project_perception(
             raise RuntimeError("; ".join(errors))
         _raise_if_cancelled(should_cancel)
 
-        result = analyze_frame_manifest(
-            video,
-            {**cfg, "_sampling_policy": sampling["policy"]},
+        windows = build_frame_windows(
             manifest,
-            progress,
-            should_cancel=should_cancel,
+            float(video.get("duration_seconds") or 0),
         )
+        set_run_window_manifest(db, run_uuid, windows)
+        sampling["estimated_vision_calls"] = len(windows) if len(manifest) >= 3 else len(manifest)
+        set_run_sampling_manifest(db, run_uuid, sampling)
+        analysis_cfg = {**cfg, "_sampling_policy": sampling["policy"]}
+        # Configs created by the current loader contain the sampling policy and
+        # opt into Phase 2. Small legacy/test configs without that policy keep
+        # the old single-frame contract for backward compatibility.
+        multi_frame_config = ((cfg.get("perception") or {}).get("multi_frame") or {})
+        multi_frame_enabled = bool(
+            multi_frame_config.get("enabled", "sampling" in cfg)
+        )
+        if multi_frame_enabled:
+            result = analyze_frame_windows(
+                video,
+                analysis_cfg,
+                manifest,
+                progress,
+                should_cancel=should_cancel,
+                duration_seconds=float(video.get("duration_seconds") or 0),
+                evidence_root=staging / "evidence",
+                windows=windows,
+            )
+        else:
+            result = analyze_frame_manifest(
+                video,
+                analysis_cfg,
+                manifest,
+                progress,
+                should_cancel=should_cancel,
+            )
+            result.setdefault("window_manifest", windows)
+            result.setdefault("window_results", [])
+            result.setdefault("window_validation", {"status": "skipped", "reason": "legacy config"})
+        set_run_window_results(db, run_uuid, result.get("window_results") or [])
+        set_run_window_validation(db, run_uuid, result.get("window_validation") or {})
         sampling["actual_vision_calls"] = int(result.get("vision_calls") or 0)
         sampling["cache_hits"] = int(result.get("cache_hits") or 0)
         set_run_sampling_manifest(db, run_uuid, sampling)
