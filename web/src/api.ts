@@ -9,6 +9,11 @@ export type Project = {
 
 export type PerceptionWindowResult = {
   window_uuid: string;
+  segment_uuid?: string;
+  include?: boolean;
+  user_notes?: string;
+  locked?: boolean;
+  publish_status?: string;
   ordinal?: number;
   start_seconds?: number;
   end_seconds?: number;
@@ -455,6 +460,8 @@ export const api = {
     json<{ ok: boolean; path?: string; error?: string }>("/api/project/segments", post({ project_id: projectId, segments, base_revision: baseRevision })),
   saveSegmentTiming: (projectId: number, segmentId: string, timing: { start_seconds: number; end_seconds: number; speed: number }, baseRevision?: number) =>
     json<{ ok: boolean; path?: string; error?: string }>("/api/project/segment-timing", post({ project_id: projectId, segment_id: segmentId, ...timing, base_revision: baseRevision })),
+  saveSegmentEvidence: (projectId: number, segmentId: string, patch: Record<string, unknown>, baseRevision?: number) =>
+    json<{ ok: boolean; path?: string; error?: string; code?: string }>("/api/project/segment-evidence", post({ project_id: projectId, segment_id: segmentId, patch, base_revision: baseRevision })),
   storyboard: (projectId: number) => json<StoryboardState>(`/api/project/storyboard?project_id=${projectId}`),
   generateStoryboard: (projectId: number, force = false, baseRevision?: number) =>
     json<{ ok: boolean; storyboard?: StoryboardState; error?: string }>("/api/project/storyboard/generate", post({ project_id: projectId, force, base_revision: baseRevision })),

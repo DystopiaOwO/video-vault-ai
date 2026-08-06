@@ -534,6 +534,98 @@ def update_segment_timing(
         return path
 
 
+def update_segment_evidence(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    segment_id: str,
+    patch: dict,
+    *,
+    base_revision: int | None = None,
+) -> Path:
+    """Patch human evidence corrections for one stable segment only."""
+
+    editable = {
+        "action",
+        "shot_role",
+        "technical_quality_issues",
+        "duplicate_group",
+        "natural_audio_recommendation",
+        "include",
+        "user_notes",
+        "locked",
+        "needs_review",
+    }
+    if not isinstance(patch, dict):
+        raise ValueError("evidence patch 必須是物件")
+    unknown = sorted(set(patch) - editable)
+    if unknown:
+        raise ValueError(f"不可修改的 evidence 欄位：{', '.join(unknown)}")
+    segment_id = str(segment_id or "")
+    if not segment_id:
+        raise ValueError("segment_id 不可為空")
+
+    with project_commit(db, project_id, base_revision) as commit:
+        plan = _read_json(project_dir(cfg, project_id) / "project_plan.json")
+        current_rows = project_segments(cfg, project_id, plan, apply_storyboard=False, db=db)
+        source = next((row for row in current_rows if str(row.get("segment_id") or "") == segment_id), None)
+        if source is None:
+            raise ValueError(f"找不到片段：{segment_id}")
+        existing = _segment_review(cfg, project_id)
+        target_index = next((index for index, row in enumerate(existing) if str(row.get("segment_id") or "") == segment_id), None)
+        created_target = target_index is None
+        if target_index is None:
+            target_index = len(existing)
+            target = {"segment_id": segment_id}
+            existing.append(target)
+        else:
+            target = dict(existing[target_index])
+            existing[target_index] = target
+        before = json.dumps(existing, ensure_ascii=False, sort_keys=True)
+        changed_fields = []
+        for key in sorted(editable):
+            if key not in patch:
+                continue
+            value = patch[key]
+            if key in {"include", "locked", "needs_review"}:
+                value = bool(value)
+            elif key == "technical_quality_issues":
+                if not isinstance(value, list):
+                    raise ValueError("technical_quality_issues 必須是陣列")
+                value = [str(item) for item in value]
+            else:
+                value = str(value or "").strip()
+            if target.get(key) != value:
+                target[key] = value
+                changed_fields.append(key)
+        if changed_fields:
+            previous_fields = target.get("manual_override_fields") or []
+            if not isinstance(previous_fields, list):
+                previous_fields = []
+            target["manual_override_fields"] = sorted({str(item) for item in previous_fields} | set(changed_fields))
+            target["manual_override_source"] = "human"
+            target["manual_override_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            target["manual_override_base_revision"] = base_revision
+        after = json.dumps(existing, ensure_ascii=False, sort_keys=True)
+        changed = before != after
+        if created_target and not changed:
+            existing.pop()
+        commit.record_changed(changed)
+        path = project_dir(cfg, project_id) / "feedback" / "segment_review.json"
+        _atomic_write_text(path, json.dumps(existing, ensure_ascii=False, indent=2) + "\n")
+        if changed:
+            append_decision(
+                cfg,
+                project_id,
+                "segment_evidence",
+                f"人工修正片段 {segment_id} 的感知證據",
+                "human",
+                affected_segments=[segment_id],
+            )
+            mark_project_needs_review(cfg, db, project_id)
+        return path
+
+
 def _update_segment_timing(
     cfg: dict,
     db: Path,
