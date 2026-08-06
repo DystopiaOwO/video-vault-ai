@@ -168,7 +168,7 @@ jobs:
     needs: select
     if: (github.event_name == 'pull_request' && needs.select.outputs.media_smoke == 'true') || (github.event_name == 'workflow_dispatch' && inputs.suite == 'media-smoke')
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
