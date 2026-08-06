@@ -377,8 +377,7 @@ def normalize_window_result(payload: Mapping[str, Any], window: Mapping[str, Any
     window_end = float(window.get("end_seconds") or 0)
     if not all(math.isfinite(value) for value in (start, end, confidence)):
         raise MultiFrameValidationError("multi-frame response contains non-finite values")
-    if not 0 <= confidence <= 1:
-        raise MultiFrameValidationError("multi-frame confidence must be between 0 and 1")
+    confidence = _normalize_unit_score(confidence, "multi-frame confidence")
     if end <= start or start < window_start - 0.001 or end > window_end + 0.001 or (duration > 0 and end > duration + 0.001):
         raise MultiFrameValidationError("multi-frame action range is outside its evidence window")
     technical = payload["technical_quality"]
@@ -388,8 +387,7 @@ def normalize_window_result(payload: Mapping[str, Any], window: Mapping[str, Any
     else:
         quality_score = float(technical)
         quality_issues = []
-    if not math.isfinite(quality_score) or not 0 <= quality_score <= 1:
-        raise MultiFrameValidationError("technical_quality score must be between 0 and 1")
+    quality_score = _normalize_unit_score(quality_score, "technical_quality score")
     tags = [str(tag) for tag in payload.get("tags") or [] if str(tag) in TAGS]
     recommendation = str(payload["natural_audio_recommendation"]).lower()
     if recommendation not in {"keep", "lower", "mute", "unknown"}:
@@ -407,6 +405,20 @@ def normalize_window_result(payload: Mapping[str, Any], window: Mapping[str, Any
         "confidence": round(confidence, 6),
         "tags": tags,
     }
+
+
+def _normalize_unit_score(value: float, label: str) -> float:
+    """Accept provider 0-1, 0-10, or percentage scores deterministically."""
+
+    if not math.isfinite(value) or value < 0:
+        raise MultiFrameValidationError(f"{label} must be a finite non-negative number")
+    if value <= 1:
+        return value
+    if value <= 10:
+        return value / 10
+    if value <= 100:
+        return value / 100
+    raise MultiFrameValidationError(f"{label} must be between 0 and 1, 0 and 10, or 0 and 100")
 
 
 def _write_contact_sheet(frame_paths: list[Path], output: Path, ffmpeg_path: str | None) -> str:

@@ -101,6 +101,24 @@ def test_normalize_window_result_rejects_action_outside_window(tmp_path):
         normalize_window_result(payload, window)
 
 
+def test_normalize_window_result_converts_provider_score_scales(tmp_path):
+    window = build_frame_windows(_manifest(tmp_path, 3), 10)[0]
+    payload = {
+        "summary": "連續畫面",
+        "action": "倒水",
+        "start_seconds": 0,
+        "end_seconds": 4,
+        "shot_role": "process",
+        "technical_quality": {"score": 8, "issues": []},
+        "duplicate_group": "",
+        "natural_audio_recommendation": "keep",
+        "confidence": 80,
+    }
+    result = normalize_window_result(payload, window)
+    assert result["technical_quality"]["score"] == 0.8
+    assert result["confidence"] == 0.8
+
+
 def test_evidence_bundle_excludes_frame_paths_from_public_window(tmp_path):
     window = build_frame_windows(_manifest(tmp_path, 3), 10)[0]
     evidence = write_window_evidence(
