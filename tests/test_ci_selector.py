@@ -3,6 +3,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 
 _SPEC = importlib.util.spec_from_file_location(
     "select_pr_tests",
@@ -40,6 +42,26 @@ def test_renderer_change_enables_micro_media_smoke():
     assert selection.media_smoke is True
     assert "tests/test_segment_renderer.py" in selection.targeted_tests
     assert selection.fallback_non_media is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/video_vault/analyzer/multi_frame.py",
+        "src/video_vault/analyzer/vision_pipeline.py",
+        "src/video_vault/project_perception.py",
+        "src/video_vault/ui.py",
+        "tests/test_media_smoke.py",
+    ],
+)
+def test_phase2_media_paths_enable_media_smoke(path):
+    selection = select_changed_files([path])
+    assert selection.media_smoke is True
+
+
+def test_unrelated_documentation_does_not_enable_media_smoke():
+    selection = select_changed_files(["docs/phase-2-notes.md"])
+    assert selection.media_smoke is False
 
 
 def test_unknown_source_change_uses_non_media_fallback():
