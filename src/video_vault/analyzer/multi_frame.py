@@ -62,23 +62,18 @@ def _partition_lengths(
     lengths: list[int] = []
     remaining = count
     while remaining:
-        if remaining <= MAX_WINDOW_FRAMES:
-            if remaining < min_frames and lengths:
-                if lengths[-1] + remaining <= max_frames:
-                    lengths[-1] += remaining
-                    remaining = 0
-                    break
-                lengths[-1] -= min_frames
-                remaining += min_frames
-            if remaining:
-                lengths.append(remaining)
-                remaining = 0
+        if remaining <= max_frames:
+            lengths.append(remaining)
             break
         size = max_frames
         remainder = remaining - size
         if 0 < remainder < min_frames:
-            # Avoid a short tail. Six frames become 3+3, not 5+1 or 2+4.
-            size = remaining - min_frames
+            # Split the final group evenly so no provider window exceeds its
+            # declared maximum, while keeping the historical 5+3+3 shape.
+            groups = (remaining + max_frames - 1) // max_frames
+            base, extra = divmod(remaining, groups)
+            lengths.extend([base + 1] * extra + [base] * (groups - extra))
+            break
         lengths.append(size)
         remaining -= size
     return lengths
@@ -229,6 +224,7 @@ def provider_capability(provider: Any, cfg: Mapping[str, Any] | None = None) -> 
         and isinstance(capability.get("supports_multi_image"), bool)
         and isinstance(maximum, int)
         and 3 <= maximum <= MAX_WINDOW_FRAMES
+        and "jpeg" in supported
         and supported
         and all(item in SUPPORTED_IMAGE_FORMATS for item in supported)
         and str(capability.get("provider_contract_version") or "")
@@ -338,17 +334,22 @@ def window_cache_key(
 def parse_window_response(raw: Mapping[str, Any]) -> dict:
     """Extract JSON from chat-completion or Responses-style provider output."""
 
-    text = str(raw.get("output_text") or "")
+    text_value = raw.get("output_text")
+    text = text_value if isinstance(text_value, (str, list)) else ""
     if not text:
         choices = raw.get("choices") or []
         if choices:
-            text = str(((choices[0].get("message") or {}).get("content") or ""))
+            content = ((choices[0].get("message") or {}).get("content") or "")
+            text = content if isinstance(content, (str, list)) else ""
     if not text:
         for item in raw.get("output") or []:
             for content in item.get("content") or []:
                 text += str(content.get("text") or "")
     if isinstance(text, list):
-        text = "".join(str(item.get("text") or item) for item in text)
+        text = "".join(
+            str(item.get("text") or "") if isinstance(item, Mapping) else str(item)
+            for item in text
+        )
     text = str(text).strip().removeprefix("```json").removesuffix("```").strip()
     data = json.loads(text)
     if not isinstance(data, dict):

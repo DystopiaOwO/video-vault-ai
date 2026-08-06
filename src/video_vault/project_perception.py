@@ -3,8 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 import json
 
-from .analyzer.multi_frame import build_frame_windows, update_window_evidence_segment_uuid
-from .analyzer.vision_pipeline import AnalysisCancelled, analyze_frame_manifest, analyze_frame_windows
+from .analyzer.multi_frame import (
+    MultiFrameValidationError,
+    build_frame_windows,
+    provider_capability,
+    update_window_evidence_segment_uuid,
+)
+from .analyzer.vision_pipeline import AnalysisCancelled, analyze_frame_manifest, analyze_frame_windows, provider_from_config
 from .database import project_ids_for_video, project_videos, segments as db_segments
 from .ffmpeg_tools import extract_frames
 from .naming import rename_after_perception
@@ -138,9 +143,17 @@ def run_project_perception(
             raise RuntimeError("; ".join(errors))
         _raise_if_cancelled(should_cancel)
 
+        multi_frame_config = ((cfg.get("perception") or {}).get("multi_frame") or {})
+        multi_frame_enabled = bool(
+            multi_frame_config.get("enabled", "sampling" in cfg)
+        )
+        max_images = 0
+        if multi_frame_enabled:
+            max_images = int(provider_capability(provider_from_config(cfg), cfg).get("maximum_images") or 0)
         windows = build_frame_windows(
             manifest,
             float(video.get("duration_seconds") or 0),
+            max_frames=max_images if multi_frame_enabled and max_images >= 3 else 5,
         )
         set_run_window_manifest(db, run_uuid, windows)
         sampling["estimated_vision_calls"] = len(windows) if len(manifest) >= 3 else len(manifest)
@@ -149,10 +162,6 @@ def run_project_perception(
         # Configs created by the current loader contain the sampling policy and
         # opt into Phase 2. Small legacy/test configs without that policy keep
         # the old single-frame contract for backward compatibility.
-        multi_frame_config = ((cfg.get("perception") or {}).get("multi_frame") or {})
-        multi_frame_enabled = bool(
-            multi_frame_config.get("enabled", "sampling" in cfg)
-        )
         if multi_frame_enabled:
             result = analyze_frame_windows(
                 video,
@@ -175,6 +184,11 @@ def run_project_perception(
             result.setdefault("window_manifest", windows)
             result.setdefault("window_results", [])
             result.setdefault("window_validation", {"status": "skipped", "reason": "legacy config"})
+        if multi_frame_enabled and (result.get("window_validation") or {}).get("status") == "blocked":
+            raise MultiFrameValidationError(
+                "multi-frame evidence validation blocked: "
+                + ", ".join((result.get("window_validation") or {}).get("needs_review_reasons") or [])
+            )
         set_run_window_results(db, run_uuid, result.get("window_results") or [])
         set_run_window_validation(db, run_uuid, result.get("window_validation") or {})
         if result.get("multi_frame_contract"):
@@ -198,6 +212,14 @@ def run_project_perception(
         metadata_snapshot = snapshot_metadata_paths(
             _metadata_paths(cfg, linked_project_ids, int(video["id"])),
             staging / "rollback_metadata",
+        )
+        (staging / "rollback_snapshot.json").write_text(
+            json.dumps(
+                {"live": published_snapshot, "metadata": metadata_snapshot},
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
         )
         migration = publish_staged_results(
             db,

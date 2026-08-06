@@ -223,6 +223,32 @@ def test_restart_marks_interrupted_run_failed_and_workflow_not_current(tmp_path)
     assert perception["status"] == "pending"
 
 
+def test_restart_rolls_back_published_run_from_durable_snapshot(tmp_path):
+    db, project_id, video_id, video, cfg = _project_video(tmp_path)
+    first = _publish_success(db, cfg, project_id, video, "stable")
+    run = create_perception_run(db, cfg, project_id, dict(project_videos(db, project_id)[0]))
+    snapshot = capture_live_results(db, video_id)
+    staging = run_staging_dir(cfg, run["run_uuid"])
+    frame_dir = staging / "frames"
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    new_frame = frame_dir / "new.jpg"
+    new_frame.write_bytes(b"new")
+    publish_staged_results(
+        db,
+        run["run_uuid"],
+        [{"frame_path": str(new_frame), "timestamp_seconds": 0, "summary": "new", "tags": []}],
+        [_segment("new")],
+    )
+    (staging / "rollback_snapshot.json").write_text(
+        json.dumps({"live": snapshot, "metadata": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    assert recover_interrupted_perception_runs(db, cfg) == 1
+    assert analysis_run(db, run["run_uuid"])["status"] == "interrupted"
+    assert frames(db, video_id)[0]["vision_summary"] == "stable-0"
+    assert perception_states_for_project(db, project_id)[video_id]["last_successful_analysis_run_uuid"] == first["run_uuid"]
+
+
 def test_run_audit_records_model_from_active_provider_and_sampling_policy(tmp_path):
     db, project_id, _video_id, video, cfg = _project_video(tmp_path)
     cfg["ai"] = {"provider": "cloud", "cloud": {"model": "vision-current"}}

@@ -9,12 +9,13 @@ from video_vault.analyzer.multi_frame import (
     _partition_lengths,
     build_frame_windows,
     normalize_window_result,
+    parse_window_response,
     provider_capability,
     window_cache_key,
     write_window_evidence,
 )
 from video_vault.analyzer import vision_pipeline
-from video_vault.database import init_db, project_videos, upsert_video
+from video_vault.database import connect, init_db, project_videos, upsert_video
 from video_vault.project import create_project
 import video_vault.project_perception as project_perception
 from video_vault.project_perception import run_project_perception
@@ -82,6 +83,35 @@ def test_local_capability_requires_explicit_valid_contract():
     }}}})
     assert capability["supports_multi_image"] is True
     assert capability["maximum_images"] == 4
+
+
+def test_local_capability_requires_jpeg_for_current_request_contract():
+    class Local:
+        provider = "local"
+
+    cfg = {"ai": {"local": {"multi_frame_capability": {
+        "supports_multi_image": True,
+        "maximum_images": 4,
+        "supported_image_formats": ["png"],
+        "provider_contract_version": "local-multiframe-v1",
+        "prompt_contract_version": "prompt-v1",
+        "schema_version": 1,
+        "capability_source": "explicit_config",
+    }}}}
+    assert provider_capability(Local(), cfg)["capability_source"] == "invalid"
+
+
+def test_parse_window_response_accepts_chat_content_parts():
+    assert parse_window_response({
+        "choices": [{"message": {"content": [
+            {"type": "text", "text": '{"summary":"畫面"}'},
+        ]}}],
+    }) == {"summary": "畫面"}
+
+
+def test_partition_respects_provider_maximum_images():
+    assert _partition_lengths(6, min_frames=3, max_frames=3) == [3, 3]
+    assert max(_partition_lengths(7, min_frames=3, max_frames=3)) <= 3
 
 
 def test_normalize_window_result_rejects_action_outside_window(tmp_path):
@@ -258,3 +288,42 @@ def test_project_perception_persists_multiframe_run_results(tmp_path, monkeypatc
     assert run["window_results"][0]["segment_uuid"]
     normalized = Path(run["staging_path"]) / "evidence" / run["window_results"][0]["window_uuid"] / "normalized.json"
     assert json.loads(normalized.read_text(encoding="utf-8"))["segment_uuid"] == run["window_results"][0]["segment_uuid"]
+
+
+def test_project_perception_does_not_publish_blocked_evidence(tmp_path, monkeypatch):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    video_id = upsert_video(db, {
+        "original_path": str(source), "current_path": str(source), "filename": source.name,
+        "category": "coffee", "duration_seconds": 20, "status": "uploaded",
+    })
+    project_id = create_project(db, "blocked-evidence", [video_id], category="coffee")
+    cfg = {
+        "library_root": str(tmp_path), "frame_interval_seconds": 5, "frame_height": 720,
+        "ffmpeg_path": "missing-ffmpeg", "ffprobe_path": "missing-ffprobe",
+        "sampling": {"mode": "fixed", "baseline_interval_seconds": 5,
+                      "policy_name": "test", "policy_version": 1,
+                      "max_frames_per_clip": 20, "max_frames_per_minute": 60},
+        "ai": {"provider": "mock", "model": "mock-v1"},
+    }
+
+    def fake_extract(_source: Path, out_dir: Path, _cfg: dict) -> list[Path]:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        paths = []
+        for index in range(4):
+            path = out_dir / f"frame_{index:02}.jpg"
+            path.write_bytes(f"frame-{index}".encode())
+            paths.append(path)
+        return paths
+
+    monkeypatch.setattr(project_perception, "extract_frames", fake_extract)
+    monkeypatch.setattr(multi_frame, "_write_contact_sheet", lambda *_args: "contact sheet failed")
+    with pytest.raises(MultiFrameValidationError, match="evidence validation blocked"):
+        run_project_perception(cfg, db, project_id, dict(project_videos(db, project_id)[0]))
+    with connect(db) as con:
+        run_row = con.execute("select status from analysis_runs order by id desc limit 1").fetchone()
+        frame_count = con.execute("select count(*) from frames where video_id=?", (video_id,)).fetchone()[0]
+    assert dict(run_row)["status"] == "failed"
+    assert frame_count == 0

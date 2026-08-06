@@ -94,7 +94,7 @@ def _ensure_columns(con, table: str, columns: dict[str, str]) -> None:
             con.execute(f"alter table {table} add column {name} {spec}")
 
 
-def recover_interrupted_perception_runs(db: Path) -> int:
+def recover_interrupted_perception_runs(db: Path, cfg: dict | None = None) -> int:
     ensure_perception_schema(db)
     with connect(db) as con:
         rows = con.execute(
@@ -103,16 +103,39 @@ def recover_interrupted_perception_runs(db: Path) -> int:
         if not rows:
             return 0
         run_ids = [str(row["run_uuid"]) for row in rows]
-        placeholders = ",".join("?" for _ in run_ids)
-        con.execute(
-            f"update analysis_runs set status='failed', finished_at=?, interrupted_at=?, error=coalesce(nullif(error,''), 'application restarted before completion') where run_uuid in ({placeholders})",
-            (_now(), _now(), *run_ids),
-        )
-        con.execute(
-            f"update project_videos set analysis_status='failed' where current_analysis_run_uuid in ({placeholders})",
-            run_ids,
-        )
-        return len(run_ids)
+    recovered = 0
+    for run_uuid in run_ids:
+        run = analysis_run(db, run_uuid)
+        snapshot_path = Path(str(run.get("staging_path") or "")) / "rollback_snapshot.json"
+        if str(run.get("status") or "") == "publishing" and snapshot_path.is_file():
+            try:
+                bundle = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                snapshot = bundle.get("live")
+                if isinstance(snapshot, dict):
+                    restore_live_results(
+                        db,
+                        snapshot,
+                        run_uuid,
+                        "interrupted",
+                        "application restarted during perception publish",
+                    )
+                    if cfg and isinstance(bundle.get("metadata"), list):
+                        restore_metadata_paths(bundle["metadata"])
+                    recovered += 1
+                    continue
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                pass
+        with connect(db) as con:
+            con.execute(
+                "update analysis_runs set status='failed', finished_at=?, interrupted_at=?, error=coalesce(nullif(error,''), 'application restarted before completion') where run_uuid=?",
+                (_now(), _now(), run_uuid),
+            )
+            con.execute(
+                "update project_videos set analysis_status='failed' where current_analysis_run_uuid=?",
+                (run_uuid,),
+            )
+        recovered += 1
+    return recovered
 
 
 def source_fingerprint(path: Path) -> dict:

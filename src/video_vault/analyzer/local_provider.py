@@ -46,8 +46,18 @@ class LocalProvider:
         last_error: Exception | None = None
         for attempt in range(3):
             try:
-                raw = self._post(self._window_request_body(frame_paths, timestamps, video))
-                return parse_window_response(raw), raw
+                extra = ""
+                if attempt:
+                    extra = "上一個回應語言不符合要求。請重新輸出，summary、action、shot_role、technical_quality.issues 全部必須使用繁體中文。"
+                raw = self._post(self._window_request_body(frame_paths, timestamps, video, extra))
+                parsed = parse_window_response(raw)
+                localized = " ".join(
+                    [str(parsed.get("summary") or ""), str(parsed.get("action") or ""), str(parsed.get("shot_role") or "")]
+                    + [str(item) for item in (parsed.get("technical_quality") or {}).get("issues") or []]
+                )
+                if not has_cjk(localized):
+                    raise ValueError("local multi-frame response is not Traditional Chinese")
+                return parsed, raw
             except Exception as exc:
                 last_error = exc
                 if attempt < 2:
@@ -86,7 +96,7 @@ class LocalProvider:
             ],
         }
 
-    def _window_request_body(self, frame_paths: list[Path], timestamps: list[float], video: dict) -> dict:
+    def _window_request_body(self, frame_paths: list[Path], timestamps: list[float], video: dict, extra: str = "") -> dict:
         prompt = (
             "請分析以下同一影片區段的連續畫面，這些畫面是同一個感知單位。只回傳 strict JSON，不要 Markdown："
             '{"summary": string, "action": string, "start_seconds": number, "end_seconds": number, '
@@ -95,7 +105,7 @@ class LocalProvider:
             '"confidence": number, "tags": string[]}. '
             "start_seconds/end_seconds 必須落在提供的 frame timestamp 範圍內；不要把不同區段合併。"
             f"tags 只能使用：{', '.join(TAGS)}。summary、action、shot_role、issues 必須使用繁體中文。"
-            f"Video filename: {video.get('filename')}; timestamps: {', '.join(f'{value:.3f}' for value in timestamps)}。"
+            f"Video filename: {video.get('filename')}; timestamps: {', '.join(f'{value:.3f}' for value in timestamps)}。{extra}"
         )
         content = [{"type": "text", "text": prompt}]
         for frame_path in frame_paths:

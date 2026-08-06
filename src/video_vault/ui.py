@@ -334,7 +334,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
     db = db_path(cfg)
     init_db(db)
     ensure_perception_schema(db)
-    recover_interrupted_perception_runs(db)
+    recover_interrupted_perception_runs(db, cfg)
     render_manager = RenderJobManager(cfg, db)
     render_manager.coordinator = JOB_COORDINATOR
     render_manager.start()
