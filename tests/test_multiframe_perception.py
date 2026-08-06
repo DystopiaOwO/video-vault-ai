@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import pytest
 
@@ -8,6 +9,7 @@ from video_vault.analyzer.multi_frame import (
     _partition_lengths,
     build_frame_windows,
     normalize_window_result,
+    provider_capability,
     window_cache_key,
     write_window_evidence,
 )
@@ -16,6 +18,7 @@ from video_vault.database import init_db, project_videos, upsert_video
 from video_vault.project import create_project
 import video_vault.project_perception as project_perception
 from video_vault.project_perception import run_project_perception
+import video_vault.analyzer.multi_frame as multi_frame
 
 
 def _manifest(tmp_path: Path, count: int = 6) -> list[dict]:
@@ -48,6 +51,39 @@ def test_window_manifest_and_cache_key_include_fingerprints_and_timestamps(tmp_p
     assert window_cache_key(windows[0], provider="mock", model="rules") != first
 
 
+def test_scene_boundary_and_large_gap_never_share_a_window(tmp_path):
+    frames = _manifest(tmp_path, 6)
+    frames[3]["timestamp_seconds"] = 30
+    frames[4]["timestamp_seconds"] = 32
+    frames[5]["timestamp_seconds"] = 34
+    frames[3]["sample_reasons"] = ["scene", "boundary"]
+    windows = build_frame_windows(frames, 40)
+    assert [len(window["frames"]) for window in windows] == [3, 3]
+    assert all(
+        not ({0, 30} <= {frame["timestamp_seconds"] for frame in window["frames"]})
+        for window in windows
+    )
+    assert any("scene_boundary" in window["window_policy"]["split_reasons"] for window in windows[1:])
+
+
+def test_local_capability_requires_explicit_valid_contract():
+    class Local:
+        provider = "local"
+
+    assert provider_capability(Local(), {"ai": {"local": {}}})["capability_source"] == "missing"
+    capability = provider_capability(Local(), {"ai": {"local": {"multi_frame_capability": {
+        "supports_multi_image": True,
+        "maximum_images": 4,
+        "supported_image_formats": ["jpeg", "png"],
+        "provider_contract_version": "local-multiframe-v1",
+        "prompt_contract_version": "prompt-v1",
+        "schema_version": 1,
+        "capability_source": "explicit_config",
+    }}}})
+    assert capability["supports_multi_image"] is True
+    assert capability["maximum_images"] == 4
+
+
 def test_normalize_window_result_rejects_action_outside_window(tmp_path):
     window = build_frame_windows(_manifest(tmp_path, 3), 10)[0]
     payload = {
@@ -67,10 +103,52 @@ def test_normalize_window_result_rejects_action_outside_window(tmp_path):
 
 def test_evidence_bundle_excludes_frame_paths_from_public_window(tmp_path):
     window = build_frame_windows(_manifest(tmp_path, 3), 10)[0]
-    evidence = write_window_evidence(window, {"summary": "測試"}, {"status": "pass"}, tmp_path / "evidence", ffmpeg_path="missing-ffmpeg")
+    evidence = write_window_evidence(
+        window,
+        {"summary": "測試"},
+        {"status": "pass"},
+        tmp_path / "evidence",
+        ffmpeg_path="missing-ffmpeg",
+        raw_response={"raw": "ok", "frame_path": r"D:\private\source.jpg"},
+        provider_contract={"capability_source": "built_in_mock"},
+    )
     public_window = (tmp_path / "evidence" / window["window_uuid"] / "window.json").read_text(encoding="utf-8")
     assert "frame_path" not in public_window
     assert evidence["artifact_id"] == window["window_uuid"]
+    raw = (tmp_path / "evidence" / window["window_uuid"] / "raw_response.json").read_text(encoding="utf-8")
+    assert "frame_path" not in raw
+    index = json.loads((tmp_path / "evidence" / "raw_response_index.json").read_text(encoding="utf-8"))
+    assert index[window["window_uuid"]]["raw_response"].endswith("/raw_response.json")
+
+
+def test_invalid_multiframe_cache_is_ignored(monkeypatch, tmp_path):
+    def contact_sheet(_paths, output, _ffmpeg):
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"sheet")
+        return ""
+
+    monkeypatch.setattr(multi_frame, "_write_contact_sheet", contact_sheet)
+    cfg = {"library_root": str(tmp_path), "ffmpeg_path": "ffmpeg", "ai": {"provider": "mock"}}
+    frames = _manifest(tmp_path, 3)
+    first = vision_pipeline.analyze_frame_windows(
+        {"duration_seconds": 10, "filename": "clip.mp4", "category": "coffee"},
+        cfg,
+        frames,
+        duration_seconds=10,
+        evidence_root=tmp_path / "evidence",
+    )
+    cache_path = tmp_path / "05_index" / "raw_ai_outputs" / "multiframe" / f"{first['window_results'][0]['cache_key']}.json"
+    cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    cache["cache_key"] = "stale-cache"
+    cache_path.write_text(json.dumps(cache), encoding="utf-8")
+    second = vision_pipeline.analyze_frame_windows(
+        {"duration_seconds": 10, "filename": "clip.mp4", "category": "coffee"},
+        cfg,
+        frames,
+        duration_seconds=10,
+        evidence_root=tmp_path / "evidence",
+    )
+    assert second["window_results"][0]["cache_hit"] is False
 
 
 def test_provider_without_multi_frame_is_blocked(monkeypatch, tmp_path):
@@ -89,6 +167,19 @@ def test_provider_without_multi_frame_is_blocked(monkeypatch, tmp_path):
             duration_seconds=10,
             evidence_root=tmp_path / "evidence",
         )
+
+
+def test_contact_sheet_failure_blocks_window(monkeypatch, tmp_path):
+    monkeypatch.setattr(multi_frame, "_write_contact_sheet", lambda *_args: "contact sheet failed")
+    result = vision_pipeline.analyze_frame_windows(
+        {"duration_seconds": 10, "filename": "clip.mp4", "category": "coffee"},
+        {"library_root": str(tmp_path), "ffmpeg_path": "ffmpeg", "ai": {"provider": "mock"}},
+        _manifest(tmp_path, 3),
+        duration_seconds=10,
+        evidence_root=tmp_path / "evidence",
+    )
+    assert result["window_validation"]["status"] == "blocked"
+    assert result["window_results"][0]["validation"]["status"] == "blocked"
 
 
 def test_project_perception_persists_multiframe_run_results(tmp_path, monkeypatch):
@@ -136,6 +227,7 @@ def test_project_perception_persists_multiframe_run_results(tmp_path, monkeypatc
     monkeypatch.setattr(project_perception, "perceive_output", lambda *args, **kwargs: None)
     monkeypatch.setattr(project_perception, "write_plan_files", lambda *args, **kwargs: None)
     monkeypatch.setattr(project_perception, "build_project_plan", lambda *args, **kwargs: {})
+    monkeypatch.setattr(multi_frame, "_write_contact_sheet", lambda _paths, output, _ffmpeg: (output.write_bytes(b"sheet"), "")[1])
 
     result = run_project_perception(cfg, db, project_id, dict(project_videos(db, project_id)[0]))
     assert result["run"]["status"] == "succeeded"
@@ -145,3 +237,6 @@ def test_project_perception_persists_multiframe_run_results(tmp_path, monkeypatc
     assert run["window_manifest"]
     assert run["window_results"]
     assert run["window_validation"]["status"] == "pass"
+    assert run["window_results"][0]["segment_uuid"]
+    normalized = Path(run["staging_path"]) / "evidence" / run["window_results"][0]["window_uuid"] / "normalized.json"
+    assert json.loads(normalized.read_text(encoding="utf-8"))["segment_uuid"] == run["window_results"][0]["segment_uuid"]

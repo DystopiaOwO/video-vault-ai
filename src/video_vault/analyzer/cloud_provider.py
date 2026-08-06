@@ -14,8 +14,8 @@ from .multi_frame import MULTI_FRAME_PROMPT_VERSION, parse_window_response
 class CloudProvider:
     provider = "cloud"
     prompt_version = PROMPT_VERSION
-    supports_multi_frame = True
-    multi_frame_max_images = 5
+    supports_multi_frame = False
+    multi_frame_max_images = 0
     multi_frame_prompt_version = MULTI_FRAME_PROMPT_VERSION
 
     def __init__(self, cfg: dict):

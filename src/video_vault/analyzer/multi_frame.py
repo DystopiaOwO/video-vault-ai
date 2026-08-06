@@ -11,8 +11,10 @@ from pathlib import Path
 import hashlib
 import json
 import math
+import os
 import shutil
 import subprocess
+import tempfile
 from typing import Any, Mapping
 
 from .frame_analysis import PROMPT_VERSION, TAGS
@@ -23,6 +25,11 @@ MULTI_FRAME_CONTRACT_VERSION = "perception-multiframe-v1"
 MULTI_FRAME_PROMPT_VERSION = f"{PROMPT_VERSION}:multiframe-v1"
 MIN_WINDOW_FRAMES = 3
 MAX_WINDOW_FRAMES = 5
+WINDOW_POLICY_NAME = "scene-aware-window"
+WINDOW_POLICY_VERSION = 1
+MAX_WINDOW_SPAN_SECONDS = 12.0
+SUPPORTED_IMAGE_FORMATS = ("jpeg", "png", "webp")
+CAPABILITY_SOURCES = {"explicit_config", "provider_metadata", "verified_probe", "built_in_mock"}
 
 
 class MultiFrameError(RuntimeError):
@@ -45,32 +52,72 @@ def frame_fingerprint(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _partition_lengths(count: int) -> list[int]:
+def _partition_lengths(
+    count: int,
+    min_frames: int = MIN_WINDOW_FRAMES,
+    max_frames: int = MAX_WINDOW_FRAMES,
+) -> list[int]:
     if count <= 0:
         return []
     lengths: list[int] = []
     remaining = count
     while remaining:
         if remaining <= MAX_WINDOW_FRAMES:
-            if remaining < MIN_WINDOW_FRAMES and lengths:
-                if lengths[-1] + remaining <= MAX_WINDOW_FRAMES:
+            if remaining < min_frames and lengths:
+                if lengths[-1] + remaining <= max_frames:
                     lengths[-1] += remaining
                     remaining = 0
                     break
-                lengths[-1] -= MIN_WINDOW_FRAMES
-                remaining += MIN_WINDOW_FRAMES
+                lengths[-1] -= min_frames
+                remaining += min_frames
             if remaining:
                 lengths.append(remaining)
                 remaining = 0
             break
-        size = MAX_WINDOW_FRAMES
+        size = max_frames
         remainder = remaining - size
-        if 0 < remainder < MIN_WINDOW_FRAMES:
+        if 0 < remainder < min_frames:
             # Avoid a short tail. Six frames become 3+3, not 5+1 or 2+4.
-            size = remaining - MIN_WINDOW_FRAMES
+            size = remaining - min_frames
         lengths.append(size)
         remaining -= size
     return lengths
+
+
+def _candidate_clusters(ordered: list[dict]) -> list[tuple[list[dict], list[str]]]:
+    """Split samples at explicit scene boundaries and long temporal gaps."""
+
+    clusters: list[tuple[list[dict], list[str]]] = []
+    current: list[dict] = []
+    reasons: list[str] = []
+    for item in ordered:
+        if not current:
+            current = [item]
+            continue
+        previous = current[-1]
+        gap = float(item["timestamp_seconds"]) - float(previous["timestamp_seconds"])
+        current_reasons = set(item.get("sample_reasons") or [])
+        previous_reasons = set(previous.get("sample_reasons") or [])
+        boundary = bool(
+            current_reasons & {"scene", "hard_cut", "cut", "boundary", "scene_change"}
+            or previous_reasons & {"hard_cut", "cut", "scene_change"}
+        )
+        split_reason = ""
+        if boundary:
+            split_reason = "scene_boundary"
+        elif gap > MAX_WINDOW_SPAN_SECONDS:
+            split_reason = "large_temporal_gap"
+        elif float(item["timestamp_seconds"]) - float(current[0]["timestamp_seconds"]) > MAX_WINDOW_SPAN_SECONDS:
+            split_reason = "maximum_temporal_span"
+        if split_reason:
+            clusters.append((current, reasons or ["clip_start"]))
+            current = [item]
+            reasons = [split_reason]
+        else:
+            current.append(item)
+    if current:
+        clusters.append((current, reasons or ["clip_end"]))
+    return clusters
 
 
 def build_frame_windows(
@@ -80,7 +127,7 @@ def build_frame_windows(
     min_frames: int = MIN_WINDOW_FRAMES,
     max_frames: int = MAX_WINDOW_FRAMES,
 ) -> list[dict]:
-    """Build deterministic 3-5 frame windows from an explicit manifest."""
+    """Build deterministic scene-aware 3-5 frame windows from a manifest."""
 
     if min_frames != MIN_WINDOW_FRAMES or max_frames != MAX_WINDOW_FRAMES:
         if not 2 <= min_frames <= max_frames <= 8:
@@ -99,44 +146,114 @@ def build_frame_windows(
         item["sample_reasons"] = sorted(str(reason) for reason in item.get("sample_reasons") or ["baseline"])
         item["fingerprint"] = fingerprint
 
-    lengths = _partition_lengths(len(ordered))
     windows: list[dict] = []
-    cursor = 0
-    for ordinal, length in enumerate(lengths, 1):
-        entries = ordered[cursor : cursor + length]
-        cursor += length
-        identity_payload = [
-            {
-                "timestamp_seconds": item["timestamp_seconds"],
-                "fingerprint": item["fingerprint"],
-                "sample_reasons": item["sample_reasons"],
-            }
-            for item in entries
-        ]
-        digest = hashlib.sha256(
-            json.dumps(identity_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-        window = {
-            "schema_version": MULTI_FRAME_SCHEMA_VERSION,
-            "window_uuid": f"window_{digest[:24]}",
-            "ordinal": ordinal,
-            "frames": [
+    ordinal = 0
+    for cluster, cluster_reasons in _candidate_clusters(ordered):
+        lengths = _partition_lengths(len(cluster), min_frames, max_frames) if len(cluster) >= min_frames else [len(cluster)]
+        cursor = 0
+        for length in lengths:
+            entries = cluster[cursor : cursor + length]
+            cursor += length
+            ordinal += 1
+            split_reasons = list(cluster_reasons)
+            if len(entries) < min_frames:
+                split_reasons.append("insufficient_evidence_frames")
+            identity_payload = [
                 {
-                    "frame_index": index,
-                    "frame_path": item.get("frame_path", ""),
                     "timestamp_seconds": item["timestamp_seconds"],
-                    "sample_reasons": item["sample_reasons"],
                     "fingerprint": item["fingerprint"],
+                    "sample_reasons": item["sample_reasons"],
                 }
-                for index, item in enumerate(entries)
-            ],
-            "start_seconds": entries[0]["timestamp_seconds"] if entries else 0.0,
-            "end_seconds": entries[-1]["timestamp_seconds"] if entries else 0.0,
-            "duration_seconds": round(max(0.0, float(duration_seconds or 0)), 6),
-        }
-        window["validation"] = validate_window(window, min_frames=min_frames, max_frames=max_frames)
-        windows.append(window)
+                for item in entries
+            ]
+            identity_payload.append({"policy": WINDOW_POLICY_NAME, "version": WINDOW_POLICY_VERSION, "split_reasons": split_reasons})
+            digest = hashlib.sha256(
+                json.dumps(identity_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            window = {
+                "schema_version": MULTI_FRAME_SCHEMA_VERSION,
+                "window_policy": {"name": WINDOW_POLICY_NAME, "version": WINDOW_POLICY_VERSION, "split_reasons": split_reasons},
+                "window_uuid": f"window_{digest[:24]}",
+                "ordinal": ordinal,
+                "frames": [
+                    {
+                        "frame_index": index,
+                        "frame_path": item.get("frame_path", ""),
+                        "timestamp_seconds": item["timestamp_seconds"],
+                        "sample_reasons": item["sample_reasons"],
+                        "fingerprint": item["fingerprint"],
+                    }
+                    for index, item in enumerate(entries)
+                ],
+                "start_seconds": entries[0]["timestamp_seconds"] if entries else 0.0,
+                "end_seconds": entries[-1]["timestamp_seconds"] if entries else 0.0,
+                "duration_seconds": round(max(0.0, float(duration_seconds or 0)), 6),
+            }
+            window["validation"] = validate_window(window, min_frames=min_frames, max_frames=max_frames)
+            windows.append(window)
     return windows
+
+
+def provider_capability(provider: Any, cfg: Mapping[str, Any] | None = None) -> dict:
+    """Resolve an explicit multi-image capability; local/cloud never assume support."""
+
+    name = str(getattr(provider, "provider", "") or "")
+    if name == "mock":
+        return {
+            "supports_multi_image": True,
+            "maximum_images": 5,
+            "supported_image_formats": list(SUPPORTED_IMAGE_FORMATS),
+            "provider_contract_version": MULTI_FRAME_CONTRACT_VERSION,
+            "prompt_contract_version": MULTI_FRAME_PROMPT_VERSION,
+            "schema_version": MULTI_FRAME_SCHEMA_VERSION,
+            "capability_source": "built_in_mock",
+        }
+    cfg = cfg or {}
+    provider_cfg = ((cfg.get("ai") or {}).get(name) or {})
+    capability = provider_cfg.get("multi_frame_capability")
+    if not isinstance(capability, Mapping):
+        return {
+            "supports_multi_image": False,
+            "maximum_images": 0,
+            "supported_image_formats": [],
+            "provider_contract_version": "",
+            "prompt_contract_version": "",
+            "schema_version": 0,
+            "capability_source": "missing",
+        }
+    source = str(capability.get("capability_source") or "explicit_config")
+    supported = [str(item).lower() for item in capability.get("supported_image_formats") or []]
+    maximum = capability.get("maximum_images")
+    valid = (
+        source in CAPABILITY_SOURCES - {"built_in_mock"}
+        and isinstance(capability.get("supports_multi_image"), bool)
+        and isinstance(maximum, int)
+        and 3 <= maximum <= MAX_WINDOW_FRAMES
+        and supported
+        and all(item in SUPPORTED_IMAGE_FORMATS for item in supported)
+        and str(capability.get("provider_contract_version") or "")
+        and str(capability.get("prompt_contract_version") or "")
+        and int(capability.get("schema_version") or 0) == MULTI_FRAME_SCHEMA_VERSION
+    )
+    if not valid:
+        return {
+            "supports_multi_image": False,
+            "maximum_images": 0,
+            "supported_image_formats": [],
+            "provider_contract_version": "",
+            "prompt_contract_version": "",
+            "schema_version": 0,
+            "capability_source": "invalid",
+        }
+    return {
+        "supports_multi_image": bool(capability["supports_multi_image"]),
+        "maximum_images": int(maximum),
+        "supported_image_formats": supported,
+        "provider_contract_version": str(capability["provider_contract_version"]),
+        "prompt_contract_version": str(capability["prompt_contract_version"]),
+        "schema_version": MULTI_FRAME_SCHEMA_VERSION,
+        "capability_source": source,
+    }
 
 
 def validate_window(window: Mapping[str, Any], *, min_frames: int = MIN_WINDOW_FRAMES, max_frames: int = MAX_WINDOW_FRAMES) -> dict:
@@ -189,13 +306,21 @@ def window_cache_key(
     model: str,
     prompt_version: str = MULTI_FRAME_PROMPT_VERSION,
     schema_version: int = MULTI_FRAME_SCHEMA_VERSION,
+    policy: Mapping[str, Any] | None = None,
+    provider_contract_version: str = MULTI_FRAME_CONTRACT_VERSION,
+    maximum_images: int = MAX_WINDOW_FRAMES,
+    supported_image_formats: list[str] | tuple[str, ...] = SUPPORTED_IMAGE_FORMATS,
 ) -> str:
     payload = {
         "contract_version": MULTI_FRAME_CONTRACT_VERSION,
+        "provider_contract_version": str(provider_contract_version),
         "schema_version": int(schema_version),
         "prompt_version": str(prompt_version),
         "provider": str(provider),
         "model": str(model),
+        "maximum_images": int(maximum_images),
+        "supported_image_formats": sorted(str(item) for item in supported_image_formats),
+        "window_policy": dict(policy or window.get("window_policy") or {}),
         "frames": [
             {
                 "fingerprint": str(frame.get("fingerprint") or ""),
@@ -311,6 +436,9 @@ def write_window_evidence(
     evidence_root: Path,
     *,
     ffmpeg_path: str | None = None,
+    raw_response: Mapping[str, Any] | None = None,
+    provider_contract: Mapping[str, Any] | None = None,
+    segment_uuid: str = "",
 ) -> dict:
     """Write a run-scoped evidence bundle without exposing it to the browser."""
 
@@ -327,7 +455,15 @@ def write_window_evidence(
     (directory / "window.json").write_text(json.dumps(public_window, ensure_ascii=False, indent=2), encoding="utf-8")
     (directory / "validation.json").write_text(json.dumps(dict(validation), ensure_ascii=False, indent=2), encoding="utf-8")
     if result is not None:
-        (directory / "normalized.json").write_text(json.dumps(dict(result), ensure_ascii=False, indent=2), encoding="utf-8")
+        normalized = dict(result)
+        if segment_uuid:
+            normalized["segment_uuid"] = str(segment_uuid)
+        (directory / "normalized.json").write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+    if raw_response is not None:
+        raw_public = _scrub_sensitive(raw_response)
+        (directory / "raw_response.json").write_text(json.dumps(raw_public, ensure_ascii=False, indent=2), encoding="utf-8")
+    if provider_contract is not None:
+        (directory / "provider_contract.json").write_text(json.dumps(dict(provider_contract), ensure_ascii=False, indent=2), encoding="utf-8")
     frame_paths = [Path(str(frame.get("frame_path") or "")) for frame in window.get("frames") or []]
     contact_sheet = directory / "contact_sheet.jpg"
     contact_error = _write_contact_sheet(frame_paths, contact_sheet, ffmpeg_path) if frame_paths else "no frames"
@@ -336,8 +472,74 @@ def write_window_evidence(
         "window_json": str(directory / "window.json"),
         "validation_json": str(directory / "validation.json"),
         "normalized_json": str(directory / "normalized.json") if result is not None else "",
+        "raw_response_json": str(directory / "raw_response.json") if raw_response is not None else "",
+        "provider_contract_json": str(directory / "provider_contract.json") if provider_contract is not None else "",
         "contact_sheet": str(contact_sheet) if contact_sheet.is_file() else "",
     }
     if contact_error:
         evidence["contact_sheet_error"] = contact_error
+    index_path = evidence_root / "raw_response_index.json"
+    index = {}
+    if index_path.is_file():
+        try:
+            existing = json.loads(index_path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                index = existing
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            index = {}
+    index[window_uuid] = {
+        "window_uuid": window_uuid,
+        "raw_response": f"{window_uuid}/raw_response.json" if raw_response is not None else "",
+        "provider_contract": f"{window_uuid}/provider_contract.json" if provider_contract is not None else "",
+        "status": str(validation.get("status") or "unknown"),
+    }
+    atomic_write_json(index_path, index)
+    evidence["raw_response_index"] = str(index_path)
     return evidence
+
+
+def _scrub_sensitive(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _scrub_sensitive(item)
+            for key, item in value.items()
+            if str(key) not in {"frame_path", "source_file", "source_path", "original_source_path", "file_path"}
+        }
+    if isinstance(value, list):
+        return [_scrub_sensitive(item) for item in value]
+    return value
+
+
+def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    """Publish a complete JSON cache entry or leave the previous entry intact."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(_scrub_sensitive(payload), handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def update_window_evidence_segment_uuid(
+    evidence_root: Path,
+    window_uuid: str,
+    segment_uuid: str,
+) -> None:
+    """Add the published stable segment identity to an existing evidence bundle."""
+
+    path = evidence_root / str(window_uuid) / "normalized.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"normalized evidence is missing: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("normalized evidence must be an object")
+    payload["segment_uuid"] = str(segment_uuid)
+    atomic_write_json(path, payload)

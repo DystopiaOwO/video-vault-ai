@@ -8,10 +8,14 @@ from .frame_analysis import PROMPT_VERSION, cache_key, merge_frames_to_segments
 from .multi_frame import (
     MULTI_FRAME_CONTRACT_VERSION,
     MULTI_FRAME_PROMPT_VERSION,
+    MAX_WINDOW_FRAMES,
+    MIN_WINDOW_FRAMES,
     MultiFrameUnsupported,
     MultiFrameValidationError,
     build_frame_windows,
     normalize_window_result,
+    atomic_write_json,
+    provider_capability,
     validate_window,
     window_cache_key,
     write_window_evidence,
@@ -133,7 +137,13 @@ def analyze_frame_windows(
 
     provider = provider_from_config(cfg)
     duration = float(video.get("duration_seconds") or 0) if duration_seconds is None else float(duration_seconds)
-    planned_windows = windows or build_frame_windows(frame_manifest, duration)
+    capability = provider_capability(provider, cfg)
+    max_images = int(capability.get("maximum_images") or 0)
+    planned_windows = windows or build_frame_windows(
+        frame_manifest,
+        duration,
+        max_frames=max_images if max_images >= MIN_WINDOW_FRAMES else MAX_WINDOW_FRAMES,
+    )
     evidence_root = evidence_root or (Path(cfg["library_root"]) / "05_index" / "multi_frame_evidence")
     validation_reports: list[dict] = []
     eligible: list[dict] = []
@@ -181,15 +191,15 @@ def analyze_frame_windows(
             "provider": provider.provider,
             "model": provider.model,
             "status": "skipped",
+            "capability": capability,
         }
         return legacy
 
-    if not bool(getattr(provider, "supports_multi_frame", False)):
+    if not bool(capability.get("supports_multi_image")):
         raise MultiFrameUnsupported(
-            f"provider {provider.provider} does not support multi-frame input; "
+            f"provider {provider.provider} does not have verified multi-image capability; "
             "no single-frame fallback is allowed"
         )
-    max_images = int(getattr(provider, "multi_frame_max_images", 0) or 0)
     if max_images < 3:
         raise MultiFrameUnsupported(f"provider {provider.provider} allows fewer than three images per window")
 
@@ -211,27 +221,45 @@ def analyze_frame_windows(
             provider=provider.provider,
             model=provider.model,
             prompt_version=str(getattr(provider, "multi_frame_prompt_version", MULTI_FRAME_PROMPT_VERSION)),
+            policy=window.get("window_policy"),
+            provider_contract_version=str(capability.get("provider_contract_version") or ""),
+            maximum_images=max_images,
+            supported_image_formats=list(capability.get("supported_image_formats") or []),
         )
         cache_path = raw_dir / f"{key}.json"
         cache_hit = False
         if cache_path.is_file():
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            payload = cached["parsed"]
-            raw = cached.get("raw") or {}
-            cache_hits += 1
-            cache_hit = True
-        else:
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                if str(cached.get("cache_key") or "") != key:
+                    raise ValueError("stale multi-frame cache contract")
+                payload = cached["parsed"]
+                normalized = normalize_window_result(payload, window)
+                raw = cached.get("raw") or {}
+                cache_hits += 1
+                cache_hit = True
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError, MultiFrameValidationError):
+                payload = None
+                raw = {}
+        if not cache_hit:
             analyze_window = getattr(provider, "analyze_window", None)
             if not callable(analyze_window):
                 raise MultiFrameUnsupported(f"provider {provider.provider} has no multi-frame method")
             payload, raw = analyze_window(frame_paths, timestamps, video)
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(
-                json.dumps({"window_uuid": window.get("window_uuid"), "parsed": payload, "raw": raw}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            if should_cancel and should_cancel():
+                raise AnalysisCancelled("perception cancelled by user")
+            normalized = normalize_window_result(payload, window)
+            atomic_write_json(
+                cache_path,
+                {
+                    "cache_key": key,
+                    "window_uuid": window.get("window_uuid"),
+                    "parsed": normalized,
+                    "raw": raw,
+                    "provider_contract": capability,
+                },
             )
             vision_calls += 1
-        normalized = normalize_window_result(payload, window)
         validation = dict(window.get("validation") or validate_window(window))
         evidence = write_window_evidence(
             window,
@@ -239,7 +267,17 @@ def analyze_frame_windows(
             validation,
             evidence_root,
             ffmpeg_path=str(cfg.get("ffmpeg_path") or "ffmpeg"),
+            raw_response=raw,
+            provider_contract=capability,
         )
+        if evidence.get("contact_sheet_error"):
+            validation.setdefault("checks", []).append({
+                "code": "contact_sheet",
+                "status": "blocked",
+                "error": evidence["contact_sheet_error"],
+            })
+            validation["status"] = "blocked"
+            validation.setdefault("needs_review_reasons", []).append("contact_sheet_unavailable")
         validation["evidence_artifact_ids"] = [str(window.get("window_uuid") or "")]
         result = {
             "window_uuid": str(window.get("window_uuid") or ""),
@@ -303,7 +341,8 @@ def analyze_frame_windows(
                 "confidence": result["confidence"],
             }
         )
-    overall_status = "pass" if all(item.get("status") == "pass" for item in validation_reports) else "warning"
+    result_statuses = [str(item.get("validation", {}).get("status") or "") for item in window_results]
+    overall_status = "pass" if result_statuses and all(status == "pass" for status in result_statuses) else "blocked"
     return {
         "provider": provider.provider,
         "model": provider.model,
@@ -323,8 +362,9 @@ def analyze_frame_windows(
             "prompt_version": str(getattr(provider, "multi_frame_prompt_version", MULTI_FRAME_PROMPT_VERSION)),
             "provider": provider.provider,
             "model": provider.model,
-            "supports_multi_frame": True,
+            "supports_multi_frame": bool(capability.get("supports_multi_image")),
             "max_images": max_images,
+            "capability": capability,
             "status": overall_status,
         },
         "cache_hits": cache_hits,
