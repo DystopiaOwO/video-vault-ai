@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 import json
 
-from .analyzer.multi_frame import build_frame_windows
+from .analyzer.multi_frame import build_frame_windows, update_window_evidence_segment_uuid
 from .analyzer.vision_pipeline import AnalysisCancelled, analyze_frame_manifest, analyze_frame_windows
-from .database import project_ids_for_video, project_videos
+from .database import project_ids_for_video, project_videos, segments as db_segments
 from .ffmpeg_tools import extract_frames
 from .naming import rename_after_perception
 from .perception_runs import (
@@ -25,7 +25,9 @@ from .perception_runs import (
     set_run_window_results,
     set_run_window_validation,
     set_run_output_path,
+    set_run_provider_contract,
     set_run_sampling_manifest,
+    set_run_segment_uuid_mapping,
     snapshot_metadata_paths,
     validate_run_inputs,
 )
@@ -175,6 +177,8 @@ def run_project_perception(
             result.setdefault("window_validation", {"status": "skipped", "reason": "legacy config"})
         set_run_window_results(db, run_uuid, result.get("window_results") or [])
         set_run_window_validation(db, run_uuid, result.get("window_validation") or {})
+        if result.get("multi_frame_contract"):
+            set_run_provider_contract(db, run_uuid, result["multi_frame_contract"])
         sampling["actual_vision_calls"] = int(result.get("vision_calls") or 0)
         sampling["cache_hits"] = int(result.get("cache_hits") or 0)
         set_run_sampling_manifest(db, run_uuid, sampling)
@@ -202,6 +206,44 @@ def run_project_perception(
             result["segments"],
         )
         published = True
+        published_segments = sorted(
+            (dict(row) for row in db_segments(db, int(video["id"]))),
+            key=lambda row: (float(row.get("start_seconds") or 0), int(row.get("id") or 0)),
+        )
+        segment_by_window: dict[str, dict] = {}
+        for row in published_segments:
+            window_uuid = str(row.get("window_uuid") or "")
+            if window_uuid and window_uuid not in segment_by_window:
+                segment_by_window[window_uuid] = row
+        for window_result in result.get("window_results") or []:
+            window_uuid = str(window_result.get("window_uuid") or "")
+            published_row = segment_by_window.get(window_uuid)
+            if not published_row:
+                raise RuntimeError(f"published segment mapping is missing: {window_uuid}")
+            stable_uuid = str(published_row.get("segment_uuid") or "")
+            if not stable_uuid:
+                raise RuntimeError(f"published segment has no stable identity: {window_uuid}")
+            window_result["segment_uuid"] = stable_uuid
+            window_result["publish_status"] = "published"
+            update_window_evidence_segment_uuid(staging / "evidence", window_uuid, stable_uuid)
+        for segment_result in result.get("segments") or []:
+            window_uuid = str(segment_result.get("window_uuid") or "")
+            published_row = segment_by_window.get(window_uuid)
+            if published_row:
+                segment_result["segment_uuid"] = str(published_row.get("segment_uuid") or "")
+        set_run_segment_uuid_mapping(
+            db,
+            run_uuid,
+            {
+                str(item.get("window_uuid") or ""): str(item.get("segment_uuid") or "")
+                for item in result.get("window_results") or []
+                if item.get("segment_uuid")
+            },
+        )
+        set_run_window_results(db, run_uuid, result.get("window_results") or [])
+        result_path = staging / "result.json"
+        result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        set_run_output_path(db, run_uuid, result_path)
         _raise_if_cancelled(should_cancel)
 
         project_migrations = migrate_segment_state_for_video(
