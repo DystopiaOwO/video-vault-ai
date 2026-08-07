@@ -47,6 +47,14 @@ DEFAULT_CONFIG = {
         },
         "cloud": {"provider": "openai", "model": "gpt-4.1-mini", "api_key_env": "OPENAI_API_KEY"},
     },
+    "story": {
+        "provider": "mock",
+        "model": "",
+        "base_url": "http://127.0.0.1:1234/v1",
+        "timeout_seconds": 180,
+        "prompt_version": "project-story-v1",
+        "schema_version": 1,
+    },
 }
 
 
