@@ -297,7 +297,7 @@ def apply_lower_thirds(
     command = [
         str(ffmpeg_path), "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(source),
         "-vf", f"{_setparams_filter(profile)},{','.join(filters)}", "-map", "0:v:0", "-map", "0:a?", "-c:v", str(profile["video_codec"]),
-        "-pix_fmt", str(profile["pixel_format"]), "-r", str(profile["fps"]), "-vsync", "cfr", "-c:a", str(profile["audio_codec"]),
+        "-pix_fmt", str(profile["pixel_format"]), "-r", str(profile["fps"]), "-fps_mode", "cfr", "-c:a", str(profile["audio_codec"]),
         "-ar", str(profile["audio_sample_rate"]), "-ac", str(profile["audio_channels"]), "-af", "aresample=async=1:first_pts=0", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart",
         "-color_primaries", str(profile.get("color_primaries") or "bt709"), "-color_trc", str(profile.get("color_transfer") or "bt709"),
         "-colorspace", str(profile.get("color_matrix") or "bt709"), "-color_range", str(profile.get("color_range") or "tv"),
