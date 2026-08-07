@@ -3,8 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 import json
 
-from .analyzer.vision_pipeline import AnalysisCancelled, analyze_frame_manifest
-from .database import project_ids_for_video, project_videos
+from .analyzer.multi_frame import (
+    MultiFrameValidationError,
+    build_frame_windows,
+    provider_capability,
+    update_window_evidence_segment_uuid,
+)
+from .analyzer.vision_pipeline import AnalysisCancelled, analyze_frame_manifest, analyze_frame_windows, provider_from_config
+from .database import project_ids_for_video, project_videos, segments as db_segments
 from .ffmpeg_tools import extract_frames
 from .naming import rename_after_perception
 from .perception_runs import (
@@ -20,8 +26,13 @@ from .perception_runs import (
     restore_metadata_paths,
     run_staging_dir,
     set_run_frame_manifest,
+    set_run_window_manifest,
+    set_run_window_results,
+    set_run_window_validation,
     set_run_output_path,
+    set_run_provider_contract,
     set_run_sampling_manifest,
+    set_run_segment_uuid_mapping,
     snapshot_metadata_paths,
     validate_run_inputs,
 )
@@ -132,13 +143,56 @@ def run_project_perception(
             raise RuntimeError("; ".join(errors))
         _raise_if_cancelled(should_cancel)
 
-        result = analyze_frame_manifest(
-            video,
-            {**cfg, "_sampling_policy": sampling["policy"]},
-            manifest,
-            progress,
-            should_cancel=should_cancel,
+        multi_frame_config = ((cfg.get("perception") or {}).get("multi_frame") or {})
+        multi_frame_enabled = bool(
+            multi_frame_config.get("enabled", "sampling" in cfg)
         )
+        max_images = 0
+        if multi_frame_enabled:
+            max_images = int(provider_capability(provider_from_config(cfg), cfg).get("maximum_images") or 0)
+        windows = build_frame_windows(
+            manifest,
+            float(video.get("duration_seconds") or 0),
+            max_frames=max_images if multi_frame_enabled and max_images >= 3 else 5,
+        )
+        set_run_window_manifest(db, run_uuid, windows)
+        sampling["estimated_vision_calls"] = len(windows) if len(manifest) >= 3 else len(manifest)
+        set_run_sampling_manifest(db, run_uuid, sampling)
+        analysis_cfg = {**cfg, "_sampling_policy": sampling["policy"]}
+        # Configs created by the current loader contain the sampling policy and
+        # opt into Phase 2. Small legacy/test configs without that policy keep
+        # the old single-frame contract for backward compatibility.
+        if multi_frame_enabled:
+            result = analyze_frame_windows(
+                video,
+                analysis_cfg,
+                manifest,
+                progress,
+                should_cancel=should_cancel,
+                duration_seconds=float(video.get("duration_seconds") or 0),
+                evidence_root=staging / "evidence",
+                windows=windows,
+            )
+        else:
+            result = analyze_frame_manifest(
+                video,
+                analysis_cfg,
+                manifest,
+                progress,
+                should_cancel=should_cancel,
+            )
+            result.setdefault("window_manifest", windows)
+            result.setdefault("window_results", [])
+            result.setdefault("window_validation", {"status": "skipped", "reason": "legacy config"})
+        if multi_frame_enabled and (result.get("window_validation") or {}).get("status") == "blocked":
+            raise MultiFrameValidationError(
+                "multi-frame evidence validation blocked: "
+                + ", ".join((result.get("window_validation") or {}).get("needs_review_reasons") or [])
+            )
+        set_run_window_results(db, run_uuid, result.get("window_results") or [])
+        set_run_window_validation(db, run_uuid, result.get("window_validation") or {})
+        if result.get("multi_frame_contract"):
+            set_run_provider_contract(db, run_uuid, result["multi_frame_contract"])
         sampling["actual_vision_calls"] = int(result.get("vision_calls") or 0)
         sampling["cache_hits"] = int(result.get("cache_hits") or 0)
         set_run_sampling_manifest(db, run_uuid, sampling)
@@ -159,6 +213,14 @@ def run_project_perception(
             _metadata_paths(cfg, linked_project_ids, int(video["id"])),
             staging / "rollback_metadata",
         )
+        (staging / "rollback_snapshot.json").write_text(
+            json.dumps(
+                {"live": published_snapshot, "metadata": metadata_snapshot},
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         migration = publish_staged_results(
             db,
             run_uuid,
@@ -166,6 +228,44 @@ def run_project_perception(
             result["segments"],
         )
         published = True
+        published_segments = sorted(
+            (dict(row) for row in db_segments(db, int(video["id"]))),
+            key=lambda row: (float(row.get("start_seconds") or 0), int(row.get("id") or 0)),
+        )
+        segment_by_window: dict[str, dict] = {}
+        for row in published_segments:
+            window_uuid = str(row.get("window_uuid") or "")
+            if window_uuid and window_uuid not in segment_by_window:
+                segment_by_window[window_uuid] = row
+        for window_result in result.get("window_results") or []:
+            window_uuid = str(window_result.get("window_uuid") or "")
+            published_row = segment_by_window.get(window_uuid)
+            if not published_row:
+                raise RuntimeError(f"published segment mapping is missing: {window_uuid}")
+            stable_uuid = str(published_row.get("segment_uuid") or "")
+            if not stable_uuid:
+                raise RuntimeError(f"published segment has no stable identity: {window_uuid}")
+            window_result["segment_uuid"] = stable_uuid
+            window_result["publish_status"] = "published"
+            update_window_evidence_segment_uuid(staging / "evidence", window_uuid, stable_uuid)
+        for segment_result in result.get("segments") or []:
+            window_uuid = str(segment_result.get("window_uuid") or "")
+            published_row = segment_by_window.get(window_uuid)
+            if published_row:
+                segment_result["segment_uuid"] = str(published_row.get("segment_uuid") or "")
+        set_run_segment_uuid_mapping(
+            db,
+            run_uuid,
+            {
+                str(item.get("window_uuid") or ""): str(item.get("segment_uuid") or "")
+                for item in result.get("window_results") or []
+                if item.get("segment_uuid")
+            },
+        )
+        set_run_window_results(db, run_uuid, result.get("window_results") or [])
+        result_path = staging / "result.json"
+        result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        set_run_output_path(db, run_uuid, result_path)
         _raise_if_cancelled(should_cancel)
 
         project_migrations = migrate_segment_state_for_video(

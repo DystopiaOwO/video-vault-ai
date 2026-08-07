@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from video_vault.database import add_analysis, init_db, upsert_video
-from video_vault.project import build_project_plan, create_project, project_detail, project_segments, save_segment_review, set_review_status, update_segment_timing
+from video_vault.project import build_project_plan, create_project, project_detail, project_segments, save_segment_review, set_review_status, update_segment_evidence, update_segment_timing
 from video_vault.render_manifest import build_render_manifest
 from video_vault.storyboard import generate_storyboard, load_storyboard, storyboard_thumbnail_path, update_storyboard, validate_storyboard
 
@@ -252,3 +252,26 @@ def test_timing_patch_rejects_source_overflow(tmp_path: Path):
     segment_id = project_detail(cfg, db, project_id)["segments"][0]["segment_id"]
     with pytest.raises(ValueError, match="超過來源長度"):
         update_segment_timing(cfg, db, project_id, segment_id, 1, 21, 1)
+
+
+def test_segment_evidence_patch_is_manual_and_scoped(tmp_path: Path):
+    cfg, db, project_id = _project(tmp_path, count=1)
+    row = dict(project_detail(cfg, db, project_id)["segments"][0])
+    row.update({"include": True, "manual_order": 4, "story_position": "開場", "user_notes": "原筆記"})
+    save_segment_review(cfg, db, project_id, [row])
+    update_segment_evidence(
+        cfg,
+        db,
+        project_id,
+        row["segment_id"],
+        {"action": "倒水", "shot_role": "process", "locked": True, "user_notes": "人工確認"},
+    )
+    review = json.loads((tmp_path / "08_projects" / f"project_{project_id}" / "feedback" / "segment_review.json").read_text(encoding="utf-8"))[0]
+    assert review["action"] == "倒水"
+    assert review["locked"] is True
+    assert review["include"] is True
+    assert review["manual_order"] == 1
+    assert review["story_position"] == "開場"
+    assert review["user_notes"] == "人工確認"
+    assert review["manual_override_source"] == "human"
+    assert set(review["manual_override_fields"]) == {"action", "locked", "shot_role", "user_notes"}

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 import { api, type BgmTrack, type Job, type Project, type ProjectDetail } from "./api";
 import { ClipSummaryEditor } from "./components/project/ClipSummaryEditor";
+import { MultiFrameEvidencePanel } from "./components/project/MultiFrameEvidencePanel";
 import { PerceptionSamplingControls } from "./components/project/PerceptionSamplingControls";
 import { ProjectLocation } from "./components/project/ProjectLocation";
 import { ProjectWorkflow, projectWorkflowSteps } from "./components/project/ProjectWorkflow";
@@ -511,6 +512,13 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
             {clip.filename}
             <span>{projectStatusLabel(clip.status)} · {clip.segment_count} 段 · {Math.round(clip.duration_seconds || 0)} 秒 · {clip.time_of_day || "未分類時段"}</span>
             <PerceptionSamplingControls clip={clip} disabled={projectMutationBusy} onAnalyze={(sampling) => analyzeOne(clip.video_id, sampling)} />
+            <MultiFrameEvidencePanel
+              clip={clip}
+              projectId={detail.project.id}
+              projectRevision={detail.project_revision}
+              setMessage={setMessage}
+              onSaved={async () => { await refreshCurrentProject({ forceFresh: true }); }}
+            />
             <ClipSummaryEditor projectId={detail.project.id} projectRevision={detail.project_revision} clip={clip} setMessage={setMessage} refreshProject={refreshCurrentProject} mutationControls={mutationControls} />
           </div>)}
           {!detail.clips.length && <div className="inline-empty">尚無素材。先選擇多支影片匯入，再進行內容感知。</div>}

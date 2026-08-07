@@ -7,6 +7,44 @@ export type Project = {
   video_count?: number;
 };
 
+export type PerceptionWindowResult = {
+  window_uuid: string;
+  segment_uuid?: string;
+  include?: boolean;
+  user_notes?: string;
+  locked?: boolean;
+  publish_status?: string;
+  ordinal?: number;
+  start_seconds?: number;
+  end_seconds?: number;
+  frame_timestamps?: number[];
+  summary?: string;
+  action?: string;
+  shot_role?: string;
+  technical_quality?: { score?: number; issues?: string[] };
+  duplicate_group?: string;
+  natural_audio_recommendation?: string;
+  confidence?: number;
+  validation?: { status?: string; needs_review_reasons?: string[] };
+  evidence_urls?: {
+    contact_sheet?: string;
+    window?: string;
+    validation?: string;
+    normalized?: string;
+  };
+};
+
+export type PerceptionRunState = {
+  current_analysis_run_uuid?: string;
+  current_status?: string;
+  current_generation?: number;
+  current_window_manifest?: Array<{ window_uuid?: string; start_seconds?: number; end_seconds?: number; frames?: Array<{ timestamp_seconds?: number; sample_reasons?: string[] }> }>;
+  current_window_results?: PerceptionWindowResult[];
+  current_window_validation?: { status?: string; needs_review_reasons?: string[]; checks?: Array<Record<string, unknown>> };
+  multi_frame_contract?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
 export type Clip = {
   clip_id: string;
   video_id: number;
@@ -25,6 +63,7 @@ export type Clip = {
   effective_summary_source: "user" | "ai" | "none";
   media_url?: string;
   sampling?: SamplingState;
+  perception_run?: PerceptionRunState;
 };
 
 export type SamplingPolicy = {
@@ -421,6 +460,8 @@ export const api = {
     json<{ ok: boolean; path?: string; error?: string }>("/api/project/segments", post({ project_id: projectId, segments, base_revision: baseRevision })),
   saveSegmentTiming: (projectId: number, segmentId: string, timing: { start_seconds: number; end_seconds: number; speed: number }, baseRevision?: number) =>
     json<{ ok: boolean; path?: string; error?: string }>("/api/project/segment-timing", post({ project_id: projectId, segment_id: segmentId, ...timing, base_revision: baseRevision })),
+  saveSegmentEvidence: (projectId: number, segmentId: string, patch: Record<string, unknown>, baseRevision?: number) =>
+    json<{ ok: boolean; path?: string; error?: string; code?: string }>("/api/project/segment-evidence", post({ project_id: projectId, segment_id: segmentId, patch, base_revision: baseRevision })),
   storyboard: (projectId: number) => json<StoryboardState>(`/api/project/storyboard?project_id=${projectId}`),
   generateStoryboard: (projectId: number, force = false, baseRevision?: number) =>
     json<{ ok: boolean; storyboard?: StoryboardState; error?: string }>("/api/project/storyboard/generate", post({ project_id: projectId, force, base_revision: baseRevision })),

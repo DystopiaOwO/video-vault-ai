@@ -57,6 +57,11 @@ CORE_TEST_BY_AREA = {
 }
 
 MEDIA_SMOKE_PATHS = (
+    "src/video_vault/analyzer/multi_frame.py",
+    "src/video_vault/analyzer/vision_pipeline.py",
+    "src/video_vault/project_perception.py",
+    "src/video_vault/perception_runs.py",
+    "src/video_vault/ui.py",
     "src/video_vault/project_renderer.py",
     "src/video_vault/segment_renderer.py",
     "src/video_vault/timeline_assembler.py",
@@ -136,6 +141,9 @@ def select_changed_files(paths: Iterable[str]) -> Selection:
                 matched_area = True
                 if path in MEDIA_SMOKE_PATHS:
                     result.media_smoke = True
+            if path in MEDIA_SMOKE_PATHS:
+                result.media_smoke = True
+                result.reasons.append(f"Phase 2 media path enables Media Smoke: {path}")
             if "audio" in lowered or "bgm" in lowered:
                 targeted.update(CORE_TEST_BY_AREA["audio"])
                 result.reasons.append(f"audio mapping selected for {path}")

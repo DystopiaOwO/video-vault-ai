@@ -35,7 +35,9 @@ create table if not exists frames (
   vision_summary text,
   tags text,
   score_visual_quality real,
-  score_usefulness real
+  score_usefulness real,
+  window_uuid text,
+  window_confidence real default 0
 );
 create table if not exists segments (
   id integer primary key,
@@ -49,7 +51,14 @@ create table if not exists segments (
   reason text,
   tags text,
   score real,
-  suggested_use text
+  suggested_use text,
+  window_uuid text,
+  action text default '',
+  shot_role text default '',
+  technical_quality_json text default '{}',
+  duplicate_group text default '',
+  natural_audio_recommendation text default 'unknown',
+  confidence real default 0
 );
 create table if not exists analysis_runs (
   id integer primary key,
@@ -59,7 +68,10 @@ create table if not exists analysis_runs (
   created_at text default current_timestamp,
   status text,
   raw_output_path text,
-  sampling_manifest_json text default '{}'
+  sampling_manifest_json text default '{}',
+  window_manifest_json text default '[]',
+  window_results_json text default '[]',
+  window_validation_json text default '{}'
 );
 create table if not exists analysis_run_frames (
   run_uuid text not null,
@@ -182,6 +194,21 @@ def init_db(db: Path) -> None:
             {
                 "segment_uuid": "text",
                 "revision": "integer default 1",
+                "window_uuid": "text",
+                "action": "text default ''",
+                "shot_role": "text default ''",
+                "technical_quality_json": "text default '{}'",
+                "duplicate_group": "text default ''",
+                "natural_audio_recommendation": "text default 'unknown'",
+                "confidence": "real default 0",
+            },
+        )
+        _ensure_columns(
+            con,
+            "frames",
+            {
+                "window_uuid": "text",
+                "window_confidence": "real default 0",
             },
         )
         _ensure_columns(
@@ -210,6 +237,9 @@ def init_db(db: Path) -> None:
                 "base_revision": "integer",
                 "provider_contract_json": "text default '{}'",
                 "sampling_manifest_json": "text default '{}'",
+                "window_manifest_json": "text default '[]'",
+                "window_results_json": "text default '[]'",
+                "window_validation_json": "text default '{}'",
                 "interrupted_at": "text",
                 "published_revision": "integer",
             },
@@ -396,13 +426,15 @@ def add_frame(db: Path, video_id: int, frame_path: Path, timestamp: float = 0) -
 def update_frame_analysis(db: Path, frame_id: int, result: dict) -> None:
     with connect(db) as con:
         con.execute(
-            """update frames set vision_summary=?, tags=?, score_visual_quality=?, score_usefulness=?
+            """update frames set vision_summary=?, tags=?, score_visual_quality=?, score_usefulness=?, window_uuid=?, window_confidence=?
             where id=?""",
             (
                 result["summary"],
                 ",".join(result["tags"]),
                 result["visual_quality_score"],
                 result["usefulness_score"],
+                str(result.get("window_uuid") or ""),
+                float(result.get("window_confidence") or 0),
                 frame_id,
             ),
         )
@@ -445,8 +477,9 @@ def _replace_segments_in_connection(
     for seg in assigned:
         con.execute(
             """insert into segments(
-                segment_uuid,revision,video_id,start_seconds,end_seconds,segment_type,title,reason,tags,score,suggested_use
-            ) values(?,?,?,?,?,?,?,?,?,?,?)""",
+                segment_uuid,revision,video_id,start_seconds,end_seconds,segment_type,title,reason,tags,score,suggested_use,
+                window_uuid,action,shot_role,technical_quality_json,duplicate_group,natural_audio_recommendation,confidence
+            ) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 seg["segment_uuid"],
                 seg["revision"],
@@ -459,6 +492,13 @@ def _replace_segments_in_connection(
                 seg["tags"],
                 seg["score"],
                 seg["suggested_use"],
+                seg.get("window_uuid", ""),
+                seg.get("action", ""),
+                seg.get("shot_role", ""),
+                seg.get("technical_quality_json", "{}"),
+                seg.get("duplicate_group", ""),
+                seg.get("natural_audio_recommendation", "unknown"),
+                seg.get("confidence", 0),
             ),
         )
     con.execute(
@@ -485,6 +525,17 @@ def _normalize_segment(row: dict) -> dict:
         "tags": tag_text,
         "score": float(row.get("score") or 0),
         "suggested_use": str(row.get("suggested_use") or ""),
+        "window_uuid": str(row.get("window_uuid") or ""),
+        "action": str(row.get("action") or ""),
+        "shot_role": str(row.get("shot_role") or ""),
+        "technical_quality_json": (
+            json.dumps(row.get("technical_quality"), ensure_ascii=False, sort_keys=True)
+            if isinstance(row.get("technical_quality"), dict)
+            else str(row.get("technical_quality_json") or "{}")
+        ),
+        "duplicate_group": str(row.get("duplicate_group") or ""),
+        "natural_audio_recommendation": str(row.get("natural_audio_recommendation") or "unknown"),
+        "confidence": float(row.get("confidence") or row.get("score") or 0),
     }
 
 

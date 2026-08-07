@@ -23,6 +23,13 @@ DEFAULT_CONFIG = {
         "max_frames_per_minute": 30,
         "visual_dedupe_threshold": 0.985,
     },
+    "perception": {
+        "multi_frame": {
+            "enabled": True,
+            "min_frames": 3,
+            "max_frames": 5,
+        },
+    },
     "proxy_height": 1080,
     "default_ingest_mode": "copy",
     "ffmpeg_path": "ffmpeg",

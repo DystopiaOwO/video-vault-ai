@@ -34,6 +34,9 @@ RUN_COLUMNS = {
     "provider_contract_json": "text default '{}'",
     "interrupted_at": "text",
     "published_revision": "integer",
+    "window_manifest_json": "text default '[]'",
+    "window_results_json": "text default '[]'",
+    "window_validation_json": "text default '{}'",
 }
 
 PROJECT_MEDIA_RUN_COLUMNS = {
@@ -91,7 +94,7 @@ def _ensure_columns(con, table: str, columns: dict[str, str]) -> None:
             con.execute(f"alter table {table} add column {name} {spec}")
 
 
-def recover_interrupted_perception_runs(db: Path) -> int:
+def recover_interrupted_perception_runs(db: Path, cfg: dict | None = None) -> int:
     ensure_perception_schema(db)
     with connect(db) as con:
         rows = con.execute(
@@ -100,16 +103,39 @@ def recover_interrupted_perception_runs(db: Path) -> int:
         if not rows:
             return 0
         run_ids = [str(row["run_uuid"]) for row in rows]
-        placeholders = ",".join("?" for _ in run_ids)
-        con.execute(
-            f"update analysis_runs set status='failed', finished_at=?, interrupted_at=?, error=coalesce(nullif(error,''), 'application restarted before completion') where run_uuid in ({placeholders})",
-            (_now(), _now(), *run_ids),
-        )
-        con.execute(
-            f"update project_videos set analysis_status='failed' where current_analysis_run_uuid in ({placeholders})",
-            run_ids,
-        )
-        return len(run_ids)
+    recovered = 0
+    for run_uuid in run_ids:
+        run = analysis_run(db, run_uuid)
+        snapshot_path = Path(str(run.get("staging_path") or "")) / "rollback_snapshot.json"
+        if str(run.get("status") or "") == "publishing" and snapshot_path.is_file():
+            try:
+                bundle = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                snapshot = bundle.get("live")
+                if isinstance(snapshot, dict):
+                    restore_live_results(
+                        db,
+                        snapshot,
+                        run_uuid,
+                        "interrupted",
+                        "application restarted during perception publish",
+                    )
+                    if cfg and isinstance(bundle.get("metadata"), list):
+                        restore_metadata_paths(bundle["metadata"])
+                    recovered += 1
+                    continue
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                pass
+        with connect(db) as con:
+            con.execute(
+                "update analysis_runs set status='failed', finished_at=?, interrupted_at=?, error=coalesce(nullif(error,''), 'application restarted before completion') where run_uuid=?",
+                (_now(), _now(), run_uuid),
+            )
+            con.execute(
+                "update project_videos set analysis_status='failed' where current_analysis_run_uuid=?",
+                (run_uuid,),
+            )
+        recovered += 1
+    return recovered
 
 
 def source_fingerprint(path: Path) -> dict:
@@ -265,6 +291,9 @@ def analysis_run(db: Path, run_uuid: str) -> dict:
         "frame_manifest_json",
         "sampling_manifest_json",
         "provider_contract_json",
+        "window_manifest_json",
+        "window_results_json",
+        "window_validation_json",
     ):
         raw = result.pop(key, "") or ""
         result[key.removesuffix("_json")] = json.loads(raw) if raw else {}
@@ -289,6 +318,64 @@ def set_run_sampling_manifest(db: Path, run_uuid: str, manifest: dict) -> None:
                 json.dumps(manifest, ensure_ascii=False, sort_keys=True),
                 str(run_uuid),
             ),
+        )
+
+
+def set_run_window_manifest(db: Path, run_uuid: str, manifest: list[dict]) -> None:
+    ensure_perception_schema(db)
+    with connect(db) as con:
+        con.execute(
+            "update analysis_runs set window_manifest_json=? where run_uuid=?",
+            (json.dumps(manifest, ensure_ascii=False, sort_keys=True), str(run_uuid)),
+        )
+
+
+def set_run_window_results(db: Path, run_uuid: str, results: list[dict]) -> None:
+    ensure_perception_schema(db)
+    with connect(db) as con:
+        con.execute(
+            "update analysis_runs set window_results_json=? where run_uuid=?",
+            (json.dumps(results, ensure_ascii=False, sort_keys=True), str(run_uuid)),
+        )
+
+
+def set_run_segment_uuid_mapping(db: Path, run_uuid: str, mapping: dict[str, str]) -> None:
+    """Persist published stable identities in the durable run-scoped payload."""
+
+    ensure_perception_schema(db)
+    with connect(db) as con:
+        rows = con.execute(
+            "select ordinal, payload_json from analysis_run_segments where run_uuid=? order by ordinal",
+            (str(run_uuid),),
+        ).fetchall()
+        for row in rows:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+            window_uuid = str(payload.get("window_uuid") or "")
+            segment_uuid = str(mapping.get(window_uuid) or "")
+            if segment_uuid:
+                payload["segment_uuid"] = segment_uuid
+                payload["publish_status"] = "published"
+            con.execute(
+                "update analysis_run_segments set segment_uuid=?, payload_json=? where run_uuid=? and ordinal=?",
+                (segment_uuid, json.dumps(payload, ensure_ascii=False, sort_keys=True), str(run_uuid), int(row["ordinal"])),
+            )
+
+
+def set_run_window_validation(db: Path, run_uuid: str, validation: dict) -> None:
+    ensure_perception_schema(db)
+    with connect(db) as con:
+        con.execute(
+            "update analysis_runs set window_validation_json=? where run_uuid=?",
+            (json.dumps(validation, ensure_ascii=False, sort_keys=True), str(run_uuid)),
+        )
+
+
+def set_run_provider_contract(db: Path, run_uuid: str, contract: dict) -> None:
+    ensure_perception_schema(db)
+    with connect(db) as con:
+        con.execute(
+            "update analysis_runs set provider_contract_json=? where run_uuid=?",
+            (json.dumps(contract, ensure_ascii=False, sort_keys=True), str(run_uuid)),
         )
 
 
@@ -433,8 +520,8 @@ def publish_staged_results(
             con.execute(
                 """insert into frames(
                     video_id, timestamp_seconds, frame_path, vision_summary, tags,
-                    score_visual_quality, score_usefulness
-                ) values(?, ?, ?, ?, ?, ?, ?)""",
+                    score_visual_quality, score_usefulness, window_uuid, window_confidence
+                ) values(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     video_id,
                     float(row.get("timestamp_seconds") or 0),
@@ -443,6 +530,8 @@ def publish_staged_results(
                     tag_text,
                     float(row.get("visual_quality_score") or row.get("score_visual_quality") or 0),
                     float(row.get("usefulness_score") or row.get("score_usefulness") or 0),
+                    str(row.get("window_uuid") or ""),
+                    float(row.get("window_confidence") or row.get("confidence") or 0),
                 ),
             )
         migration = _replace_segments_in_connection(con, video_id, segment_results)
@@ -503,6 +592,14 @@ def restore_live_results(
     ensure_perception_schema(db)
     run = analysis_run(db, run_uuid)
     video_id = int(snapshot["video_id"])
+    rolled_back_windows = []
+    for item in run.get("window_results") or []:
+        if not isinstance(item, dict):
+            continue
+        restored = dict(item)
+        restored.pop("segment_uuid", None)
+        restored["publish_status"] = "rolled_back"
+        rolled_back_windows.append(restored)
     with connect(db) as con:
         con.execute("delete from frames where video_id=?", (video_id,))
         _restore_rows(con, "frames", snapshot.get("frames", []))
@@ -520,6 +617,17 @@ def restore_live_results(
                 "delete from segment_identity_migrations where video_id=?",
                 (video_id,),
             )
+        for row in con.execute(
+            "select ordinal, payload_json from analysis_run_segments where run_uuid=? order by ordinal",
+            (str(run_uuid),),
+        ).fetchall():
+            payload = json.loads(str(row["payload_json"] or "{}"))
+            payload.pop("segment_uuid", None)
+            payload["publish_status"] = "rolled_back"
+            con.execute(
+                "update analysis_run_segments set segment_uuid='', payload_json=? where run_uuid=? and ordinal=?",
+                (json.dumps(payload, ensure_ascii=False, sort_keys=True), str(run_uuid), int(row["ordinal"])),
+            )
         con.execute(
             "update videos set status=? where id=?",
             (str(snapshot.get("video_status") or ""), video_id),
@@ -534,8 +642,23 @@ def restore_live_results(
             (str(run_uuid), int(run.get("generation") or 0), status, video_id),
         )
         con.execute(
-            "update analysis_runs set status=?, finished_at=?, published_at=null, error=? where run_uuid=?",
-            (status, _now(), str(error), str(run_uuid)),
+            """update analysis_runs
+            set status=?, finished_at=?, published_at=null, error=?,
+                window_results_json=?,
+                window_validation_json=?
+            where run_uuid=?""",
+            (
+                status,
+                _now(),
+                str(error),
+                json.dumps(rolled_back_windows, ensure_ascii=False, sort_keys=True),
+                json.dumps({
+                    "status": "blocked",
+                    "needs_review_reasons": ["publish_rolled_back"],
+                    "checks": [{"code": "publish", "status": "blocked", "error": str(error)}],
+                }, ensure_ascii=False, sort_keys=True),
+                str(run_uuid),
+            ),
         )
     return analysis_run(db, run_uuid)
 
@@ -608,6 +731,9 @@ def perception_states_for_project(db: Path, project_id: int) -> dict[int, dict]:
                 current.input_snapshot_json as current_input_snapshot_json,
                 current.sampling_manifest_json as current_sampling_manifest_json,
                 current.provider_contract_json as current_provider_contract_json,
+                current.window_manifest_json as current_window_manifest_json,
+                current.window_results_json as current_window_results_json,
+                current.window_validation_json as current_window_validation_json,
                 success.generation as last_success_generation,
                 success.finished_at as last_success_finished_at,
                 exists(select 1 from segments s where s.video_id=pv.video_id) as has_segments
@@ -635,6 +761,12 @@ def perception_states_for_project(db: Path, project_id: int) -> dict[int, dict]:
         data["current_sampling_manifest"] = json.loads(raw_sampling) if raw_sampling else {}
         raw_provider = str(data.pop("current_provider_contract_json", "") or "")
         data["current_provider_contract"] = json.loads(raw_provider) if raw_provider else {}
+        raw_window_manifest = str(data.pop("current_window_manifest_json", "") or "")
+        data["current_window_manifest"] = json.loads(raw_window_manifest) if raw_window_manifest else []
+        raw_window_results = str(data.pop("current_window_results_json", "") or "")
+        data["current_window_results"] = json.loads(raw_window_results) if raw_window_results else []
+        raw_window_validation = str(data.pop("current_window_validation_json", "") or "")
+        data["current_window_validation"] = json.loads(raw_window_validation) if raw_window_validation else {}
         data["stale_fallback_available"] = bool(
             data.get("last_successful_analysis_run_uuid")
             and not data["analysis_current"]

@@ -51,6 +51,102 @@
   font-size: 12px;
 }
 
+#root .multiframe-evidence {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--border, #d8dee6);
+  border-radius: 8px;
+  background: var(--surface-subtle, #f8fafc);
+}
+
+#root .multiframe-window {
+  overflow: hidden;
+  border: 1px solid var(--border, #d8dee6);
+  border-radius: 7px;
+  background: var(--surface, #fff);
+}
+
+#root .multiframe-window summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+#root .multiframe-window-body {
+  display: grid;
+  grid-template-columns: minmax(180px, 320px) 1fr;
+  gap: 12px;
+  padding: 10px;
+  border-top: 1px solid var(--border, #d8dee6);
+}
+
+#root .multiframe-window-body img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #0f172a;
+}
+
+#root .multiframe-facts {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+  font-size: 13px;
+}
+
+#root .multiframe-manual-editor {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(140px, 1fr));
+  gap: 8px;
+  grid-column: 1 / -1;
+  padding-top: 8px;
+  border-top: 1px solid var(--border, #d8dee6);
+}
+
+#root .multiframe-manual-editor label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted, #64748b);
+}
+
+#root .multiframe-manual-editor input:not([type="checkbox"]),
+#root .multiframe-manual-editor textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border, #d8dee6);
+  border-radius: 5px;
+  padding: 6px;
+  color: inherit;
+  background: var(--surface, #fff);
+}
+
+#root .multiframe-manual-editor textarea { min-height: 46px; resize: vertical; }
+#root .multiframe-manual-editor button { justify-self: start; }
+
+#root .evidence-status {
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+#root .evidence-pass { color: #166534; background: #dcfce7; }
+#root .evidence-warning { color: #92400e; background: #fef3c7; }
+#root .evidence-skipped { color: #475569; background: #e2e8f0; }
+
+@media (max-width: 680px) {
+  #root .multiframe-window-body { grid-template-columns: 1fr; }
+  #root .multiframe-manual-editor { grid-template-columns: 1fr; }
+}
+
 #root .perception-sampling input {
   width: 92px;
 }

@@ -33,11 +33,11 @@ from .naming import rename_after_perception
 from .opencut import OPENCUT_URL, export_opencut_handoff, opencut_status, start_opencut
 from .paths import db_path
 from .planner import draft_plan, perceive_output, review_text, revise_plan, set_plan_status, video_dir, write_plan_files
-from .project import build_project_plan, can_project_render, create_project, list_projects, mark_project_needs_review, project_detail, project_dir, revise_project, save_revision_notes, save_segment_review, set_review_status, sync_project_files, update_segment_timing
+from .project import build_project_plan, can_project_render, create_project, list_projects, mark_project_needs_review, project_detail, project_dir, revise_project, save_revision_notes, save_segment_review, set_review_status, sync_project_files, update_segment_evidence, update_segment_timing
 from .project_lifecycle import CancellationRequested, CancellationToken, ProjectRevisionConflict, check_base_revision, current_revision, project_commit
 from .job_coordinator import DEFAULT_COORDINATOR, JobState
 from .project_perception import run_project_perception
-from .perception_runs import PerceptionCancelled, ensure_perception_schema, perception_jobs, recover_interrupted_perception_runs
+from .perception_runs import PerceptionCancelled, analysis_run, ensure_perception_schema, perception_jobs, recover_interrupted_perception_runs
 from .render_api import RenderAPI
 from .render_job_manager import RenderJobManager
 from .renderer import render_approved
@@ -334,7 +334,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
     db = db_path(cfg)
     init_db(db)
     ensure_perception_schema(db)
-    recover_interrupted_perception_runs(db)
+    recover_interrupted_perception_runs(db, cfg)
     render_manager = RenderJobManager(cfg, db)
     render_manager.coordinator = JOB_COORDINATOR
     render_manager.start()
@@ -458,6 +458,19 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                         db,
                         int(query.get("project_id", ["0"])[0] or 0),
                         query.get("media_id", [""])[0],
+                    )
+                    self._file(path)
+                except (FileNotFoundError, ValueError):
+                    self.send_error(404)
+            elif parsed.path == "/api/project/perception-evidence":
+                try:
+                    path = perception_evidence_path(
+                        cfg,
+                        db,
+                        int(query.get("project_id", ["0"])[0] or 0),
+                        query.get("run_uuid", [""])[0],
+                        query.get("window_uuid", [""])[0],
+                        query.get("file", [""])[0],
                     )
                     self._file(path)
                 except (FileNotFoundError, ValueError):
@@ -683,6 +696,22 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     self._json({"ok": True, "path": str(output_path)})
                 except (OSError, TypeError, ValueError) as exc:
                     self._json({"ok": False, "code": "invalid_segment_timing", "error": str(exc)})
+            elif path == "/api/project/segment-evidence":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    output_path = update_segment_evidence(
+                        cfg,
+                        db,
+                        project_id,
+                        str(data.get("segment_id") or ""),
+                        data.get("patch") if isinstance(data.get("patch"), dict) else {},
+                        base_revision=_require_api_base_revision(data),
+                    )
+                    self._json({"ok": True, "path": str(output_path)})
+                except (OSError, TypeError, ValueError) as exc:
+                    if isinstance(exc, ProjectRevisionConflict):
+                        raise
+                    self._json({"ok": False, "code": getattr(exc, "code", "invalid_segment_evidence"), "error": str(exc)})
             elif path == "/api/project/storyboard":
                 try:
                     project_id = int(data.get("project_id", 0))
@@ -1078,6 +1107,46 @@ def registered_project_media_path(cfg: dict, db: Path, project_id: int, media_id
     raise FileNotFoundError("registered project media not found")
 
 
+PERCEPTION_EVIDENCE_FILES = {
+    "contact_sheet.jpg",
+    "window.json",
+    "validation.json",
+    "normalized.json",
+}
+
+
+def perception_evidence_path(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    run_uuid: str,
+    window_uuid: str,
+    file_name: str,
+) -> Path:
+    """Resolve only an evidence artifact from a run belonging to this project."""
+
+    run_token = str(run_uuid or "").strip()
+    window_token = str(window_uuid or "").strip()
+    file_token = str(file_name or "").strip()
+    token_pattern = re.compile(r"^[A-Za-z0-9_-]+$")
+    if not token_pattern.fullmatch(run_token) or not token_pattern.fullmatch(window_token):
+        raise ValueError("invalid perception evidence identity")
+    if file_token not in PERCEPTION_EVIDENCE_FILES:
+        raise ValueError("invalid perception evidence file")
+    run = analysis_run(db, run_token)
+    if int(run.get("project_id") or 0) != int(project_id):
+        raise FileNotFoundError("perception evidence is not in this project")
+    persisted_staging = Path(str(run.get("staging_path") or "")).expanduser().resolve()
+    staging_root = (Path(cfg["library_root"]) / "05_index" / "perception_runs").resolve()
+    if not persisted_staging.is_dir() or staging_root not in persisted_staging.parents:
+        raise FileNotFoundError("perception run staging directory is unavailable")
+    root = (persisted_staging / "evidence").resolve()
+    candidate = (root / window_token / file_token).resolve()
+    if root not in candidate.parents or not candidate.is_file() or candidate.is_symlink():
+        raise FileNotFoundError("perception evidence not found")
+    return candidate
+
+
 def _project_detail_for_api(cfg: dict, detail: dict) -> dict:
     """Expose project-scoped media URLs without leaking local filesystem paths."""
 
@@ -1088,17 +1157,14 @@ def _project_detail_for_api(cfg: dict, detail: dict) -> dict:
     def media_url(media_id: object) -> str:
         return f"/api/project/media?project_id={project_id}&media_id={str(media_id or '')}"
 
-    for clip in result.get("clips") or []:
-        if not isinstance(clip, dict):
-            continue
-        clip["media_url"] = media_url(clip.get("project_media_id") or clip.get("video_id"))
-        for key in ("source_path", "original_source_path", "physical_filename"):
-            clip.pop(key, None)
-    for segment in result.get("segments") or []:
-        if not isinstance(segment, dict):
-            continue
-        segment["media_url"] = media_url(segment.get("project_media_id") or segment.get("video_id"))
-        segment.pop("source_file", None)
+    def evidence_url(run_uuid: str, window_uuid: str, file_name: str) -> str:
+        query = urlencode({
+            "project_id": project_id,
+            "run_uuid": run_uuid,
+            "window_uuid": window_uuid,
+            "file": file_name,
+        })
+        return f"/api/project/perception-evidence?{query}"
 
     def scrub(value: object) -> object:
         if isinstance(value, list):
@@ -1107,14 +1173,70 @@ def _project_detail_for_api(cfg: dict, detail: dict) -> dict:
             return value
         cleaned = {}
         for key, item in value.items():
-            if key in {"source_file", "source_path", "original_source_path", "file_path"}:
+            if key in {"source_file", "source_path", "original_source_path", "file_path", "frame_path", "evidence"}:
                 continue
             cleaned[key] = scrub(item)
         if "project_media_id" in cleaned and "media_url" not in cleaned:
             cleaned["media_url"] = media_url(cleaned["project_media_id"])
         return cleaned
 
+    segment_by_window: dict[str, dict] = {}
+    segment_by_uuid: dict[str, dict] = {}
+    for segment in result.get("segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        segment_uuid = str(segment.get("segment_uuid") or segment.get("segment_id") or "")
+        window_uuid = str(segment.get("window_uuid") or "")
+        if segment_uuid:
+            segment_by_uuid[segment_uuid] = segment
+        if window_uuid and window_uuid not in segment_by_window:
+            segment_by_window[window_uuid] = segment
+
+    for clip in result.get("clips") or []:
+        if not isinstance(clip, dict):
+            continue
+        clip["media_url"] = media_url(clip.get("project_media_id") or clip.get("video_id"))
+        perception = clip.get("perception_run")
+        if isinstance(perception, dict):
+            run_uuid = str(perception.get("current_analysis_run_uuid") or "")
+            public_perception = scrub(perception)
+            public_results = []
+            for item in perception.get("current_window_results") or []:
+                if not isinstance(item, dict):
+                    continue
+                public_item = scrub(item)
+                public_item.pop("evidence", None)
+                window_uuid = str(item.get("window_uuid") or "")
+                segment_uuid = str(item.get("segment_uuid") or "")
+                segment = segment_by_uuid.get(segment_uuid) or segment_by_window.get(window_uuid)
+                if not segment_uuid and segment:
+                    segment_uuid = str(segment.get("segment_uuid") or segment.get("segment_id") or "")
+                    if segment_uuid:
+                        public_item["segment_uuid"] = segment_uuid
+                if segment:
+                    for key in ("include", "user_notes", "locked", "action", "shot_role", "technical_quality_json", "duplicate_group", "natural_audio_recommendation"):
+                        if key not in public_item and key in segment:
+                            public_item[key] = segment[key]
+                if run_uuid and window_uuid:
+                    public_item["evidence_urls"] = {
+                        "contact_sheet": evidence_url(run_uuid, window_uuid, "contact_sheet.jpg"),
+                        "window": evidence_url(run_uuid, window_uuid, "window.json"),
+                        "validation": evidence_url(run_uuid, window_uuid, "validation.json"),
+                        "normalized": evidence_url(run_uuid, window_uuid, "normalized.json"),
+                    }
+                public_results.append(public_item)
+            public_perception["current_window_results"] = public_results
+            clip["perception_run"] = public_perception
+        for key in ("source_path", "original_source_path", "physical_filename"):
+            clip.pop(key, None)
+    for segment in result.get("segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        segment["media_url"] = media_url(segment.get("project_media_id") or segment.get("video_id"))
+        segment.pop("source_file", None)
+
     result["plan"] = scrub(result.get("plan"))
+    result["perception_runs"] = scrub(result.get("perception_runs"))
     result.pop("folder", None)
     return result
 

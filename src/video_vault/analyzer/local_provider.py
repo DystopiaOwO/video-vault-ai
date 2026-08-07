@@ -10,11 +10,15 @@ import urllib.request
 from urllib.error import HTTPError
 
 from .frame_analysis import PROMPT_VERSION, TAGS, has_cjk
+from .multi_frame import MULTI_FRAME_PROMPT_VERSION, parse_window_response
 
 
 class LocalProvider:
     provider = "local"
     prompt_version = PROMPT_VERSION
+    supports_multi_frame = False
+    multi_frame_max_images = 0
+    multi_frame_prompt_version = MULTI_FRAME_PROMPT_VERSION
 
     def __init__(self, cfg: dict | None = None):
         local = (cfg or {}).get("ai", {}).get("local", {})
@@ -37,6 +41,28 @@ class LocalProvider:
             raw = self._post(self._request_body(frame_path, timestamp, video, "你剛剛回英文了。請重新輸出同一個 JSON，但 summary 與 suggested_use 必須全部使用繁體中文。"))
             parsed = _parse(raw)
         return parsed, raw
+
+    def analyze_window(self, frame_paths: list[Path], timestamps: list[float], video: dict) -> tuple[dict, dict]:
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                extra = ""
+                if attempt:
+                    extra = "上一個回應語言不符合要求。請重新輸出，summary、action、shot_role、technical_quality.issues 全部必須使用繁體中文。"
+                raw = self._post(self._window_request_body(frame_paths, timestamps, video, extra))
+                parsed = parse_window_response(raw)
+                localized = " ".join(
+                    [str(parsed.get("summary") or ""), str(parsed.get("action") or ""), str(parsed.get("shot_role") or "")]
+                    + [str(item) for item in (parsed.get("technical_quality") or {}).get("issues") or []]
+                )
+                if not has_cjk(localized):
+                    raise ValueError("local multi-frame response is not Traditional Chinese")
+                return parsed, raw
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+        raise RuntimeError(f"local multi-frame API failed after retries: {last_error}") from last_error
 
     def _request_body(self, frame_path: Path, timestamp: float, video: dict, extra: str = "") -> dict:
         image = base64.b64encode(frame_path.read_bytes()).decode("ascii")
@@ -68,6 +94,27 @@ class LocalProvider:
                     ],
                 }
             ],
+        }
+
+    def _window_request_body(self, frame_paths: list[Path], timestamps: list[float], video: dict, extra: str = "") -> dict:
+        prompt = (
+            "請分析以下同一影片區段的連續畫面，這些畫面是同一個感知單位。只回傳 strict JSON，不要 Markdown："
+            '{"summary": string, "action": string, "start_seconds": number, "end_seconds": number, '
+            '"shot_role": string, "technical_quality": {"score": number, "issues": string[]}, '
+            '"duplicate_group": string, "natural_audio_recommendation": "keep|lower|mute|unknown", '
+            '"confidence": number, "tags": string[]}. '
+            "start_seconds/end_seconds 必須落在提供的 frame timestamp 範圍內；不要把不同區段合併。"
+            f"tags 只能使用：{', '.join(TAGS)}。summary、action、shot_role、issues 必須使用繁體中文。"
+            f"Video filename: {video.get('filename')}; timestamps: {', '.join(f'{value:.3f}' for value in timestamps)}。{extra}"
+        )
+        content = [{"type": "text", "text": prompt}]
+        for frame_path in frame_paths:
+            image = base64.b64encode(frame_path.read_bytes()).decode("ascii")
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image}"}})
+        return {
+            "model": self.model,
+            "temperature": 0.1,
+            "messages": [{"role": "user", "content": content}],
         }
 
     def _post(self, body: dict) -> dict:
