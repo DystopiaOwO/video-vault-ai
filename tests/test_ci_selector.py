@@ -50,6 +50,7 @@ def test_renderer_change_enables_micro_media_smoke():
         "src/video_vault/analyzer/multi_frame.py",
         "src/video_vault/analyzer/vision_pipeline.py",
         "src/video_vault/project_perception.py",
+        "src/video_vault/visual_compositor.py",
         "src/video_vault/ui.py",
         "tests/test_media_smoke.py",
     ],

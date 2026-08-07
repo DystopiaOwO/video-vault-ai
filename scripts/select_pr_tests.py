@@ -63,6 +63,7 @@ MEDIA_SMOKE_PATHS = (
     "src/video_vault/perception_runs.py",
     "src/video_vault/ui.py",
     "src/video_vault/project_renderer.py",
+    "src/video_vault/visual_compositor.py",
     "src/video_vault/segment_renderer.py",
     "src/video_vault/timeline_assembler.py",
     "src/video_vault/ffmpeg_tools.py",
