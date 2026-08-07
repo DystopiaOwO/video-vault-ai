@@ -27,13 +27,18 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
   const [draft, setDraft] = useState(draftFor(story?.current_generation));
   const [locked, setLocked] = useState(Boolean(story?.current_generation?.review_state?.locked));
   const [busy, setBusy] = useState("");
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  const [creatorDirty, setCreatorDirty] = useState(false);
+  const [draftDirty, setDraftDirty] = useState(false);
 
   useEffect(() => {
-    setSettings(story?.settings || {});
-    setCreator(story?.creator_profile || {});
-    setDraft(draftFor(story?.current_generation));
-    setLocked(Boolean(story?.current_generation?.review_state?.locked));
-  }, [story?.current_story_generation_uuid, story?.settings, story?.creator_profile]);
+    if (!settingsDirty) setSettings(story?.settings || {});
+    if (!creatorDirty) setCreator(story?.creator_profile || {});
+    if (!draftDirty) {
+      setDraft(draftFor(story?.current_generation));
+      setLocked(Boolean(story?.current_generation?.review_state?.locked));
+    }
+  }, [story?.current_story_generation_uuid, story?.settings, story?.creator_profile, story?.current_generation, settingsDirty, creatorDirty, draftDirty]);
 
   const generation = story?.current_generation;
   const chapters = draft.chapters;
@@ -42,12 +47,32 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
     if (!mutation) return;
     setBusy("settings");
     try {
-      const result = await api.saveStorySettings(detail.project.id, settings, creator, detail.project_revision);
+      const result = await api.saveStorySettings(detail.project.id, settings, detail.project_revision);
       if (!result.ok) throw new Error(result.error || "故事設定儲存失敗");
       await refreshProject({ forceFresh: true });
+      setSettingsDirty(false);
       setMessage("故事設定已儲存；下次生成故事時才會套用新的 Profile。 ");
     } catch (error) {
       setMessage(`故事設定失敗：${formatApiError(error)}`);
+    } finally {
+      mutationControls.finishProjectMutation(mutation);
+      setBusy("");
+    }
+  }
+
+  async function saveCreator() {
+    const mutation = mutationControls.beginProjectMutation(detail.project.id, "story");
+    if (!mutation) return;
+    setBusy("creator");
+    try {
+      const expectedVersion = Number(creator.profile_version || 1);
+      const result = await api.saveCreatorProfile(creator, expectedVersion);
+      if (!result.ok) throw new Error(result.error || "Creator Profile 儲存失敗");
+      await refreshProject({ forceFresh: true });
+      setCreatorDirty(false);
+      setMessage("Creator Profile 已儲存。");
+    } catch (error) {
+      setMessage(`Creator Profile 失敗：${formatApiError(error)}`);
     } finally {
       mutationControls.finishProjectMutation(mutation);
       setBusy("");
@@ -80,6 +105,7 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
       const result = await api.updateStoryReview(detail.project.id, generation.story_generation_uuid, { ...draft, locked }, detail.project_revision);
       if (!result.ok) throw new Error(result.error || "故事審核儲存失敗");
       await refreshProject({ forceFresh: true });
+      setDraftDirty(false);
       setMessage("故事人工修改已儲存；尚未套用到分鏡。");
     } catch (error) {
       setMessage(`故事審核失敗：${formatApiError(error)}`);
@@ -91,6 +117,10 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
 
   async function applyToStoryboard() {
     if (!generation) return;
+    if (draftDirty || settingsDirty || creatorDirty) {
+      setMessage("請先儲存目前故事草稿與設定，再套用到既有分鏡。");
+      return;
+    }
     const mutation = mutationControls.beginProjectMutation(detail.project.id, "story");
     if (!mutation) return;
     setBusy("apply");
@@ -108,10 +138,12 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
   }
 
   function patchChapter(index: number, patch: Partial<StoryChapter>) {
+    setDraftDirty(true);
     setDraft((current) => ({ ...current, chapters: current.chapters.map((chapter, chapterIndex) => chapterIndex === index ? { ...chapter, ...patch } : chapter) }));
   }
 
   function moveChapter(index: number, direction: -1 | 1) {
+    setDraftDirty(true);
     setDraft((current) => {
       const nextIndex = index + direction;
       if (nextIndex < 0 || nextIndex >= current.chapters.length) return current;
@@ -121,42 +153,77 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
     });
   }
 
-  return <section className="story-understanding card" aria-label="專案故事理解">
+  async function updateCalibration(action: "recalculate" | "reset") {
+    const mutation = mutationControls.beginProjectMutation(detail.project.id, "story");
+    if (!mutation) return;
+    setBusy("calibration");
+    try {
+      const result = action === "reset"
+        ? await api.resetStoryCalibration(detail.project.id, String(settings.profile_id || "general_diary"))
+        : await api.recalculateStoryCalibration(detail.project.id, String(settings.profile_id || "general_diary"));
+      if (!result.ok) throw new Error(result.error || "calibration 更新失敗");
+      await refreshProject({ forceFresh: true });
+      setMessage(action === "reset" ? "Calibration 已重設。" : "Calibration 已從 approved output 重新計算。");
+    } catch (error) {
+      setMessage(`Calibration 失敗：${formatApiError(error)}`);
+    } finally {
+      mutationControls.finishProjectMutation(mutation);
+      setBusy("");
+    }
+  }
+
+  const review = generation?.review_state || {};
+  const normalized = generation?.normalized_response || {};
+  const suppressed = review.suppressed_segments || normalized.suppressed_segments || [];
+  const dirty = settingsDirty || creatorDirty || draftDirty;
+
+  return <section className="story-understanding card" aria-label="專案故事理解" data-unsaved-text-draft={dirty ? "true" : undefined}>
     <div className="story-understanding-heading">
       <div><span className="eyebrow">PROJECT STORY UNDERSTANDING</span><h3>故事理解與人工審核</h3><p>故事生成只提供建議，必須明確套用到既有分鏡後才會改變剪輯流程。</p></div>
       <div className="row">
         <button type="button" disabled={Boolean(busy)} onClick={() => void saveSettings()}>儲存設定</button>
+        <button type="button" disabled={Boolean(busy)} onClick={() => void saveCreator()}>儲存 Creator</button>
         <button type="button" className="primary" disabled={Boolean(busy)} onClick={() => void generate()}>{busy === "generate" ? "生成中…" : "生成故事"}</button>
         {generation && <button type="button" disabled={Boolean(busy)} onClick={() => void generate(true)}>重新生成</button>}
       </div>
     </div>
     <div className="story-settings-grid">
-      <label>Story Profile<select value={String(settings.profile_id || "general_diary")} disabled={Boolean(busy)} onChange={(event) => setSettings({ ...settings, profile_id: event.target.value })}>
+      <label>Story Profile<select value={String(settings.profile_id || "general_diary")} disabled={Boolean(busy)} onChange={(event) => { setSettingsDirty(true); setSettings({ ...settings, profile_id: event.target.value }); }}>
         <option value="travel_diary">travel_diary｜旅行日記</option><option value="coffee_matcha_diary">coffee_matcha_diary｜咖啡／抹茶日記</option><option value="roasting_diary">roasting_diary｜烘豆日記</option><option value="general_diary">general_diary｜一般日記</option>
       </select></label>
-      <label>文字語言<input value={String(creator.language || "zh-TW")} disabled={Boolean(busy)} onChange={(event) => setCreator({ ...creator, language: event.target.value })} /></label>
-      <label>字卡密度<select value={String(creator.title_card_density || "low")} disabled={Boolean(busy)} onChange={(event) => setCreator({ ...creator, title_card_density: event.target.value })}><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
-      <label>節奏偏好<input value={String(settings.desired_pacing || "")} disabled={Boolean(busy)} placeholder="例如：自然、慢節奏、保留等待" onChange={(event) => setSettings({ ...settings, desired_pacing: event.target.value })} /></label>
-      <label className="wide">Creator wording style<input value={String(creator.wording_style || "")} disabled={Boolean(busy)} onChange={(event) => setCreator({ ...creator, wording_style: event.target.value })} /></label>
-      <label className="wide">專案故事意圖<textarea value={String(settings.project_intent || "")} disabled={Boolean(busy)} placeholder="這支影片想讓觀眾感受到什麼？" onChange={(event) => setSettings({ ...settings, project_intent: event.target.value })} /></label>
-      <label className="wide">行程／場景順序<textarea value={String(settings.itinerary || "")} disabled={Boolean(busy)} placeholder="例如：早上車站，下午展覽，傍晚咖啡廳" onChange={(event) => setSettings({ ...settings, itinerary: event.target.value })} /></label>
-      <label className="wide">必留內容<input value={(settings.must_keep || []).join(", ")} disabled={Boolean(busy)} onChange={(event) => setSettings({ ...settings, must_keep: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) })} /></label>
-      <label className="wide">排除指引<input value={(settings.exclude_guidance || []).join(", ")} disabled={Boolean(busy)} onChange={(event) => setSettings({ ...settings, exclude_guidance: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) })} /></label>
+      <label>文字語言<input value={String(creator.language || "zh-TW")} disabled={Boolean(busy)} onChange={(event) => { setCreatorDirty(true); setCreator({ ...creator, language: event.target.value }); }} /></label>
+      <label>字卡密度<select value={String(creator.title_card_density || "low")} disabled={Boolean(busy)} onChange={(event) => { setCreatorDirty(true); setCreator({ ...creator, title_card_density: event.target.value }); }}><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
+      <label>節奏偏好<input value={String(settings.desired_pacing || "")} disabled={Boolean(busy)} placeholder="例如：自然、慢節奏、保留等待" onChange={(event) => { setSettingsDirty(true); setSettings({ ...settings, desired_pacing: event.target.value }); }} /></label>
+      <label className="wide">Creator wording style<input value={String(creator.wording_style || "")} disabled={Boolean(busy)} onChange={(event) => { setCreatorDirty(true); setCreator({ ...creator, wording_style: event.target.value }); }} /></label>
+      <label className="wide">Creator visual style<input value={String(creator.visual_style || "")} disabled={Boolean(busy)} onChange={(event) => { setCreatorDirty(true); setCreator({ ...creator, visual_style: event.target.value }); }} /></label>
+      <label className="wide">專案故事意圖<textarea value={String(settings.project_intent || "")} disabled={Boolean(busy)} placeholder="這支影片想讓觀眾感受到什麼？" onChange={(event) => { setSettingsDirty(true); setSettings({ ...settings, project_intent: event.target.value }); }} /></label>
+      <label className="wide">行程／場景順序<textarea value={String(settings.itinerary || "")} disabled={Boolean(busy)} placeholder="例如：早上車站，下午展覽，傍晚咖啡廳" onChange={(event) => { setSettingsDirty(true); setSettings({ ...settings, itinerary: event.target.value }); }} /></label>
+      <label className="wide">期望順序<input value={(settings.desired_sequence || []).join(", ")} disabled={Boolean(busy)} onChange={(event) => { setSettingsDirty(true); setSettings({ ...settings, desired_sequence: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) }); }} /></label>
+      <label className="wide">必留內容<input value={(settings.must_keep || []).join(", ")} disabled={Boolean(busy)} onChange={(event) => { setSettingsDirty(true); setSettings({ ...settings, must_keep: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) }); }} /></label>
+      <label className="wide">排除指引<input value={(settings.exclude_guidance || []).join(", ")} disabled={Boolean(busy)} onChange={(event) => { setSettingsDirty(true); setSettings({ ...settings, exclude_guidance: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) }); }} /></label>
+      <label>字卡偏好<input value={String(settings.title_card_preference_override || "")} disabled={Boolean(busy)} onChange={(event) => { setSettingsDirty(true); setSettings({ ...settings, title_card_preference_override: event.target.value }); }} /></label>
+      <label>自然音偏好<input value={String(settings.natural_audio_override || "")} disabled={Boolean(busy)} onChange={(event) => { setSettingsDirty(true); setSettings({ ...settings, natural_audio_override: event.target.value }); }} /></label>
     </div>
     {!generation && <p className="inline-empty">尚未生成故事。請先儲存設定，再按「生成故事」。</p>}
     {generation && <>
       <div className="story-generation-meta"><b>{generation.story_generation_uuid}</b><span>{generation.provider} / {generation.model}</span><span>input {generation.input_hash?.slice(0, 12)}</span><span>狀態：{generation.status}</span></div>
-      <label className="wide">專案摘要<textarea value={draft.project_summary} disabled={Boolean(busy)} onChange={(event) => setDraft({ ...draft, project_summary: event.target.value })} /></label>
+      {story?.current_generation_is_stale && <p className="story-stale" role="alert">目前 StoryInputSnapshot 已變更；此 generation 過期，Apply 會 fail closed，請重新生成。</p>}
+      <div className="story-audit" aria-label="故事 audit"><span>raw provider calls：{generation.provider_audit?.calls ?? "—"}</span><span>corrective retry：{generation.provider_audit?.retries ?? 0}</span><span>latency：{generation.provider_audit?.total_latency_ms ?? "—"} ms</span><span>validation：{String(generation.validation?.status || "unknown")}</span></div>
+      <label className="wide">專案摘要<textarea value={draft.project_summary} disabled={Boolean(busy)} onChange={(event) => { setDraftDirty(true); setDraft({ ...draft, project_summary: event.target.value }); }} /></label>
       <div className="story-chapters">
         {chapters.map((chapter, index) => <article className="story-chapter" key={chapter.chapter_id || index}>
           <div className="story-chapter-head"><strong>章節 {index + 1}</strong><span>信心 {Math.round((chapter.confidence || 0) * 100)}% · {chapter.locked ? "已鎖定" : "未鎖定"}</span></div>
           <label>標題<input value={chapter.title || ""} disabled={Boolean(busy)} onChange={(event) => patchChapter(index, { title: event.target.value })} /></label>
           <label>目的<textarea value={chapter.purpose || ""} disabled={Boolean(busy)} onChange={(event) => patchChapter(index, { purpose: event.target.value })} /></label>
-          <label>片段順序<textarea value={(chapter.segment_uuids || []).join(", ")} onChange={(event) => patchChapter(index, { segment_uuids: event.target.value.split(",").map((id) => id.trim()).filter(Boolean) })} /></label>
+          <label>片段順序<textarea value={(chapter.segment_uuids || []).join(", ")} disabled={Boolean(busy)} onChange={(event) => patchChapter(index, { segment_uuids: event.target.value.split(",").map((id) => id.trim()).filter(Boolean) })} /></label>
           <label>節奏<input value={chapter.pacing_intent || ""} disabled={Boolean(busy)} onChange={(event) => patchChapter(index, { pacing_intent: event.target.value })} /></label>
           <label>自然音<input value={chapter.natural_audio_intent || ""} disabled={Boolean(busy)} onChange={(event) => patchChapter(index, { natural_audio_intent: event.target.value })} /></label>
           <div className="row"><button type="button" disabled={Boolean(busy) || index === 0} onClick={() => moveChapter(index, -1)}>章節上移</button><button type="button" disabled={Boolean(busy) || index === chapters.length - 1} onClick={() => moveChapter(index, 1)}>章節下移</button><button type="button" disabled={Boolean(busy)} onClick={() => patchChapter(index, { locked: !chapter.locked })}>{chapter.locked ? "解除本章鎖定" : "鎖定本章"}</button></div>
         </article>)}
+      </div>
+      <div className="story-suppression" aria-label="duplicate suppression evidence">
+        <strong>Duplicate suppression evidence</strong>
+        {suppressed.length === 0 ? <span>目前沒有被抑制的 duplicate segment。</span> : suppressed.map((item) => <span key={`${item.segment_uuid}:${item.representative_segment_uuid}`}>{item.segment_uuid} → representative {item.representative_segment_uuid}（{item.reason || "duplicate"}）</span>)}
       </div>
       <div className="row story-actions">
         <button type="button" disabled={Boolean(busy)} onClick={() => void saveReview()}>{busy === "review" ? "儲存中…" : "儲存故事修改"}</button>
@@ -165,5 +232,9 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
       </div>
       <p className="muted">套用前不會修改 storyboard.json、approval 或正式輸出；鎖定的既有分鏡片段會在套用時保留。</p>
     </>}
+    <div className="story-calibration" aria-label="Story calibration">
+      <div><strong>Calibration</strong><span>來源：{story?.calibration?.source || "approved outputs only"}</span><span>樣本：{story?.calibration?.sample_count ?? 0}</span><span>狀態：{story?.calibration?.status || "insufficient_data"}</span></div>
+      <div className="row"><button type="button" disabled={Boolean(busy)} onClick={() => void updateCalibration("recalculate")}>重新計算</button><button type="button" disabled={Boolean(busy)} onClick={() => void updateCalibration("reset")}>重設</button></div>
+    </div>
   </section>;
 }

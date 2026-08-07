@@ -7,13 +7,14 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from .database import project, project_videos
+from .database import frames, project, project_videos
 from .project import _read_json, project_dir, project_segments
 from .story_profiles import (
     load_project_story_settings,
     resolved_creator_profile,
     story_profile_definition,
 )
+from .story_context import story_context
 
 
 STORY_INPUT_SCHEMA_VERSION = 1
@@ -46,6 +47,9 @@ def _effective_segment(row: Mapping[str, Any], clip_order: int) -> dict[str, Any
     segment_id = str(row.get("segment_id") or row.get("segment_uuid") or "").strip()
     if not segment_id:
         return {}
+    user_summary = str(row.get("user_summary") or "").strip()
+    ai_visual_summary = str(row.get("ai_visual_summary") or row.get("visual_summary") or "").strip()
+    context = story_context(user_summary, ai_visual_summary, str(row.get("activity") or row.get("group") or ""))
     return {
         "segment_uuid": segment_id,
         "project_media_uuid": str(row.get("project_media_id") or row.get("project_media_uuid") or ""),
@@ -66,6 +70,7 @@ def _effective_segment(row: Mapping[str, Any], clip_order: int) -> dict[str, Any
         "tags": sorted(str(tag).strip() for tag in (row.get("tags") or []) if str(tag).strip()) if isinstance(row.get("tags"), list) else sorted(str(row.get("tags") or "").split(",")),
         "activity": str(row.get("activity") or row.get("group") or ""),
         "time_of_day": str(row.get("time_of_day") or ""),
+        "story_context": context,
         "human_override": {
             "include": bool(row.get("include", row.get("included", True))),
             "manual_order": int(row.get("manual_order") or row.get("order") or 0),
@@ -113,11 +118,21 @@ def build_story_input_snapshot(cfg: Mapping[str, Any], db: Path, project_id: int
     plan_path = project_dir(cfg, int(project_id)) / "project_plan.json"
     plan = _read_json(plan_path)
     clips = [dict(row) for row in project_videos(db, int(project_id))]
+    video_by_id = {int(row.get("id") or 0): row for row in clips}
+    ai_summary_by_video = {
+        int(row.get("id") or 0): " / ".join(
+            str(frame["vision_summary"] or "").strip()
+            for frame in frames(db, int(row.get("id") or 0))
+            if str(frame["vision_summary"] or "").strip()
+        )
+        for row in clips
+    }
     clip_order = {int(row["id"]): int(row.get("sort_order") or index) for index, row in enumerate(clips, 1)}
     rows = project_segments(cfg, int(project_id), plan, apply_storyboard=True, db=db)
     effective_segments = []
     for row in rows:
-        item = _effective_segment(row, clip_order.get(int(row.get("video_id") or 0), 0))
+        video = video_by_id.get(int(row.get("video_id") or 0), {})
+        item = _effective_segment({**video, "ai_visual_summary": ai_summary_by_video.get(int(row.get("video_id") or 0), ""), **row}, clip_order.get(int(row.get("video_id") or 0), 0))
         if item:
             effective_segments.append(item)
     effective_segments.sort(key=lambda item: (int(item["clip_order"]), int(item["human_override"]["manual_order"] or 999999), item["segment_uuid"]))
@@ -125,11 +140,16 @@ def build_story_input_snapshot(cfg: Mapping[str, Any], db: Path, project_id: int
         {
             "project_media_uuid": str(row.get("project_media_uuid") or ""),
             "clip_order": clip_order.get(int(row.get("id") or 0), 0),
-            "display_name": str(row.get("display_name") or row.get("filename") or ""),
             "duration_seconds": round(float(row.get("duration_seconds") or 0), 6),
             "category": str(row.get("category_override") or row.get("category") or ""),
             "user_summary": str(row.get("user_summary") or ""),
-            "effective_summary": str(row.get("user_summary") or row.get("project_summary") or ""),
+            "ai_visual_summary": ai_summary_by_video.get(int(row.get("id") or 0), str(row.get("ai_visual_summary") or row.get("visual_summary") or "")),
+            "effective_summary": str(row.get("user_summary") or row.get("project_summary") or row.get("visual_summary") or ""),
+            "story_context": story_context(
+                str(row.get("user_summary") or ""),
+                str(row.get("ai_visual_summary") or row.get("visual_summary") or ""),
+                str(row.get("category_override") or row.get("category") or ""),
+            ),
         }
         for row in clips
     ]
@@ -151,6 +171,11 @@ def build_story_input_snapshot(cfg: Mapping[str, Any], db: Path, project_id: int
         "desired_pacing": str(settings.get("desired_pacing") or ""),
         "must_keep": list(settings.get("must_keep") or []),
         "exclude_guidance": list(settings.get("exclude_guidance") or []),
+        "story_context_provenance": {
+            "contract_version": "story-context-v1",
+            "sources": ["project_videos.user_summary", "frames.vision_summary", "segment.tags"],
+            "filename_semantics": False,
+        },
         "clips": sorted(clips_payload, key=lambda item: (int(item["clip_order"]), item["project_media_uuid"])),
         "segments": effective_segments,
         "ordered_segment_uuids": [item["segment_uuid"] for item in effective_segments],

@@ -11,4 +11,9 @@
 #root .story-chapter-head { display: flex; justify-content: space-between; gap: 8px; }
 #root .story-chapter textarea { min-height: 54px; resize: vertical; }
 #root .story-actions { margin-top: 14px; }
+#root .story-stale { padding: 10px 12px; border: 1px solid #d59b32; border-radius: 8px; color: #7d4c00; background: #fff7e6; }
+#root .story-audit, #root .story-suppression, #root .story-calibration { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; padding: 10px; border: 1px solid var(--line, #d9e0ea); border-radius: 8px; color: var(--muted, #637083); font-size: 12px; }
+#root .story-suppression { display: grid; }
+#root .story-calibration { justify-content: space-between; align-items: center; }
+#root .story-calibration > div:first-child { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 @media (max-width: 760px) { #root .story-understanding-heading, #root .story-settings-grid { display: grid; grid-template-columns: 1fr; } #root .story-settings-grid .wide, #root .story-understanding > .wide { grid-column: auto; } }

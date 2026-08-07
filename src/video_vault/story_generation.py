@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Mapping, Protocol
@@ -16,6 +17,7 @@ from .project import project_dir
 from .project_lifecycle import CancellationRequested, ProjectRevisionConflict, check_base_revision, current_revision, project_commit
 from .story_input import STORY_INPUT_PROMPT_VERSION, build_story_input_snapshot
 from .story_profiles import load_creator_profile, load_project_story_settings, story_profile_definition
+from .story_calibration import calibration_for_profile
 from .storyboard import load_storyboard, update_storyboard
 
 
@@ -102,20 +104,21 @@ def _public_generation(row: Mapping[str, Any], *, include_internal: bool = False
         result.pop(key, None)
     if not include_internal:
         result["input_snapshot"] = {"input_hash": result.get("input_snapshot", {}).get("input_hash", ""), "schema_version": result.get("input_snapshot", {}).get("schema_version", 0)}
+        raw = result.get("raw_response") or {}
+        if isinstance(raw, Mapping) and isinstance(raw.get("provider_audit"), Mapping):
+            result["provider_audit"] = dict(raw["provider_audit"])
         result.pop("raw_response", None)
     return result
 
 
 def list_story_generations(db: Path, project_id: int, *, include_internal: bool = False) -> list[dict[str, Any]]:
     init_db(db)
-    recover_interrupted_story_generations(db)
     with connect(db) as con:
         rows = con.execute("select * from story_generations where project_id=? order by generation desc, id desc", (int(project_id),)).fetchall()
     return [_public_generation(dict(row), include_internal=include_internal) for row in rows]
 
 
 def project_story_detail(cfg: Mapping[str, Any], db: Path, project_id: int) -> dict[str, Any]:
-    recover_interrupted_story_generations(db)
     row = project(db, int(project_id))
     if not row:
         return {}
@@ -125,6 +128,10 @@ def project_story_detail(cfg: Mapping[str, Any], db: Path, project_id: int) -> d
     generations = list_story_generations(db, int(project_id), include_internal=False)
     current_uuid = str(row["current_story_generation_uuid"] or "")
     current = next((item for item in generations if str(item.get("story_generation_uuid")) == current_uuid), None)
+    try:
+        current_input_hash = str(build_story_input_snapshot(cfg, db, project_id).get("input_hash") or "")
+    except (OSError, TypeError, ValueError):
+        current_input_hash = ""
     return {
         "settings": settings,
         "creator_profile": creator,
@@ -133,6 +140,9 @@ def project_story_detail(cfg: Mapping[str, Any], db: Path, project_id: int) -> d
         "current_generation": current,
         "current_story_generation_uuid": current_uuid,
         "last_successful_story_generation_uuid": str(row["last_successful_story_generation_uuid"] or ""),
+        "current_input_hash": current_input_hash,
+        "current_generation_is_stale": bool(current and current_input_hash and current.get("input_hash") != current_input_hash),
+        "calibration": calibration_for_profile(cfg, db, str(settings.get("profile_id") or "general_diary")),
     }
 
 
@@ -257,19 +267,50 @@ class MockStoryProvider:
 class LocalTextStoryProvider:
     provider = "local_text"
 
+    _ROOT_KEYS = {
+        "schema_version", "project_summary", "story_profile", "chapters",
+        "overall_confidence", "needs_review_reasons", "suppressed_segments",
+    }
+    _CHAPTER_KEYS = {
+        "title", "purpose", "segment_uuids", "pacing_intent", "transition_intent",
+        "natural_audio_intent", "title_card_suggestion", "confidence", "needs_review_reasons",
+    }
+
     def __init__(self, base_url: str, model: str, timeout_seconds: float = 180.0):
         self.base_url = str(base_url).rstrip("/")
         self.model = str(model)
         self.timeout_seconds = float(timeout_seconds)
 
-    def generate_story(self, snapshot: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-        system = (
-            "你是 video-vault-ai 的 project story planner。只能輸出嚴格 JSON。"
-            "只能引用輸入提供的 segment_uuid，不得發明事件、地點、參數或不存在的內容。"
-            "不要要求圖片，不要輸出 frame bytes、image_url 或 base64。"
-            "不得決定 approval 或 render。咖啡、抹茶與烘豆不得自行寫成教學、業配或虛構專業參數。"
-        )
-        request_payload = {"model": self.model, "temperature": 0, "response_format": {"type": "json_object"}, "messages": [{"role": "system", "content": system}, {"role": "user", "content": _canonical(snapshot)}]}
+    def _strict_parse(self, content: Any) -> dict[str, Any]:
+        try:
+            output = json.loads(str(content))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise StoryValidationError("文字模型沒有回傳合法 JSON") from exc
+        if not isinstance(output, dict):
+            raise StoryValidationError("文字模型輸出必須是 JSON object")
+        unknown = sorted(set(output) - self._ROOT_KEYS)
+        missing = sorted({"schema_version", "project_summary", "story_profile", "chapters", "overall_confidence"} - set(output))
+        if unknown or missing:
+            bits = []
+            if unknown:
+                bits.append("未知欄位：" + ", ".join(unknown))
+            if missing:
+                bits.append("缺少欄位：" + ", ".join(missing))
+            raise StoryValidationError("文字模型 schema 不符合契約（" + "；".join(bits) + "）")
+        if not isinstance(output.get("chapters"), list):
+            raise StoryValidationError("文字模型 chapters 必須是陣列")
+        for index, chapter in enumerate(output["chapters"], 1):
+            if not isinstance(chapter, Mapping):
+                raise StoryValidationError(f"文字模型 chapter {index} 必須是物件")
+            unknown_chapter = sorted(set(chapter) - self._CHAPTER_KEYS)
+            if unknown_chapter:
+                raise StoryValidationError(f"文字模型 chapter {index} 含未知欄位：{', '.join(unknown_chapter)}")
+        if "suppressed_segments" in output and not isinstance(output["suppressed_segments"], list):
+            raise StoryValidationError("文字模型 suppressed_segments 必須是陣列")
+        return output
+
+    def _request(self, request_payload: Mapping[str, Any]) -> tuple[dict[str, Any], Any, float]:
+        started = time.perf_counter()
         request = urllib.request.Request(
             self.base_url + "/chat/completions",
             data=json.dumps(request_payload, ensure_ascii=False).encode("utf-8"),
@@ -284,13 +325,43 @@ class LocalTextStoryProvider:
         content = (((raw.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
         if isinstance(content, list):
             content = "".join(str(item.get("text") or item) if isinstance(item, Mapping) else str(item) for item in content)
-        try:
-            output = json.loads(str(content))
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise StoryValidationError("文字模型沒有回傳合法 JSON") from exc
-        if not isinstance(output, dict):
-            raise StoryValidationError("文字模型輸出必須是 JSON object")
-        return output, raw
+        return self._strict_parse(content), raw, (time.perf_counter() - started) * 1000
+
+    def generate_story(self, snapshot: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        system = (
+            "你是 video-vault-ai 的 project story planner。只能輸出嚴格 JSON。"
+            "只能引用輸入提供的 segment_uuid，不得發明事件、地點、參數或不存在的內容。"
+            "不要要求圖片，不要輸出 frame bytes、image_url 或 base64。"
+            "不得決定 approval 或 render。咖啡、抹茶與烘豆不得自行寫成教學、業配或虛構專業參數。"
+        )
+        base_messages = [{"role": "system", "content": system}, {"role": "user", "content": _canonical(snapshot)}]
+        attempts: list[dict[str, Any]] = []
+        latencies: list[float] = []
+        last_error: StoryValidationError | None = None
+        for attempt in range(2):
+            messages = list(base_messages)
+            if attempt:
+                messages.extend([
+                    {"role": "assistant", "content": attempts[-1].get("content", "")},
+                    {"role": "user", "content": "上一個輸出不符合 strict schema。只修正 schema，重新輸出完整 JSON，不要解釋。"},
+                ])
+            payload = {"model": self.model, "temperature": 0, "response_format": {"type": "json_object"}, "messages": messages}
+            started = time.perf_counter()
+            try:
+                output, raw, latency = self._request(payload)
+                latencies.append(round(latency, 3))
+                attempts.append({"content": json.dumps(output, ensure_ascii=False, sort_keys=True), "error": ""})
+                audit = {"calls": attempt + 1, "retries": attempt, "call_latencies_ms": latencies, "total_latency_ms": round(sum(latencies), 3), "strict_schema": True}
+                return output, {**dict(raw), "provider_audit": audit}
+            except StoryValidationError as exc:
+                last_error = exc
+                latencies.append(round((time.perf_counter() - started) * 1000, 3))
+                attempts.append({"content": "", "error": str(exc)})
+                if attempt == 1:
+                    break
+        error = last_error or StoryValidationError("本地文字模型 strict schema 驗證失敗")
+        error.audit = {"calls": 2, "retries": 1, "call_latencies_ms": latencies, "total_latency_ms": round(sum(latencies), 3), "strict_schema": True, "error": str(error)}
+        raise error
 
 
 def provider_from_config(cfg: Mapping[str, Any], provider_override: str | None = None) -> StoryProvider:
@@ -340,6 +411,39 @@ def validate_story_output(output: Mapping[str, Any], snapshot: Mapping[str, Any]
     except (TypeError, ValueError):
         errors.append("overall_confidence 無效")
     used: set[str] = set()
+    suppressed: list[dict[str, str]] = []
+    suppressed_ids: set[str] = set()
+    raw_suppressed = output.get("suppressed_segments") or []
+    if not isinstance(raw_suppressed, list):
+        errors.append("suppressed_segments 必須是陣列")
+        raw_suppressed = []
+    segment_by_id = {str(item.get("segment_uuid") or ""): item for item in snapshot.get("segments") or []}
+    for index, item in enumerate(raw_suppressed, 1):
+        if not isinstance(item, Mapping):
+            errors.append(f"suppressed_segments {index} 必須是 object")
+            continue
+        segment_id = str(item.get("segment_uuid") or "").strip()
+        representative_id = str(item.get("representative_segment_uuid") or "").strip()
+        if not segment_id or not representative_id or segment_id == representative_id:
+            errors.append(f"suppressed_segments {index} 必須指定不同的 segment_uuid 與 representative_segment_uuid")
+            continue
+        if segment_id not in allowed_ids or representative_id not in allowed_ids:
+            errors.append(f"suppressed_segments {index} 引用了不存在或跨專案 segment")
+            continue
+        source_group = str((segment_by_id.get(segment_id) or {}).get("duplicate_group") or "")
+        representative_group = str((segment_by_id.get(representative_id) or {}).get("duplicate_group") or "")
+        if not source_group or source_group != representative_group:
+            errors.append(f"suppressed segment {segment_id} 必須與 representative 屬於同一 duplicate_group")
+            continue
+        if segment_id in suppressed_ids:
+            errors.append(f"suppressed segment 重複：{segment_id}")
+            continue
+        suppressed_ids.add(segment_id)
+        suppressed.append({
+            "segment_uuid": segment_id,
+            "representative_segment_uuid": representative_id,
+            "reason": str(item.get("reason") or "duplicate"),
+        })
     normalized_chapters: list[dict[str, Any]] = []
     for index, chapter in enumerate(chapters, 1):
         if not isinstance(chapter, Mapping):
@@ -357,6 +461,8 @@ def validate_story_output(output: Mapping[str, Any], snapshot: Mapping[str, Any]
                 errors.append(f"chapter {index} 引用了不存在或跨專案 segment：{segment_id}")
             if segment_id in used:
                 errors.append(f"segment UUID 重複出現在多個 chapter：{segment_id}")
+            if segment_id in suppressed_ids:
+                errors.append(f"segment UUID 不可同時出現在 chapter 與 suppressed_segments：{segment_id}")
             used.add(segment_id)
         confidence = _validate_confidence(chapter.get("confidence"), f"chapter {index}", errors)
         if "roast_parameters" in chapter or "development_ratio" in chapter or "roast_curve" in chapter:
@@ -380,9 +486,15 @@ def validate_story_output(output: Mapping[str, Any], snapshot: Mapping[str, Any]
         for item in snapshot.get("segments") or []
         if bool((item.get("human_override") or {}).get("include", True))
     }
-    missing_ids = sorted(expected_ids - used)
+    missing_ids = sorted(expected_ids - used - suppressed_ids)
     if missing_ids:
         errors.append(f"故事輸出遺漏可納入片段：{', '.join(missing_ids)}")
+    used_ids = set(used)
+    for item in suppressed:
+        if item["representative_segment_uuid"] not in used_ids:
+            errors.append(
+                f"suppressed segment {item['segment_uuid']} 的 representative 必須出現在 chapter：{item['representative_segment_uuid']}"
+            )
     if errors:
         raise StoryValidationError("；".join(errors))
     return {
@@ -392,6 +504,7 @@ def validate_story_output(output: Mapping[str, Any], snapshot: Mapping[str, Any]
         "chapters": normalized_chapters,
         "overall_confidence": float(output.get("overall_confidence") or 0),
         "needs_review_reasons": [str(item) for item in output.get("needs_review_reasons") or []],
+        "suppressed_segments": suppressed,
     }
 
 
@@ -548,9 +661,19 @@ def generate_project_story(
             if current != base:
                 raise ProjectRevisionConflict(project_id, base, current)
             with connect(db) as con:
-                con.execute("update projects set current_story_generation_uuid=?, last_successful_story_generation_uuid=? where id=?", (generation_uuid, generation_uuid, int(project_id)))
+                pointer_update = con.execute(
+                    "update projects set current_story_generation_uuid=?, last_successful_story_generation_uuid=? where id=?",
+                    (generation_uuid, generation_uuid, int(project_id)),
+                )
+                if pointer_update.rowcount != 1:
+                    raise StoryGenerationError("故事 generation publish 找不到專案，已 rollback")
+                status_update = con.execute(
+                    "update story_generations set status='succeeded', finished_at=?, published_revision=? where story_generation_uuid=?",
+                    (_now(), base, generation_uuid),
+                )
+                if status_update.rowcount != 1:
+                    raise StoryGenerationError("故事 generation publish 找不到 generation，已 rollback")
             commit.record_changed(False)
-        _update_generation(db, generation_uuid, status="succeeded", finished_at=_now(), published_revision=current_revision(db, project_id))
         result = get_story_generation(db, generation_uuid, include_internal=True)
         result["cache_key"] = key
         result["cache_hit"] = cache_hit
@@ -559,13 +682,45 @@ def generate_project_story(
         _update_generation(db, generation_uuid, status="cancelled", finished_at=_now(), error=str(exc))
         raise
     except Exception as exc:
-        _update_generation(db, generation_uuid, status="failed", finished_at=_now(), error=str(exc))
+        audit = getattr(exc, "audit", None)
+        fields = {"status": "failed", "finished_at": _now(), "error": str(exc)}
+        if audit:
+            fields["raw_response_json"] = {"provider_audit": audit}
+        _update_generation(db, generation_uuid, **fields)
         raise
 
 
 def _assert_generation_project(generation: Mapping[str, Any], project_id: int | None) -> None:
     if project_id is not None and int(generation.get("project_id") or 0) != int(project_id):
         raise StoryGenerationError("故事 generation 不屬於指定專案")
+
+
+def _review_chapter_identity(
+    submitted: Any,
+    original: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Require application-owned chapter IDs and preserve them across edits/reorder."""
+    if not isinstance(submitted, list):
+        raise StoryValidationError("人工審核 chapters 必須是陣列")
+    known = {str(item.get("chapter_id") or ""): dict(item) for item in original if str(item.get("chapter_id") or "")}
+    if not known:
+        raise StoryValidationError("故事 generation 缺少 app-owned chapter_id")
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(submitted, 1):
+        if not isinstance(item, Mapping):
+            raise StoryValidationError(f"人工審核 chapter {index} 必須是 object")
+        chapter_id = str(item.get("chapter_id") or "").strip()
+        if not chapter_id or chapter_id not in known:
+            raise StoryValidationError(f"人工審核 chapter {index} 的 chapter_id 不是 app-owned identity")
+        if chapter_id in seen:
+            raise StoryValidationError(f"人工審核 chapter_id 重複：{chapter_id}")
+        seen.add(chapter_id)
+        result.append({**dict(item), "chapter_id": chapter_id})
+    if seen != set(known):
+        missing = sorted(set(known) - seen)
+        raise StoryValidationError("人工審核不可刪除既有章節 identity：" + ", ".join(missing))
+    return result
 
 
 def update_story_generation_review(
@@ -582,13 +737,33 @@ def update_story_generation_review(
         check_base_revision(db, int(project_id), base_revision)
     snapshot = generation.get("input_snapshot") or {}
     original = generation.get("normalized_response") or {}
-    candidate = {**original, **dict(review_state)}
+    submitted_for_boundary = review_state.get("chapters")
+    allowed_ids = {str(item.get("segment_uuid") or "") for item in snapshot.get("segments") or []}
+    if isinstance(submitted_for_boundary, list):
+        for item in submitted_for_boundary:
+            if not isinstance(item, Mapping):
+                continue
+            for segment_id in item.get("segment_uuids") or []:
+                if str(segment_id) not in allowed_ids:
+                    raise StoryValidationError(f"chapter 引用了不存在或跨專案 segment：{segment_id}")
+    submitted_chapters = _review_chapter_identity(review_state.get("chapters", original.get("chapters") or []), original.get("chapters") or [])
+    candidate = {**original, **dict(review_state), "chapters": submitted_chapters}
     reviewed = validate_story_output(candidate, snapshot)
+    reviewed_by_id = {str(item.get("chapter_id")): item for item in submitted_chapters}
+    original_by_id = {str(item.get("chapter_id")): item for item in original.get("chapters") or []}
+    reviewed["chapters"] = [
+        {**chapter, "chapter_id": str(submitted_chapters[index].get("chapter_id"))}
+        for index, chapter in enumerate(reviewed["chapters"])
+    ]
+    for chapter_id, chapter in reviewed_by_id.items():
+        if chapter_id not in original_by_id:
+            raise StoryValidationError(f"人工審核 chapter_id 不是 app-owned identity：{chapter_id}")
     state = {
         "project_summary": reviewed["project_summary"],
         "chapters": reviewed["chapters"],
         "overall_confidence": reviewed["overall_confidence"],
         "needs_review_reasons": reviewed["needs_review_reasons"],
+        "suppressed_segments": reviewed.get("suppressed_segments") or [],
         "locked": bool(review_state.get("locked", (generation.get("review_state") or {}).get("locked", False))),
     }
     state["source"] = "human"
@@ -663,11 +838,23 @@ def apply_story_generation_to_storyboard(
     _assert_generation_project(generation, project_id)
     if str(generation.get("status")) != "succeeded":
         raise StoryGenerationError("只有成功且已驗證的故事 generation 可以套用")
+    current_snapshot = build_story_input_snapshot(cfg, db, int(project_id))
+    if str(generation.get("input_hash") or "") != str(current_snapshot.get("input_hash") or ""):
+        raise StoryGenerationError("故事 generation 的 input_hash 已過期，請重新計算目前 StoryInputSnapshot 後再套用")
     existing = load_storyboard(dict(cfg), int(project_id))
     if existing is None:
         raise ValueError("尚未建立 storyboard，請先到分鏡審核建立分鏡後再套用故事")
     state = _storyboard_state_from_generation(generation, existing)
-    result = update_storyboard(dict(cfg), db, int(project_id), state, return_result=True, base_revision=base_revision)
+    storyboard_file = Path(str(project_dir(dict(cfg), int(project_id)) / "storyboard.json"))
+    previous_bytes = storyboard_file.read_bytes() if storyboard_file.is_file() else None
+    try:
+        result = update_storyboard(dict(cfg), db, int(project_id), state, return_result=True, base_revision=base_revision)
+    except Exception:
+        if previous_bytes is not None:
+            storyboard_file.write_bytes(previous_bytes)
+        else:
+            storyboard_file.unlink(missing_ok=True)
+        raise
     return {"generation": generation, "storyboard": result["state"], "render_changed": result["render_changed"], "approval_invalidated": result["approval_invalidated"]}
 
 

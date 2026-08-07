@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
+import urllib.request
 
 import pytest
 
@@ -11,6 +12,7 @@ from video_vault.project import build_project_plan, create_project, project_dir,
 from video_vault.project_lifecycle import CancellationRequested, ProjectRevisionConflict, current_revision
 from video_vault.story_calibration import compute_calibration, reset_calibration
 from video_vault.story_generation import (
+    LocalTextStoryProvider,
     StoryGenerationError,
     StoryValidationError,
     apply_story_generation_to_storyboard,
@@ -22,7 +24,7 @@ from video_vault.story_generation import (
     validate_story_output,
 )
 from video_vault.story_input import build_story_input_snapshot, story_input_hash
-from video_vault.story_profiles import load_project_story_settings, save_creator_profile, save_project_story_settings
+from video_vault.story_profiles import CreatorProfileRevisionConflict, load_creator_profile, load_project_story_settings, save_creator_profile, save_project_story_settings
 from video_vault.storyboard import generate_storyboard, load_storyboard
 
 
@@ -196,6 +198,24 @@ def test_restart_recovery_marks_inflight_generation_interrupted(tmp_path: Path):
     assert project_detail(cfg, db, project_id)["story"]["last_successful_story_generation_uuid"] == successful["story_generation_uuid"]
 
 
+def test_story_detail_polling_does_not_recover_inflight_generation(tmp_path: Path):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    successful = generate_project_story(cfg, db, project_id)
+    with pytest.raises(CancellationRequested):
+        generate_project_story(cfg, db, project_id, force=True, should_cancel=lambda: True)
+    with connect(db) as con:
+        interrupted = con.execute(
+            "select story_generation_uuid from story_generations where project_id=? and story_generation_uuid<>? order by generation desc limit 1",
+            (project_id, successful["story_generation_uuid"]),
+        ).fetchone()
+        con.execute("update story_generations set status='publishing' where story_generation_uuid=?", (interrupted["story_generation_uuid"],))
+        con.execute("update projects set current_story_generation_uuid=? where id=?", (interrupted["story_generation_uuid"], project_id))
+    detail = project_detail(cfg, db, project_id)
+    assert detail["story"]["current_generation"]["status"] == "publishing"
+    assert detail["story"]["current_story_generation_uuid"] == interrupted["story_generation_uuid"]
+    assert get_story_generation(db, interrupted["story_generation_uuid"])["status"] == "publishing"
+
+
 def test_story_review_payload_is_validated_against_input_snapshot(tmp_path: Path):
     cfg, db, project_id, _ = _fixture(tmp_path)
     generation = generate_project_story(cfg, db, project_id)
@@ -329,6 +349,119 @@ def test_story_output_rejects_unknown_duplicate_and_missing_segment_ids(tmp_path
     output["chapters"][0]["segment_uuids"] = ids[:1]
     with pytest.raises(StoryValidationError, match="遺漏可納入片段"):
         validate_story_output(output, snapshot)
+
+
+def test_duplicate_suppression_requires_same_project_representative(tmp_path: Path):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    snapshot = build_story_input_snapshot(cfg, db, project_id)
+    ids = [item["segment_uuid"] for item in snapshot["segments"]]
+    snapshot["segments"][0]["duplicate_group"] = "arrival"
+    snapshot["segments"][1]["duplicate_group"] = "arrival"
+    output = {
+        "schema_version": 1,
+        "story_profile": snapshot["story_profile_id"],
+        "project_summary": "摘要",
+        "overall_confidence": 0.8,
+        "chapters": [{"title": "章節", "purpose": "整理", "segment_uuids": [ids[0]], "confidence": 0.8}],
+        "suppressed_segments": [{"segment_uuid": ids[1], "representative_segment_uuid": ids[0], "reason": "duplicate"}],
+    }
+    normalized = validate_story_output(output, snapshot)
+    assert normalized["suppressed_segments"] == output["suppressed_segments"]
+    output["suppressed_segments"][0]["representative_segment_uuid"] = "not-owned"
+    with pytest.raises(StoryValidationError, match="不存在或跨專案"):
+        validate_story_output(output, snapshot)
+
+
+def test_apply_rejects_stale_snapshot_and_preserves_storyboard_bytes(tmp_path: Path):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    generation = generate_project_story(cfg, db, project_id)
+    storyboard_file = project_dir(cfg, project_id) / "storyboard.json"
+    before = storyboard_file.read_bytes()
+    settings = load_project_story_settings(cfg, db, project_id)
+    save_project_story_settings(cfg, db, project_id, {**settings, "project_intent": "已變更的最新意圖"})
+    with pytest.raises(StoryGenerationError, match="input_hash 已過期"):
+        apply_story_generation_to_storyboard(cfg, db, project_id, generation["story_generation_uuid"])
+    assert storyboard_file.read_bytes() == before
+
+
+def test_human_review_preserves_app_owned_chapter_identity(tmp_path: Path):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    generation = generate_project_story(cfg, db, project_id)
+    chapters = deepcopy(generation["normalized_response"]["chapters"])
+    chapter_id = chapters[0]["chapter_id"]
+    chapters[0]["title"] = "人工重新命名"
+    reviewed = update_story_generation_review(db, generation["story_generation_uuid"], {"chapters": chapters}, project_id=project_id)
+    assert reviewed["review_state"]["chapters"][0]["chapter_id"] == chapter_id
+    chapters[0]["chapter_id"] = "fake-model-id"
+    with pytest.raises(StoryValidationError, match="app-owned identity"):
+        update_story_generation_review(db, generation["story_generation_uuid"], {"chapters": chapters}, project_id=project_id)
+
+
+def test_creator_profile_noop_keeps_version_and_stale_write_is_rejected(tmp_path: Path):
+    cfg, _, _, _ = _fixture(tmp_path)
+    current = load_creator_profile(cfg)
+    version = int(current["profile_version"])
+    unchanged = save_creator_profile(cfg, current, expected_version=version)
+    assert unchanged["profile_version"] == version
+    save_creator_profile(cfg, {**current, "wording_style": "新的語氣"}, expected_version=version)
+    with pytest.raises(CreatorProfileRevisionConflict):
+        save_creator_profile(cfg, {**current, "wording_style": "過期寫入"}, expected_version=version)
+
+
+def test_story_input_uses_story_context_provenance_without_filename_semantics(tmp_path: Path):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    snapshot = build_story_input_snapshot(cfg, db, project_id)
+    assert snapshot["story_context_provenance"]["filename_semantics"] is False
+
+    def assert_no_semantic_filename(value):
+        if isinstance(value, dict):
+            assert "filename" not in value
+            assert "display_name" not in value
+            for child in value.values():
+                assert_no_semantic_filename(child)
+        elif isinstance(value, list):
+            for child in value:
+                assert_no_semantic_filename(child)
+
+    assert_no_semantic_filename(snapshot)
+
+
+def test_local_text_provider_allows_at_most_one_corrective_retry_and_audits(monkeypatch):
+    valid = {
+        "schema_version": 1,
+        "project_summary": "摘要",
+        "story_profile": "general_diary",
+        "chapters": [],
+        "overall_confidence": 0.5,
+    }
+    responses = [
+        {"choices": [{"message": {"content": json.dumps({"unknown": True})}}]},
+        {"choices": [{"message": {"content": json.dumps(valid)}}]},
+    ]
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_urlopen(*_args, **_kwargs):
+        return Response(responses.pop(0))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    output, raw = LocalTextStoryProvider("http://127.0.0.1:1234/v1", "test-model").generate_story({"story_profile_id": "general_diary"})
+    assert output == valid
+    assert raw["provider_audit"]["calls"] == 2
+    assert raw["provider_audit"]["retries"] == 1
+    assert len(raw["provider_audit"]["call_latencies_ms"]) == 2
+    assert raw["provider_audit"]["strict_schema"] is True
 
 
 def test_calibration_uses_approved_outputs_only_and_can_reset(tmp_path: Path):

@@ -17,6 +17,15 @@ STORY_PROFILE_IDS = ("travel_diary", "coffee_matcha_diary", "roasting_diary", "g
 _TITLE_CARD_DENSITIES = {"low", "medium", "high"}
 
 
+class CreatorProfileRevisionConflict(RuntimeError):
+    code = "stale_creator_profile"
+
+    def __init__(self, expected: int | None, current: int):
+        self.expected = expected
+        self.current = int(current)
+        super().__init__(f"Creator Profile 已更新：目前 version {current}，請重新載入後再儲存")
+
+
 STORY_PROFILES: dict[str, dict[str, Any]] = {
     "travel_diary": {
         "profile_id": "travel_diary",
@@ -115,10 +124,24 @@ def load_creator_profile(cfg: Mapping[str, Any]) -> dict[str, Any]:
         return default_creator_profile()
 
 
-def save_creator_profile(cfg: Mapping[str, Any], profile: Mapping[str, Any]) -> dict[str, Any]:
+def save_creator_profile(
+    cfg: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    *,
+    expected_version: int | None = None,
+) -> dict[str, Any]:
     current = load_creator_profile(cfg)
     incoming = normalize_creator_profile(profile)
-    incoming["profile_version"] = int(current.get("profile_version") or 1) + 1
+    current_version = int(current.get("profile_version") or 1)
+    if expected_version is not None and int(expected_version) != current_version:
+        raise CreatorProfileRevisionConflict(int(expected_version), current_version)
+    comparable_current = {key: value for key, value in current.items() if key not in {"profile_version", "updated_at"}}
+    comparable_incoming = {key: value for key, value in incoming.items() if key not in {"profile_version", "updated_at"}}
+    if comparable_current == comparable_incoming:
+        if not creator_profile_path(cfg).is_file():
+            _atomic_json(creator_profile_path(cfg), current)
+        return current
+    incoming["profile_version"] = current_version + 1
     incoming["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     _atomic_json(creator_profile_path(cfg), incoming)
     return incoming
@@ -213,6 +236,7 @@ def resolved_creator_profile(cfg: Mapping[str, Any], project_settings: Mapping[s
 
 __all__ = [
     "CREATOR_PROFILE_SCHEMA_VERSION",
+    "CreatorProfileRevisionConflict",
     "STORY_PROFILE_SCHEMA_VERSION",
     "STORY_PROFILE_IDS",
     "STORY_PROFILES",
