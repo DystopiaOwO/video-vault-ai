@@ -273,6 +273,64 @@ export type ProjectDetail = {
   color: ColorState;
   audio: AudioState;
   storyboard: StoryboardState;
+  story?: StoryDetail;
+};
+
+export type StoryChapter = {
+  chapter_id?: string;
+  order?: number;
+  title?: string;
+  purpose?: string;
+  segment_uuids?: string[];
+  pacing_intent?: string;
+  transition_intent?: string;
+  natural_audio_intent?: string;
+  title_card_suggestion?: string;
+  confidence?: number;
+  needs_review_reasons?: string[];
+  locked?: boolean;
+};
+
+export type StoryGeneration = {
+  story_generation_uuid: string;
+  project_id: number;
+  generation: number;
+  status: string;
+  input_hash?: string;
+  input_snapshot?: { input_hash?: string; schema_version?: number };
+  provider?: string;
+  model?: string;
+  prompt_version?: string;
+  schema_version?: number;
+  creator_profile_version?: number;
+  project_story_profile_version?: number;
+  normalized_response?: { project_summary?: string; chapters?: StoryChapter[]; overall_confidence?: number; needs_review_reasons?: string[] };
+  review_state?: { chapters?: StoryChapter[]; project_summary?: string; source?: string; locked?: boolean };
+  validation?: Record<string, unknown>;
+  error?: string;
+  cache_hit?: boolean;
+};
+
+export type StoryDetail = {
+  settings: {
+    schema_version?: number;
+    profile_id?: string;
+    profile_version?: number;
+    project_intent?: string;
+    itinerary?: string;
+    desired_sequence?: string[];
+    desired_pacing?: string;
+    title_card_preference_override?: string;
+    natural_audio_override?: string;
+    must_keep?: string[];
+    exclude_guidance?: string[];
+  };
+  creator_profile: Record<string, unknown>;
+  story_profile: { profile_id?: string; label?: string; roles?: string[]; rules?: string[] };
+  generations: StoryGeneration[];
+  current_generation?: StoryGeneration;
+  current_story_generation_uuid?: string;
+  last_successful_story_generation_uuid?: string;
 };
 
 export type ColorAdjustment = {
@@ -467,6 +525,15 @@ export const api = {
     json<{ ok: boolean; storyboard?: StoryboardState; error?: string }>("/api/project/storyboard/generate", post({ project_id: projectId, force, base_revision: baseRevision })),
   updateStoryboard: (projectId: number, state: StoryboardState, baseRevision?: number) =>
     json<{ ok: boolean; storyboard?: StoryboardState; render_changed?: boolean; approval_invalidated?: boolean; error?: string }>("/api/project/storyboard", post({ project_id: projectId, state, base_revision: baseRevision })),
+  storySettings: (projectId: number) => json<StoryDetail>(`/api/project/story?project_id=${projectId}`),
+  saveStorySettings: (projectId: number, settings: Record<string, unknown>, creatorProfile?: Record<string, unknown>, baseRevision?: number) =>
+    json<{ ok: boolean; settings?: StoryDetail["settings"]; creator_profile?: Record<string, unknown>; project_revision?: number; error?: string; code?: string }>("/api/project/story/settings", post({ project_id: projectId, settings, creator_profile: creatorProfile, base_revision: baseRevision })),
+  generateStory: (projectId: number, force = false, provider?: string, baseRevision?: number) =>
+    json<{ ok: boolean; generation?: StoryGeneration; story?: StoryDetail; error?: string; code?: string }>("/api/project/story/generate", post({ project_id: projectId, force, provider, base_revision: baseRevision })),
+  updateStoryReview: (projectId: number, storyGenerationUuid: string, review: Record<string, unknown>, baseRevision?: number) =>
+    json<{ ok: boolean; generation?: StoryGeneration; error?: string; code?: string }>("/api/project/story/review", post({ project_id: projectId, story_generation_uuid: storyGenerationUuid, review, base_revision: baseRevision })),
+  applyStory: (projectId: number, storyGenerationUuid: string, baseRevision?: number) =>
+    json<{ ok: boolean; storyboard?: StoryboardState; render_changed?: boolean; approval_invalidated?: boolean; generation?: StoryGeneration; error?: string; code?: string }>("/api/project/story/apply", post({ project_id: projectId, story_generation_uuid: storyGenerationUuid, base_revision: baseRevision })),
   storyboardThumbnail: (projectId: number, segmentId: string, ratio = 0.5, force = false) =>
     json<{ ok: boolean; file?: string; url?: string; cache_hit?: boolean; error?: string }>("/api/project/storyboard/thumbnail", post({ project_id: projectId, segment_id: segmentId, ratio, force })),
   storyboardPreview: (projectId: number, options: { mode: "segment" | "transition" | "range"; segmentId?: string; durationSeconds?: number; timelineStartSeconds?: number; storyboardState?: StoryboardState; force?: boolean }) =>

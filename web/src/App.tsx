@@ -22,6 +22,7 @@ import { AudioMixingWorkspace } from "./workspaces/audio/AudioMixingWorkspace";
 import { ColorConsistencyWorkspace } from "./workspaces/color/ColorConsistencyWorkspace";
 import { StoryboardWorkspaceController } from "./workspaces/storyboard/StoryboardWorkspaceController";
 import { StorageWorkspace } from "./workspaces/storage/StorageWorkspace";
+import { StoryUnderstandingWorkspace } from "./workspaces/story/StoryUnderstandingWorkspace";
 import "./project-detail-polish.css";
 
 export function App() {
@@ -467,6 +468,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
 
     <div className="workspace-section" id="workspace-storyboard" tabIndex={-1}>
       <StoryboardWorkspaceController detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} mutationControls={mutationControls} />
+      <StoryUnderstandingWorkspace detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} mutationControls={mutationControls} />
     </div>
 
     <div className="workspace-section" id="workspace-review" tabIndex={-1}>

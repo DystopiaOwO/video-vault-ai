@@ -371,6 +371,7 @@ def validate_story_output(output: Mapping[str, Any], snapshot: Mapping[str, Any]
             "title_card_suggestion": str(chapter.get("title_card_suggestion") or "").strip(),
             "confidence": confidence,
             "needs_review_reasons": [str(item) for item in chapter.get("needs_review_reasons") or []],
+            "locked": bool(chapter.get("locked", False)),
         })
     if not used:
         errors.append("故事沒有可用 segment")
@@ -401,13 +402,51 @@ def _chapter_id(chapter: Mapping[str, Any], index: int) -> str:
 
 def normalize_story_output(output: Mapping[str, Any], snapshot: Mapping[str, Any], previous: Mapping[str, Any] | None = None) -> dict[str, Any]:
     normalized = validate_story_output(output, snapshot)
-    old = {frozenset(item.get("segment_uuids") or []): str(item.get("chapter_id") or "") for item in (previous or {}).get("chapters") or [] if item.get("chapter_id")}
+    previous_chapters = [item for item in (previous or {}).get("chapters") or [] if item.get("chapter_id")]
+    old_exact: dict[tuple[str, ...], list[str]] = {}
+    for item in previous_chapters:
+        old_exact.setdefault(tuple(item.get("segment_uuids") or []), []).append(str(item.get("chapter_id") or ""))
+    old_sets: dict[frozenset[str], list[Mapping[str, Any]]] = {}
+    for item in previous_chapters:
+        old_sets.setdefault(frozenset(item.get("segment_uuids") or []), []).append(item)
     chapters = []
     for index, chapter in enumerate(normalized["chapters"], 1):
         membership = frozenset(chapter["segment_uuids"])
-        chapter_id = old.get(membership) or _chapter_id(chapter, index)
-        chapters.append({"chapter_id": chapter_id, "order": index, **chapter})
+        ordered = tuple(chapter["segment_uuids"])
+        exact_candidates = old_exact.get(ordered) or []
+        chapter_id = exact_candidates[0] if len(exact_candidates) == 1 else None
+        needs_review = list(chapter.get("needs_review_reasons") or [])
+        if len(exact_candidates) > 1:
+            needs_review.append("章節 identity 對應不明確，需人工確認")
+        elif not chapter_id:
+            candidates = old_sets.get(membership) or []
+            if len(candidates) == 1:
+                chapter_id = str(candidates[0].get("chapter_id") or "")
+            elif len(candidates) > 1:
+                needs_review.append("章節 identity 對應不明確，需人工確認")
+        chapter_id = chapter_id or _chapter_id(chapter, index)
+        chapters.append({"chapter_id": chapter_id, "order": index, **chapter, "locked": bool(chapter.get("locked", False)), "needs_review_reasons": needs_review})
     return {**normalized, "chapters": chapters, "normalization_version": 1}
+
+
+def _merge_locked_chapters(output: Mapping[str, Any], previous: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Keep exact locked human chapters while allowing new unlocked chapters to regenerate."""
+    old_chapters = [dict(item) for item in (previous or {}).get("chapters") or [] if bool(item.get("locked"))]
+    if not old_chapters:
+        return dict(output)
+    chapters = [dict(item) for item in output.get("chapters") or []]
+    for locked in old_chapters:
+        old_ids = set(str(item) for item in locked.get("segment_uuids") or [])
+        match_index = next((index for index, item in enumerate(chapters) if set(str(value) for value in item.get("segment_uuids") or []) == old_ids), None)
+        if match_index is not None:
+            chapters[match_index] = {**chapters[match_index], **locked, "locked": True}
+            continue
+        for item in chapters:
+            item["segment_uuids"] = [value for value in item.get("segment_uuids") or [] if str(value) not in old_ids]
+        chapters = [item for item in chapters if item.get("segment_uuids")]
+        locked["needs_review_reasons"] = [*(locked.get("needs_review_reasons") or []), "鎖定章節無法與新結果精確對應，已保留並需人工確認"]
+        chapters.append(locked)
+    return {**dict(output), "chapters": chapters}
 
 
 def _cache_load(cache_dir: Path, key: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
@@ -454,6 +493,15 @@ def generate_project_story(
         previous = con.execute("select last_successful_story_generation_uuid from projects where id=?", (int(project_id),)).fetchone()
     generation_uuid = str(uuid4())
     previous_uuid = str(previous[0] or "") if previous else ""
+    previous_story: dict[str, Any] = {}
+    if previous_uuid:
+        with connect(db) as con:
+            previous_row = con.execute("select normalized_response_json, review_state_json from story_generations where story_generation_uuid=?", (previous_uuid,)).fetchone()
+        if previous_row:
+            previous_story = _parse_json_field({"normalized_response_json": previous_row["normalized_response_json"]}, "normalized_response_json", {})
+            previous_review = _parse_json_field({"review_state_json": previous_row["review_state_json"]}, "review_state_json", {})
+            if previous_review.get("chapters"):
+                previous_story = {**previous_story, "chapters": previous_review["chapters"]}
     values = {
         "story_generation_uuid": generation_uuid,
         "project_id": int(project_id),
@@ -477,14 +525,14 @@ def generate_project_story(
         cached = None if force else _cache_load(_cache_dir(cfg, project_id), key)
         if cached:
             raw, normalized = cached
-            normalized = normalize_story_output(normalized, snapshot)
+            normalized = normalize_story_output(_merge_locked_chapters(normalized, previous_story), snapshot, previous=previous_story)
             cache_hit = True
         else:
             output, raw = provider.generate_story(snapshot)
             _update_generation(db, generation_uuid, status="validating", raw_response_json=raw)
             if should_cancel and should_cancel():
                 raise CancellationRequested("故事生成已取消")
-            normalized = normalize_story_output(output, snapshot)
+            normalized = normalize_story_output(_merge_locked_chapters(output, previous_story), snapshot, previous=previous_story)
             _cache_store(_cache_dir(cfg, project_id), key, raw, normalized)
             cache_hit = False
         generation_path = _generation_dir(cfg, project_id, generation_uuid)
@@ -526,9 +574,12 @@ def update_story_generation_review(
     review_state: Mapping[str, Any],
     *,
     project_id: int | None = None,
+    base_revision: int | None = None,
 ) -> dict[str, Any]:
     generation = get_story_generation(db, generation_uuid, include_internal=True)
     _assert_generation_project(generation, project_id)
+    if project_id is not None:
+        check_base_revision(db, int(project_id), base_revision)
     snapshot = generation.get("input_snapshot") or {}
     original = generation.get("normalized_response") or {}
     candidate = {**original, **dict(review_state)}
@@ -538,6 +589,7 @@ def update_story_generation_review(
         "chapters": reviewed["chapters"],
         "overall_confidence": reviewed["overall_confidence"],
         "needs_review_reasons": reviewed["needs_review_reasons"],
+        "locked": bool(review_state.get("locked", (generation.get("review_state") or {}).get("locked", False))),
     }
     state["source"] = "human"
     state["story_generation_uuid"] = generation_uuid
@@ -565,8 +617,13 @@ def _storyboard_state_from_generation(generation: Mapping[str, Any], existing: M
         for order, segment_id in enumerate(chapter.get("segment_uuids") or [], 1):
             segment_id = str(segment_id)
             old = dict(old_segments.get(segment_id) or {})
-            if old.get("locked"):
-                next_segments[segment_id] = old
+            if old.get("locked") or old.get("manual_group") or old.get("manual_order"):
+                preserved = {**old}
+                if not old.get("locked") and not old.get("manual_group"):
+                    preserved["group_id"] = group_id
+                if not old.get("locked") and not old.get("manual_order"):
+                    preserved["order"] = order
+                next_segments[segment_id] = preserved
                 continue
             next_segments[segment_id] = {
                 **old,
@@ -580,6 +637,17 @@ def _storyboard_state_from_generation(generation: Mapping[str, Any], existing: M
                 "auto_order": order,
                 "notes": str(old.get("notes") or ""),
             }
+    existing_group_ids = {str(item.get("group_id") or "") for item in groups}
+    preserved_group_ids = {
+        str(item.get("group_id") or "")
+        for item in next_segments.values()
+        if (item.get("manual_group") or item.get("locked")) and str(item.get("group_id") or "")
+    }
+    for group in existing.get("groups") or []:
+        group_id = str(group.get("group_id") or "")
+        if group_id in preserved_group_ids and group_id not in existing_group_ids:
+            groups.append({**dict(group), "order": len(groups) + 1})
+            existing_group_ids.add(group_id)
     return {"schema_version": int(existing.get("schema_version") or 1), "groups": groups, "segments": next_segments}
 
 

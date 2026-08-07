@@ -8,7 +8,7 @@ import pytest
 
 from video_vault.database import add_analysis, connect, init_db, upsert_video
 from video_vault.project import build_project_plan, create_project, project_dir, project_detail
-from video_vault.project_lifecycle import CancellationRequested, current_revision
+from video_vault.project_lifecycle import CancellationRequested, ProjectRevisionConflict, current_revision
 from video_vault.story_calibration import compute_calibration, reset_calibration
 from video_vault.story_generation import (
     StoryGenerationError,
@@ -16,12 +16,13 @@ from video_vault.story_generation import (
     apply_story_generation_to_storyboard,
     generate_project_story,
     get_story_generation,
+    normalize_story_output,
     recover_interrupted_story_generations,
     update_story_generation_review,
     validate_story_output,
 )
 from video_vault.story_input import build_story_input_snapshot, story_input_hash
-from video_vault.story_profiles import load_project_story_settings, save_project_story_settings
+from video_vault.story_profiles import load_project_story_settings, save_creator_profile, save_project_story_settings
 from video_vault.storyboard import generate_storyboard, load_storyboard
 
 
@@ -114,6 +115,25 @@ def test_story_input_hash_changes_with_human_story_settings(tmp_path: Path):
     assert after["input_hash"] != before["input_hash"]
 
 
+def test_profile_versions_change_story_input_hash_but_raw_evidence_does_not(tmp_path: Path):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    with connect(db) as con:
+        video_id = int(con.execute("select video_id from project_videos where project_id=?", (project_id,)).fetchone()[0])
+    before = build_story_input_snapshot(cfg, db, project_id)
+    save_creator_profile(cfg, {"wording_style": "更短句", "title_card_density": "medium"})
+    creator_changed = build_story_input_snapshot(cfg, db, project_id)
+    assert creator_changed["input_hash"] != before["input_hash"]
+
+    settings = load_project_story_settings(cfg, db, project_id)
+    save_project_story_settings(cfg, db, project_id, {**settings, "profile_id": "general_diary"})
+    profile_changed = build_story_input_snapshot(cfg, db, project_id)
+    assert profile_changed["input_hash"] != creator_changed["input_hash"]
+
+    add_analysis(db, video_id, "mock", "new-raw", {"segments": []}, tmp_path / "changed-raw.json")
+    raw_changed = build_story_input_snapshot(cfg, db, project_id)
+    assert raw_changed["input_hash"] == profile_changed["input_hash"]
+
+
 def test_story_generation_is_cached_and_does_not_auto_apply_storyboard(tmp_path: Path):
     cfg, db, project_id, _ = _fixture(tmp_path)
     before_storyboard = load_storyboard(cfg, project_id)
@@ -186,6 +206,85 @@ def test_story_review_payload_is_validated_against_input_snapshot(tmp_path: Path
             {"chapters": [{"title": "錯誤", "purpose": "錯誤", "segment_uuids": ["not-owned"], "confidence": 0.5}]},
             project_id=project_id,
         )
+
+
+def test_story_review_lock_is_persisted_without_changing_project_revision(tmp_path: Path):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    generation = generate_project_story(cfg, db, project_id)
+    before = current_revision(db, project_id)
+    reviewed = update_story_generation_review(
+        db,
+        generation["story_generation_uuid"],
+        {"locked": True},
+        project_id=project_id,
+    )
+    assert reviewed["review_state"]["locked"] is True
+    assert current_revision(db, project_id) == before
+
+
+def test_story_review_rejects_stale_project_revision_without_writing(tmp_path: Path):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    generation = generate_project_story(cfg, db, project_id)
+    stale = current_revision(db, project_id)
+    save_project_story_settings(cfg, db, project_id, {"desired_pacing": "更新後"}, base_revision=stale)
+    before = get_story_generation(db, generation["story_generation_uuid"], include_internal=True)["review_state"]
+    with pytest.raises(ProjectRevisionConflict):
+        update_story_generation_review(db, generation["story_generation_uuid"], {"locked": True}, project_id=project_id, base_revision=stale)
+    after = get_story_generation(db, generation["story_generation_uuid"], include_internal=True)["review_state"]
+    assert after == before
+
+
+def test_locked_story_chapter_survives_regeneration(tmp_path: Path):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    first = generate_project_story(cfg, db, project_id)
+    locked_chapters = [{**chapter, "locked": True} for chapter in first["normalized_response"]["chapters"]]
+    update_story_generation_review(
+        db,
+        first["story_generation_uuid"],
+        {"chapters": locked_chapters},
+        project_id=project_id,
+    )
+    second = generate_project_story(cfg, db, project_id, force=True)
+    assert all(chapter["locked"] for chapter in second["normalized_response"]["chapters"])
+    assert [chapter["segment_uuids"] for chapter in second["normalized_response"]["chapters"]] == [chapter["segment_uuids"] for chapter in first["normalized_response"]["chapters"]]
+
+
+def test_apply_preserves_manual_group_and_order(tmp_path: Path):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    state = load_storyboard(cfg, project_id)
+    segment_id = next(iter(state["segments"]))
+    manual_group = state["segments"][segment_id]["group_id"]
+    state["segments"][segment_id].update({"manual_group": True, "manual_order": True, "group_id": manual_group, "order": 77})
+    from video_vault.storyboard import update_storyboard
+
+    update_storyboard(cfg, db, project_id, state)
+    generation = generate_project_story(cfg, db, project_id)
+    applied = apply_story_generation_to_storyboard(cfg, db, project_id, generation["story_generation_uuid"])
+    assert applied["storyboard"]["segments"][segment_id]["group_id"] == manual_group
+    assert applied["storyboard"]["segments"][segment_id]["order"] == 77
+
+
+def test_chapter_identity_ambiguous_match_gets_review_warning():
+    snapshot = {
+        "schema_version": 1,
+        "input_hash": "unused",
+        "project_id": 1,
+        "story_profile_id": "general_diary",
+        "segments": [{"segment_uuid": "a", "human_override": {"include": True}}, {"segment_uuid": "b", "human_override": {"include": True}}],
+        "ordered_segment_uuids": ["a", "b"],
+    }
+    snapshot["input_hash"] = story_input_hash(snapshot)
+    output = {
+        "schema_version": 1,
+        "story_profile": "general_diary",
+        "project_summary": "摘要",
+        "chapters": [{"title": "章", "purpose": "整理", "segment_uuids": ["a", "b"], "confidence": 0.5}],
+        "overall_confidence": 0.5,
+    }
+    previous = {"chapters": [{"chapter_id": "old-1", "segment_uuids": ["a", "b"]}, {"chapter_id": "old-2", "segment_uuids": ["a", "b"]}]}
+    normalized = normalize_story_output(output, snapshot, previous=previous)
+    assert normalized["chapters"][0]["chapter_id"] != "old-1"
+    assert any("不明確" in item for item in normalized["chapters"][0]["needs_review_reasons"])
 
 
 def test_story_apply_is_explicit_and_preserves_locked_segment(tmp_path: Path):

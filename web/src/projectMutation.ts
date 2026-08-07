@@ -5,6 +5,7 @@ export type ProjectMutation =
   | "upload"
   | "analyze"
   | "storyboard"
+  | "story"
   | "timing"
   | "audio"
   | "color"
@@ -31,6 +32,7 @@ const CHANNELS: Record<ProjectMutation, ProjectMutationChannel> = {
   upload: "media",
   analyze: "media",
   storyboard: "review",
+  story: "review",
   timing: "review",
   audio: "media",
   color: "media",
@@ -52,6 +54,7 @@ export function mutationLabel(mutation: ProjectMutation): string {
     upload: "素材匯入",
     analyze: "內容感知",
     storyboard: "分鏡",
+    story: "故事理解",
     timing: "片段剪點",
     audio: "音訊設定",
     color: "調色設定",

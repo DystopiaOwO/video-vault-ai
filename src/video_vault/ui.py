@@ -44,6 +44,8 @@ from .renderer import render_approved
 from .scanner import scan_inbox
 from .storyboard import generate_storyboard, generate_thumbnail, storyboard_for_api, storyboard_thumbnail_path, update_storyboard
 from .storyboard_preview import StoryboardPreviewError, render_storyboard_preview, storyboard_preview_path
+from .story_generation import StoryGenerationError, StoryValidationError, apply_story_generation_to_storyboard, generate_project_story, get_story_generation, project_story_detail, update_story_generation_review
+from .story_profiles import load_creator_profile, load_project_story_settings, save_creator_profile, save_project_story_settings, story_profile_definition
 from .web_security import WebSecurityError, parse_content_length, parse_single_range, validate_local_bind_host, validate_origin_headers
 
 
@@ -380,6 +382,8 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json(_project_detail_for_api(cfg, project_detail(cfg, db, int(query.get("id", ["0"])[0]))))
             elif parsed.path == "/api/project/storyboard":
                 self._json(storyboard_for_api(cfg, db, int(query.get("project_id", ["0"])[0] or 0)))
+            elif parsed.path == "/api/project/story":
+                self._json(_project_detail_for_api(cfg, project_detail(cfg, db, int(query.get("project_id", ["0"])[0] or 0))).get("story", {}))
             elif parsed.path == "/api/project/storage":
                 project_id = int(query.get("project_id", ["0"])[0] or 0)
                 inventory = reconcile_inventory(cfg, project_id)
@@ -726,6 +730,49 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     self._json({"ok": True, "storyboard": storyboard_for_api(cfg, db, project_id), "state": state})
                 except (OSError, TypeError, ValueError) as exc:
                     self._json({"ok": False, "code": "storyboard_generation_failed", "error": str(exc)})
+            elif path == "/api/project/story/settings":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    if isinstance(data.get("creator_profile"), dict):
+                        creator = save_creator_profile(cfg, data["creator_profile"])
+                    else:
+                        creator = load_creator_profile(cfg)
+                    patch = data.get("settings") if isinstance(data.get("settings"), dict) else {}
+                    settings = save_project_story_settings(cfg, db, project_id, patch, base_revision=_base_revision(data)) if patch else load_project_story_settings(cfg, db, project_id)
+                    self._json({"ok": True, "creator_profile": creator, "settings": settings, "project_revision": current_revision(db, project_id)})
+                except (OSError, TypeError, ValueError) as exc:
+                    self._json({"ok": False, "code": "invalid_story_settings", "error": str(exc)})
+            elif path == "/api/project/story/generate":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    result = generate_project_story(cfg, db, project_id, base_revision=_base_revision(data), provider_override=str(data.get("provider") or "") or None, force=bool(data.get("force")))
+                    self._json({"ok": True, "generation": result, "story": project_story_detail(cfg, db, project_id)})
+                except ProjectRevisionConflict:
+                    raise
+                except (OSError, TypeError, ValueError, StoryGenerationError) as exc:
+                    self._json({"ok": False, "code": "story_generation_failed", "error": str(exc)})
+            elif path == "/api/project/story/review":
+                try:
+                    generation_uuid = str(data.get("story_generation_uuid") or "")
+                    result = update_story_generation_review(
+                        db,
+                        generation_uuid,
+                        data.get("review") if isinstance(data.get("review"), dict) else {},
+                        project_id=int(data.get("project_id", 0)),
+                        base_revision=_base_revision(data),
+                    )
+                    self._json({"ok": True, "generation": result})
+                except (OSError, TypeError, ValueError, StoryGenerationError) as exc:
+                    self._json({"ok": False, "code": "invalid_story_review", "error": str(exc)})
+            elif path == "/api/project/story/apply":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    result = apply_story_generation_to_storyboard(cfg, db, project_id, str(data.get("story_generation_uuid") or ""), base_revision=_base_revision(data))
+                    self._json({"ok": True, **result})
+                except ProjectRevisionConflict:
+                    raise
+                except (OSError, TypeError, ValueError, StoryGenerationError) as exc:
+                    self._json({"ok": False, "code": "story_apply_failed", "error": str(exc)})
             elif path == "/api/project/storage/reconcile":
                 project_id = int(data.get("project_id", 0))
                 self._json(reconcile_inventory(cfg, project_id))

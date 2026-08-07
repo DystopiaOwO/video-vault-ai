@@ -1,0 +1,14 @@
+#root .story-understanding { margin-top: 16px; }
+#root .story-understanding-heading { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+#root .story-understanding-heading h3 { margin: 4px 0; }
+#root .story-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+#root .story-settings-grid .wide, #root .story-understanding > .wide { grid-column: 1 / -1; }
+#root .story-settings-grid label, #root .story-understanding label { display: grid; gap: 5px; color: var(--muted, #637083); font-size: 12px; }
+#root .story-settings-grid input, #root .story-settings-grid textarea, #root .story-settings-grid select, #root .story-understanding input, #root .story-understanding textarea { width: 100%; box-sizing: border-box; }
+#root .story-generation-meta { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0 10px; color: var(--muted, #637083); font-size: 12px; }
+#root .story-chapters { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 14px; }
+#root .story-chapter { border: 1px solid var(--line, #d9e0ea); padding: 12px; border-radius: 8px; display: grid; gap: 8px; }
+#root .story-chapter-head { display: flex; justify-content: space-between; gap: 8px; }
+#root .story-chapter textarea { min-height: 54px; resize: vertical; }
+#root .story-actions { margin-top: 14px; }
+@media (max-width: 760px) { #root .story-understanding-heading, #root .story-settings-grid { display: grid; grid-template-columns: 1fr; } #root .story-settings-grid .wide, #root .story-understanding > .wide { grid-column: auto; } }
