@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import closing
 from datetime import datetime, timezone
+import gc
 import json
 import os
 from pathlib import Path
@@ -474,6 +475,16 @@ def _sqlite_fixture_check(repo: Path, mode: str) -> dict[str, Any]:
                 connection.commit()
             finally:
                 connection.close()
+        # Windows may retain a SQLite handle until its last Python wrapper is
+        # collected; retry cleanup without turning an unverified fixture into
+        # a false pass.
+        gc.collect()
+        for _ in range(3):
+            if not fixture_root.exists():
+                break
+            shutil.rmtree(fixture_root, ignore_errors=True)
+            if fixture_root.exists():
+                time.sleep(0.05)
         cleaned = fixture_root is not None and not fixture_root.exists()
         valid = remaining == 0 and not missing_tables and cleaned
         return _check("storage.sqlite", "storage", "pass" if valid else "blocked", "isolated SQLite migration/schema/rollback probe passed" if valid else "isolated SQLite migration/schema/rollback probe failed", evidence={"fixture": "isolated", "schema_contract_version": "database-schema-v1", "required_table_count": len(required_tables), "missing_tables": missing_tables, "rollback_clean": remaining == 0, "fixture_cleaned_up": cleaned}, remediation=None if valid else "檢查 SQLite migration schema consistency 與 temporary fixture cleanup。")
