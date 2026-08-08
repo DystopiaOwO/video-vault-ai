@@ -25,6 +25,68 @@ STORY_OUTPUT_SCHEMA_VERSION = 1
 STORY_PROMPT_VERSION = "project-story-v1"
 STORY_GENERATION_STATUSES = {"queued", "running", "validating", "publishing", "succeeded", "failed", "cancelled", "interrupted"}
 
+_STORY_OUTPUT_JSON_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "project_story_output",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "schema_version": {"type": "integer"},
+                "project_summary": {"type": "string"},
+                "story_profile": {
+                    "type": "string",
+                    "enum": ["travel_diary", "coffee_matcha_diary", "roasting_diary", "general_diary"],
+                },
+                "chapters": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "title": {"type": "string"},
+                            "purpose": {"type": "string"},
+                            "segment_uuids": {"type": "array", "items": {"type": "string"}},
+                            "pacing_intent": {"type": "string"},
+                            "transition_intent": {"type": "string"},
+                            "natural_audio_intent": {"type": "string"},
+                            "title_card_suggestion": {"type": "string"},
+                            "notes": {"type": "string"},
+                            "confidence": {"type": "number"},
+                            "needs_review_reasons": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": [
+                            "title", "purpose", "segment_uuids", "pacing_intent", "transition_intent",
+                            "natural_audio_intent", "title_card_suggestion", "notes", "confidence", "needs_review_reasons",
+                        ],
+                    },
+                },
+                "overall_confidence": {"type": "number"},
+                "needs_review_reasons": {"type": "array", "items": {"type": "string"}},
+                "suppressed_segments": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "segment_uuid": {"type": "string"},
+                            "representative_segment_uuid": {"type": "string"},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["segment_uuid", "representative_segment_uuid", "reason"],
+                    },
+                },
+            },
+            "required": [
+                "schema_version", "project_summary", "story_profile", "chapters", "overall_confidence",
+                "needs_review_reasons", "suppressed_segments",
+            ],
+        },
+    },
+}
+
 
 class StoryGenerationError(RuntimeError):
     pass
@@ -399,7 +461,7 @@ class LocalTextStoryProvider:
                     {"role": "assistant", "content": attempts[-1].get("content", "")},
                     {"role": "user", "content": "上一個輸出不符合 strict schema。只修正 schema，重新輸出完整 JSON，不要解釋。"},
                 ])
-            payload = {"model": self.model, "temperature": 0, "response_format": {"type": "json_object"}, "messages": messages}
+            payload = {"model": self.model, "temperature": 0, "response_format": _STORY_OUTPUT_JSON_SCHEMA, "messages": messages}
             started = time.perf_counter()
             try:
                 output, raw, latency = self._request(payload)

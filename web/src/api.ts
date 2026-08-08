@@ -445,10 +445,23 @@ export class ApiError extends Error {
 
 export function formatApiError(error: unknown): string {
   if (error instanceof ApiError && error.status === 409) {
-    const revision = typeof error.payload.profile_version === "number"
-      ? `Story Settings 目前 version ${error.payload.profile_version}`
-      : typeof error.payload.project_revision === "number" ? `目前版本 ${error.payload.project_revision}` : "目前版本已更新";
-    return `${revision}，請重新載入後再儲存，未套用這次舊內容。`;
+    const code = error.payload.code;
+    if (code === "stale_creator_profile") {
+      const version = typeof error.payload.profile_version === "number" ? `目前 version ${error.payload.profile_version}` : "目前 version 已更新";
+      return `Creator Profile ${version}，請重新載入後再儲存，未套用這次舊內容。`;
+    }
+    if (code === "stale_story_settings") {
+      const version = typeof error.payload.profile_version === "number" ? `目前 version ${error.payload.profile_version}` : "目前 version 已更新";
+      return `Story Settings ${version}，請重新載入後再儲存，未套用這次舊內容。`;
+    }
+    if (code === "stale_project_revision") {
+      const revision = typeof error.payload.project_revision === "number" ? `目前 project revision ${error.payload.project_revision}` : "目前 project revision 已更新";
+      return `${revision}，請重新載入後再儲存，未套用這次舊內容。`;
+    }
+    if (typeof error.payload.project_revision === "number") {
+      return `目前版本 ${error.payload.project_revision}，請重新載入後再儲存，未套用這次舊內容。`;
+    }
+    return "版本已更新，請重新載入後再儲存，未套用這次舊內容。";
   }
   return error instanceof Error ? error.message : "網路或服務錯誤";
 }

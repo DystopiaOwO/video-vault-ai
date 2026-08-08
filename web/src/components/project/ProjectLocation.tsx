@@ -3,16 +3,17 @@ import { copyText } from "../../utils/clipboard";
 
 export type ProjectLocationProps = {
   projectId: number;
-  folder: string;
+  folder?: string;
   setMessage: (value: string) => void;
 };
 
 export function ProjectLocation({ projectId, folder, setMessage }: ProjectLocationProps) {
   const [expanded, setExpanded] = useState(false);
-  const hasFolder = Boolean(folder.trim());
+  const safeFolder = String(folder || "");
+  const hasFolder = Boolean(safeFolder.trim());
 
   async function copyFolder() {
-    const copied = await copyText(folder);
+    const copied = await copyText(safeFolder);
     setMessage(copied ? "專案資料夾路徑已複製。" : "無法自動複製路徑，請展開後手動複製。");
     if (!copied) setExpanded(true);
   }
@@ -23,6 +24,6 @@ export function ProjectLocation({ projectId, folder, setMessage }: ProjectLocati
       <button type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>{expanded ? "隱藏資料夾" : "顯示資料夾"}</button>
       <button type="button" onClick={() => void copyFolder()}>複製路徑</button>
     </>}
-    {expanded && hasFolder && <code title={folder}>{folder}</code>}
+    {expanded && hasFolder && <code title={safeFolder}>{safeFolder}</code>}
   </div>;
 }

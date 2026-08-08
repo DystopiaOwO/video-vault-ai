@@ -517,6 +517,7 @@ def test_local_text_provider_allows_at_most_one_corrective_retry_and_audits(monk
         {"choices": [{"message": {"content": json.dumps({"unknown": True})}}]},
         {"choices": [{"message": {"content": json.dumps(valid)}}]},
     ]
+    requests = []
 
     class Response:
         def __init__(self, payload):
@@ -531,7 +532,8 @@ def test_local_text_provider_allows_at_most_one_corrective_retry_and_audits(monk
         def read(self):
             return json.dumps(self.payload).encode("utf-8")
 
-    def fake_urlopen(*_args, **_kwargs):
+    def fake_urlopen(request, **_kwargs):
+        requests.append(json.loads(request.data.decode("utf-8")))
         return Response(responses.pop(0))
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
@@ -541,6 +543,9 @@ def test_local_text_provider_allows_at_most_one_corrective_retry_and_audits(monk
     assert raw["provider_audit"]["retries"] == 1
     assert len(raw["provider_audit"]["call_latencies_ms"]) == 2
     assert raw["provider_audit"]["strict_schema"] is True
+    assert all(request["response_format"]["type"] == "json_schema" for request in requests)
+    assert all(request["response_format"]["json_schema"]["strict"] is True for request in requests)
+    assert all(request["response_format"]["json_schema"]["schema"]["properties"]["story_profile"]["enum"] == ["travel_diary", "coffee_matcha_diary", "roasting_diary", "general_diary"] for request in requests)
 
 
 def test_calibration_uses_approved_outputs_only_and_can_reset(tmp_path: Path):
