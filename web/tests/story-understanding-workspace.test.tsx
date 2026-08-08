@@ -180,7 +180,7 @@ describe("StoryUnderstandingWorkspace", () => {
     await waitFor(() => expect(setMessage).toHaveBeenLastCalledWith(expect.stringContaining("故事已套用到分鏡")));
     expect(setMessage).not.toHaveBeenLastCalledWith(expect.stringContaining("套用分鏡失敗"));
     expect(setMessage).toHaveBeenLastCalledWith(expect.stringContaining("請重新整理"));
-    expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true });
+    expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true, throwOnError: true });
   });
 
   it("marks story lock dirty and preserves it across polling until review save", async () => {
