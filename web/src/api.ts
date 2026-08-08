@@ -34,6 +34,28 @@ export type PerceptionWindowResult = {
   };
 };
 
+export type DoctorCheck = {
+  check_id: string;
+  category: string;
+  status: "pass" | "warning" | "blocked" | "skipped" | string;
+  summary: string;
+  evidence?: Record<string, unknown>;
+  remediation?: string | null;
+  duration_ms?: number;
+  sensitive?: boolean;
+};
+
+export type DoctorReport = {
+  schema_version: string;
+  mode: "default" | "quick" | "full" | string;
+  generated_at: string;
+  status: "pass" | "warning" | "blocked" | string;
+  ok: boolean;
+  summary: Record<"pass" | "warning" | "blocked" | "skipped", number>;
+  checks: DoctorCheck[];
+  sensitive_data_redacted: boolean;
+};
+
 export type AudioPerceptionCandidate = {
   audio_window_uuid?: string;
   segment_uuid?: string;
@@ -572,6 +594,7 @@ async function json<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  doctor: (mode: "default" | "quick" | "full" = "default") => json<DoctorReport>(`/api/doctor?mode=${encodeURIComponent(mode)}`),
   projects: () => json<Project[]>("/api/projects"),
   project: (id: number, signal?: AbortSignal) => json<ProjectDetail>(`/api/project?id=${id}`, { signal }),
   jobs: (projectId: number, signal?: AbortSignal, sinceRevision?: number) => json<Job[] | JobsSnapshot>(`/api/jobs?project_id=${projectId}&meta=1${sinceRevision === undefined ? "" : `&since_revision=${sinceRevision}`}`, { signal }).then((result) => Array.isArray(result) ? { jobs: result } : result),

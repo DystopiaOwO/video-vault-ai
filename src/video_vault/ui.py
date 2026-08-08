@@ -21,6 +21,7 @@ from .analyzer.vision_pipeline import analyze_video_frames
 from .audio_state import audio_state_for_api, update_audio_state
 from .artifact_retention import RetentionError, build_cleanup_plan, execute_cleanup_plan, free_disk_bytes, load_inventory, reconcile_inventory, set_artifact_pinned
 from .audio_preview import AudioPreviewError, audio_preview_file_path, render_project_audio_preview
+from .doctor import collect_doctor_report_from_config
 from .bgm_pipeline import BgmPipelineError, validate_bgm_track
 from .bgm import import_bgm, list_bgm
 from .color import render_color_preview
@@ -558,7 +559,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 return
             if parsed.path == "/api/security":
                 self._json({"ok": True, "csrf_token": FORM_CSRF_TOKEN})
-            elif parsed.path == "/" and _web_dist().exists():
+            elif parsed.path in {"/", "/system-status"} and _web_dist().exists():
                 self._file(_web_dist() / "index.html")
             elif parsed.path == "/classic" or (parsed.path == "/" and not _web_dist().exists()):
                 project_id = int(query.get("project_id", ["0"])[0] or 0)
@@ -571,6 +572,12 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json(list_projects(db))
             elif parsed.path == "/api/project":
                 self._json(_project_detail_for_api(cfg, project_detail(cfg, db, int(query.get("id", ["0"])[0]))))
+            elif parsed.path == "/api/doctor":
+                mode = str(query.get("mode", ["default"])[0] or "default").lower()
+                try:
+                    self._json(collect_doctor_report_from_config(cfg, mode=mode, repo_root=Path(__file__).resolve().parents[2]))
+                except ValueError as exc:
+                    self._json({"ok": False, "code": "invalid_doctor_mode", "error": str(exc)}, status=400)
             elif parsed.path == "/api/project/storyboard":
                 self._json(storyboard_for_api(cfg, db, int(query.get("project_id", ["0"])[0] or 0)))
             elif parsed.path == "/api/project/story":
