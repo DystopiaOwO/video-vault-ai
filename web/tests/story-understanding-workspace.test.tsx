@@ -9,7 +9,41 @@ function detail(overrides: Partial<ProjectDetail> = {}): ProjectDetail {
     project: { id: 1, name: "旅行故事", status: "needs_review" },
     project_revision: 7,
     clips: [],
-    segments: [],
+    segments: [{
+      segment_id: "segment-a",
+      clip_id: "clip-a",
+      title: "抵達車站",
+      group: "travel",
+      start_seconds: 0,
+      end_seconds: 4,
+      score: .9,
+      suggested_use: "main",
+      scene_role: "arrival",
+      story_position: "opening",
+      manual_order: 1,
+      audio_role: "keep",
+      speed: 1,
+      include: true,
+      user_notes: "",
+      media_url: "/api/project/media?project_id=1&media_id=clip-a",
+    }, {
+      segment_id: "segment-b",
+      clip_id: "clip-a",
+      title: "巷弄散步",
+      group: "travel",
+      start_seconds: 4,
+      end_seconds: 8,
+      score: .8,
+      suggested_use: "transition",
+      scene_role: "walk",
+      story_position: "middle",
+      manual_order: 2,
+      audio_role: "keep",
+      speed: 1,
+      include: true,
+      user_notes: "",
+      media_url: "/api/project/media?project_id=1&media_id=clip-a",
+    }],
     bgm: [],
     plan: {},
     workflow: { style: "test", current: "story", stages: [] },
@@ -39,12 +73,17 @@ function detail(overrides: Partial<ProjectDetail> = {}): ProjectDetail {
         model: "mock",
         normalized_response: {
           project_summary: "摘要",
-          chapters: [{ chapter_id: "chapter-a", title: "抵達", purpose: "開場", segment_uuids: ["segment-a"], confidence: .9 }],
+          chapters: [{ chapter_id: "chapter-a", title: "抵達", purpose: "開場", segment_uuids: ["segment-a", "segment-b"], confidence: .9 }],
           suppressed_segments: [{ segment_uuid: "segment-duplicate", representative_segment_uuid: "segment-a", reason: "duplicate" }],
         },
-        review_state: { project_summary: "摘要", chapters: [{ chapter_id: "chapter-a", title: "抵達", purpose: "開場", segment_uuids: ["segment-a"], confidence: .9 }] },
+        review_state: { project_summary: "摘要", chapters: [{ chapter_id: "chapter-a", title: "抵達", purpose: "開場", segment_uuids: ["segment-a", "segment-b"], confidence: .9 }] },
         validation: { status: "valid" },
         provider_audit: { calls: 2, retries: 1, total_latency_ms: 42, strict_schema: true },
+        story_audit: {
+          raw: { provider: "mock", model: "mock", input_hash: "current-hash", schema_version: 1 },
+          normalized: { chapter_count: 1, segment_count: 2, validation_status: "valid" },
+          effective: { source: "normalized", locked: false, chapter_count: 1, segment_count: 2 },
+        },
       },
       calibration: { profile_id: "travel_diary", status: "ready", sample_count: 2, source: "approved outputs and render metadata" },
     },
@@ -56,7 +95,8 @@ function renderWorkspace(input = detail()) {
   const setMessage = vi.fn();
   const refreshProject = vi.fn(async () => []);
   const mutationControls = createProjectMutationControls(new ProjectMutationCoordinator());
-  const view = render(<StoryUnderstandingWorkspace detail={input} setMessage={setMessage} refreshProject={refreshProject} mutationControls={mutationControls} />);
+  const merged = { ...detail(), ...input, story: input.story || detail().story };
+  const view = render(<StoryUnderstandingWorkspace detail={merged} setMessage={setMessage} refreshProject={refreshProject} mutationControls={mutationControls} />);
   return { ...view, setMessage, refreshProject };
 }
 
@@ -104,6 +144,18 @@ describe("StoryUnderstandingWorkspace", () => {
     }));
   });
 
+  it("reorders visual segment cards inside the story draft", async () => {
+    const reviewSave = vi.spyOn(api, "updateStoryReview").mockResolvedValue({ ok: true });
+    renderWorkspace();
+
+    fireEvent.click(screen.getByRole("button", { name: "片段 segment-a 下移" }));
+    fireEvent.click(screen.getByRole("button", { name: "儲存故事修改" }));
+    await waitFor(() => expect(reviewSave).toHaveBeenCalled());
+    expect(reviewSave.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
+      chapters: [expect.objectContaining({ segment_uuids: ["segment-b", "segment-a"] })],
+    }));
+  });
+
   it("shows stale, suppression, and provider audit evidence", () => {
     renderWorkspace({ story: { ...detail().story!, current_generation_is_stale: true } });
 
@@ -111,6 +163,21 @@ describe("StoryUnderstandingWorkspace", () => {
     expect(screen.getByLabelText("故事 audit").textContent).toContain("raw provider calls：2");
     expect(screen.getByLabelText("故事 audit").textContent).toContain("corrective retry：1");
     expect(screen.getByLabelText("duplicate suppression evidence").textContent).toContain("segment-duplicate → representative segment-a");
+    expect(screen.getByLabelText("raw normalized effective audit").textContent).toContain("Raw provider audit");
+    expect(screen.getByLabelText("章節 1 視覺片段 cards").querySelector('[data-segment-card="segment-a"]')).toBeTruthy();
+  });
+
+  it("marks story lock dirty and preserves it across polling until review save", async () => {
+    const view = renderWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "鎖定故事修改" }));
+    expect(document.querySelector('[data-unsaved-text-draft="true"]')).toBeTruthy();
+
+    view.rerender(<StoryUnderstandingWorkspace detail={detail({ story: { ...detail().story!, current_generation: { ...detail().story!.current_generation!, review_state: { ...detail().story!.current_generation!.review_state!, locked: false } } } })} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+    expect(screen.getByRole("button", { name: "解除鎖定故事" })).toBeTruthy();
+
+    const reviewSave = vi.spyOn(api, "updateStoryReview").mockResolvedValue({ ok: true });
+    fireEvent.click(screen.getByRole("button", { name: "儲存故事修改" }));
+    await waitFor(() => expect(reviewSave).toHaveBeenCalledWith(1, "gen-1", expect.objectContaining({ locked: true }), 7));
   });
 
   it("wires calibration recalculate and reset actions", async () => {

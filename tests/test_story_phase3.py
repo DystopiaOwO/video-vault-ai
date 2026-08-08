@@ -8,7 +8,7 @@ import urllib.request
 import pytest
 
 from video_vault.database import add_analysis, connect, init_db, upsert_video
-from video_vault.project import build_project_plan, create_project, project_dir, project_detail
+from video_vault.project import build_project_plan, create_project, project_dir, project_detail, save_segment_review
 from video_vault.project_lifecycle import CancellationRequested, ProjectRevisionConflict, current_revision
 from video_vault.story_calibration import compute_calibration, reset_calibration
 from video_vault.story_generation import (
@@ -152,6 +152,38 @@ def test_story_generation_is_cached_and_does_not_auto_apply_storyboard(tmp_path:
     assert second["input_hash"] == first["input_hash"]
 
 
+def test_generate_story_does_not_run_destructive_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+
+    def recovery_must_not_run(*_args, **_kwargs):
+        raise AssertionError("generation must not perform destructive recovery")
+
+    monkeypatch.setattr("video_vault.story_generation.recover_interrupted_story_generations", recovery_must_not_run)
+    result = generate_project_story(cfg, db, project_id)
+    assert result["status"] == "succeeded"
+
+
+def test_story_settings_do_not_advance_render_revision_or_touch_approval(tmp_path: Path):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    before_revision = current_revision(db, project_id)
+    review_path = project_dir(cfg, project_id) / "review_status.json"
+    before_review = review_path.read_bytes() if review_path.is_file() else None
+    settings = load_project_story_settings(cfg, db, project_id)
+    save_project_story_settings(cfg, db, project_id, {**settings, "project_intent": "下一次生成才套用的意圖"}, base_revision=before_revision)
+    assert current_revision(db, project_id) == before_revision
+    assert (review_path.read_bytes() if review_path.is_file() else None) == before_review
+
+
+def test_story_public_generation_exposes_raw_normalized_effective_audit(tmp_path: Path):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    generation = generate_project_story(cfg, db, project_id)
+    public = get_story_generation(db, generation["story_generation_uuid"])
+    assert set(public["story_audit"]) == {"raw", "normalized", "effective"}
+    assert public["story_audit"]["raw"]["input_hash"] == generation["input_hash"]
+    assert public["story_audit"]["normalized"]["chapter_count"] >= 1
+    assert public["story_audit"]["effective"]["source"] == "normalized"
+
+
 def test_cancelled_generation_does_not_replace_last_success(tmp_path: Path):
     cfg, db, project_id, _ = _fixture(tmp_path)
     successful = generate_project_story(cfg, db, project_id)
@@ -247,6 +279,14 @@ def test_story_review_rejects_stale_project_revision_without_writing(tmp_path: P
     generation = generate_project_story(cfg, db, project_id)
     stale = current_revision(db, project_id)
     save_project_story_settings(cfg, db, project_id, {"desired_pacing": "更新後"}, base_revision=stale)
+    snapshot = build_story_input_snapshot(cfg, db, project_id)
+    save_segment_review(
+        cfg,
+        db,
+        project_id,
+        [{"segment_id": snapshot["segments"][0]["segment_uuid"], "user_notes": "其他人工修改"}],
+        base_revision=stale,
+    )
     before = get_story_generation(db, generation["story_generation_uuid"], include_internal=True)["review_state"]
     with pytest.raises(ProjectRevisionConflict):
         update_story_generation_review(db, generation["story_generation_uuid"], {"locked": True}, project_id=project_id, base_revision=stale)
@@ -390,8 +430,10 @@ def test_human_review_preserves_app_owned_chapter_identity(tmp_path: Path):
     chapters = deepcopy(generation["normalized_response"]["chapters"])
     chapter_id = chapters[0]["chapter_id"]
     chapters[0]["title"] = "人工重新命名"
+    chapters[0]["notes"] = "人工保留環境音"
     reviewed = update_story_generation_review(db, generation["story_generation_uuid"], {"chapters": chapters}, project_id=project_id)
     assert reviewed["review_state"]["chapters"][0]["chapter_id"] == chapter_id
+    assert reviewed["review_state"]["chapters"][0]["notes"] == "人工保留環境音"
     chapters[0]["chapter_id"] = "fake-model-id"
     with pytest.raises(StoryValidationError, match="app-owned identity"):
         update_story_generation_review(db, generation["story_generation_uuid"], {"chapters": chapters}, project_id=project_id)

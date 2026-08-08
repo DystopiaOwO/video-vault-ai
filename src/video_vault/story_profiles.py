@@ -222,7 +222,10 @@ def save_project_story_settings(
     with project_commit(db, int(project_id), base_revision) as commit:
         if updated != current or not project_story_settings_path(cfg, project_id).is_file():
             _atomic_json(project_story_settings_path(cfg, project_id), updated)
-            commit.record_changed(True)
+            # Story settings affect the next StoryInputSnapshot, but do not
+            # change the approved render state. Only Apply/storyboard writes
+            # should advance project_revision and invalidate approval.
+            commit.record_changed(False)
         else:
             commit.record_changed(False)
     return load_project_story_settings(cfg, db, project_id)

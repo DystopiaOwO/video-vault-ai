@@ -11,6 +11,8 @@ type Props = {
   mutationControls: ProjectMutationControls;
 };
 
+type SegmentWithUuid = { segment_uuid?: string };
+
 function draftFor(generation?: StoryGeneration) {
   const response = generation?.normalized_response || {};
   const review = generation?.review_state || {};
@@ -30,15 +32,16 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [creatorDirty, setCreatorDirty] = useState(false);
   const [draftDirty, setDraftDirty] = useState(false);
+  const [lockedDirty, setLockedDirty] = useState(false);
 
   useEffect(() => {
     if (!settingsDirty) setSettings(story?.settings || {});
     if (!creatorDirty) setCreator(story?.creator_profile || {});
     if (!draftDirty) {
       setDraft(draftFor(story?.current_generation));
-      setLocked(Boolean(story?.current_generation?.review_state?.locked));
+      if (!lockedDirty) setLocked(Boolean(story?.current_generation?.review_state?.locked));
     }
-  }, [story?.current_story_generation_uuid, story?.settings, story?.creator_profile, story?.current_generation, settingsDirty, creatorDirty, draftDirty]);
+  }, [story?.current_story_generation_uuid, story?.settings, story?.creator_profile, story?.current_generation, settingsDirty, creatorDirty, draftDirty, lockedDirty]);
 
   const generation = story?.current_generation;
   const chapters = draft.chapters;
@@ -106,6 +109,7 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
       if (!result.ok) throw new Error(result.error || "故事審核儲存失敗");
       await refreshProject({ forceFresh: true });
       setDraftDirty(false);
+      setLockedDirty(false);
       setMessage("故事人工修改已儲存；尚未套用到分鏡。");
     } catch (error) {
       setMessage(`故事審核失敗：${formatApiError(error)}`);
@@ -117,7 +121,7 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
 
   async function applyToStoryboard() {
     if (!generation) return;
-    if (draftDirty || settingsDirty || creatorDirty) {
+    if (draftDirty || settingsDirty || creatorDirty || lockedDirty) {
       setMessage("請先儲存目前故事草稿與設定，再套用到既有分鏡。");
       return;
     }
@@ -153,6 +157,37 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
     });
   }
 
+  function patchCreator(patch: Record<string, unknown>) {
+    setCreatorDirty(true);
+    setCreator((current) => ({ ...current, ...patch }));
+  }
+
+  function moveSegment(chapterIndex: number, segmentIndex: number, direction: -1 | 1) {
+    setDraftDirty(true);
+    setDraft((current) => {
+      const nextChapters = current.chapters.map((chapter) => ({ ...chapter, segment_uuids: [...(chapter.segment_uuids || [])] }));
+      const chapter = nextChapters[chapterIndex];
+      if (!chapter?.segment_uuids) return current;
+      const nextSegmentIndex = segmentIndex + direction;
+      if (nextSegmentIndex >= 0 && nextSegmentIndex < chapter.segment_uuids.length) {
+        [chapter.segment_uuids[segmentIndex], chapter.segment_uuids[nextSegmentIndex]] = [chapter.segment_uuids[nextSegmentIndex], chapter.segment_uuids[segmentIndex]];
+        return { ...current, chapters: nextChapters };
+      }
+      const targetChapter = nextChapters[chapterIndex + direction];
+      if (!targetChapter?.segment_uuids || segmentIndex !== (direction < 0 ? 0 : chapter.segment_uuids.length - 1)) return current;
+      const [segmentUuid] = chapter.segment_uuids.splice(segmentIndex, 1);
+      if (segmentUuid) {
+        if (direction < 0) targetChapter.segment_uuids.push(segmentUuid);
+        else targetChapter.segment_uuids.unshift(segmentUuid);
+      }
+      return { ...current, chapters: nextChapters };
+    });
+  }
+
+  function segmentFor(uuid: string) {
+    return (detail.segments || []).find((segment) => segment.segment_id === uuid || (segment as SegmentWithUuid).segment_uuid === uuid);
+  }
+
   async function updateCalibration(action: "recalculate" | "reset") {
     const mutation = mutationControls.beginProjectMutation(detail.project.id, "story");
     if (!mutation) return;
@@ -175,7 +210,7 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
   const review = generation?.review_state || {};
   const normalized = generation?.normalized_response || {};
   const suppressed = review.suppressed_segments || normalized.suppressed_segments || [];
-  const dirty = settingsDirty || creatorDirty || draftDirty;
+  const dirty = settingsDirty || creatorDirty || draftDirty || lockedDirty;
 
   return <section className="story-understanding card" aria-label="專案故事理解" data-unsaved-text-draft={dirty ? "true" : undefined}>
     <div className="story-understanding-heading">
@@ -191,11 +226,17 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
       <label>Story Profile<select value={String(settings.profile_id || "general_diary")} disabled={Boolean(busy)} onChange={(event) => { setSettingsDirty(true); setSettings({ ...settings, profile_id: event.target.value }); }}>
         <option value="travel_diary">travel_diary｜旅行日記</option><option value="coffee_matcha_diary">coffee_matcha_diary｜咖啡／抹茶日記</option><option value="roasting_diary">roasting_diary｜烘豆日記</option><option value="general_diary">general_diary｜一般日記</option>
       </select></label>
-      <label>文字語言<input value={String(creator.language || "zh-TW")} disabled={Boolean(busy)} onChange={(event) => { setCreatorDirty(true); setCreator({ ...creator, language: event.target.value }); }} /></label>
-      <label>字卡密度<select value={String(creator.title_card_density || "low")} disabled={Boolean(busy)} onChange={(event) => { setCreatorDirty(true); setCreator({ ...creator, title_card_density: event.target.value }); }}><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
+      <label>文字語言<input value={String(creator.language || "zh-TW")} disabled={Boolean(busy)} onChange={(event) => patchCreator({ language: event.target.value })} /></label>
+      <label>字卡密度<select value={String(creator.title_card_density || "low")} disabled={Boolean(busy)} onChange={(event) => patchCreator({ title_card_density: event.target.value })}><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
       <label>節奏偏好<input value={String(settings.desired_pacing || "")} disabled={Boolean(busy)} placeholder="例如：自然、慢節奏、保留等待" onChange={(event) => { setSettingsDirty(true); setSettings({ ...settings, desired_pacing: event.target.value }); }} /></label>
-      <label className="wide">Creator wording style<input value={String(creator.wording_style || "")} disabled={Boolean(busy)} onChange={(event) => { setCreatorDirty(true); setCreator({ ...creator, wording_style: event.target.value }); }} /></label>
-      <label className="wide">Creator visual style<input value={String(creator.visual_style || "")} disabled={Boolean(busy)} onChange={(event) => { setCreatorDirty(true); setCreator({ ...creator, visual_style: event.target.value }); }} /></label>
+      <label className="wide">Creator wording style<input value={String(creator.wording_style || "")} disabled={Boolean(busy)} onChange={(event) => patchCreator({ wording_style: event.target.value })} /></label>
+      <label className="wide">Creator visual style<input value={String(creator.visual_style || "")} disabled={Boolean(busy)} onChange={(event) => patchCreator({ visual_style: event.target.value })} /></label>
+      <label className="wide">Creator transition preference<input value={String(creator.transition_preference || "")} disabled={Boolean(busy)} onChange={(event) => patchCreator({ transition_preference: event.target.value })} /></label>
+      <label className="wide">Creator natural audio policy<textarea value={String(creator.natural_audio_policy || "")} disabled={Boolean(busy)} onChange={(event) => patchCreator({ natural_audio_policy: event.target.value })} /></label>
+      <label className="wide">不喜歡的風格<input value={Array.isArray(creator.disliked_styles) ? creator.disliked_styles.join(", ") : String(creator.disliked_styles || "")} disabled={Boolean(busy)} onChange={(event) => patchCreator({ disliked_styles: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) })} /></label>
+      <label className="creator-check"><input type="checkbox" checked={Boolean(creator.tutorial_tone_allowed)} disabled={Boolean(busy)} onChange={(event) => patchCreator({ tutorial_tone_allowed: event.target.checked })} />允許教學語氣</label>
+      <label className="creator-check"><input type="checkbox" checked={Boolean(creator.sponsored_tone_allowed)} disabled={Boolean(busy)} onChange={(event) => patchCreator({ sponsored_tone_allowed: event.target.checked })} />允許業配語氣</label>
+      <div className="creator-readonly" aria-label="Creator profile metadata"><span>schema version：{String(creator.schema_version || 1)}</span><span>profile version：{String(creator.profile_version || 1)}</span><span>calibration：{JSON.stringify(creator.calibration || {})}</span></div>
       <label className="wide">專案故事意圖<textarea value={String(settings.project_intent || "")} disabled={Boolean(busy)} placeholder="這支影片想讓觀眾感受到什麼？" onChange={(event) => { setSettingsDirty(true); setSettings({ ...settings, project_intent: event.target.value }); }} /></label>
       <label className="wide">行程／場景順序<textarea value={String(settings.itinerary || "")} disabled={Boolean(busy)} placeholder="例如：早上車站，下午展覽，傍晚咖啡廳" onChange={(event) => { setSettingsDirty(true); setSettings({ ...settings, itinerary: event.target.value }); }} /></label>
       <label className="wide">期望順序<input value={(settings.desired_sequence || []).join(", ")} disabled={Boolean(busy)} onChange={(event) => { setSettingsDirty(true); setSettings({ ...settings, desired_sequence: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) }); }} /></label>
@@ -208,7 +249,12 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
     {generation && <>
       <div className="story-generation-meta"><b>{generation.story_generation_uuid}</b><span>{generation.provider} / {generation.model}</span><span>input {generation.input_hash?.slice(0, 12)}</span><span>狀態：{generation.status}</span></div>
       {story?.current_generation_is_stale && <p className="story-stale" role="alert">目前 StoryInputSnapshot 已變更；此 generation 過期，Apply 會 fail closed，請重新生成。</p>}
-      <div className="story-audit" aria-label="故事 audit"><span>raw provider calls：{generation.provider_audit?.calls ?? "—"}</span><span>corrective retry：{generation.provider_audit?.retries ?? 0}</span><span>latency：{generation.provider_audit?.total_latency_ms ?? "—"} ms</span><span>validation：{String(generation.validation?.status || "unknown")}</span></div>
+      <div className="story-audit" aria-label="故事 audit"><span>raw provider calls：{generation.provider_audit?.calls ?? "—"}</span><span>corrective retry：{generation.provider_audit?.retries ?? 0}</span><span>latency：{generation.provider_audit?.total_latency_ms ?? "—"} ms</span><span>validation：{String(generation.validation?.status || "unknown")}</span><span>effective source：{generation.story_audit?.effective?.source || "normalized"}</span></div>
+      <div className="story-audit-details" aria-label="raw normalized effective audit">
+        <details><summary>Raw provider audit</summary><pre>{JSON.stringify(generation.story_audit?.raw || { provider: generation.provider, model: generation.model, input_hash: generation.input_hash }, null, 2)}</pre></details>
+        <details><summary>Normalized output audit</summary><pre>{JSON.stringify(generation.story_audit?.normalized || { chapter_count: normalized.chapters?.length || 0 }, null, 2)}</pre></details>
+        <details><summary>Effective review audit</summary><pre>{JSON.stringify(generation.story_audit?.effective || { source: review.source || "normalized", locked: Boolean(review.locked) }, null, 2)}</pre></details>
+      </div>
       <label className="wide">專案摘要<textarea value={draft.project_summary} disabled={Boolean(busy)} onChange={(event) => { setDraftDirty(true); setDraft({ ...draft, project_summary: event.target.value }); }} /></label>
       <div className="story-chapters">
         {chapters.map((chapter, index) => <article className="story-chapter" key={chapter.chapter_id || index}>
@@ -217,7 +263,22 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
           <label>目的<textarea value={chapter.purpose || ""} disabled={Boolean(busy)} onChange={(event) => patchChapter(index, { purpose: event.target.value })} /></label>
           <label>片段順序<textarea value={(chapter.segment_uuids || []).join(", ")} disabled={Boolean(busy)} onChange={(event) => patchChapter(index, { segment_uuids: event.target.value.split(",").map((id) => id.trim()).filter(Boolean) })} /></label>
           <label>節奏<input value={chapter.pacing_intent || ""} disabled={Boolean(busy)} onChange={(event) => patchChapter(index, { pacing_intent: event.target.value })} /></label>
+          <label>轉場意圖<input value={chapter.transition_intent || ""} disabled={Boolean(busy)} onChange={(event) => patchChapter(index, { transition_intent: event.target.value })} /></label>
+          <label>標題字卡建議<textarea value={chapter.title_card_suggestion || ""} disabled={Boolean(busy)} onChange={(event) => patchChapter(index, { title_card_suggestion: event.target.value })} /></label>
           <label>自然音<input value={chapter.natural_audio_intent || ""} disabled={Boolean(busy)} onChange={(event) => patchChapter(index, { natural_audio_intent: event.target.value })} /></label>
+          <label>章節備註<textarea value={chapter.notes || ""} disabled={Boolean(busy)} onChange={(event) => patchChapter(index, { notes: event.target.value })} /></label>
+          <div className="story-segment-cards" aria-label={`章節 ${index + 1} 視覺片段 cards`}>
+            {(chapter.segment_uuids || []).map((segmentUuid, segmentIndex) => {
+              const segment = segmentFor(segmentUuid);
+              const start = Number(segment?.start_seconds || 0);
+              const end = Number(segment?.end_seconds || start + 1);
+              return <article className="story-segment-card" data-segment-card={segmentUuid} key={segmentUuid}>
+                {segment?.media_url ? <video muted preload="metadata" src={`${segment.media_url}#t=${start},${end}`} aria-label={`${segmentUuid} preview`} /> : <div className="story-segment-placeholder" aria-label={`${segmentUuid} preview`}>預覽未提供</div>}
+                <div className="story-segment-card-copy"><strong>{segment?.title || segmentUuid}</strong><span>{segmentUuid} · {start.toFixed(2)}s–{end.toFixed(2)}s</span><span>{segment?.scene_role || "未指定 shot role"}</span></div>
+                <div className="row"><button type="button" aria-label={`片段 ${segmentUuid} 上移`} disabled={Boolean(busy)} onClick={() => moveSegment(index, segmentIndex, -1)}>片段上移</button><button type="button" aria-label={`片段 ${segmentUuid} 下移`} disabled={Boolean(busy)} onClick={() => moveSegment(index, segmentIndex, 1)}>片段下移</button></div>
+              </article>;
+            })}
+          </div>
           <div className="row"><button type="button" disabled={Boolean(busy) || index === 0} onClick={() => moveChapter(index, -1)}>章節上移</button><button type="button" disabled={Boolean(busy) || index === chapters.length - 1} onClick={() => moveChapter(index, 1)}>章節下移</button><button type="button" disabled={Boolean(busy)} onClick={() => patchChapter(index, { locked: !chapter.locked })}>{chapter.locked ? "解除本章鎖定" : "鎖定本章"}</button></div>
         </article>)}
       </div>
@@ -227,7 +288,7 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
       </div>
       <div className="row story-actions">
         <button type="button" disabled={Boolean(busy)} onClick={() => void saveReview()}>{busy === "review" ? "儲存中…" : "儲存故事修改"}</button>
-        <button type="button" disabled={Boolean(busy)} onClick={() => setLocked((value) => !value)}>{locked ? "解除鎖定故事" : "鎖定故事修改"}</button>
+        <button type="button" disabled={Boolean(busy)} onClick={() => { setLockedDirty(true); setLocked((value) => !value); }}>{locked ? "解除鎖定故事" : "鎖定故事修改"}</button>
         <button type="button" className="primary" disabled={Boolean(busy)} onClick={() => void applyToStoryboard()}>{busy === "apply" ? "套用中…" : "套用到既有分鏡"}</button>
       </div>
       <p className="muted">套用前不會修改 storyboard.json、approval 或正式輸出；鎖定的既有分鏡片段會在套用時保留。</p>

@@ -97,11 +97,65 @@ def _parse_json_field(row: Mapping[str, Any], key: str, default: Any) -> Any:
         return default
 
 
+def _story_audit(
+    row: Mapping[str, Any],
+    raw: Mapping[str, Any],
+    normalized: Mapping[str, Any],
+    review: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Expose safe raw/normalized/effective audit metadata without raw model text."""
+    raw_audit = raw.get("provider_audit") if isinstance(raw.get("provider_audit"), Mapping) else {}
+    normalized_chapters = [item for item in normalized.get("chapters") or [] if isinstance(item, Mapping)]
+    effective_chapters = [item for item in (review.get("chapters") or normalized_chapters) if isinstance(item, Mapping)]
+    normalized_segments = [
+        str(segment_id)
+        for chapter in normalized_chapters
+        for segment_id in chapter.get("segment_uuids") or []
+    ]
+    effective_segments = [
+        str(segment_id)
+        for chapter in effective_chapters
+        for segment_id in chapter.get("segment_uuids") or []
+    ]
+    return {
+        "raw": {
+            "provider": str(row.get("provider") or ""),
+            "model": str(row.get("model") or ""),
+            "input_hash": str(row.get("input_hash") or ""),
+            "schema_version": int(row.get("schema_version") or 0),
+            "provider_audit": dict(raw_audit),
+        },
+        "normalized": {
+            "schema_version": int(normalized.get("schema_version") or row.get("schema_version") or 0),
+            "project_summary_present": bool(str(normalized.get("project_summary") or "").strip()),
+            "chapter_count": len(normalized_chapters),
+            "segment_count": len(normalized_segments),
+            "segment_uuids": normalized_segments,
+            "suppressed_count": len(normalized.get("suppressed_segments") or []),
+            "validation_status": str(((row.get("validation") or {}).get("status") or "unknown")),
+        },
+        "effective": {
+            "source": "human" if str(review.get("source") or "") == "human" else "normalized",
+            "locked": bool(review.get("locked", False)),
+            "chapter_count": len(effective_chapters),
+            "segment_count": len(effective_segments),
+            "segment_uuids": effective_segments,
+            "suppressed_count": len(review.get("suppressed_segments") or normalized.get("suppressed_segments") or []),
+        },
+    }
+
+
 def _public_generation(row: Mapping[str, Any], *, include_internal: bool = False) -> dict[str, Any]:
     result = dict(row)
     for key in ("input_snapshot_json", "raw_response_json", "normalized_response_json", "review_state_json", "validation_json"):
         result[key.removesuffix("_json")] = _parse_json_field(row, key, {})
         result.pop(key, None)
+    result["story_audit"] = _story_audit(
+        result,
+        result.get("raw_response") or {},
+        result.get("normalized_response") or {},
+        result.get("review_state") or {},
+    )
     if not include_internal:
         result["input_snapshot"] = {"input_hash": result.get("input_snapshot", {}).get("input_hash", ""), "schema_version": result.get("input_snapshot", {}).get("schema_version", 0)}
         raw = result.get("raw_response") or {}
@@ -273,7 +327,7 @@ class LocalTextStoryProvider:
     }
     _CHAPTER_KEYS = {
         "title", "purpose", "segment_uuids", "pacing_intent", "transition_intent",
-        "natural_audio_intent", "title_card_suggestion", "confidence", "needs_review_reasons",
+        "natural_audio_intent", "title_card_suggestion", "notes", "confidence", "needs_review_reasons",
     }
 
     def __init__(self, base_url: str, model: str, timeout_seconds: float = 180.0):
@@ -475,6 +529,7 @@ def validate_story_output(output: Mapping[str, Any], snapshot: Mapping[str, Any]
             "transition_intent": str(chapter.get("transition_intent") or "").strip(),
             "natural_audio_intent": str(chapter.get("natural_audio_intent") or "").strip(),
             "title_card_suggestion": str(chapter.get("title_card_suggestion") or "").strip(),
+            "notes": str(chapter.get("notes") or "").strip(),
             "confidence": confidence,
             "needs_review_reasons": [str(item) for item in chapter.get("needs_review_reasons") or []],
             "locked": bool(chapter.get("locked", False)),
@@ -595,7 +650,6 @@ def generate_project_story(
     force: bool = False,
     should_cancel: Any | None = None,
 ) -> dict[str, Any]:
-    recover_interrupted_story_generations(db)
     snapshot = build_story_input_snapshot(cfg, db, project_id)
     base = int(snapshot["project_revision"])
     check_base_revision(db, project_id, base_revision)

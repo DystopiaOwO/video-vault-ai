@@ -286,6 +286,7 @@ export type StoryChapter = {
   transition_intent?: string;
   natural_audio_intent?: string;
   title_card_suggestion?: string;
+  notes?: string;
   confidence?: number;
   needs_review_reasons?: string[];
   locked?: boolean;
@@ -310,10 +311,16 @@ export type StoryGeneration = {
   error?: string;
   cache_hit?: boolean;
   provider_audit?: ProviderAudit;
+  story_audit?: StoryAudit;
 };
 
 export type SuppressedSegment = { segment_uuid: string; representative_segment_uuid: string; reason?: string };
 export type ProviderAudit = { calls?: number; retries?: number; call_latencies_ms?: number[]; total_latency_ms?: number; strict_schema?: boolean; error?: string };
+export type StoryAudit = {
+  raw?: { provider?: string; model?: string; input_hash?: string; schema_version?: number; provider_audit?: ProviderAudit };
+  normalized?: { schema_version?: number; project_summary_present?: boolean; chapter_count?: number; segment_count?: number; segment_uuids?: string[]; suppressed_count?: number; validation_status?: string };
+  effective?: { source?: string; locked?: boolean; chapter_count?: number; segment_count?: number; segment_uuids?: string[]; suppressed_count?: number };
+};
 export type StoryCalibration = { schema_version?: number; profile_id?: string; status?: string; sample_count?: number; record_count?: number; metrics?: Record<string, number | null>; source?: string };
 
 export type StoryDetail = {
