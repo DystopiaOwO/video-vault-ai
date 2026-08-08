@@ -445,7 +445,9 @@ export class ApiError extends Error {
 
 export function formatApiError(error: unknown): string {
   if (error instanceof ApiError && error.status === 409) {
-    const revision = typeof error.payload.project_revision === "number" ? `目前版本 ${error.payload.project_revision}` : "目前版本已更新";
+    const revision = typeof error.payload.profile_version === "number"
+      ? `Story Settings 目前 version ${error.payload.profile_version}`
+      : typeof error.payload.project_revision === "number" ? `目前版本 ${error.payload.project_revision}` : "目前版本已更新";
     return `${revision}，請重新載入後再儲存，未套用這次舊內容。`;
   }
   return error instanceof Error ? error.message : "網路或服務錯誤";
@@ -544,8 +546,8 @@ export const api = {
   creatorProfile: () => json<Record<string, unknown>>("/api/creator-profile"),
   saveCreatorProfile: (profile: Record<string, unknown>, expectedVersion?: number) =>
     json<{ ok: boolean; creator_profile?: Record<string, unknown>; profile_version?: number; error?: string; code?: string }>("/api/creator-profile", post({ profile, expected_version: expectedVersion })),
-  saveStorySettings: (projectId: number, settings: Record<string, unknown>, baseRevision?: number) =>
-    json<{ ok: boolean; settings?: StoryDetail["settings"]; project_revision?: number; error?: string; code?: string }>("/api/project/story/settings", post({ project_id: projectId, settings, base_revision: baseRevision })),
+  saveStorySettings: (projectId: number, settings: Record<string, unknown>, baseRevision?: number, expectedVersion?: number) =>
+    json<{ ok: boolean; settings?: StoryDetail["settings"]; profile_version?: number; project_revision?: number; error?: string; code?: string }>("/api/project/story/settings", post({ project_id: projectId, settings, base_revision: baseRevision, expected_version: expectedVersion ?? Number(settings.profile_version || 1) })),
   generateStory: (projectId: number, force = false, provider?: string, baseRevision?: number) =>
     json<{ ok: boolean; generation?: StoryGeneration; story?: StoryDetail; error?: string; code?: string }>("/api/project/story/generate", post({ project_id: projectId, force, provider, base_revision: baseRevision })),
   updateStoryReview: (projectId: number, storyGenerationUuid: string, review: Record<string, unknown>, baseRevision?: number) =>

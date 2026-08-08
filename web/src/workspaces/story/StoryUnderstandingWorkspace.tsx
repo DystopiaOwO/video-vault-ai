@@ -50,7 +50,8 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
     if (!mutation) return;
     setBusy("settings");
     try {
-      const result = await api.saveStorySettings(detail.project.id, settings, detail.project_revision);
+      const expectedVersion = Number(settings.profile_version || 1);
+      const result = await api.saveStorySettings(detail.project.id, settings, detail.project_revision, expectedVersion);
       if (!result.ok) throw new Error(result.error || "故事設定儲存失敗");
       await refreshProject({ forceFresh: true });
       setSettingsDirty(false);

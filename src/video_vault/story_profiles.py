@@ -26,6 +26,16 @@ class CreatorProfileRevisionConflict(RuntimeError):
         super().__init__(f"Creator Profile 已更新：目前 version {current}，請重新載入後再儲存")
 
 
+class StorySettingsRevisionConflict(RuntimeError):
+    code = "stale_story_settings"
+
+    def __init__(self, expected: int | None, current: int):
+        self.expected = expected
+        self.current = int(current)
+        expected_text = "缺少" if expected is None else str(expected)
+        super().__init__(f"Project Story Settings 已更新：目前 version {current}，請重新載入後再儲存（收到 {expected_text}）")
+
+
 STORY_PROFILES: dict[str, dict[str, Any]] = {
     "travel_diary": {
         "profile_id": "travel_diary",
@@ -179,6 +189,22 @@ def default_project_story_settings(content_type: str = "diary_montage") -> dict[
     }
 
 
+def _normalize_project_story_settings(settings: Mapping[str, Any], content_type: str = "diary_montage") -> dict[str, Any]:
+    normalized = {**default_project_story_settings(content_type), **dict(settings)}
+    profile_id = str(normalized.get("profile_id") or "general_diary")
+    story_profile_definition(profile_id)
+    normalized["schema_version"] = STORY_PROFILE_SCHEMA_VERSION
+    normalized["profile_id"] = profile_id
+    normalized["profile_version"] = max(1, int(normalized.get("profile_version") or 1))
+    for key in ("project_intent", "itinerary", "desired_pacing", "title_card_preference_override", "natural_audio_override"):
+        normalized[key] = str(normalized.get(key) or "")
+    for key in ("desired_sequence", "must_keep", "exclude_guidance"):
+        value = normalized.get(key) or []
+        normalized[key] = [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []
+    normalized["creator_profile_override"] = dict(normalized.get("creator_profile_override") or {})
+    return normalized
+
+
 def load_project_story_settings(cfg: Mapping[str, Any], db: Path, project_id: int) -> dict[str, Any]:
     from .database import project
 
@@ -190,18 +216,7 @@ def load_project_story_settings(cfg: Mapping[str, Any], db: Path, project_id: in
             default.update(json.loads(path.read_text(encoding="utf-8")))
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             pass
-    profile_id = str(default.get("profile_id") or "general_diary")
-    definition = story_profile_definition(profile_id)
-    default["schema_version"] = STORY_PROFILE_SCHEMA_VERSION
-    default["profile_id"] = profile_id
-    default["profile_version"] = int(default.get("profile_version") or definition["profile_version"])
-    for key in ("project_intent", "itinerary", "desired_pacing", "title_card_preference_override", "natural_audio_override"):
-        default[key] = str(default.get(key) or "")
-    for key in ("desired_sequence", "must_keep", "exclude_guidance"):
-        value = default.get(key) or []
-        default[key] = [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []
-    default["creator_profile_override"] = dict(default.get("creator_profile_override") or {})
-    return default
+    return _normalize_project_story_settings(default, str(row["content_type"]) if row else "diary_montage")
 
 
 def save_project_story_settings(
@@ -211,16 +226,25 @@ def save_project_story_settings(
     patch: Mapping[str, Any],
     *,
     base_revision: int | None = None,
+    expected_version: int | None = None,
 ) -> dict[str, Any]:
-    current = load_project_story_settings(cfg, db, project_id)
-    updated = {**current, **dict(patch)}
-    if "profile_id" in updated:
-        updated["profile_id"] = str(updated["profile_id"] or "general_diary")
-        story_profile_definition(updated["profile_id"])
-    updated["schema_version"] = STORY_PROFILE_SCHEMA_VERSION
-    updated["profile_version"] = int(current.get("profile_version") or 1) + (1 if updated != current else 0)
     with project_commit(db, int(project_id), base_revision) as commit:
-        if updated != current or not project_story_settings_path(cfg, project_id).is_file():
+        current = load_project_story_settings(cfg, db, project_id)
+        current_version = int(current.get("profile_version") or 1)
+        if expected_version is not None and int(expected_version) != current_version:
+            raise StorySettingsRevisionConflict(int(expected_version), current_version)
+        row_content_type = "diary_montage"
+        from .database import project
+
+        row = project(db, int(project_id))
+        if row:
+            row_content_type = str(row["content_type"] or "diary_montage")
+        updated = _normalize_project_story_settings({**current, **dict(patch)}, row_content_type)
+        comparable_current = {key: value for key, value in current.items() if key != "profile_version"}
+        comparable_updated = {key: value for key, value in updated.items() if key != "profile_version"}
+        changed = comparable_updated != comparable_current
+        updated["profile_version"] = current_version + 1 if changed else current_version
+        if changed or not project_story_settings_path(cfg, project_id).is_file():
             _atomic_json(project_story_settings_path(cfg, project_id), updated)
             # Story settings affect the next StoryInputSnapshot, but do not
             # change the approved render state. Only Apply/storyboard writes
@@ -240,6 +264,7 @@ def resolved_creator_profile(cfg: Mapping[str, Any], project_settings: Mapping[s
 __all__ = [
     "CREATOR_PROFILE_SCHEMA_VERSION",
     "CreatorProfileRevisionConflict",
+    "StorySettingsRevisionConflict",
     "STORY_PROFILE_SCHEMA_VERSION",
     "STORY_PROFILE_IDS",
     "STORY_PROFILES",

@@ -46,7 +46,7 @@ from .scanner import scan_inbox
 from .storyboard import generate_storyboard, generate_thumbnail, storyboard_for_api, storyboard_thumbnail_path, update_storyboard
 from .storyboard_preview import StoryboardPreviewError, render_storyboard_preview, storyboard_preview_path
 from .story_generation import StoryGenerationError, StoryValidationError, apply_story_generation_to_storyboard, generate_project_story, get_story_generation, project_story_detail, update_story_generation_review
-from .story_profiles import CreatorProfileRevisionConflict, load_creator_profile, load_project_story_settings, save_creator_profile, save_project_story_settings, story_profile_definition
+from .story_profiles import CreatorProfileRevisionConflict, StorySettingsRevisionConflict, load_creator_profile, load_project_story_settings, save_creator_profile, save_project_story_settings, story_profile_definition
 from .web_security import WebSecurityError, parse_content_length, parse_single_range, validate_local_bind_host, validate_origin_headers
 
 
@@ -532,6 +532,15 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     "error": str(exc),
                     "profile_version": exc.current,
                 }, status=409)
+            except StorySettingsRevisionConflict as exc:
+                self._json({
+                    "ok": False,
+                    "code": exc.code,
+                    "error": str(exc),
+                    "expected_version": exc.expected,
+                    "profile_version": exc.current,
+                    "current_version": exc.current,
+                }, status=409)
             except WebSecurityError as exc:
                 self._json(exc.as_dict(), status=403)
             except RetentionError as exc:
@@ -755,8 +764,10 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     if "creator_profile" in data:
                         raise ValueError("Creator Profile 必須透過 /api/creator-profile 獨立儲存")
                     patch = data.get("settings") if isinstance(data.get("settings"), dict) else {}
-                    settings = save_project_story_settings(cfg, db, project_id, patch, base_revision=_base_revision(data)) if patch else load_project_story_settings(cfg, db, project_id)
-                    self._json({"ok": True, "settings": settings, "project_revision": current_revision(db, project_id)})
+                    expected = data.get("expected_version", patch.get("profile_version"))
+                    expected_version = int(expected) if expected not in (None, "") else None
+                    settings = save_project_story_settings(cfg, db, project_id, patch, base_revision=_base_revision(data), expected_version=expected_version) if "settings" in data else load_project_story_settings(cfg, db, project_id)
+                    self._json({"ok": True, "settings": settings, "profile_version": settings.get("profile_version"), "project_revision": current_revision(db, project_id)})
                 except (OSError, TypeError, ValueError) as exc:
                     self._json({"ok": False, "code": "invalid_story_settings", "error": str(exc)})
             elif path == "/api/creator-profile":

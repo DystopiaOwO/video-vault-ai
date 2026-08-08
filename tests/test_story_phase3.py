@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -24,7 +25,7 @@ from video_vault.story_generation import (
     validate_story_output,
 )
 from video_vault.story_input import build_story_input_snapshot, story_input_hash
-from video_vault.story_profiles import CreatorProfileRevisionConflict, load_creator_profile, load_project_story_settings, save_creator_profile, save_project_story_settings
+from video_vault.story_profiles import CreatorProfileRevisionConflict, StorySettingsRevisionConflict, load_creator_profile, load_project_story_settings, save_creator_profile, save_project_story_settings
 from video_vault.storyboard import generate_storyboard, load_storyboard
 
 
@@ -172,6 +173,42 @@ def test_story_settings_do_not_advance_render_revision_or_touch_approval(tmp_pat
     save_project_story_settings(cfg, db, project_id, {**settings, "project_intent": "下一次生成才套用的意圖"}, base_revision=before_revision)
     assert current_revision(db, project_id) == before_revision
     assert (review_path.read_bytes() if review_path.is_file() else None) == before_review
+
+
+def test_story_settings_use_independent_version_for_noop_and_stale_writes(tmp_path: Path):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    first_client = load_project_story_settings(cfg, db, project_id)
+    second_client = dict(first_client)
+    version = int(first_client["profile_version"])
+    before_revision = current_revision(db, project_id)
+
+    unchanged = save_project_story_settings(cfg, db, project_id, first_client, expected_version=version)
+    assert unchanged["profile_version"] == version
+
+    def write(client: dict, intent: str):
+        try:
+            saved = save_project_story_settings(
+                cfg,
+                db,
+                project_id,
+                {**client, "project_intent": intent},
+                expected_version=version,
+            )
+            return ("saved", saved)
+        except StorySettingsRevisionConflict as exc:
+            return ("conflict", exc)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(
+            lambda args: write(*args),
+            ((first_client, "第一個 client 的新意圖"), (second_client, "第二個 stale client 不得覆寫")),
+        ))
+    assert sorted(result[0] for result in results) == ["conflict", "saved"]
+    conflict = next(result[1] for result in results if result[0] == "conflict")
+    assert conflict.expected == version
+    assert conflict.current == version + 1
+    assert load_project_story_settings(cfg, db, project_id)["project_intent"] in {"第一個 client 的新意圖", "第二個 stale client 不得覆寫"}
+    assert current_revision(db, project_id) == before_revision
 
 
 def test_story_public_generation_exposes_raw_normalized_effective_audit(tmp_path: Path):

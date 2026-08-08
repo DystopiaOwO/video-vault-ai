@@ -56,7 +56,7 @@ function detail(overrides: Partial<ProjectDetail> = {}): ProjectDetail {
     audio: {} as ProjectDetail["audio"],
     storyboard: { schema_version: 1, exists: false, groups: [], segments: {} },
     story: {
-      settings: { profile_id: "travel_diary", project_intent: "原始意圖", desired_pacing: "自然" },
+      settings: { profile_id: "travel_diary", profile_version: 5, project_intent: "原始意圖", desired_pacing: "自然" },
       creator_profile: { profile_version: 3, wording_style: "簡潔", visual_style: "自然" },
       story_profile: { profile_id: "travel_diary", label: "旅行日記" },
       generations: [],
@@ -129,7 +129,7 @@ describe("StoryUnderstandingWorkspace", () => {
 
     fireEvent.change(screen.getByLabelText("專案故事意圖"), { target: { value: "新的意圖" } });
     fireEvent.click(screen.getByRole("button", { name: "儲存設定" }));
-    await waitFor(() => expect(settingsSave).toHaveBeenCalledWith(1, expect.objectContaining({ project_intent: "新的意圖" }), 7));
+    await waitFor(() => expect(settingsSave).toHaveBeenCalledWith(1, expect.objectContaining({ project_intent: "新的意圖" }), 7, 5));
   });
 
   it("submits the app-owned chapter id after a human title edit", async () => {
