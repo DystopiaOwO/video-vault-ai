@@ -64,7 +64,7 @@ describe("MultiFrameEvidencePanel", () => {
   });
 
   it("shows local audio candidates and saves a user decision without resending perception", async () => {
-    const save = vi.spyOn(api, "saveSegmentEvidence").mockResolvedValue({ ok: true, path: "segment_review.json" });
+    const save = vi.spyOn(api, "audioSettings").mockResolvedValue({ ok: true, state: {}, project_revision: 4 });
     render(<MultiFrameEvidencePanel clip={{
       filename: "travel.mp4",
       perception_run: {
@@ -92,9 +92,35 @@ describe("MultiFrameEvidencePanel", () => {
     expect(screen.getByRole("region", { name: "travel.mp4 音訊感知證據" })).toBeTruthy();
     expect(screen.getByText(/local-only/)).toBeTruthy();
     expect(screen.getByText(/使用者決策：duck/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "改為 mute" }));
-    await waitFor(() => expect(save).toHaveBeenCalledWith(7, "segment-audio-1", {
-      user_audio_decision: "mute",
+    fireEvent.click(screen.getByRole("button", { name: "設為 mute" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(7, {
+      segments: { "segment-audio-1": { role: "mute" } },
+    }, 3));
+    save.mockRestore();
+  });
+
+  it("keeps an AI duck recommendation non-authoritative and maps an explicit choice to lower", async () => {
+    const save = vi.spyOn(api, "audioSettings").mockResolvedValue({ ok: true, state: {}, project_revision: 4 });
+    render(<MultiFrameEvidencePanel clip={{
+      filename: "travel.mp4",
+      perception_run: {
+        current_status: "succeeded",
+        current_audio_perception: {
+          status: "succeeded",
+          summary: { windows_analyzed: 1 },
+          candidates: [{
+            audio_window_uuid: "audio-window-2",
+            segment_uuid: "segment-audio-2",
+            natural_audio_recommendation: "duck",
+          }],
+        },
+      },
+    }} projectId={7} projectRevision={3} />);
+
+    expect(screen.getByText(/AI 建議：duck · 尚未有人工作決/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "設為 duck" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(7, {
+      segments: { "segment-audio-2": { role: "lower" } },
     }, 3));
     save.mockRestore();
   });

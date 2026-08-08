@@ -19,6 +19,8 @@ LEGACY_AUDIO_ROLE_MAP = {
     "lower_original": "lower",
     "mute": "mute",
 }
+AUDIO_DECISION_TO_ROLE = {"keep": "keep", "duck": "lower", "mute": "mute"}
+AUDIO_ROLE_TO_DECISION = {"keep": "keep", "lower": "duck", "mute": "mute", "bgm_only": "mute"}
 
 
 def audio_state_path(cfg: dict, project_id: int) -> Path:
@@ -126,8 +128,44 @@ def effective_segment_audio_settings(
         "fade_in_seconds": float(configured.get("fade_in_seconds", original.get("fade_in_seconds", 0.1))),
         "fade_out_seconds": float(configured.get("fade_out_seconds", original.get("fade_out_seconds", 0.1))),
         "locked": bool(configured.get("locked", False)),
+        "source": "audio_settings.segment" if configured.get("role") else "audio_settings.default",
         "legacy": False,
     }
+
+
+def audio_decision_to_role(value: Any) -> str:
+    decision = str(value or "").strip().lower()
+    if decision not in AUDIO_DECISION_TO_ROLE:
+        raise ValueError(f"unsupported audio decision: {decision}")
+    return AUDIO_DECISION_TO_ROLE[decision]
+
+
+def audio_role_to_decision(value: Any) -> str:
+    role = normalize_audio_role(value)
+    return AUDIO_ROLE_TO_DECISION[role]
+
+
+def authoritative_segment_audio_decision(
+    cfg: dict,
+    project_id: int,
+    segment_id: str,
+    *,
+    state: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Return only an explicit user decision from audio_settings.json.
+
+    AI perception recommendations and segment_review legacy fields are not
+    authoritative audio state. A project default role is effective render
+    state, but is not reported as a per-segment user override here.
+    """
+
+    active = state if state is not None else (load_audio_state(cfg, project_id) if has_audio_state(cfg, project_id) else None)
+    if not isinstance(active, Mapping):
+        return None
+    configured = (active.get("segments") or {}).get(str(segment_id))
+    if not isinstance(configured, Mapping) or "role" not in configured:
+        return None
+    return audio_role_to_decision(configured.get("role"))
 
 
 def effective_project_bgm(state: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -432,7 +470,8 @@ def _apply_audio_patch(base: Mapping[str, Any], patch: Mapping[str, Any]) -> dic
 
 
 __all__ = [
-    "AUDIO_ROLES", "AUDIO_STATE_VERSION", "LEGACY_AUDIO_ROLE_MAP", "audio_state_for_api", "audio_state_path",
+    "AUDIO_ROLES", "AUDIO_STATE_VERSION", "LEGACY_AUDIO_ROLE_MAP", "AUDIO_DECISION_TO_ROLE", "AUDIO_ROLE_TO_DECISION", "audio_state_for_api", "audio_state_path",
+    "audio_decision_to_role", "audio_role_to_decision", "authoritative_segment_audio_decision",
     "effective_project_audio_state", "effective_project_bgm", "effective_segment_audio_settings", "has_audio_state", "legacy_audio_state_seed",
     "resolve_audio_state_bgm", "resolve_legacy_project_bgm",
     "default_audio_state", "editable_audio_patch", "load_audio_state", "normalize_audio_role",

@@ -9,6 +9,7 @@ import urllib.request
 import pytest
 
 from video_vault.database import add_analysis, connect, init_db, upsert_video
+from video_vault.audio_state import default_audio_state, save_audio_state
 from video_vault.project import build_project_plan, create_project, project_dir, project_detail, save_segment_review
 from video_vault.project_lifecycle import CancellationRequested, ProjectRevisionConflict, current_revision
 from video_vault.story_calibration import calibration_path, compute_calibration, reset_calibration
@@ -27,6 +28,7 @@ from video_vault.story_generation import (
 from video_vault.story_input import build_story_input_snapshot, story_input_hash
 from video_vault.story_profiles import CreatorProfileRevisionConflict, StorySettingsRevisionConflict, load_creator_profile, load_project_story_settings, save_creator_profile, save_project_story_settings
 from video_vault.storyboard import generate_storyboard, load_storyboard
+from video_vault.render_manifest import build_render_manifest
 
 
 def _fixture(tmp_path: Path, *, second_project: bool = False):
@@ -107,6 +109,39 @@ def test_story_input_is_deterministic_and_has_no_media_paths(tmp_path: Path):
                 assert_safe(child)
 
     assert_safe(first)
+
+
+def test_story_input_and_render_share_authoritative_audio_state(tmp_path: Path):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    details = project_detail(cfg, db, project_id)
+    segment_id = details["segments"][0]["segment_id"]
+    state = default_audio_state()
+    state["segments"] = {segment_id: {"role": "mute"}}
+    save_audio_state(cfg, db, project_id, state, mark_review=False)
+
+    snapshot = build_story_input_snapshot(cfg, db, project_id)
+    segment = next(item for item in snapshot["segments"] if item["segment_uuid"] == segment_id)
+    assert segment["audio"]["user_decision"] == "mute"
+    assert segment["audio"]["effective_role"] == "mute"
+    assert segment["human_override"]["audio_role"] == "mute"
+
+    manifest = build_render_manifest(cfg, db, project_id)
+    rendered = next(item for item in manifest["segments"] if item["segment_id"] == segment_id)
+    assert rendered["audio"]["role"] == "mute"
+
+
+def test_story_input_keeps_ai_duck_as_recommendation_without_user_override(tmp_path: Path):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    details = project_detail(cfg, db, project_id)
+    segment_id = details["segments"][0]["segment_id"]
+    from video_vault.project import update_segment_evidence
+
+    update_segment_evidence(cfg, db, project_id, segment_id, {"natural_audio_recommendation": "duck"})
+    snapshot = build_story_input_snapshot(cfg, db, project_id)
+    segment = next(item for item in snapshot["segments"] if item["segment_uuid"] == segment_id)
+    assert segment["natural_audio_recommendation"] == "duck"
+    assert segment["audio"]["ai_recommendation"] == "duck"
+    assert segment["audio"]["user_decision"] is None
 
 
 def test_story_input_hash_changes_with_human_story_settings(tmp_path: Path):

@@ -18,6 +18,7 @@ from video_vault.audio_perception import (
     audio_policy,
 )
 from video_vault.database import add_analysis, init_db, project_videos, upsert_video
+from video_vault.audio_state import default_audio_state, save_audio_state, update_audio_state
 from video_vault.perception_runs import analysis_run, create_perception_run, set_run_audio_perception
 from video_vault.project import build_project_plan, create_project, project_detail, update_segment_evidence
 from video_vault.project import _merge_audio_user_decisions
@@ -59,10 +60,14 @@ def test_local_audio_result_is_versioned_and_keeps_recommendation_separate_from_
         "cloud_audio_requested": False,
         "user_decisions_overridden": False,
         "source_duration_seconds": 2.0,
+        "decoded_duration_seconds": 2.0,
         "analyzed_duration_seconds": 2.0,
+        "uncovered_duration_seconds": 0.0,
         "truncated": False,
         "partial": False,
         "needs_review_reason": "",
+        "decode_status": "succeeded",
+        "ffmpeg_stderr": "",
     }
     assert result["candidates"]
     assert {item["segment_uuid"] for item in result["candidates"]} == {"visual-1"}
@@ -141,6 +146,57 @@ def test_audio_analysis_cap_is_auditable_partial_coverage():
     assert result["audit"]["partial"] is True
     assert result["audit"]["needs_review_reason"] == "audio_analysis_capped_by_max_analysis_seconds"
     assert max(item["end_seconds"] for item in result["candidates"]) <= 2.0
+
+
+def test_partial_decoded_pcm_never_reports_complete(monkeypatch, tmp_path: Path):
+    source = tmp_path / "partial.mp4"
+    source.write_bytes(b"source")
+    monkeypatch.setattr(
+        "video_vault.audio_perception.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["ffmpeg"], returncode=1, stdout=_sine(8000, 4.0), stderr=b"decode error after 4 seconds"
+        ),
+    )
+    result = analyze_audio_file(
+        source,
+        {"ffmpeg_path": "ffmpeg", "perception": {"audio": {"sample_rate": 8000, "max_analysis_seconds": 30}}},
+        video_id=12,
+        duration_seconds=10.0,
+    )
+    assert result["status"] == "partial"
+    assert result["status"] != "succeeded"
+    assert result["audit"]["decode_status"] == "partial_decode"
+    assert result["audit"]["ffmpeg_stderr"] == "decode error after 4 seconds"
+    assert result["audit"]["uncovered_duration_seconds"] == 6.0
+    assert "decoded_audio_shorter_than_source" in result["audit"]["needs_review_reason"]
+
+
+def test_short_decoded_pcm_has_explicit_uncovered_duration():
+    result = analyze_pcm(
+        _sine(8000, 4.0),
+        sample_rate=8000,
+        video_id=13,
+        duration_seconds=10.0,
+        policy={"window_seconds": 1.0, "hop_seconds": 1.0, "max_analysis_seconds": 30.0},
+    )
+    assert result["status"] == "partial"
+    assert result["audit"]["source_duration_seconds"] == 10.0
+    assert result["audit"]["decoded_duration_seconds"] == 4.0
+    assert result["audit"]["analyzed_duration_seconds"] == 4.0
+    assert result["audit"]["uncovered_duration_seconds"] == 6.0
+    assert result["audit"]["partial"] is True
+
+
+def test_complete_decoded_pcm_is_succeeded():
+    result = analyze_pcm(
+        _sine(8000, 4.0),
+        sample_rate=8000,
+        video_id=14,
+        duration_seconds=4.0,
+        policy={"window_seconds": 1.0, "hop_seconds": 1.0, "max_analysis_seconds": 30.0},
+    )
+    assert result["status"] == "succeeded"
+    assert result["audit"]["uncovered_duration_seconds"] == 0.0
 
 
 def test_audio_extraction_failure_is_fail_closed(monkeypatch, tmp_path: Path):
@@ -225,11 +281,11 @@ def test_human_audio_decision_is_exposed_as_effective_without_mutating_ai_recomm
         "natural_audio_recommendation": "duck",
         "decision_source": "recommendation_only",
     }]}}
-    merged = _merge_audio_user_decisions(state, [{"segment_id": "segment-1", "natural_audio_recommendation": "mute"}])
+    merged = _merge_audio_user_decisions(state, authoritative_decisions={"segment-1": "mute"})
     candidate = merged["current_audio_perception"]["candidates"][0]
     assert candidate["natural_audio_recommendation"] == "duck"
     assert candidate["user_audio_decision"] == "mute"
-    assert candidate["decision_source"] == "human"
+    assert candidate["decision_source"] == "audio_settings"
     assert merged["current_audio_perception"]["audit"]["user_decisions_overridden"] is True
     assert "user_audio_decision" not in state["current_audio_perception"]["candidates"][0]
 
@@ -247,20 +303,21 @@ def test_audio_decision_preserves_global_segment_lock_and_stable_id_reruns(tmp_p
     project_detail(cfg, db, project_id)
     segment_id = project_detail(cfg, db, project_id)["segments"][0]["segment_id"]
 
-    update_segment_evidence(cfg, db, project_id, segment_id, {"locked": False, "user_audio_decision": "duck"})
+    state = default_audio_state()
+    state["segments"] = {segment_id: {"role": "lower"}}
+    save_audio_state(cfg, db, project_id, state)
+    update_segment_evidence(cfg, db, project_id, segment_id, {"locked": False})
     review_path = tmp_path / "08_projects" / f"project_{project_id}" / "feedback" / "segment_review.json"
     assert json.loads(review_path.read_text(encoding="utf-8"))[0]["locked"] is False
-    update_segment_evidence(cfg, db, project_id, segment_id, {"user_audio_decision": "mute"})
+    update_audio_state(cfg, db, project_id, {"segments": {segment_id: {"role": "mute"}}})
     review = json.loads(review_path.read_text(encoding="utf-8"))[0]
     assert review["locked"] is False
-    assert review["user_audio_decision"] == "mute"
 
     update_segment_evidence(cfg, db, project_id, segment_id, {"locked": True})
-    update_segment_evidence(cfg, db, project_id, segment_id, {"user_audio_decision": "keep"})
+    update_audio_state(cfg, db, project_id, {"segments": {segment_id: {"role": "keep"}}})
     review = json.loads(review_path.read_text(encoding="utf-8"))[0]
     assert review["locked"] is True
-    assert review["user_audio_decision"] == "keep"
 
     rerun = {"current_audio_perception": {"candidates": [{"segment_uuid": segment_id, "natural_audio_recommendation": "duck"}]}}
-    merged = _merge_audio_user_decisions(rerun, [{"segment_id": segment_id, "user_audio_decision": "keep"}])
+    merged = _merge_audio_user_decisions(rerun, cfg=cfg, project_id=project_id)
     assert merged["current_audio_perception"]["candidates"][0]["user_audio_decision"] == "keep"

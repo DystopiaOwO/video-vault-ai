@@ -54,7 +54,11 @@ def sync_project_files(cfg: dict, db: Path, project_id: int) -> list[dict]:
         display_clip_dir.mkdir(parents=True, exist_ok=True)
         display_name = str(video.get("filename") or src.name)
         perception_state = perception_states.get(int(video["id"]), {})
-        perception_state = _merge_audio_user_decisions(perception_state, _segment_review(cfg, project_id))
+        perception_state = _merge_audio_user_decisions(
+            perception_state,
+            cfg=cfg,
+            project_id=project_id,
+        )
         default_sampling_policy = resolved_sampling_policy(cfg)
         current_sampling = perception_state.get("current_sampling_manifest") or {}
         ai_visual_summary = _visual_summary(db, int(video["id"]))
@@ -423,19 +427,36 @@ def _public_bgm_row(row: dict) -> dict:
     }
 
 
-def _merge_audio_user_decisions(perception_state: dict, reviews: list[dict]) -> dict:
-    """Expose human audio overrides without mutating the local AI audit."""
+def _merge_audio_user_decisions(
+    perception_state: dict,
+    reviews: list[dict] | None = None,
+    *,
+    cfg: dict | None = None,
+    project_id: int | None = None,
+    authoritative_decisions: dict[str, str] | None = None,
+) -> dict:
+    """Expose audio_settings decisions without mutating the local AI audit.
+
+    ``reviews`` is retained as a call compatibility parameter, but legacy
+    segment_review audio fields are deliberately ignored. Render, preview,
+    StoryInput, and this audit overlay all use audio_settings as the single
+    user-decision source.
+    """
 
     audio = perception_state.get("current_audio_perception")
     if not isinstance(audio, dict) or not isinstance(audio.get("candidates"), list):
         return perception_state
-    by_segment = {
-        str(row.get("segment_id") or ""): row
-        for row in reviews
-        if isinstance(row, dict) and str(row.get("segment_id") or "")
-    }
-    if not by_segment:
-        return perception_state
+    decisions = dict(authoritative_decisions or {})
+    if cfg is not None and project_id is not None:
+        from .audio_state import authoritative_segment_audio_decision
+
+        for candidate in audio.get("candidates") or []:
+            segment_id = str(candidate.get("segment_uuid") or "")
+            if not segment_id:
+                continue
+            decision = authoritative_segment_audio_decision(cfg, project_id, segment_id)
+            if decision:
+                decisions[segment_id] = decision
     result = deepcopy(perception_state)
     merged_audio = deepcopy(audio)
     audit = dict(merged_audio.get("audit") or {})
@@ -443,16 +464,19 @@ def _merge_audio_user_decisions(perception_state: dict, reviews: list[dict]) -> 
     for candidate in merged_audio.get("candidates") or []:
         if not isinstance(candidate, dict):
             continue
-        review = by_segment.get(str(candidate.get("segment_uuid") or ""))
-        if not review or not any(key in review for key in ("user_audio_decision", "natural_audio_recommendation")):
+        segment_id = str(candidate.get("segment_uuid") or "")
+        decision = decisions.get(segment_id)
+        if not decision:
+            if "user_audio_decision" in candidate or candidate.get("decision_source") != "recommendation_only":
+                changed = True
+            candidate.pop("user_audio_decision", None)
+            candidate["decision_source"] = "recommendation_only"
             continue
-        candidate["user_audio_decision"] = str(
-            review.get("user_audio_decision")
-            or review.get("natural_audio_recommendation")
-            or ""
-        )
-        candidate["decision_source"] = str(review.get("user_audio_decision_source") or "human")
-        changed = True
+        if candidate.get("user_audio_decision") != str(decision) or candidate.get("decision_source") != "audio_settings" or not candidate.get("audio_state_authoritative"):
+            changed = True
+        candidate["user_audio_decision"] = str(decision)
+        candidate["decision_source"] = "audio_settings"
+        candidate["audio_state_authoritative"] = True
     if changed:
         audit["user_decisions_overridden"] = True
         merged_audio["audit"] = audit
@@ -591,7 +615,6 @@ def update_segment_evidence(
         "technical_quality_issues",
         "duplicate_group",
         "natural_audio_recommendation",
-        "user_audio_decision",
         "include",
         "user_notes",
         "locked",
@@ -634,10 +657,6 @@ def update_segment_evidence(
                 if not isinstance(value, list):
                     raise ValueError("technical_quality_issues 必須是陣列")
                 value = [str(item) for item in value]
-            elif key == "user_audio_decision":
-                value = str(value or "").strip().lower()
-                if value not in {"keep", "duck", "mute"}:
-                    raise ValueError("user_audio_decision 必須是 keep、duck 或 mute")
             else:
                 value = str(value or "").strip()
             if target.get(key) != value:

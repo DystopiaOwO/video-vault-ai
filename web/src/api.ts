@@ -44,6 +44,7 @@ export type AudioPerceptionCandidate = {
   natural_audio_recommendation?: "keep" | "mute" | "duck" | string;
   user_audio_decision?: string | null;
   decision_source?: string;
+  audio_state_authoritative?: boolean;
   features?: Record<string, number | boolean | string>;
   event_candidates?: Array<{ event?: string; confidence?: number }>;
 };
@@ -54,7 +55,7 @@ export type AudioPerceptionAudit = {
   provider?: string;
   model?: string;
   error?: string;
-  audit?: { local_only?: boolean; transcription_requested?: boolean; cloud_audio_requested?: boolean; user_decisions_overridden?: boolean; source_duration_seconds?: number; analyzed_duration_seconds?: number; truncated?: boolean; partial?: boolean; needs_review_reason?: string };
+  audit?: { local_only?: boolean; transcription_requested?: boolean; cloud_audio_requested?: boolean; user_decisions_overridden?: boolean; source_duration_seconds?: number; decoded_duration_seconds?: number; analyzed_duration_seconds?: number; uncovered_duration_seconds?: number; truncated?: boolean; partial?: boolean; needs_review_reason?: string; decode_status?: string; ffmpeg_stderr?: string };
   summary?: { windows_analyzed?: number; voiced_windows?: number; event_counts?: Record<string, number>; recommendation_counts?: Record<string, number> };
   candidates?: AudioPerceptionCandidate[];
 };

@@ -43,7 +43,13 @@ def _technical_quality(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _effective_segment(row: Mapping[str, Any], clip_order: int) -> dict[str, Any]:
+def _effective_segment(
+    row: Mapping[str, Any],
+    clip_order: int,
+    *,
+    effective_audio: Mapping[str, Any] | None = None,
+    user_audio_decision: str | None = None,
+) -> dict[str, Any]:
     segment_id = str(row.get("segment_id") or row.get("segment_uuid") or "").strip()
     if not segment_id:
         return {}
@@ -52,6 +58,9 @@ def _effective_segment(row: Mapping[str, Any], clip_order: int) -> dict[str, Any
     tags = [str(tag).strip() for tag in (row.get("tags") or []) if str(tag).strip()] if isinstance(row.get("tags"), list) else [item.strip() for item in str(row.get("tags") or "").split(",") if item.strip()]
     fallback_activity = " ".join([str(row.get("activity") or ""), str(row.get("group") or ""), *tags]).strip()
     context = story_context(user_summary, ai_visual_summary, fallback_activity)
+    audio = dict(effective_audio or {})
+    effective_audio_role = str(audio.get("role") or row.get("audio_role") or "")
+    audio_source = str(audio.get("source") or ("legacy" if audio.get("legacy") else "audio_settings.default"))
     return {
         "segment_uuid": segment_id,
         "project_media_uuid": str(row.get("project_media_id") or row.get("project_media_uuid") or ""),
@@ -68,6 +77,13 @@ def _effective_segment(row: Mapping[str, Any], clip_order: int) -> dict[str, Any
         "technical_quality": _technical_quality(row.get("technical_quality") or row.get("technical_quality_json")),
         "duplicate_group": str(row.get("duplicate_group") or ""),
         "natural_audio_recommendation": str(row.get("natural_audio_recommendation") or "unknown"),
+        "audio": {
+            "ai_recommendation": str(row.get("natural_audio_recommendation") or "unknown"),
+            "user_decision": user_audio_decision,
+            "effective_role": effective_audio_role,
+            "source": audio_source,
+        },
+        "effective_audio_role": effective_audio_role,
         "confidence": round(float(row.get("confidence") or row.get("score") or 0), 6),
         "tags": sorted(tags),
         "activity": str(row.get("activity") or row.get("group") or ""),
@@ -78,7 +94,7 @@ def _effective_segment(row: Mapping[str, Any], clip_order: int) -> dict[str, Any
             "manual_order": int(row.get("manual_order") or row.get("order") or 0),
             "scene_role": str(row.get("scene_role") or ""),
             "story_position": str(row.get("story_position") or ""),
-            "audio_role": str(row.get("audio_role") or ""),
+            "audio_role": effective_audio_role,
             "user_notes": str(row.get("user_notes") or row.get("notes") or ""),
             "locked": bool(row.get("locked", False)),
         },
@@ -115,6 +131,9 @@ def build_story_input_snapshot(cfg: Mapping[str, Any], db: Path, project_id: int
         raise ValueError(f"project not found: {project_id}")
     project_data = dict(project_row)
     settings = load_project_story_settings(cfg, db, int(project_id))
+    from .audio_state import authoritative_segment_audio_decision, effective_project_audio_state, effective_segment_audio_settings
+
+    audio_state = effective_project_audio_state(dict(cfg), int(project_id), db)
     story_profile = story_profile_definition(str(settings["profile_id"]))
     creator_profile = resolved_creator_profile(cfg, settings)
     plan_path = project_dir(cfg, int(project_id)) / "project_plan.json"
@@ -134,7 +153,17 @@ def build_story_input_snapshot(cfg: Mapping[str, Any], db: Path, project_id: int
     effective_segments = []
     for row in rows:
         video = video_by_id.get(int(row.get("video_id") or 0), {})
-        item = _effective_segment({**video, "ai_visual_summary": ai_summary_by_video.get(int(row.get("video_id") or 0), ""), **row}, clip_order.get(int(row.get("video_id") or 0), 0))
+        effective_row = {**video, "ai_visual_summary": ai_summary_by_video.get(int(row.get("video_id") or 0), ""), **row}
+        effective_audio = effective_segment_audio_settings(dict(cfg), int(project_id), effective_row, state=audio_state)
+        user_audio_decision = authoritative_segment_audio_decision(
+            dict(cfg), int(project_id), str(effective_row.get("segment_id") or ""), state=audio_state
+        )
+        item = _effective_segment(
+            effective_row,
+            clip_order.get(int(row.get("video_id") or 0), 0),
+            effective_audio=effective_audio,
+            user_audio_decision=user_audio_decision,
+        )
         if item:
             effective_segments.append(item)
     effective_segments.sort(key=lambda item: (int(item["clip_order"]), int(item["human_override"]["manual_order"] or 999999), item["segment_uuid"]))

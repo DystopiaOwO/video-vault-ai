@@ -111,11 +111,25 @@ def analyze_audio_file(
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise AudioPerceptionError(f"local audio extraction failed: {exc}") from exc
     pcm = bytes(completed.stdout or b"")
-    if completed.returncode != 0 and not pcm:
-        detail = (completed.stderr or b"").decode("utf-8", errors="replace").strip()
+    detail = (completed.stderr or b"").decode("utf-8", errors="replace").strip()
+    if completed.returncode != 0:
         if _is_no_audio_error(detail):
-            return _no_audio_result(video_id, duration_seconds, source_fingerprint, policy)
-        raise AudioPerceptionError(f"local audio extraction failed: {detail or completed.returncode}")
+            return _no_audio_result(video_id, duration_seconds, source_fingerprint, policy, ffmpeg_stderr=detail)
+        if not pcm:
+            raise AudioPerceptionError(f"local audio extraction failed: {detail or completed.returncode}")
+        # A non-zero FFmpeg exit with bytes on stdout is still a failed/partial
+        # decode. Preserve the PCM for evidence, but never call it complete.
+        return analyze_pcm(
+            pcm,
+            sample_rate=int(policy["sample_rate"]),
+            video_id=video_id,
+            duration_seconds=duration_seconds,
+            source_fingerprint=source_fingerprint,
+            visual_segments=visual_segments,
+            policy=policy,
+            decode_status="partial_decode",
+            decode_error=detail or f"ffmpeg exited with {completed.returncode}",
+        )
     return analyze_pcm(
         pcm,
         sample_rate=int(policy["sample_rate"]),
@@ -124,6 +138,7 @@ def analyze_audio_file(
         source_fingerprint=source_fingerprint,
         visual_segments=visual_segments,
         policy=policy,
+        decode_status="succeeded",
     )
 
 
@@ -136,6 +151,8 @@ def analyze_pcm(
     source_fingerprint: Mapping[str, Any] | None = None,
     visual_segments: Sequence[Mapping[str, Any]] | None = None,
     policy: Mapping[str, Any] | None = None,
+    decode_status: str = "succeeded",
+    decode_error: str = "",
 ) -> dict[str, Any]:
     """Analyze signed 16-bit little-endian mono PCM deterministically."""
 
@@ -153,7 +170,11 @@ def analyze_pcm(
     source_duration = float(duration_seconds or 0.0) or raw_duration_seconds
     max_analysis_seconds = float(resolved["max_analysis_seconds"])
     max_samples = max(1, int(round(sample_rate * max_analysis_seconds)))
-    truncated = source_duration > max_analysis_seconds + 1e-6 or len(samples) > max_samples
+    cap_truncated = source_duration > max_analysis_seconds + 1e-6 or len(samples) > max_samples
+    decoded_gap = max(0.0, source_duration - raw_duration_seconds)
+    decode_tolerance = max(0.5, source_duration * 0.02)
+    decode_truncated = source_duration > 0 and decoded_gap > decode_tolerance
+    truncated = cap_truncated or decode_truncated or decode_status != "succeeded"
     samples = samples[:max_samples]
     analyzed_duration = min(raw_duration_seconds, max_analysis_seconds)
     window_size = max(1, int(round(sample_rate * float(resolved["window_seconds"]))))
@@ -212,6 +233,13 @@ def analyze_pcm(
             break
         offset += hop_size
     partial = bool(truncated)
+    reasons: list[str] = []
+    if cap_truncated:
+        reasons.append("audio_analysis_capped_by_max_analysis_seconds")
+    if decode_truncated:
+        reasons.append("decoded_audio_shorter_than_source")
+    if decode_status != "succeeded":
+        reasons.append("ffmpeg_nonzero_exit_with_partial_pcm")
     return {
         "schema_version": AUDIO_PERCEPTION_VERSION,
         "status": "partial" if partial else "succeeded",
@@ -227,10 +255,14 @@ def analyze_pcm(
             "cloud_audio_requested": False,
             "user_decisions_overridden": False,
             "source_duration_seconds": round(source_duration, 6),
+            "decoded_duration_seconds": round(raw_duration_seconds, 6),
             "analyzed_duration_seconds": round(analyzed_duration, 6),
+            "uncovered_duration_seconds": round(max(0.0, source_duration - analyzed_duration), 6),
             "truncated": partial,
             "partial": partial,
-            "needs_review_reason": "audio_analysis_capped_by_max_analysis_seconds" if partial else "",
+            "needs_review_reason": ",".join(reasons),
+            "decode_status": str(decode_status),
+            "ffmpeg_stderr": str(decode_error or ""),
         },
         "summary": {
             "windows_analyzed": len(candidates),
@@ -325,7 +357,14 @@ def _recommendation(event: str) -> str:
     return "keep"
 
 
-def _no_audio_result(video_id: int, duration_seconds: float, source_fingerprint: Mapping[str, Any] | None, policy: Mapping[str, Any]) -> dict[str, Any]:
+def _no_audio_result(
+    video_id: int,
+    duration_seconds: float,
+    source_fingerprint: Mapping[str, Any] | None,
+    policy: Mapping[str, Any],
+    *,
+    ffmpeg_stderr: str = "",
+) -> dict[str, Any]:
     source_duration = round(float(duration_seconds or 0.0), 6)
     return {
         "schema_version": AUDIO_PERCEPTION_VERSION,
@@ -342,10 +381,14 @@ def _no_audio_result(video_id: int, duration_seconds: float, source_fingerprint:
             "cloud_audio_requested": False,
             "user_decisions_overridden": False,
             "source_duration_seconds": source_duration,
+            "decoded_duration_seconds": 0.0,
             "analyzed_duration_seconds": 0.0,
+            "uncovered_duration_seconds": 0.0,
             "truncated": False,
             "partial": False,
             "needs_review_reason": "no_audio_track",
+            "decode_status": "no_audio",
+            "ffmpeg_stderr": str(ffmpeg_stderr or ""),
         },
         "summary": {"windows_analyzed": 0, "voiced_windows": 0, "event_counts": {event: 0 for event in EVENT_TYPES}, "recommendation_counts": {recommendation: 0 for recommendation in sorted(RECOMMENDATIONS)}},
         "candidates": [],

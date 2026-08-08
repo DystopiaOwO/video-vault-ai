@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, type AudioPerceptionCandidate, type Clip, type PerceptionWindowResult } from "../../api";
+import { api, type AudioPerceptionCandidate, type AudioSegmentSettings, type Clip, type PerceptionWindowResult } from "../../api";
 
 type Props = {
   clip: Pick<Clip, "filename" | "perception_run">;
@@ -95,7 +95,9 @@ function AudioEvidence({ item, projectId, projectRevision, setMessage, onSaved }
   const [saving, setSaving] = useState(false);
   const recommendation = item.natural_audio_recommendation || "keep";
   const userDecision = item.user_audio_decision || "";
-  const effectiveDecision = userDecision || recommendation;
+  // A recommendation is not a render decision. Only the persisted audio
+  // state decision may be shown as the current choice.
+  const effectiveDecision = userDecision;
   async function choose(value: string) {
     if (!projectId || !item.segment_uuid) {
       setMessage?.("此音訊候選尚未完成 stable segment 對應，請先重新執行內容感知。 ");
@@ -103,15 +105,16 @@ function AudioEvidence({ item, projectId, projectRevision, setMessage, onSaved }
     }
     setSaving(true);
     try {
-      const result = await api.saveSegmentEvidence(projectId, item.segment_uuid, {
-        user_audio_decision: value,
+      const role = (value === "duck" ? "lower" : value) as AudioSegmentSettings["role"];
+      const result = await api.audioSettings(projectId, {
+        segments: { [item.segment_uuid]: { role } },
       }, projectRevision);
       if (!result.ok) {
         setMessage?.(`音訊決策儲存失敗：${result.error || "儲存未成功"}`);
         return;
       }
       await onSaved?.();
-      setMessage?.("音訊人工決策已儲存；原有片段鎖定狀態保持不變。 ");
+      setMessage?.("音訊人工決策已儲存至 audio state；預覽與輸出會使用相同設定。 ");
     } catch (error) {
       setMessage?.(`音訊決策儲存失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
     } finally {
@@ -123,7 +126,7 @@ function AudioEvidence({ item, projectId, projectRevision, setMessage, onSaved }
     <span>AI 建議：{recommendation} · {userDecision ? `使用者決策：${userDecision}` : "尚未有人工作決"}</span>
     <div className="row" aria-label="人工音訊決策">
       {(["keep", "duck", "mute"] as const).map((value) => <button key={value} type="button" disabled={saving || !item.segment_uuid} onClick={() => void choose(value)}>
-        {value === effectiveDecision ? `目前：${value}` : `改為 ${value}`}
+        {value === effectiveDecision ? `目前：${value}` : `設為 ${value}`}
       </button>)}
     </div>
   </div>;
