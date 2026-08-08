@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, type Clip, type PerceptionWindowResult } from "../../api";
+import { api, type AudioPerceptionCandidate, type AudioSegmentSettings, type Clip, type PerceptionWindowResult } from "../../api";
 
 type Props = {
   clip: Pick<Clip, "filename" | "perception_run">;
@@ -91,11 +91,54 @@ function WindowEvidence({ item, projectId, projectRevision, setMessage, onSaved 
   </details>;
 }
 
+function AudioEvidence({ item, projectId, projectRevision, setMessage, onSaved }: Props & { item: AudioPerceptionCandidate }) {
+  const [saving, setSaving] = useState(false);
+  const recommendation = item.natural_audio_recommendation || "keep";
+  const userDecision = item.user_audio_decision || "";
+  // A recommendation is not a render decision. Only the persisted audio
+  // state decision may be shown as the current choice.
+  const effectiveDecision = userDecision;
+  async function choose(value: string) {
+    if (!projectId || !item.segment_uuid) {
+      setMessage?.("此音訊候選尚未完成 stable segment 對應，請先重新執行內容感知。 ");
+      return;
+    }
+    setSaving(true);
+    try {
+      const role = (value === "duck" ? "lower" : value) as AudioSegmentSettings["role"];
+      const result = await api.audioSettings(projectId, {
+        segments: { [item.segment_uuid]: { role } },
+      }, projectRevision);
+      if (!result.ok) {
+        setMessage?.(`音訊決策儲存失敗：${result.error || "儲存未成功"}`);
+        return;
+      }
+      await onSaved?.();
+      setMessage?.("音訊人工決策已儲存至 audio state；預覽與輸出會使用相同設定。 ");
+    } catch (error) {
+      setMessage?.(`音訊決策儲存失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+  return <div className="multiframe-facts audio-perception-candidate">
+    <span>{timecode(item.start_seconds)} - {timecode(item.end_seconds)} · {item.event || "未判定"} · {Math.round(Number(item.confidence || 0) * 100)}%</span>
+    <span>AI 建議：{recommendation} · {userDecision ? `使用者決策：${userDecision}` : "尚未有人工作決"}</span>
+    <div className="row" aria-label="人工音訊決策">
+      {(["keep", "duck", "mute"] as const).map((value) => <button key={value} type="button" disabled={saving || !item.segment_uuid} onClick={() => void choose(value)}>
+        {value === effectiveDecision ? `目前：${value}` : `設為 ${value}`}
+      </button>)}
+    </div>
+  </div>;
+}
+
 export function MultiFrameEvidencePanel({ clip, projectId, projectRevision, setMessage, onSaved }: Props) {
   const perception = clip.perception_run;
   const results = perception?.current_window_results || [];
   const contract = perception?.multi_frame_contract;
-  if (!perception || (!results.length && !perception.current_window_validation)) return null;
+  const audio = perception?.current_audio_perception;
+  const audioCandidates = audio?.candidates || [];
+  if (!perception || (!results.length && !perception.current_window_validation && !audio)) return null;
 
   return <section className="multiframe-evidence" aria-label={`${clip.filename} 多幀感知證據`}>
     <div className="clip-summary-heading">
@@ -111,6 +154,21 @@ export function MultiFrameEvidencePanel({ clip, projectId, projectRevision, setM
       雲端複判：{perception.current_cloud_review.status === "completed" ? "已完成，仍需人工確認" : "未完成；已保留本地結果並標記待審"}
       {perception.current_cloud_review.error ? `（${String(perception.current_cloud_review.error)}）` : ""}
     </div>}
+    {audio && <section className="multiframe-evidence audio-perception" aria-label={`${clip.filename} 音訊感知證據`}>
+      <div className="clip-summary-heading">
+        <strong>音訊感知證據</strong>
+        <span>{audio.status === "succeeded" ? `${audio.summary?.windows_analyzed || 0} 個音訊視窗` : audio.status || "尚無結果"}</span>
+      </div>
+      <div className="muted">
+        {audio.schema_version || "audio-perception-v1"} · local-only；轉錄與 cloud audio 均未啟用
+        {audio.error ? ` · ${audio.error}` : ""}
+      </div>
+      {audio.audit?.partial && <div role="status" className="muted">
+        僅分析部分音訊：{Number(audio.audit.analyzed_duration_seconds || 0).toFixed(1)} / {Number(audio.audit.source_duration_seconds || 0).toFixed(1)} 秒；需人工複核
+        {audio.audit.needs_review_reason ? `（${audio.audit.needs_review_reason}）` : ""}
+      </div>}
+      {audioCandidates.map((item, index) => <AudioEvidence key={item.audio_window_uuid || `${item.start_seconds}-${index}`} item={item} projectId={projectId} projectRevision={projectRevision} setMessage={setMessage} onSaved={onSaved} clip={clip} />)}
+    </section>}
     {results.map((item) => <WindowEvidence key={item.window_uuid} item={item} projectId={projectId} projectRevision={projectRevision} setMessage={setMessage} onSaved={onSaved} clip={clip} />)}
     <div className="row">
       <a className="buttonlink" href="#workspace-storyboard">前往分鏡審核修改</a>

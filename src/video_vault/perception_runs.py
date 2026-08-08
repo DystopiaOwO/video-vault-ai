@@ -37,6 +37,7 @@ RUN_COLUMNS = {
     "window_manifest_json": "text default '[]'",
     "window_results_json": "text default '[]'",
     "window_validation_json": "text default '{}'",
+    "audio_perception_json": "text default '{}'",
     "cloud_review_json": "text default '{}'",
 }
 
@@ -295,6 +296,7 @@ def analysis_run(db: Path, run_uuid: str) -> dict:
         "window_manifest_json",
         "window_results_json",
         "window_validation_json",
+        "audio_perception_json",
         "cloud_review_json",
     ):
         raw = result.pop(key, "") or ""
@@ -369,6 +371,17 @@ def set_run_window_validation(db: Path, run_uuid: str, validation: dict) -> None
         con.execute(
             "update analysis_runs set window_validation_json=? where run_uuid=?",
             (json.dumps(validation, ensure_ascii=False, sort_keys=True), str(run_uuid)),
+        )
+
+
+def set_run_audio_perception(db: Path, run_uuid: str, perception: dict) -> None:
+    """Persist the versioned local audio audit for one perception run."""
+
+    ensure_perception_schema(db)
+    with connect(db) as con:
+        con.execute(
+            "update analysis_runs set audio_perception_json=? where run_uuid=?",
+            (json.dumps(perception, ensure_ascii=False, sort_keys=True), str(run_uuid)),
         )
 
 
@@ -747,6 +760,7 @@ def perception_states_for_project(db: Path, project_id: int) -> dict[int, dict]:
                 current.window_manifest_json as current_window_manifest_json,
                 current.window_results_json as current_window_results_json,
                 current.window_validation_json as current_window_validation_json,
+                current.audio_perception_json as current_audio_perception_json,
                 current.cloud_review_json as current_cloud_review_json,
                 success.generation as last_success_generation,
                 success.finished_at as last_success_finished_at,
@@ -781,6 +795,8 @@ def perception_states_for_project(db: Path, project_id: int) -> dict[int, dict]:
         data["current_window_results"] = json.loads(raw_window_results) if raw_window_results else []
         raw_window_validation = str(data.pop("current_window_validation_json", "") or "")
         data["current_window_validation"] = json.loads(raw_window_validation) if raw_window_validation else {}
+        raw_audio_perception = str(data.pop("current_audio_perception_json", "") or "")
+        data["current_audio_perception"] = json.loads(raw_audio_perception) if raw_audio_perception else {}
         raw_cloud_review = str(data.pop("current_cloud_review_json", "") or "")
         data["current_cloud_review"] = json.loads(raw_cloud_review) if raw_cloud_review else {}
         data["stale_fallback_available"] = bool(

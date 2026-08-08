@@ -62,4 +62,90 @@ describe("MultiFrameEvidencePanel", () => {
     await waitFor(() => expect(save).toHaveBeenCalledWith(7, "segment_1", expect.objectContaining({ action: "走路" }), 3));
     save.mockRestore();
   });
+
+  it("shows local audio candidates and saves a user decision without resending perception", async () => {
+    const save = vi.spyOn(api, "audioSettings").mockResolvedValue({ ok: true, state: {}, project_revision: 4 });
+    render(<MultiFrameEvidencePanel clip={{
+      filename: "travel.mp4",
+      perception_run: {
+        current_status: "succeeded",
+        current_audio_perception: {
+          schema_version: "audio-perception-v1",
+          status: "succeeded",
+          audit: { local_only: true, transcription_requested: false, cloud_audio_requested: false },
+          summary: { windows_analyzed: 1 },
+          candidates: [{
+            audio_window_uuid: "audio-window-1",
+            segment_uuid: "segment-audio-1",
+            start_seconds: 1,
+            end_seconds: 2,
+            event: "dialogue",
+            confidence: 0.84,
+            natural_audio_recommendation: "keep",
+            user_audio_decision: "duck",
+            decision_source: "human",
+          }],
+        },
+      },
+    }} projectId={7} projectRevision={3} />);
+
+    expect(screen.getByRole("region", { name: "travel.mp4 音訊感知證據" })).toBeTruthy();
+    expect(screen.getByText(/local-only/)).toBeTruthy();
+    expect(screen.getByText(/使用者決策：duck/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "設為 mute" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(7, {
+      segments: { "segment-audio-1": { role: "mute" } },
+    }, 3));
+    save.mockRestore();
+  });
+
+  it("keeps an AI duck recommendation non-authoritative and maps an explicit choice to lower", async () => {
+    const save = vi.spyOn(api, "audioSettings").mockResolvedValue({ ok: true, state: {}, project_revision: 4 });
+    render(<MultiFrameEvidencePanel clip={{
+      filename: "travel.mp4",
+      perception_run: {
+        current_status: "succeeded",
+        current_audio_perception: {
+          status: "succeeded",
+          summary: { windows_analyzed: 1 },
+          candidates: [{
+            audio_window_uuid: "audio-window-2",
+            segment_uuid: "segment-audio-2",
+            natural_audio_recommendation: "duck",
+          }],
+        },
+      },
+    }} projectId={7} projectRevision={3} />);
+
+    expect(screen.getByText(/AI 建議：duck · 尚未有人工作決/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "設為 duck" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(7, {
+      segments: { "segment-audio-2": { role: "lower" } },
+    }, 3));
+    save.mockRestore();
+  });
+
+  it("makes partial long-audio coverage explicit", () => {
+    render(<MultiFrameEvidencePanel clip={{
+      filename: "long-silent-tail.mp4",
+      perception_run: {
+        current_status: "succeeded",
+        current_audio_perception: {
+          schema_version: "audio-perception-v1",
+          status: "partial",
+          audit: {
+            partial: true,
+            truncated: true,
+            source_duration_seconds: 120,
+            analyzed_duration_seconds: 30,
+            needs_review_reason: "audio_analysis_capped_by_max_analysis_seconds",
+          },
+          candidates: [],
+        },
+      },
+    }} />);
+
+    expect(screen.getByText(/僅分析部分音訊：30\.0 \/ 120\.0 秒/)).toBeTruthy();
+    expect(screen.getByText(/需人工複核/)).toBeTruthy();
+  });
 });

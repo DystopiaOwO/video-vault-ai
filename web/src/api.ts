@@ -34,6 +34,32 @@ export type PerceptionWindowResult = {
   };
 };
 
+export type AudioPerceptionCandidate = {
+  audio_window_uuid?: string;
+  segment_uuid?: string;
+  start_seconds?: number;
+  end_seconds?: number;
+  event?: string;
+  confidence?: number;
+  natural_audio_recommendation?: "keep" | "mute" | "duck" | string;
+  user_audio_decision?: string | null;
+  decision_source?: string;
+  audio_state_authoritative?: boolean;
+  features?: Record<string, number | boolean | string>;
+  event_candidates?: Array<{ event?: string; confidence?: number }>;
+};
+
+export type AudioPerceptionAudit = {
+  schema_version?: string;
+  status?: string;
+  provider?: string;
+  model?: string;
+  error?: string;
+  audit?: { local_only?: boolean; transcription_requested?: boolean; cloud_audio_requested?: boolean; user_decisions_overridden?: boolean; source_duration_seconds?: number; decoded_duration_seconds?: number; analyzed_duration_seconds?: number; uncovered_duration_seconds?: number; truncated?: boolean; partial?: boolean; needs_review_reason?: string; decode_status?: string; ffmpeg_stderr?: string };
+  summary?: { windows_analyzed?: number; voiced_windows?: number; event_counts?: Record<string, number>; recommendation_counts?: Record<string, number> };
+  candidates?: AudioPerceptionCandidate[];
+};
+
 export type PerceptionRunState = {
   current_analysis_run_uuid?: string;
   current_status?: string;
@@ -41,6 +67,7 @@ export type PerceptionRunState = {
   current_window_manifest?: Array<{ window_uuid?: string; start_seconds?: number; end_seconds?: number; frames?: Array<{ timestamp_seconds?: number; sample_reasons?: string[] }> }>;
   current_window_results?: PerceptionWindowResult[];
   current_window_validation?: { status?: string; needs_review_reasons?: string[]; checks?: Array<Record<string, unknown>> };
+  current_audio_perception?: AudioPerceptionAudit;
   current_cloud_review?: CloudReviewAudit;
   multi_frame_contract?: Record<string, unknown>;
   [key: string]: unknown;
