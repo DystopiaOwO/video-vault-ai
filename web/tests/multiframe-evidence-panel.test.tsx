@@ -11,6 +11,7 @@ describe("MultiFrameEvidencePanel", () => {
       perception_run: {
         current_status: "succeeded",
         current_window_validation: { status: "pass" },
+        current_cloud_review: { status: "failed", error: "timeout" },
         multi_frame_contract: { provider: "mock", model: "rules" },
         current_window_results: [{
           window_uuid: "window_1",
@@ -35,6 +36,7 @@ describe("MultiFrameEvidencePanel", () => {
     }} />);
 
     expect(screen.getByText("車站入口連續畫面")).toBeTruthy();
+    expect(screen.getByText(/已保留本地結果/)).toBeTruthy();
     expect(screen.getByAltText("車站入口連續畫面 contact sheet")).toBeTruthy();
     expect(screen.getByRole("link", { name: "前往分鏡審核修改" }).getAttribute("href")).toBe("#workspace-storyboard");
     expect(screen.getByRole("link", { name: "查看視窗 JSON" }).getAttribute("href")).toBe("/window.json");

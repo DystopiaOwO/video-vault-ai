@@ -743,3 +743,16 @@ body {
     grid-column: auto;
   }
 }
+ .cloud-review-workspace {
+  border: 1px solid var(--border, #d9dee8);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 12px 0;
+}
+
+.cloud-review-window {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 6px 0;
+}

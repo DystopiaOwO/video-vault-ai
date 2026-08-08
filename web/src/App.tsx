@@ -4,6 +4,7 @@ import { api, type BgmTrack, type Job, type Project, type ProjectDetail } from "
 import { ClipSummaryEditor } from "./components/project/ClipSummaryEditor";
 import { MultiFrameEvidencePanel } from "./components/project/MultiFrameEvidencePanel";
 import { PerceptionSamplingControls } from "./components/project/PerceptionSamplingControls";
+import { CloudReviewWorkspace } from "./components/project/CloudReviewWorkspace";
 import { ProjectLocation } from "./components/project/ProjectLocation";
 import { ProjectWorkflow, projectWorkflowSteps } from "./components/project/ProjectWorkflow";
 import { RenderJobPanel } from "./components/render/RenderJobPanel";
@@ -507,6 +508,13 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
             <button type="button" disabled={projectMutationBusy} onClick={() => void analyze(true)}>全部重跑感知</button>
             <button type="button" disabled={projectMutationBusy || !detail.clips.length} onClick={() => void buildPlan()}>產生故事整理</button>
           </div>
+          <CloudReviewWorkspace
+            projectId={detail.project.id}
+            projectRevision={detail.project_revision}
+            disabled={projectMutationBusy}
+            setMessage={setMessage}
+            refreshProject={refreshCurrentProject}
+          />
           {detail.clips.map((clip) => <div className="item" key={`${detail.project.id}:${clip.clip_id}`}>
             <div className="row">
               <b>{clip.clip_id}</b>

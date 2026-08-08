@@ -67,6 +67,7 @@ ai:
 `adaptive` 會先用本機 FFmpeg 找 scene／motion 候選，再產生可稽核的 sampling manifest；
 舊設定檔若只有 `frame_interval_seconds`，會維持 fixed 模式，不會無聲改變既有取樣結果。
 WebUI 可針對單支素材切換 fixed／adaptive 或較密集取樣，每次重跑都建立新的 perception generation。
+Phase 4 cloud review 維持 local-first：只有低信心、規則衝突或使用者指定的 multi-frame window 能進入 optional review。WebUI 會在送出前顯示 provider、抽幀數、estimated cost 與「不上傳整支影片」privacy contract；clip/project caps 超出時 fail closed。Cloud unavailable、quota 或 timeout 只會保留 local result 並標記 needs-review，不會冒充複判成功。
 
 ## Human-in-the-loop Project Flow
 

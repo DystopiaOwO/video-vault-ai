@@ -26,6 +26,7 @@ from .bgm import import_bgm, list_bgm
 from .color import render_color_preview
 from .color_consistency import ColorReferenceError, analyze_project_color, color_state_for_api, preview_file_path, reference_file_path, render_project_color_previews, set_color_reference, update_color_state
 from .color_pipeline import ColorPipelineError
+from .cloud_review import CloudReviewError, build_review_plan, execute_review_plan
 from .database import add_frame, add_project_bgm, bgm_tracks as db_bgm_tracks, connect, frames as db_frames, init_db, project as db_project, project_bgm_tracks, project_videos, set_project_videos, set_video_status, update_video_summary, upsert_video, videos
 from .ffmpeg_tools import extract_frames, frame_timestamp, metadata
 from .hyperframes import export_hyperframes_project, render_fast_draft
@@ -37,7 +38,7 @@ from .project import build_project_plan, can_project_render, create_project, lis
 from .project_lifecycle import CancellationRequested, CancellationToken, ProjectRevisionConflict, check_base_revision, current_revision, project_commit
 from .job_coordinator import DEFAULT_COORDINATOR, JobState
 from .project_perception import run_project_perception
-from .perception_runs import PerceptionCancelled, analysis_run, ensure_perception_schema, perception_jobs, recover_interrupted_perception_runs
+from .perception_runs import PerceptionCancelled, analysis_run, ensure_perception_schema, perception_jobs, perception_states_for_project, recover_interrupted_perception_runs, set_run_cloud_review
 from .story_calibration import calibration_for_profile, recalculate_calibration, reset_calibration
 from .render_api import RenderAPI
 from .render_job_manager import RenderJobManager
@@ -110,6 +111,119 @@ def _sampling_override(data: dict) -> dict | None:
             raise ValueError("max_frames_per_clip 必須介於 1 和 2000")
         result["max_frames_per_clip"] = maximum
     return result or None
+
+
+def _cloud_review_candidates(cfg: dict, db: Path, project_id: int) -> list[dict]:
+    """Build review candidates from current local runs without exposing paths."""
+
+    states = perception_states_for_project(db, project_id)
+    candidates: list[dict] = []
+    for video in project_videos(db, project_id):
+        video_id = int(video["id"])
+        state = states.get(video_id) or {}
+        run_uuid = str(state.get("current_analysis_run_uuid") or "")
+        if not run_uuid:
+            continue
+        run = analysis_run(db, run_uuid)
+        manifest_by_window = {
+            str(window.get("window_uuid") or ""): window
+            for window in run.get("window_manifest") or []
+            if isinstance(window, dict)
+        }
+        for result in run.get("window_results") or []:
+            if not isinstance(result, dict):
+                continue
+            window_uuid = str(result.get("window_uuid") or "")
+            window = manifest_by_window.get(window_uuid) or {}
+            frame_entries = list(window.get("frames") or [])
+            candidates.append({
+                "project_id": int(project_id),
+                "video_id": video_id,
+                "run_uuid": run_uuid,
+                "window_uuid": window_uuid,
+                "segment_uuid": str(result.get("segment_uuid") or ""),
+                "ordinal": int(result.get("ordinal") or window.get("ordinal") or 0),
+                "start_seconds": float(result.get("start_seconds") or window.get("start_seconds") or 0),
+                "end_seconds": float(result.get("end_seconds") or window.get("end_seconds") or 0),
+                "frame_timestamps": [float(value) for value in result.get("frame_timestamps") or []],
+                "confidence": float(result.get("confidence") or 0),
+                "validation": result.get("validation") if isinstance(result.get("validation"), dict) else {},
+                "frame_paths": [str(frame.get("frame_path") or "") for frame in frame_entries],
+            })
+    return candidates
+
+
+def _cloud_review_selection(data: dict) -> set[str] | None:
+    raw = data.get("window_uuids", data.get("selected_window_ids"))
+    if raw in (None, ""):
+        return None
+    if not isinstance(raw, list):
+        raise ValueError("window_uuids 必須是陣列")
+    return {str(value).strip() for value in raw if str(value).strip()}
+
+
+def _cloud_review_plan(cfg: dict, db: Path, project_id: int, data: dict) -> dict:
+    candidates = _cloud_review_candidates(cfg, db, project_id)
+    public = build_review_plan(candidates, cfg, selected_window_ids=_cloud_review_selection(data))
+    return {"ok": True, "plan": public, "project_revision": current_revision(db, project_id)}
+
+
+def _cloud_review_execute(cfg: dict, db: Path, project_id: int, data: dict) -> dict:
+    base_revision = _base_revision(data)
+    check_base_revision(db, project_id, base_revision)
+    candidates = _cloud_review_candidates(cfg, db, project_id)
+    plan = build_review_plan(candidates, cfg, selected_window_ids=_cloud_review_selection(data))
+    if plan.get("status") != "ready":
+        raise ValueError(f"cloud review plan is not ready: {plan.get('status')}")
+    frame_paths_by_window = {}
+    staging_roots: dict[str, Path] = {}
+    for candidate in candidates:
+        run_uuid = str(candidate.get("run_uuid") or "")
+        raw_staging = str(analysis_run(db, run_uuid).get("staging_path") or "").strip()
+        if not raw_staging:
+            raise ValueError("current perception staging root is unavailable")
+        staging_roots.setdefault(run_uuid, Path(raw_staging).resolve())
+        if candidate["window_uuid"] not in {item["window_uuid"] for item in plan.get("windows") or []}:
+            continue
+        root = staging_roots[run_uuid]
+        paths = []
+        for raw_path in candidate.get("frame_paths") or []:
+            path = Path(raw_path).resolve()
+            if root not in path.parents:
+                raise ValueError("cloud review frame is outside the current perception staging root")
+            paths.append(path)
+        frame_paths_by_window[candidate["window_uuid"]] = paths
+    try:
+        outcome = execute_review_plan(plan, frame_paths_by_window, cfg)
+    except CloudReviewError as exc:
+        outcome = {"contract_version": plan["contract_version"], "status": "failed", "provider": plan.get("provider"), "error": str(exc), "results": [], "completed_count": 0}
+    review_by_run: dict[str, dict] = {}
+    result_by_window = {str(item.get("window_uuid") or ""): item for item in outcome.get("results") or []}
+    for item in plan.get("windows") or []:
+        run_uuid = str(item.get("run_uuid") or "")
+        review = review_by_run.setdefault(run_uuid, {
+            "contract_version": plan["contract_version"],
+            "status": outcome.get("status"),
+            "provider": outcome.get("provider"),
+            "model": outcome.get("model"),
+            "policy": plan.get("policy"),
+            "windows": [],
+            "error": outcome.get("error"),
+        })
+        review["windows"].append({**{key: value for key, value in item.items() if key not in {"source_paths_exposed"}}, "result": result_by_window.get(item["window_uuid"])})
+    with project_commit(db, project_id, base_revision) as commit:
+        for run_uuid, review in review_by_run.items():
+            set_run_cloud_review(db, run_uuid, review)
+        mark_project_needs_review(cfg, db, project_id)
+        commit.record_changed(True)
+    return {
+        "ok": outcome.get("status") == "completed",
+        "code": None if outcome.get("status") == "completed" else "cloud_review_failed",
+        "review_status": outcome.get("status"),
+        "cloud_review": outcome,
+        "project_revision": current_revision(db, project_id),
+        "local_result_preserved": True,
+    }
 
 
 class ProjectRevisionRequired(ValueError):
@@ -691,6 +805,20 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     sampling_override=sampling_override,
                 )
                 self._json({"ok": started, "message": "單支素材感知已開始" if started else "內容感知已在執行中"})
+            elif path == "/api/project/cloud-review/plan":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    self._json(_cloud_review_plan(cfg, db, project_id, data))
+                except (OSError, TypeError, ValueError, CloudReviewError) as exc:
+                    self._json({"ok": False, "code": "cloud_review_plan_invalid", "error": str(exc)})
+            elif path == "/api/project/cloud-review":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    self._json(_cloud_review_execute(cfg, db, project_id, data))
+                except ProjectRevisionConflict:
+                    raise
+                except (OSError, TypeError, ValueError, CloudReviewError) as exc:
+                    self._json({"ok": False, "code": "cloud_review_failed", "error": str(exc), "local_result_preserved": True})
             elif path == "/api/project/clip-summary":
                 project_id = int(data.get("project_id", 0))
                 user_summary = data.get("user_summary", data.get("summary", ""))
