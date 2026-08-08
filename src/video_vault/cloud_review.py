@@ -24,6 +24,8 @@ DEFAULT_CLOUD_REVIEW = {
     "max_calls_per_project": 6,
     "max_frames_per_project": 24,
     "estimated_cost_per_frame_usd": 0.0,
+    "max_estimated_cost_usd_per_clip": 0.12,
+    "max_estimated_cost_usd_per_project": 0.24,
     "timeout_seconds": 60,
 }
 RULE_CONFLICT_REASONS = {
@@ -59,6 +61,55 @@ def cloud_review_config(cfg: Mapping[str, Any]) -> dict:
     for key in ("max_calls_per_clip", "max_frames_per_clip", "max_calls_per_project", "max_frames_per_project"):
         result[key] = max(0, int(result[key]))
     result["estimated_cost_per_frame_usd"] = max(0.0, float(result["estimated_cost_per_frame_usd"]))
+    for key in ("max_estimated_cost_usd_per_clip", "max_estimated_cost_usd_per_project"):
+        result[key] = max(0.0, float(result[key]))
+    result["timeout_seconds"] = max(1.0, float(result["timeout_seconds"]))
+    return result
+
+
+def empty_review_usage() -> dict:
+    return {"calls": 0, "frames": 0, "estimated_cost_usd": 0.0, "by_clip": {}}
+
+
+def normalise_review_usage(value: Mapping[str, Any] | None) -> dict:
+    result = empty_review_usage()
+    if not isinstance(value, Mapping):
+        return result
+    result["calls"] = max(0, int(value.get("calls") or 0))
+    result["frames"] = max(0, int(value.get("frames") or 0))
+    result["estimated_cost_usd"] = max(0.0, float(value.get("estimated_cost_usd") or 0.0))
+    raw_by_clip = value.get("by_clip") or {}
+    if isinstance(raw_by_clip, Mapping):
+        for clip_id, raw in raw_by_clip.items():
+            if not isinstance(raw, Mapping):
+                continue
+            result["by_clip"][str(clip_id)] = {
+                "calls": max(0, int(raw.get("calls") or 0)),
+                "frames": max(0, int(raw.get("frames") or 0)),
+                "estimated_cost_usd": max(0.0, float(raw.get("estimated_cost_usd") or 0.0)),
+            }
+    return result
+
+
+def add_review_usage(left: Mapping[str, Any] | None, right: Mapping[str, Any] | None) -> dict:
+    result = normalise_review_usage(left)
+    increment = normalise_review_usage(right)
+    result["calls"] += increment["calls"]
+    result["frames"] += increment["frames"]
+    result["estimated_cost_usd"] = round(result["estimated_cost_usd"] + increment["estimated_cost_usd"], 6)
+    for clip_id, raw in increment["by_clip"].items():
+        current = result["by_clip"].setdefault(clip_id, {"calls": 0, "frames": 0, "estimated_cost_usd": 0.0})
+        current["calls"] += raw["calls"]
+        current["frames"] += raw["frames"]
+        current["estimated_cost_usd"] = round(current["estimated_cost_usd"] + raw["estimated_cost_usd"], 6)
+    return result
+
+
+def review_usage_from_audits(audits: list[Mapping[str, Any] | None]) -> dict:
+    result = empty_review_usage()
+    for audit in audits:
+        if isinstance(audit, Mapping):
+            result = add_review_usage(result, audit.get("usage") if isinstance(audit.get("usage"), Mapping) else None)
     return result
 
 
@@ -86,6 +137,7 @@ def build_review_plan(
     cfg: Mapping[str, Any],
     *,
     selected_window_ids: set[str] | None = None,
+    usage: Mapping[str, Any] | None = None,
 ) -> dict:
     """Return a public plan without frame paths or source-media identifiers."""
 
@@ -108,6 +160,15 @@ def build_review_plan(
             },
         }
     selected = selected_window_ids
+    current_usage = normalise_review_usage(usage)
+    budget_limits = {
+        "max_calls_per_clip": policy["max_calls_per_clip"],
+        "max_frames_per_clip": policy["max_frames_per_clip"],
+        "max_estimated_cost_usd_per_clip": policy["max_estimated_cost_usd_per_clip"],
+        "max_calls_per_project": policy["max_calls_per_project"],
+        "max_frames_per_project": policy["max_frames_per_project"],
+        "max_estimated_cost_usd_per_project": policy["max_estimated_cost_usd_per_project"],
+    }
     candidates = []
     for source in windows:
         window_uuid = str(source.get("window_uuid") or "")
@@ -115,7 +176,9 @@ def build_review_plan(
             continue
         explicit = selected is not None and window_uuid in selected
         reasons = _window_reasons(source, float(policy["confidence_threshold"]), explicit)
-        if not reasons or (selected is not None and not explicit and "low_confidence" not in reasons and "rule_conflict" not in reasons):
+        if selected is not None and not explicit:
+            continue
+        if not reasons and not explicit:
             continue
         frame_count = len(source.get("frame_timestamps") or source.get("frames") or [])
         candidates.append({
@@ -136,25 +199,41 @@ def build_review_plan(
     candidates.sort(key=lambda item: (item["video_id"], item["ordinal"], item["window_uuid"]))
     accepted = []
     rejected = []
-    calls_by_clip: dict[int, int] = {}
-    frames_by_clip: dict[int, int] = {}
-    total_frames = 0
+    calls_by_clip = {str(clip_id): int(raw.get("calls") or 0) for clip_id, raw in current_usage["by_clip"].items()}
+    frames_by_clip = {str(clip_id): int(raw.get("frames") or 0) for clip_id, raw in current_usage["by_clip"].items()}
+    costs_by_clip = {str(clip_id): float(raw.get("estimated_cost_usd") or 0.0) for clip_id, raw in current_usage["by_clip"].items()}
+    total_calls = current_usage["calls"]
+    total_frames = current_usage["frames"]
+    total_cost = current_usage["estimated_cost_usd"]
     for item in candidates:
-        video_id = item["video_id"]
-        next_calls = calls_by_clip.get(video_id, 0) + 1
-        next_clip_frames = frames_by_clip.get(video_id, 0) + item["frame_count"]
+        clip_id = str(item["video_id"])
+        item_cost = item["frame_count"] * policy["estimated_cost_per_frame_usd"]
+        next_calls = calls_by_clip.get(clip_id, 0) + 1
+        next_clip_frames = frames_by_clip.get(clip_id, 0) + item["frame_count"]
+        next_clip_cost = costs_by_clip.get(clip_id, 0.0) + item_cost
         if next_calls > policy["max_calls_per_clip"] or next_clip_frames > policy["max_frames_per_clip"]:
             item["rejected_reason"] = "clip_budget_exceeded"
             rejected.append(item)
             continue
-        if len(accepted) + 1 > policy["max_calls_per_project"] or total_frames + item["frame_count"] > policy["max_frames_per_project"]:
+        if next_clip_cost > policy["max_estimated_cost_usd_per_clip"]:
+            item["rejected_reason"] = "clip_cost_budget_exceeded"
+            rejected.append(item)
+            continue
+        if total_calls + 1 > policy["max_calls_per_project"] or total_frames + item["frame_count"] > policy["max_frames_per_project"]:
             item["rejected_reason"] = "project_budget_exceeded"
             rejected.append(item)
             continue
+        if total_cost + item_cost > policy["max_estimated_cost_usd_per_project"]:
+            item["rejected_reason"] = "project_cost_budget_exceeded"
+            rejected.append(item)
+            continue
         accepted.append(item)
-        calls_by_clip[video_id] = next_calls
-        frames_by_clip[video_id] = next_clip_frames
+        calls_by_clip[clip_id] = next_calls
+        frames_by_clip[clip_id] = next_clip_frames
+        costs_by_clip[clip_id] = next_clip_cost
+        total_calls += 1
         total_frames += item["frame_count"]
+        total_cost += item_cost
     status = "ready" if accepted else ("budget_exceeded" if rejected else "no_eligible_windows")
     return {
         "contract_version": CLOUD_REVIEW_CONTRACT_VERSION,
@@ -163,9 +242,11 @@ def build_review_plan(
         "policy": policy,
         "windows": accepted,
         "rejected_windows": rejected,
-        "estimated_calls": len(accepted),
-        "estimated_frames": total_frames,
-        "estimated_cost_usd": round(total_frames * policy["estimated_cost_per_frame_usd"], 6),
+        "estimated_calls": total_calls - current_usage["calls"],
+        "estimated_frames": total_frames - current_usage["frames"],
+        "estimated_cost_usd": round(total_cost - current_usage["estimated_cost_usd"], 6),
+        "budget_usage": current_usage,
+        "budget_limits": budget_limits,
         "privacy": {
             "full_video_upload": False,
             "payload": "selected_frames_only",
@@ -198,10 +279,12 @@ class OpenAICloudReviewProvider:
     name = "openai"
 
     def __init__(self, cfg: Mapping[str, Any]):
+        policy = cloud_review_config(cfg)
         cloud = dict(((cfg.get("ai") or {}).get("cloud_review") or {}))
         if not cloud:
             cloud = dict(((cfg.get("ai") or {}).get("cloud") or {}))
         self.model = str(cloud.get("model") or "gpt-4.1-mini")
+        cloud["timeout_seconds"] = policy["timeout_seconds"]
         adapter_cfg = {"ai": {"cloud": cloud}}
         self._provider = CloudProvider(adapter_cfg)
 
@@ -229,6 +312,8 @@ def execute_review_plan(
 ) -> dict:
     """Execute selected frames and fail closed on any provider failure."""
 
+    attempted_window_uuids: list[str] = []
+    policy = cloud_review_config(cfg)
     try:
         provider = cloud_review_provider(cfg)
     except CloudReviewError as exc:
@@ -239,12 +324,17 @@ def execute_review_plan(
             "error": str(exc),
             "results": [],
             "completed_count": 0,
+            "attempted_window_uuids": attempted_window_uuids,
+            "usage": empty_review_usage(),
+            "local_result_preserved": True,
+            "project_needs_review": True,
         }
     results = []
     for item in plan.get("windows") or []:
         window_uuid = str(item.get("window_uuid") or "")
         paths = list(frame_paths_by_window.get(window_uuid) or [])
         timestamps = [float(value) for value in item.get("frame_timestamps") or []]
+        attempted_window_uuids.append(window_uuid)
         try:
             parsed, raw = provider.review_window(paths, timestamps, {
                 "local_confidence": item.get("confidence"),
@@ -270,6 +360,10 @@ def execute_review_plan(
                 "results": results,
                 "completed_count": len(results),
                 "failed_window_uuid": window_uuid,
+                "attempted_window_uuids": attempted_window_uuids,
+                "usage": _attempted_usage(plan, attempted_window_uuids, policy),
+                "local_result_preserved": True,
+                "project_needs_review": True,
             }
     return {
         "contract_version": CLOUD_REVIEW_CONTRACT_VERSION,
@@ -278,7 +372,28 @@ def execute_review_plan(
         "model": provider.model,
         "results": results,
         "completed_count": len(results),
+        "attempted_window_uuids": attempted_window_uuids,
+        "usage": _attempted_usage(plan, attempted_window_uuids, policy),
     }
+
+
+def _attempted_usage(plan: Mapping[str, Any], attempted_window_uuids: list[str], policy: Mapping[str, Any]) -> dict:
+    usage = empty_review_usage()
+    attempted = set(attempted_window_uuids)
+    for item in plan.get("windows") or []:
+        if str(item.get("window_uuid") or "") not in attempted:
+            continue
+        frames = int(item.get("frame_count") or len(item.get("frame_timestamps") or []))
+        clip_id = str(item.get("video_id") or "")
+        cost = frames * float(policy["estimated_cost_per_frame_usd"])
+        usage["calls"] += 1
+        usage["frames"] += frames
+        usage["estimated_cost_usd"] = round(usage["estimated_cost_usd"] + cost, 6)
+        clip = usage["by_clip"].setdefault(clip_id, {"calls": 0, "frames": 0, "estimated_cost_usd": 0.0})
+        clip["calls"] += 1
+        clip["frames"] += frames
+        clip["estimated_cost_usd"] = round(clip["estimated_cost_usd"] + cost, 6)
+    return usage
 
 
 def _scrub_raw(value: Any) -> Any:

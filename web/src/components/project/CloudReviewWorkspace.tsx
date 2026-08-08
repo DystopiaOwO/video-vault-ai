@@ -44,16 +44,30 @@ export function CloudReviewWorkspace({ projectId, projectRevision, disabled, set
   async function send() {
     if (!plan || !selected.length) return;
     setSending(true);
+    let result;
     try {
-      const result = await api.cloudReview(projectId, projectRevision, selected);
-      if (!result.ok) {
-        setMessage(`雲端複判未完成，已保留本地結果：${result.error || "provider unavailable"}`);
-      } else {
-        setMessage(`雲端複判完成：${selected.length} 個區段；仍需人工確認。`);
-      }
-      await refreshProject({ forceFresh: true, throwOnError: true });
+      result = await api.cloudReview(projectId, projectRevision, selected);
     } catch (error) {
       setMessage(`雲端複判未完成，已保留本地結果：${error instanceof Error ? error.message : "未知錯誤"}`);
+      setSending(false);
+      return;
+    }
+    if (!result.ok) {
+      setMessage(`雲端複判未完成，已保留本地結果：${result.error || "provider unavailable"}`);
+      try {
+        await refreshProject({ forceFresh: true, throwOnError: true });
+      } catch {
+        // The API result is authoritative; a stale UI must not turn a failed
+        // review into a retry prompt or trigger another cloud request.
+      }
+      setSending(false);
+      return;
+    }
+    try {
+      await refreshProject({ forceFresh: true, throwOnError: true });
+      setMessage(`雲端複判完成：${selected.length} 個區段；仍需人工確認。`);
+    } catch {
+      setMessage("雲端複判完成，但畫面更新失敗，請重新整理；未自動重送。");
     } finally {
       setSending(false);
     }

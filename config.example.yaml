@@ -39,6 +39,8 @@ perception:
     max_calls_per_project: 6
     max_frames_per_project: 24
     estimated_cost_per_frame_usd: 0.0
+    max_estimated_cost_usd_per_clip: 0.12
+    max_estimated_cost_usd_per_project: 0.24
     timeout_seconds: 60
 
 ai:

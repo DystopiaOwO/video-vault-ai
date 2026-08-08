@@ -26,7 +26,7 @@ from .bgm import import_bgm, list_bgm
 from .color import render_color_preview
 from .color_consistency import ColorReferenceError, analyze_project_color, color_state_for_api, preview_file_path, reference_file_path, render_project_color_previews, set_color_reference, update_color_state
 from .color_pipeline import ColorPipelineError
-from .cloud_review import CloudReviewError, build_review_plan, execute_review_plan
+from .cloud_review import CloudReviewError, add_review_usage, build_review_plan, empty_review_usage, execute_review_plan, review_usage_from_audits
 from .database import add_frame, add_project_bgm, bgm_tracks as db_bgm_tracks, connect, frames as db_frames, init_db, project as db_project, project_bgm_tracks, project_videos, set_project_videos, set_video_status, update_video_summary, upsert_video, videos
 from .ffmpeg_tools import extract_frames, frame_timestamp, metadata
 from .hyperframes import export_hyperframes_project, render_fast_draft
@@ -162,9 +162,23 @@ def _cloud_review_selection(data: dict) -> set[str] | None:
     return {str(value).strip() for value in raw if str(value).strip()}
 
 
+def _cloud_review_usage(db: Path, project_id: int) -> dict:
+    states = perception_states_for_project(db, project_id)
+    return review_usage_from_audits([
+        state.get("current_cloud_review")
+        for state in states.values()
+        if isinstance(state, dict)
+    ])
+
+
 def _cloud_review_plan(cfg: dict, db: Path, project_id: int, data: dict) -> dict:
     candidates = _cloud_review_candidates(cfg, db, project_id)
-    public = build_review_plan(candidates, cfg, selected_window_ids=_cloud_review_selection(data))
+    public = build_review_plan(
+        candidates,
+        cfg,
+        selected_window_ids=_cloud_review_selection(data),
+        usage=_cloud_review_usage(db, project_id),
+    )
     return {"ok": True, "plan": public, "project_revision": current_revision(db, project_id)}
 
 
@@ -172,7 +186,17 @@ def _cloud_review_execute(cfg: dict, db: Path, project_id: int, data: dict) -> d
     base_revision = _base_revision(data)
     check_base_revision(db, project_id, base_revision)
     candidates = _cloud_review_candidates(cfg, db, project_id)
-    plan = build_review_plan(candidates, cfg, selected_window_ids=_cloud_review_selection(data))
+    states = perception_states_for_project(db, project_id)
+    plan = build_review_plan(
+        candidates,
+        cfg,
+        selected_window_ids=_cloud_review_selection(data),
+        usage=review_usage_from_audits([
+            state.get("current_cloud_review")
+            for state in states.values()
+            if isinstance(state, dict)
+        ]),
+    )
     if plan.get("status") != "ready":
         raise ValueError(f"cloud review plan is not ready: {plan.get('status')}")
     frame_paths_by_window = {}
@@ -199,8 +223,26 @@ def _cloud_review_execute(cfg: dict, db: Path, project_id: int, data: dict) -> d
         outcome = {"contract_version": plan["contract_version"], "status": "failed", "provider": plan.get("provider"), "error": str(exc), "results": [], "completed_count": 0}
     review_by_run: dict[str, dict] = {}
     result_by_window = {str(item.get("window_uuid") or ""): item for item in outcome.get("results") or []}
+    attempted = {str(value) for value in outcome.get("attempted_window_uuids") or []}
+    policy = plan.get("policy") or {}
+    increment_by_run: dict[str, dict] = {}
+    for item in plan.get("windows") or []:
+        window_uuid = str(item.get("window_uuid") or "")
+        if window_uuid not in attempted:
+            continue
+        frames = int(item.get("frame_count") or len(item.get("frame_timestamps") or []))
+        cost = frames * float(policy.get("estimated_cost_per_frame_usd") or 0.0)
+        increment = increment_by_run.setdefault(str(item.get("run_uuid") or ""), empty_review_usage())
+        increment["calls"] += 1
+        increment["frames"] += frames
+        increment["estimated_cost_usd"] = round(increment["estimated_cost_usd"] + cost, 6)
+        clip = increment["by_clip"].setdefault(str(item.get("video_id") or ""), {"calls": 0, "frames": 0, "estimated_cost_usd": 0.0})
+        clip["calls"] += 1
+        clip["frames"] += frames
+        clip["estimated_cost_usd"] = round(clip["estimated_cost_usd"] + cost, 6)
     for item in plan.get("windows") or []:
         run_uuid = str(item.get("run_uuid") or "")
+        prior = (states.get(int(item.get("video_id") or 0)) or {}).get("current_cloud_review") or {}
         review = review_by_run.setdefault(run_uuid, {
             "contract_version": plan["contract_version"],
             "status": outcome.get("status"),
@@ -209,6 +251,7 @@ def _cloud_review_execute(cfg: dict, db: Path, project_id: int, data: dict) -> d
             "policy": plan.get("policy"),
             "windows": [],
             "error": outcome.get("error"),
+            "usage": add_review_usage(prior.get("usage") if isinstance(prior, dict) else None, increment_by_run.get(run_uuid)),
         })
         review["windows"].append({**{key: value for key, value in item.items() if key not in {"source_paths_exposed"}}, "result": result_by_window.get(item["window_uuid"])})
     with project_commit(db, project_id, base_revision) as commit:

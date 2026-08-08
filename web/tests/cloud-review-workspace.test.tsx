@@ -60,6 +60,27 @@ describe("CloudReviewWorkspace", () => {
     await waitFor(() => expect(setMessage).toHaveBeenCalledWith(expect.stringContaining("已保留本地結果")));
     expect(review).toHaveBeenCalledWith(1, 4, ["window-1"]);
     expect(refresh).toHaveBeenCalled();
+    expect(review).toHaveBeenCalledTimes(1);
     review.mockRestore();
+  });
+
+  it.each(["refresh rejected", "refresh aborted"]) ("keeps cloud success authoritative when %s", async (caseName) => {
+    vi.spyOn(api, "cloudReviewPlan").mockResolvedValue({ ok: true, plan, project_revision: 4 });
+    const review = vi.spyOn(api, "cloudReview").mockResolvedValue({ ok: true, review_status: "completed", local_result_preserved: true });
+    const refresh = vi.fn(async () => {
+      throw caseName === "refresh aborted" ? new DOMException("aborted", "AbortError") : new Error("refresh failed");
+    });
+    const setMessage = vi.fn();
+    render(<CloudReviewWorkspace projectId={1} projectRevision={4} setMessage={setMessage} refreshProject={refresh} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "檢查可複判區段" }));
+    await waitFor(() => screen.getByRole("button", { name: "送出 1 個區段" }));
+    fireEvent.click(screen.getByRole("button", { name: "送出 1 個區段" }));
+    await waitFor(() => expect(setMessage).toHaveBeenCalledWith(expect.stringContaining("雲端複判完成")));
+
+    expect(setMessage).not.toHaveBeenCalledWith(expect.stringContaining("雲端複判未完成"));
+    expect(setMessage).not.toHaveBeenCalledWith(expect.stringContaining("請重新送出"));
+    expect(review).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 });

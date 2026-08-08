@@ -21,6 +21,7 @@ class CloudProvider:
     def __init__(self, cfg: dict):
         cloud = cfg.get("ai", {}).get("cloud", {})
         self.model = cloud.get("model") or "gpt-4.1-mini"
+        self.timeout_seconds = max(1.0, float(cloud.get("timeout_seconds") or 60))
         self.api_key = os.environ.get(cloud.get("api_key_env", "OPENAI_API_KEY"), "")
 
     def analyze_frame(self, frame_path: Path, timestamp: float, video: dict) -> tuple[dict, dict]:
@@ -105,7 +106,7 @@ class CloudProvider:
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=60) as res:
+        with urllib.request.urlopen(req, timeout=self.timeout_seconds) as res:
             return json.loads(res.read().decode("utf-8"))
 
 

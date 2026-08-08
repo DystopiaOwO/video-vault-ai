@@ -65,7 +65,7 @@ export type CloudReviewWindow = {
 
 export type CloudReviewPlan = {
   contract_version: string;
-  status: "ready" | "no_eligible_windows" | "budget_exceeded" | string;
+  status: "ready" | "disabled" | "no_eligible_windows" | "budget_exceeded" | string;
   provider: string;
   policy: Record<string, unknown>;
   windows: CloudReviewWindow[];
@@ -73,6 +73,8 @@ export type CloudReviewPlan = {
   estimated_calls: number;
   estimated_frames: number;
   estimated_cost_usd: number;
+  budget_usage?: { calls: number; frames: number; estimated_cost_usd: number; by_clip?: Record<string, { calls: number; frames: number; estimated_cost_usd: number }> };
+  budget_limits?: Record<string, number>;
   privacy: { full_video_upload: false; payload: string; source_paths_exposed: false };
 };
 
@@ -83,6 +85,7 @@ export type CloudReviewAudit = {
   model?: string;
   error?: string;
   completed_count?: number;
+  usage?: { calls: number; frames: number; estimated_cost_usd: number; by_clip?: Record<string, { calls: number; frames: number; estimated_cost_usd: number }> };
   windows?: Array<CloudReviewWindow & { result?: Record<string, unknown> | null }>;
   [key: string]: unknown;
 };
