@@ -469,6 +469,9 @@ def _sqlite_fixture_check(repo: Path, mode: str) -> dict[str, Any]:
                 connection.execute("insert into doctor_probe values ('rollback')")
                 connection.rollback()
                 remaining = int(connection.execute("select count(*) from doctor_probe").fetchone()[0])
+                # Release the read transaction explicitly before Windows tries
+                # to remove the temporary SQLite file and directory.
+                connection.commit()
             finally:
                 connection.close()
         cleaned = fixture_root is not None and not fixture_root.exists()
