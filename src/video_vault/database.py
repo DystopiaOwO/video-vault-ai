@@ -126,6 +126,8 @@ create table if not exists projects (
   target_duration_seconds real default 0,
   status text default 'draft',
   project_revision integer not null default 1,
+  current_story_generation_uuid text default '',
+  last_successful_story_generation_uuid text default '',
   created_at text default current_timestamp,
   updated_at text default current_timestamp
 );
@@ -153,6 +155,32 @@ create table if not exists project_bgm (
   bgm_id integer not null,
   primary key(project_id, bgm_id)
 );
+create table if not exists story_generations (
+  id integer primary key,
+  story_generation_uuid text unique not null,
+  project_id integer not null,
+  generation integer not null,
+  status text not null,
+  base_project_revision integer not null,
+  input_hash text not null,
+  input_snapshot_json text not null,
+  provider text not null,
+  model text not null,
+  prompt_version text not null,
+  schema_version integer not null,
+  creator_profile_version integer not null,
+  project_story_profile_version integer not null,
+  raw_response_json text default '{}',
+  normalized_response_json text default '{}',
+  review_state_json text default '{}',
+  validation_json text default '{}',
+  created_at text default current_timestamp,
+  finished_at text,
+  published_revision integer,
+  previous_successful_generation_uuid text default '',
+  error text default ''
+);
+create index if not exists idx_story_generations_project on story_generations(project_id, generation desc, id desc);
 """
 
 IDENTITY_NAMESPACE = uuid5(NAMESPACE_URL, "video-vault-ai/stable-identities/v1")
@@ -177,6 +205,8 @@ def init_db(db: Path) -> None:
                 "platform": "text default 'YouTube'",
                 "target_duration_seconds": "real default 0",
                 "project_revision": "integer not null default 1",
+                "current_story_generation_uuid": "text default ''",
+                "last_successful_story_generation_uuid": "text default ''",
             },
         )
         con.execute("update projects set project_revision=1 where project_revision is null or project_revision < 1")

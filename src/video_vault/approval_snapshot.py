@@ -18,6 +18,7 @@ import uuid
 
 from .audio_state import effective_project_audio_state, resolve_audio_state_bgm
 from .color_consistency import effective_color_settings, load_project_color_state
+from .database import project
 from .project import project_dir
 from .render_manifest import build_render_manifest, manifest_hash, validate_render_manifest
 
@@ -95,6 +96,7 @@ def build_approval_snapshot(
     ):
         raise ApprovalSnapshotError("存在未確認 BGM 授權；請補齊授權證據，或以一次性的明確 acknowledgement 允許繼續")
     color_state = load_project_color_state(dict(cfg), int(project_id))
+    project_row = project(db, int(project_id))
     effective_color = {
         str(item.get("segment_id")): effective_color_settings(color_state, str(item.get("segment_id")))
         for item in manifest.get("segments", [])
@@ -105,6 +107,7 @@ def build_approval_snapshot(
         "contract_version": APPROVAL_CONTRACT_VERSION,
         "project_id": int(project_id),
         "approved_project_revision": int(approved_revision),
+        "story_generation_uuid": str(project_row["current_story_generation_uuid"] or "") if project_row else "",
         "manifest": deepcopy(manifest),
         "manifest_hash": manifest_id,
         "assets": assets,

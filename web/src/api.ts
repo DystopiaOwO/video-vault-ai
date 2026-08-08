@@ -273,6 +273,79 @@ export type ProjectDetail = {
   color: ColorState;
   audio: AudioState;
   storyboard: StoryboardState;
+  story?: StoryDetail;
+};
+
+export type StoryChapter = {
+  chapter_id?: string;
+  order?: number;
+  title?: string;
+  purpose?: string;
+  segment_uuids?: string[];
+  pacing_intent?: string;
+  transition_intent?: string;
+  natural_audio_intent?: string;
+  title_card_suggestion?: string;
+  notes?: string;
+  confidence?: number;
+  needs_review_reasons?: string[];
+  locked?: boolean;
+};
+
+export type StoryGeneration = {
+  story_generation_uuid: string;
+  project_id: number;
+  generation: number;
+  status: string;
+  input_hash?: string;
+  input_snapshot?: { input_hash?: string; schema_version?: number };
+  provider?: string;
+  model?: string;
+  prompt_version?: string;
+  schema_version?: number;
+  creator_profile_version?: number;
+  project_story_profile_version?: number;
+  normalized_response?: { project_summary?: string; chapters?: StoryChapter[]; overall_confidence?: number; needs_review_reasons?: string[]; suppressed_segments?: SuppressedSegment[] };
+  review_state?: { chapters?: StoryChapter[]; project_summary?: string; source?: string; locked?: boolean; suppressed_segments?: SuppressedSegment[] };
+  validation?: Record<string, unknown>;
+  error?: string;
+  cache_hit?: boolean;
+  provider_audit?: ProviderAudit;
+  story_audit?: StoryAudit;
+};
+
+export type SuppressedSegment = { segment_uuid: string; representative_segment_uuid: string; reason?: string };
+export type ProviderAudit = { calls?: number; retries?: number; call_latencies_ms?: number[]; total_latency_ms?: number; strict_schema?: boolean; error?: string };
+export type StoryAudit = {
+  raw?: { provider?: string; model?: string; input_hash?: string; schema_version?: number; provider_audit?: ProviderAudit };
+  normalized?: { schema_version?: number; project_summary_present?: boolean; chapter_count?: number; segment_count?: number; segment_uuids?: string[]; suppressed_count?: number; validation_status?: string };
+  effective?: { source?: string; locked?: boolean; chapter_count?: number; segment_count?: number; segment_uuids?: string[]; suppressed_count?: number };
+};
+export type StoryCalibration = { schema_version?: number; profile_id?: string; status?: string; sample_count?: number; record_count?: number; metrics?: Record<string, number | null>; source?: string };
+
+export type StoryDetail = {
+  settings: {
+    schema_version?: number;
+    profile_id?: string;
+    profile_version?: number;
+    project_intent?: string;
+    itinerary?: string;
+    desired_sequence?: string[];
+    desired_pacing?: string;
+    title_card_preference_override?: string;
+    natural_audio_override?: string;
+    must_keep?: string[];
+    exclude_guidance?: string[];
+  };
+  creator_profile: Record<string, unknown>;
+  story_profile: { profile_id?: string; label?: string; roles?: string[]; rules?: string[] };
+  generations: StoryGeneration[];
+  current_generation?: StoryGeneration;
+  current_story_generation_uuid?: string;
+  last_successful_story_generation_uuid?: string;
+  current_input_hash?: string;
+  current_generation_is_stale?: boolean;
+  calibration?: StoryCalibration;
 };
 
 export type ColorAdjustment = {
@@ -372,8 +445,23 @@ export class ApiError extends Error {
 
 export function formatApiError(error: unknown): string {
   if (error instanceof ApiError && error.status === 409) {
-    const revision = typeof error.payload.project_revision === "number" ? `目前版本 ${error.payload.project_revision}` : "目前版本已更新";
-    return `${revision}，請重新載入後再儲存，未套用這次舊內容。`;
+    const code = error.payload.code;
+    if (code === "stale_creator_profile") {
+      const version = typeof error.payload.profile_version === "number" ? `目前 version ${error.payload.profile_version}` : "目前 version 已更新";
+      return `Creator Profile ${version}，請重新載入後再儲存，未套用這次舊內容。`;
+    }
+    if (code === "stale_story_settings") {
+      const version = typeof error.payload.profile_version === "number" ? `目前 version ${error.payload.profile_version}` : "目前 version 已更新";
+      return `Story Settings ${version}，請重新載入後再儲存，未套用這次舊內容。`;
+    }
+    if (code === "stale_project_revision") {
+      const revision = typeof error.payload.project_revision === "number" ? `目前 project revision ${error.payload.project_revision}` : "目前 project revision 已更新";
+      return `${revision}，請重新載入後再儲存，未套用這次舊內容。`;
+    }
+    if (typeof error.payload.project_revision === "number") {
+      return `目前版本 ${error.payload.project_revision}，請重新載入後再儲存，未套用這次舊內容。`;
+    }
+    return "版本已更新，請重新載入後再儲存，未套用這次舊內容。";
   }
   return error instanceof Error ? error.message : "網路或服務錯誤";
 }
@@ -467,6 +555,21 @@ export const api = {
     json<{ ok: boolean; storyboard?: StoryboardState; error?: string }>("/api/project/storyboard/generate", post({ project_id: projectId, force, base_revision: baseRevision })),
   updateStoryboard: (projectId: number, state: StoryboardState, baseRevision?: number) =>
     json<{ ok: boolean; storyboard?: StoryboardState; render_changed?: boolean; approval_invalidated?: boolean; error?: string }>("/api/project/storyboard", post({ project_id: projectId, state, base_revision: baseRevision })),
+  storySettings: (projectId: number) => json<StoryDetail>(`/api/project/story?project_id=${projectId}`),
+  creatorProfile: () => json<Record<string, unknown>>("/api/creator-profile"),
+  saveCreatorProfile: (profile: Record<string, unknown>, expectedVersion?: number) =>
+    json<{ ok: boolean; creator_profile?: Record<string, unknown>; profile_version?: number; error?: string; code?: string }>("/api/creator-profile", post({ profile, expected_version: expectedVersion })),
+  saveStorySettings: (projectId: number, settings: Record<string, unknown>, baseRevision?: number, expectedVersion?: number) =>
+    json<{ ok: boolean; settings?: StoryDetail["settings"]; profile_version?: number; project_revision?: number; error?: string; code?: string }>("/api/project/story/settings", post({ project_id: projectId, settings, base_revision: baseRevision, expected_version: expectedVersion ?? Number(settings.profile_version || 1) })),
+  generateStory: (projectId: number, force = false, provider?: string, baseRevision?: number) =>
+    json<{ ok: boolean; generation?: StoryGeneration; story?: StoryDetail; error?: string; code?: string }>("/api/project/story/generate", post({ project_id: projectId, force, provider, base_revision: baseRevision })),
+  updateStoryReview: (projectId: number, storyGenerationUuid: string, review: Record<string, unknown>, baseRevision?: number) =>
+    json<{ ok: boolean; generation?: StoryGeneration; error?: string; code?: string }>("/api/project/story/review", post({ project_id: projectId, story_generation_uuid: storyGenerationUuid, review, base_revision: baseRevision })),
+  applyStory: (projectId: number, storyGenerationUuid: string, baseRevision?: number) =>
+    json<{ ok: boolean; storyboard?: StoryboardState; render_changed?: boolean; approval_invalidated?: boolean; generation?: StoryGeneration; error?: string; code?: string }>("/api/project/story/apply", post({ project_id: projectId, story_generation_uuid: storyGenerationUuid, base_revision: baseRevision })),
+  storyCalibration: (projectId: number) => json<StoryCalibration>(`/api/project/story/calibration?project_id=${projectId}`),
+  recalculateStoryCalibration: (projectId: number, profileId?: string) => json<{ ok: boolean; calibration?: StoryCalibration; error?: string }>("/api/project/story/calibration", post({ project_id: projectId, profile_id: profileId, action: "recalculate" })),
+  resetStoryCalibration: (projectId: number, profileId?: string) => json<{ ok: boolean; calibration?: StoryCalibration; error?: string }>("/api/project/story/calibration", post({ project_id: projectId, profile_id: profileId, action: "reset" })),
   storyboardThumbnail: (projectId: number, segmentId: string, ratio = 0.5, force = false) =>
     json<{ ok: boolean; file?: string; url?: string; cache_hit?: boolean; error?: string }>("/api/project/storyboard/thumbnail", post({ project_id: projectId, segment_id: segmentId, ratio, force })),
   storyboardPreview: (projectId: number, options: { mode: "segment" | "transition" | "range"; segmentId?: string; durationSeconds?: number; timelineStartSeconds?: number; storyboardState?: StoryboardState; force?: boolean }) =>

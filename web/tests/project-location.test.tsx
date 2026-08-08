@@ -41,4 +41,11 @@ describe("ProjectLocation", () => {
     expect(screen.getByText("專案 #8")).toBeTruthy();
     expect(screen.queryByRole("button")).toBeNull();
   });
+
+  it("does not crash when the API omits the local folder path", () => {
+    render(<ProjectLocation projectId={9} setMessage={vi.fn()} />);
+
+    expect(screen.getByText("專案 #9")).toBeTruthy();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
 });

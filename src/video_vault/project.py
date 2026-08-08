@@ -322,6 +322,7 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
     from .color_consistency import color_state_for_api, load_project_color_state
     from .audio_state import audio_state_for_api
     from .storyboard import storyboard_for_api
+    from .story_generation import project_story_detail
 
     public_bgm = []
     for bgm_row in project_bgm_tracks(db, project_id):
@@ -365,6 +366,7 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
         "color": color_state_for_api(cfg, project_id, load_project_color_state(cfg, project_id)),
         "audio": audio_state_for_api(cfg, project_id, db),
         "storyboard": storyboard_for_api(cfg, db, project_id),
+        "story": project_story_detail(cfg, db, project_id),
     }
 
 
@@ -914,7 +916,7 @@ def _mark_project_needs_review(cfg: dict, db: Path, project_id: int) -> None:
         review.update({"status": "needs_review", "approved_by_user": False, "updated_at": datetime.now().isoformat(timespec="seconds")})
         for key in (
             "approved_manifest_hash", "approved_plan_id", "approved_project_revision", "approved_at",
-            "approval_snapshot_id", "approval_snapshot_hash", "approval_snapshot_schema_version", "approval_snapshot_path",
+            "approval_snapshot_id", "approval_snapshot_hash", "approval_snapshot_schema_version", "approval_snapshot_path", "story_generation_uuid",
         ):
             review.pop(key, None)
         review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
