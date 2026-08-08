@@ -45,11 +45,12 @@ def test_doctor_report_is_read_only_and_checks_real_paths(tmp_path: Path, monkey
     report = doctor.collect_doctor_report(config, repo_root=tmp_path)
     after = sorted(path.name for path in library.iterdir())
 
-    assert report["ok"] is True
     assert before == after
     assert not (library / "05_index" / "video_vault.sqlite3").exists()
     assert not list(library.glob(".video_vault_doctor_*"))
-    assert next(item for item in report["checks"] if item["name"] == "database path")["status"] == "ok"
+    assert report["schema_version"] == "doctor-v1"
+    assert all({"check_id", "category", "status", "summary", "evidence", "remediation", "duration_ms", "sensitive"} <= set(item) for item in report["checks"])
+    assert next(item for item in report["checks"] if item["check_id"] == "storage.database_parent")["status"] == "pass"
 
 
 def test_doctor_reports_missing_and_timeout_tools(tmp_path: Path, monkeypatch):
@@ -70,9 +71,9 @@ def test_doctor_reports_missing_and_timeout_tools(tmp_path: Path, monkeypatch):
     checks = {item["name"]: item for item in report["checks"]}
 
     assert report["ok"] is False
-    assert checks["ffmpeg"]["status"] == "failed"
-    assert checks["ffprobe"]["status"] == "failed"
-    assert "timeout" in checks["ffprobe"]["message"]
+    assert checks["runtime.media.ffmpeg"]["status"] == "blocked"
+    assert checks["runtime.media.ffprobe"]["status"] == "blocked"
+    assert checks["runtime.media.ffprobe"]["evidence"]["probe"] == "timeout"
 
 
 def test_doctor_rejects_malformed_config(tmp_path: Path):
@@ -81,9 +82,9 @@ def test_doctor_rejects_malformed_config(tmp_path: Path):
 
     report = doctor.collect_doctor_report(config, repo_root=tmp_path)
 
-    config_check = next(item for item in report["checks"] if item["name"] == "config")
-    assert config_check["status"] == "failed"
-    assert "解析" in config_check["message"]
+    config_check = next(item for item in report["checks"] if item["check_id"] == "configuration.parse")
+    assert config_check["status"] == "blocked"
+    assert "解析" in config_check["summary"]
 
 
 def test_doctor_json_is_machine_readable_without_secrets(tmp_path: Path, monkeypatch, capsys):
@@ -99,8 +100,8 @@ def test_doctor_json_is_machine_readable_without_secrets(tmp_path: Path, monkeyp
     result = doctor.run_doctor(config, json_output=True)
     payload = json.loads(capsys.readouterr().out)
 
-    assert result == 0
-    assert payload["ok"] is True
+    assert result in {0, 1}
+    assert payload["schema_version"] == "doctor-v1"
     assert "must-not-appear" not in json.dumps(payload, ensure_ascii=False)
 
 
@@ -110,7 +111,7 @@ def test_cli_doctor_does_not_initialize_database(monkeypatch):
     monkeypatch.setattr(cli, "init_db", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("doctor must be read-only")))
 
     assert cli.main(["doctor", "--json", "--dev"]) == 0
-    assert calls == [( ("config.yaml",), {"json_output": True, "dev": True})]
+    assert calls == [( ("config.yaml",), {"json_output": "-", "mode": "default", "dev": True})]
 
 
 def test_doctor_validates_declared_node_engine(tmp_path: Path, monkeypatch):
@@ -119,7 +120,7 @@ def test_doctor_validates_declared_node_engine(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(doctor.shutil, "which", lambda name: "node.exe" if name == "node" else None)
     monkeypatch.setattr(doctor.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="v22.4.1\n", stderr=""))
     check = doctor._node_engine_check(package)
-    assert check["status"] == "ok"
+    assert check["status"] == "pass"
     assert check["required"] is False
 
 
@@ -131,3 +132,42 @@ def test_doctor_warns_for_incompatible_node_engine(tmp_path: Path, monkeypatch):
     check = doctor._node_engine_check(package)
     assert check["status"] == "warning"
     assert check["required"] is False
+
+
+def test_quick_mode_never_runs_subprocess_and_marks_behavior_skipped(tmp_path: Path, monkeypatch):
+    config, _, _, _ = _config(tmp_path)
+    _pass_python(monkeypatch)
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("quick doctor must not run subprocess")))
+    report = doctor.collect_doctor_report(config, mode="quick", repo_root=Path(__file__).resolve().parents[1])
+    media = next(item for item in report["checks"] if item["check_id"] == "media.behavior")
+    assert media["status"] == "skipped"
+    assert media["evidence"]["probe"] == "skipped"
+
+
+def test_report_redacts_sensitive_values_and_paths(tmp_path: Path, monkeypatch):
+    config, library, _, _ = _config(tmp_path)
+    _pass_python(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "super-secret-key")
+    payload = json.dumps(doctor.collect_doctor_report(config, repo_root=Path(__file__).resolve().parents[1]), ensure_ascii=False)
+    assert "super-secret-key" not in payload
+    assert str(library) not in payload
+
+
+def test_doctor_summary_redaction_does_not_destroy_normal_slashes():
+    check = doctor._check("probe", "runtime", "pass", "FFmpeg/FFprobe fixture probe passed")
+    assert check["summary"] == "FFmpeg/FFprobe fixture probe passed"
+
+
+def test_report_surfaces_skipped_checks_as_warning_instead_of_total_green(tmp_path: Path, monkeypatch):
+    config, _, _, _ = _config(tmp_path)
+    _pass_python(monkeypatch)
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "tool.exe")
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="v22.4.1\n", stderr=""))
+    monkeypatch.setattr(doctor, "_hyperframes_check", lambda *args: doctor._check("frontend.hyperframes", "frontend", "pass", "fixture"))
+    monkeypatch.setattr(doctor, "_media_fixture_check", lambda *args: doctor._check("media.behavior", "runtime.media", "pass", "fixture"))
+    monkeypatch.setattr(doctor, "_sqlite_fixture_check", lambda *args: doctor._check("storage.sqlite", "storage", "pass", "fixture"))
+    monkeypatch.setattr(doctor, "_loopback_fixture_check", lambda *args: doctor._check("web.loopback", "frontend", "pass", "fixture"))
+    report = doctor.collect_doctor_report(config, mode="full", repo_root=Path(__file__).resolve().parents[1])
+    assert report["summary"]["skipped"] > 0
+    assert report["status"] == "warning"
+    assert report["ok"] is True

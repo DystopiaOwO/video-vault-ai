@@ -33,7 +33,10 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("init", "scan", "ingest", "extract-frames", "make-proxy", "index", "analyze", "perceive", "draft-plan", "review-plan", "approve-plan", "reject-plan", "revise-plan", "render-approved", "report", "dry-run"):
         sub.add_parser(name)
     doctor_parser = sub.add_parser("doctor")
-    doctor_parser.add_argument("--json", action="store_true", dest="json_output")
+    doctor_parser.add_argument("--json", nargs="?", const="-", default=False, dest="json_output", metavar="PATH")
+    doctor_mode = doctor_parser.add_mutually_exclusive_group()
+    doctor_mode.add_argument("--quick", action="store_const", const="quick", dest="doctor_mode")
+    doctor_mode.add_argument("--full", action="store_const", const="full", dest="doctor_mode")
     doctor_parser.add_argument("--dev", action="store_true")
     bgm_parser = sub.add_parser("add-bgm")
     bgm_parser.add_argument("file")
@@ -82,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "doctor":
-        return run_doctor(args.config, json_output=args.json_output, dev=args.dev)
+        return run_doctor(args.config, json_output=args.json_output, mode=args.doctor_mode or "default", dev=args.dev)
 
     cfg = load_config(args.config)
     db = db_path(cfg)

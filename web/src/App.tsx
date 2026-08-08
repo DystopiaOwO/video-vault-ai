@@ -24,10 +24,12 @@ import { ColorConsistencyWorkspace } from "./workspaces/color/ColorConsistencyWo
 import { StoryboardWorkspaceController } from "./workspaces/storyboard/StoryboardWorkspaceController";
 import { StorageWorkspace } from "./workspaces/storage/StorageWorkspace";
 import { StoryUnderstandingWorkspace } from "./workspaces/story/StoryUnderstandingWorkspace";
+import { SystemStatusPage } from "./pages/SystemStatusPage";
 import "./project-detail-polish.css";
 
 export function App() {
   if (window.location.pathname === "/bgm") return <BgmPage />;
+  if (window.location.pathname === "/system-status") return <SystemStatusPage />;
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [projectQuery, setProjectQuery] = useState("");
@@ -354,6 +356,7 @@ export function App() {
     <aside>
       <h1>Video Vault AI</h1>
       <nav className="sidebar-links" aria-label="主要導覽">
+        <a className="nav" href="/system-status">系統狀態</a>
         <a className="nav" href="/bgm">BGM 資料庫</a>
         <a className="nav" href="/classic-bgm">舊版 BGM 上傳</a>
         <a className="nav" href="/classic">舊版工作台</a>
