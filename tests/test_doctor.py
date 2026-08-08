@@ -295,7 +295,7 @@ def test_asset_lock_parse_and_optional_asset_contracts(tmp_path: Path):
 
 def test_full_sqlite_fixture_checks_schema_and_cleanup():
     result = doctor._sqlite_fixture_check(Path.cwd(), "full")
-    assert result["status"] == "pass", result
+    assert result["status"] == "pass", result["evidence"]
     assert result["evidence"]["missing_tables"] == []
     assert result["evidence"]["fixture_cleaned_up"] is True
 

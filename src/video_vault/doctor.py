@@ -489,7 +489,7 @@ def _sqlite_fixture_check(repo: Path, mode: str) -> dict[str, Any]:
         valid = remaining == 0 and not missing_tables and cleaned
         return _check("storage.sqlite", "storage", "pass" if valid else "blocked", "isolated SQLite migration/schema/rollback probe passed" if valid else "isolated SQLite migration/schema/rollback probe failed", evidence={"fixture": "isolated", "schema_contract_version": "database-schema-v1", "required_table_count": len(required_tables), "missing_tables": missing_tables, "rollback_clean": remaining == 0, "fixture_cleaned_up": cleaned}, remediation=None if valid else "檢查 SQLite migration schema consistency 與 temporary fixture cleanup。")
     except Exception as exc:
-        return _check("storage.sqlite", "storage", "blocked", "isolated SQLite fixture failed", evidence={"fixture": "isolated", "error_code": type(exc).__name__}, remediation="檢查 Python SQLite runtime 與 migration。")
+        return _check("storage.sqlite", "storage", "blocked", "isolated SQLite fixture failed", evidence={"fixture": "isolated", "error_code": type(exc).__name__, "error_message": _redact_text(exc)}, remediation="檢查 Python SQLite runtime 與 migration。")
 
 
 def _media_fixture_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
