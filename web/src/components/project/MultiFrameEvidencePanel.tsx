@@ -104,15 +104,14 @@ function AudioEvidence({ item, projectId, projectRevision, setMessage, onSaved }
     setSaving(true);
     try {
       const result = await api.saveSegmentEvidence(projectId, item.segment_uuid, {
-        natural_audio_recommendation: value,
-        locked: true,
+        user_audio_decision: value,
       }, projectRevision);
       if (!result.ok) {
         setMessage?.(`音訊決策儲存失敗：${result.error || "儲存未成功"}`);
         return;
       }
       await onSaved?.();
-      setMessage?.("音訊人工決策已儲存；自動重跑不會覆蓋此鎖定。 ");
+      setMessage?.("音訊人工決策已儲存；原有片段鎖定狀態保持不變。 ");
     } catch (error) {
       setMessage?.(`音訊決策儲存失敗：${error instanceof Error ? error.message : "未知錯誤"}`);
     } finally {
@@ -161,6 +160,10 @@ export function MultiFrameEvidencePanel({ clip, projectId, projectRevision, setM
         {audio.schema_version || "audio-perception-v1"} · local-only；轉錄與 cloud audio 均未啟用
         {audio.error ? ` · ${audio.error}` : ""}
       </div>
+      {audio.audit?.partial && <div role="status" className="muted">
+        僅分析部分音訊：{Number(audio.audit.analyzed_duration_seconds || 0).toFixed(1)} / {Number(audio.audit.source_duration_seconds || 0).toFixed(1)} 秒；需人工複核
+        {audio.audit.needs_review_reason ? `（${audio.audit.needs_review_reason}）` : ""}
+      </div>}
       {audioCandidates.map((item, index) => <AudioEvidence key={item.audio_window_uuid || `${item.start_seconds}-${index}`} item={item} projectId={projectId} projectRevision={projectRevision} setMessage={setMessage} onSaved={onSaved} clip={clip} />)}
     </section>}
     {results.map((item) => <WindowEvidence key={item.window_uuid} item={item} projectId={projectId} projectRevision={projectRevision} setMessage={setMessage} onSaved={onSaved} clip={clip} />)}

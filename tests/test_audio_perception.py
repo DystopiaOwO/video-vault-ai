@@ -3,7 +3,10 @@ from __future__ import annotations
 from array import array
 from pathlib import Path
 import math
+import json
+import shutil
 import struct
+import subprocess
 
 import pytest
 
@@ -14,9 +17,9 @@ from video_vault.audio_perception import (
     analyze_pcm,
     audio_policy,
 )
-from video_vault.database import init_db, project_videos, upsert_video
+from video_vault.database import add_analysis, init_db, project_videos, upsert_video
 from video_vault.perception_runs import analysis_run, create_perception_run, set_run_audio_perception
-from video_vault.project import create_project
+from video_vault.project import build_project_plan, create_project, project_detail, update_segment_evidence
 from video_vault.project import _merge_audio_user_decisions
 import video_vault.project_perception as project_perception
 from video_vault.project_perception import run_project_perception
@@ -55,6 +58,11 @@ def test_local_audio_result_is_versioned_and_keeps_recommendation_separate_from_
         "transcription_requested": False,
         "cloud_audio_requested": False,
         "user_decisions_overridden": False,
+        "source_duration_seconds": 2.0,
+        "analyzed_duration_seconds": 2.0,
+        "truncated": False,
+        "partial": False,
+        "needs_review_reason": "",
     }
     assert result["candidates"]
     assert {item["segment_uuid"] for item in result["candidates"]} == {"visual-1"}
@@ -78,6 +86,61 @@ def test_empty_pcm_is_auditable_no_audio_result():
     assert result["status"] == "no_audio"
     assert result["timeline"]["duration_seconds"] == 3.5
     assert result["candidates"] == []
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="requires real ffmpeg")
+def test_real_ffmpeg_no_audio_media_is_auditable_no_audio(tmp_path: Path):
+    ffmpeg = shutil.which("ffmpeg")
+    assert ffmpeg
+    source = tmp_path / "no-audio.mp4"
+    generated = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:r=5",
+            "-t",
+            "1",
+            "-an",
+            "-c:v",
+            "mpeg4",
+            str(source),
+        ],
+        capture_output=True,
+        check=False,
+    )
+    assert generated.returncode == 0, generated.stderr.decode("utf-8", errors="replace")
+    result = analyze_audio_file(
+        source,
+        {"ffmpeg_path": ffmpeg, "perception": {"audio": {"ffmpeg_timeout_seconds": 30}}},
+        video_id=10,
+        duration_seconds=1.0,
+    )
+    assert result["status"] == "no_audio"
+    assert result["audit"]["needs_review_reason"] == "no_audio_track"
+    assert result["candidates"] == []
+
+
+def test_audio_analysis_cap_is_auditable_partial_coverage():
+    result = analyze_pcm(
+        _sine(8000, 4.0),
+        sample_rate=8000,
+        video_id=11,
+        duration_seconds=4.0,
+        policy={"window_seconds": 1.0, "hop_seconds": 1.0, "max_analysis_seconds": 2.0},
+    )
+    assert result["status"] == "partial"
+    assert result["audit"]["source_duration_seconds"] == 4.0
+    assert result["audit"]["analyzed_duration_seconds"] == 2.0
+    assert result["audit"]["truncated"] is True
+    assert result["audit"]["partial"] is True
+    assert result["audit"]["needs_review_reason"] == "audio_analysis_capped_by_max_analysis_seconds"
+    assert max(item["end_seconds"] for item in result["candidates"]) <= 2.0
 
 
 def test_audio_extraction_failure_is_fail_closed(monkeypatch, tmp_path: Path):
@@ -169,3 +232,35 @@ def test_human_audio_decision_is_exposed_as_effective_without_mutating_ai_recomm
     assert candidate["decision_source"] == "human"
     assert merged["current_audio_perception"]["audit"]["user_decisions_overridden"] is True
     assert "user_audio_decision" not in state["current_audio_perception"]["candidates"][0]
+
+
+def test_audio_decision_preserves_global_segment_lock_and_stable_id_reruns(tmp_path: Path):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"source")
+    video_id = upsert_video(db, {"original_path": str(source), "current_path": str(source), "filename": source.name, "category": "travel", "duration_seconds": 10})
+    add_analysis(db, video_id, "mock", "rules", {"segments": [{"start_seconds": 0, "end_seconds": 5, "segment_type": "scene", "title": "scene", "reason": "ok", "tags": [], "score": 1, "suggested_use": "main"}]}, tmp_path / "raw.json")
+    cfg = {"library_root": str(tmp_path)}
+    project_id = create_project(db, "Audio decisions", [video_id], category="travel")
+    build_project_plan(cfg, db, project_id)
+    project_detail(cfg, db, project_id)
+    segment_id = project_detail(cfg, db, project_id)["segments"][0]["segment_id"]
+
+    update_segment_evidence(cfg, db, project_id, segment_id, {"locked": False, "user_audio_decision": "duck"})
+    review_path = tmp_path / "08_projects" / f"project_{project_id}" / "feedback" / "segment_review.json"
+    assert json.loads(review_path.read_text(encoding="utf-8"))[0]["locked"] is False
+    update_segment_evidence(cfg, db, project_id, segment_id, {"user_audio_decision": "mute"})
+    review = json.loads(review_path.read_text(encoding="utf-8"))[0]
+    assert review["locked"] is False
+    assert review["user_audio_decision"] == "mute"
+
+    update_segment_evidence(cfg, db, project_id, segment_id, {"locked": True})
+    update_segment_evidence(cfg, db, project_id, segment_id, {"user_audio_decision": "keep"})
+    review = json.loads(review_path.read_text(encoding="utf-8"))[0]
+    assert review["locked"] is True
+    assert review["user_audio_decision"] == "keep"
+
+    rerun = {"current_audio_perception": {"candidates": [{"segment_uuid": segment_id, "natural_audio_recommendation": "duck"}]}}
+    merged = _merge_audio_user_decisions(rerun, [{"segment_id": segment_id, "user_audio_decision": "keep"}])
+    assert merged["current_audio_perception"]["candidates"][0]["user_audio_decision"] == "keep"

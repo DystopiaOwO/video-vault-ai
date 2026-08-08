@@ -94,9 +94,32 @@ describe("MultiFrameEvidencePanel", () => {
     expect(screen.getByText(/使用者決策：duck/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "改為 mute" }));
     await waitFor(() => expect(save).toHaveBeenCalledWith(7, "segment-audio-1", {
-      natural_audio_recommendation: "mute",
-      locked: true,
+      user_audio_decision: "mute",
     }, 3));
     save.mockRestore();
+  });
+
+  it("makes partial long-audio coverage explicit", () => {
+    render(<MultiFrameEvidencePanel clip={{
+      filename: "long-silent-tail.mp4",
+      perception_run: {
+        current_status: "succeeded",
+        current_audio_perception: {
+          schema_version: "audio-perception-v1",
+          status: "partial",
+          audit: {
+            partial: true,
+            truncated: true,
+            source_duration_seconds: 120,
+            analyzed_duration_seconds: 30,
+            needs_review_reason: "audio_analysis_capped_by_max_analysis_seconds",
+          },
+          candidates: [],
+        },
+      },
+    }} />);
+
+    expect(screen.getByText(/僅分析部分音訊：30\.0 \/ 120\.0 秒/)).toBeTruthy();
+    expect(screen.getByText(/需人工複核/)).toBeTruthy();
   });
 });

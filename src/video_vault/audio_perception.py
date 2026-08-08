@@ -113,7 +113,7 @@ def analyze_audio_file(
     pcm = bytes(completed.stdout or b"")
     if completed.returncode != 0 and not pcm:
         detail = (completed.stderr or b"").decode("utf-8", errors="replace").strip()
-        if "matches no streams" in detail.lower() or "stream map" in detail.lower() and "audio" in detail.lower():
+        if _is_no_audio_error(detail):
             return _no_audio_result(video_id, duration_seconds, source_fingerprint, policy)
         raise AudioPerceptionError(f"local audio extraction failed: {detail or completed.returncode}")
     return analyze_pcm(
@@ -145,9 +145,17 @@ def analyze_pcm(
     resolved.setdefault("window_seconds", 1.0)
     resolved.setdefault("hop_seconds", 0.5)
     resolved.setdefault("vad_threshold_db", -48.0)
+    resolved.setdefault("max_analysis_seconds", 1800.0)
     if not pcm:
         return _no_audio_result(video_id, duration_seconds, source_fingerprint, resolved)
     samples = _pcm_samples(pcm)
+    raw_duration_seconds = len(samples) / max(1, sample_rate)
+    source_duration = float(duration_seconds or 0.0) or raw_duration_seconds
+    max_analysis_seconds = float(resolved["max_analysis_seconds"])
+    max_samples = max(1, int(round(sample_rate * max_analysis_seconds)))
+    truncated = source_duration > max_analysis_seconds + 1e-6 or len(samples) > max_samples
+    samples = samples[:max_samples]
+    analyzed_duration = min(raw_duration_seconds, max_analysis_seconds)
     window_size = max(1, int(round(sample_rate * float(resolved["window_seconds"]))))
     hop_size = max(1, int(round(sample_rate * float(resolved["hop_seconds"]))))
     candidates: list[dict[str, Any]] = []
@@ -203,20 +211,26 @@ def analyze_pcm(
         if offset + window_size >= len(samples):
             break
         offset += hop_size
+    partial = bool(truncated)
     return {
         "schema_version": AUDIO_PERCEPTION_VERSION,
-        "status": "succeeded",
+        "status": "partial" if partial else "succeeded",
         "provider": "local",
         "model": AUDIO_FEATURE_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "source": dict(source_fingerprint or {}),
-        "timeline": {"timebase": "seconds", "start_seconds": 0.0, "duration_seconds": round(len(samples) / sample_rate, 6)},
+        "timeline": {"timebase": "seconds", "start_seconds": 0.0, "duration_seconds": round(analyzed_duration, 6)},
         "policy": dict(resolved),
         "audit": {
             "local_only": True,
             "transcription_requested": False,
             "cloud_audio_requested": False,
             "user_decisions_overridden": False,
+            "source_duration_seconds": round(source_duration, 6),
+            "analyzed_duration_seconds": round(analyzed_duration, 6),
+            "truncated": partial,
+            "partial": partial,
+            "needs_review_reason": "audio_analysis_capped_by_max_analysis_seconds" if partial else "",
         },
         "summary": {
             "windows_analyzed": len(candidates),
@@ -312,6 +326,7 @@ def _recommendation(event: str) -> str:
 
 
 def _no_audio_result(video_id: int, duration_seconds: float, source_fingerprint: Mapping[str, Any] | None, policy: Mapping[str, Any]) -> dict[str, Any]:
+    source_duration = round(float(duration_seconds or 0.0), 6)
     return {
         "schema_version": AUDIO_PERCEPTION_VERSION,
         "status": "no_audio",
@@ -321,10 +336,33 @@ def _no_audio_result(video_id: int, duration_seconds: float, source_fingerprint:
         "source": dict(source_fingerprint or {}),
         "timeline": {"timebase": "seconds", "start_seconds": 0.0, "duration_seconds": round(float(duration_seconds or 0.0), 6)},
         "policy": dict(policy),
-        "audit": {"local_only": True, "transcription_requested": False, "cloud_audio_requested": False, "user_decisions_overridden": False},
+        "audit": {
+            "local_only": True,
+            "transcription_requested": False,
+            "cloud_audio_requested": False,
+            "user_decisions_overridden": False,
+            "source_duration_seconds": source_duration,
+            "analyzed_duration_seconds": 0.0,
+            "truncated": False,
+            "partial": False,
+            "needs_review_reason": "no_audio_track",
+        },
         "summary": {"windows_analyzed": 0, "voiced_windows": 0, "event_counts": {event: 0 for event in EVENT_TYPES}, "recommendation_counts": {recommendation: 0 for recommendation in sorted(RECOMMENDATIONS)}},
         "candidates": [],
     }
+
+
+def _is_no_audio_error(detail: str) -> bool:
+    normalized = " ".join(str(detail or "").lower().split())
+    return any(
+        marker in normalized
+        for marker in (
+            "output file does not contain any stream",
+            "output file #0 does not contain any stream",
+            "matches no streams",
+            "stream map",
+        )
+    ) and ("audio" in normalized or "stream" in normalized)
 
 
 def _bounded_int(value: Any, lower: int, upper: int, field: str) -> int:

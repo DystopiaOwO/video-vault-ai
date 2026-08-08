@@ -444,10 +444,14 @@ def _merge_audio_user_decisions(perception_state: dict, reviews: list[dict]) -> 
         if not isinstance(candidate, dict):
             continue
         review = by_segment.get(str(candidate.get("segment_uuid") or ""))
-        if not review or "natural_audio_recommendation" not in review:
+        if not review or not any(key in review for key in ("user_audio_decision", "natural_audio_recommendation")):
             continue
-        candidate["user_audio_decision"] = str(review.get("natural_audio_recommendation") or "")
-        candidate["decision_source"] = "human"
+        candidate["user_audio_decision"] = str(
+            review.get("user_audio_decision")
+            or review.get("natural_audio_recommendation")
+            or ""
+        )
+        candidate["decision_source"] = str(review.get("user_audio_decision_source") or "human")
         changed = True
     if changed:
         audit["user_decisions_overridden"] = True
@@ -587,6 +591,7 @@ def update_segment_evidence(
         "technical_quality_issues",
         "duplicate_group",
         "natural_audio_recommendation",
+        "user_audio_decision",
         "include",
         "user_notes",
         "locked",
@@ -629,6 +634,10 @@ def update_segment_evidence(
                 if not isinstance(value, list):
                     raise ValueError("technical_quality_issues 必須是陣列")
                 value = [str(item) for item in value]
+            elif key == "user_audio_decision":
+                value = str(value or "").strip().lower()
+                if value not in {"keep", "duck", "mute"}:
+                    raise ValueError("user_audio_decision 必須是 keep、duck 或 mute")
             else:
                 value = str(value or "").strip()
             if target.get(key) != value:
