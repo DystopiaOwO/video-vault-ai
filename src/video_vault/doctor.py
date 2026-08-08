@@ -463,13 +463,17 @@ def _sqlite_fixture_check(repo: Path, mode: str) -> dict[str, Any]:
             connection = sqlite3.connect(db)
             try:
                 required_tables = set(re.findall(r"create\s+table\s+if\s+not\s+exists\s+([A-Za-z_][A-Za-z0-9_]*)", SCHEMA, re.IGNORECASE))
-                present_tables = {str(row[0]) for row in connection.execute("select name from sqlite_master where type='table'").fetchall()}
+                table_cursor = connection.execute("select name from sqlite_master where type='table'")
+                present_tables = {str(row[0]) for row in table_cursor.fetchall()}
+                table_cursor.close()
                 missing_tables = sorted(required_tables - present_tables)
                 connection.execute("create table if not exists doctor_probe (value text)")
                 connection.execute("begin")
                 connection.execute("insert into doctor_probe values ('rollback')")
                 connection.rollback()
-                remaining = int(connection.execute("select count(*) from doctor_probe").fetchone()[0])
+                remaining_cursor = connection.execute("select count(*) from doctor_probe")
+                remaining = int(remaining_cursor.fetchone()[0])
+                remaining_cursor.close()
                 # Release the read transaction explicitly before Windows tries
                 # to remove the temporary SQLite file and directory.
                 connection.commit()
