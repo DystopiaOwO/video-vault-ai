@@ -457,11 +457,11 @@ def _sqlite_fixture_check(repo: Path, mode: str) -> dict[str, Any]:
             fixture_root = Path(raw)
             db = fixture_root / "健檢 fixture" / "doctor.sqlite3"
             db.parent.mkdir(parents=True)
-            from .database import SCHEMA, init_db
+            from .database import SCHEMA
 
-            init_db(db)
             connection = sqlite3.connect(db)
             try:
+                connection.executescript(SCHEMA)
                 required_tables = set(re.findall(r"create\s+table\s+if\s+not\s+exists\s+([A-Za-z_][A-Za-z0-9_]*)", SCHEMA, re.IGNORECASE))
                 table_cursor = connection.execute("select name from sqlite_master where type='table'")
                 present_tables = {str(row[0]) for row in table_cursor.fetchall()}
