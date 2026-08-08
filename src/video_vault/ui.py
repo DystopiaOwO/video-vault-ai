@@ -277,6 +277,7 @@ def _cloud_review_execute(cfg: dict, db: Path, project_id: int, data: dict) -> d
             "windows": [],
             "error": outcome.get("error"),
             "usage": add_review_usage(prior.get("usage") if isinstance(prior, dict) else None, increment_by_run.get(run_uuid)),
+            "ledger_backed": bool((prior.get("ledger_backed") if isinstance(prior, dict) else False) or attempts_by_run.get(run_uuid)),
             "actual_attempt_count": len(attempts_by_run.get(run_uuid) or []),
             "attempts": attempts_by_run.get(run_uuid) or [],
         })

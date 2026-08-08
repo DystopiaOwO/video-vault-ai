@@ -6,7 +6,7 @@ import json
 import os
 import time
 import urllib.request
-from typing import Callable
+from typing import Any, Callable
 
 from ..cloud_review_ledger import CloudReviewBudgetExceeded
 from .frame_analysis import PROMPT_VERSION, TAGS, has_cjk
@@ -31,27 +31,33 @@ class CloudProvider:
         frame_path: Path,
         timestamp: float,
         video: dict,
-        before_external_attempt: Callable[[], None] | None = None,
+        before_external_attempt: Callable[[], Any] | None = None,
+        after_external_attempt: Callable[[Any, str, str], None] | None = None,
     ) -> tuple[dict, dict]:
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is not set")
         body = self._request_body(frame_path, timestamp, video)
         last_error = None
         for attempt in range(3):
+            reservation = None
             try:
-                if before_external_attempt:
-                    before_external_attempt()
+                reservation = before_external_attempt() if before_external_attempt else None
                 raw = self._post(body)
                 parsed = _parse(raw)
                 if not has_cjk(parsed["summary"] + parsed["suggested_use"]):
-                    if before_external_attempt:
-                        before_external_attempt()
+                    if after_external_attempt:
+                        after_external_attempt(reservation, "completed", "")
+                    reservation = before_external_attempt() if before_external_attempt else None
                     raw = self._post(self._request_body(frame_path, timestamp, video, "你剛剛回英文了。請重新輸出同一個 JSON，但 summary 與 suggested_use 必須全部使用繁體中文。"))
                     parsed = _parse(raw)
+                if after_external_attempt:
+                    after_external_attempt(reservation, "completed", "")
                 return parsed, raw
             except CloudReviewBudgetExceeded:
                 raise
             except Exception as exc:
+                if after_external_attempt and reservation is not None:
+                    after_external_attempt(reservation, "failed", str(exc))
                 last_error = exc
                 time.sleep(2 ** attempt)
         raise RuntimeError(f"vision API failed after retries: {last_error}")
@@ -61,21 +67,27 @@ class CloudProvider:
         frame_paths: list[Path],
         timestamps: list[float],
         video: dict,
-        before_external_attempt: Callable[[], None] | None = None,
+        before_external_attempt: Callable[[], Any] | None = None,
+        after_external_attempt: Callable[[Any, str, str], None] | None = None,
     ) -> tuple[dict, dict]:
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is not set")
         body = self._window_request_body(frame_paths, timestamps, video)
         last_error: Exception | None = None
         for attempt in range(3):
+            reservation = None
             try:
-                if before_external_attempt:
-                    before_external_attempt()
+                reservation = before_external_attempt() if before_external_attempt else None
                 raw = self._post(body)
-                return parse_window_response(raw), raw
+                parsed = parse_window_response(raw)
+                if after_external_attempt:
+                    after_external_attempt(reservation, "completed", "")
+                return parsed, raw
             except CloudReviewBudgetExceeded:
                 raise
             except Exception as exc:
+                if after_external_attempt and reservation is not None:
+                    after_external_attempt(reservation, "failed", str(exc))
                 last_error = exc
                 time.sleep(2 ** attempt)
         raise RuntimeError(f"vision multi-frame API failed after retries: {last_error}") from last_error

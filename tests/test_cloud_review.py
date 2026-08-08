@@ -14,6 +14,7 @@ from video_vault.database import init_db, project
 from video_vault.cloud_review_ledger import (
     CloudReviewBudgetExceeded,
     ensure_cloud_review_ledger,
+    finalize_attempt,
     ledger_rows_for_scope,
     reserve_attempt,
     usage_for_scope,
@@ -354,17 +355,97 @@ def test_retry_attempts_are_each_reserved_and_audited_without_breaking_caps(monk
             scope_run_uuids=["run-1"],
         )
 
-    outcome = cloud_review.execute_review_plan(plan, {"window-1": [frame, frame, frame]}, cfg, attempt_reserver=reserve)
+    outcome = cloud_review.execute_review_plan(
+        plan,
+        {"window-1": [frame, frame, frame]},
+        cfg,
+        attempt_reserver=reserve,
+        attempt_finalizer=lambda record, status, error: finalize_attempt(db, record["reservation_uuid"], status, error),
+    )
     assert outcome["status"] == "completed"
     assert len(outcome["attempts"]) == 2
     assert outcome["results"][0]["audit"]["attempt_count"] == 2
+    assert [attempt["status"] for attempt in outcome["attempts"]] == ["failed", "completed"]
     assert outcome["usage"]["calls"] == 2
     assert outcome["usage"]["frames"] == 6
     assert outcome["usage"]["estimated_cost_usd"] == 0.06
-    assert len(ledger_rows_for_scope(db, 7, ["run-1"])) == 2
+    rows = ledger_rows_for_scope(db, 7, ["run-1"])
+    assert len(rows) == 2
+    assert [row["status"] for row in rows] == ["failed", "completed"]
 
     exhausted = build_review_plan([_window("window-2", confidence=0.1)], cfg, usage=usage_for_scope(db, 7, ["run-1"]))
     assert exhausted["status"] == "budget_exceeded"
+
+
+def test_ledger_backed_audit_is_not_seeded_again_after_execution(tmp_path):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    policy = _cfg()["perception"]["cloud_review"]
+    reservation = reserve_attempt(
+        db,
+        project_id=7,
+        video_id=1,
+        run_uuid="run-1",
+        window_uuid="window-1",
+        frame_count=3,
+        estimated_cost_usd=0.03,
+        policy=policy,
+        scope_run_uuids=["run-1"],
+    )
+    persisted_audit = {
+        "ledger_backed": True,
+        "usage": {"calls": 1, "frames": 3, "estimated_cost_usd": 0.03, "by_clip": {"1": {"calls": 1, "frames": 3, "estimated_cost_usd": 0.03}}},
+    }
+    assert usage_for_scope(db, 7, ["run-1"], {"run-1": persisted_audit})["calls"] == 1
+    assert usage_for_scope(db, 7, ["run-1"], {"run-1": persisted_audit})["calls"] == 1
+    assert len(ledger_rows_for_scope(db, 7, ["run-1"])) == 1
+    assert reservation["reservation_uuid"]
+
+
+def test_actual_execution_then_persisted_audit_keeps_next_usage_at_one(tmp_path):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    cfg = _cfg(max_calls_per_clip=1, max_frames_per_clip=3, max_calls_per_project=1, max_frames_per_project=3, max_estimated_cost_usd_per_clip=0.03, max_estimated_cost_usd_per_project=0.03)
+    plan = build_review_plan([_window("window-1", confidence=0.1)], cfg)
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"frame")
+
+    def reserve(item, frame_count):
+        return reserve_attempt(db, project_id=7, video_id=1, run_uuid="run-1", window_uuid=str(item["window_uuid"]), frame_count=frame_count, estimated_cost_usd=0.03, policy=plan["policy"], scope_run_uuids=["run-1"])
+
+    outcome = cloud_review.execute_review_plan(
+        plan,
+        {"window-1": [frame, frame, frame]},
+        cfg,
+        attempt_reserver=reserve,
+        attempt_finalizer=lambda record, status, error: finalize_attempt(db, record["reservation_uuid"], status, error),
+    )
+    assert outcome["status"] == "completed"
+    persisted_audit = {"ledger_backed": True, "usage": outcome["usage"]}
+    usage = usage_for_scope(db, 7, ["run-1"], {"run-1": persisted_audit})
+    assert usage["calls"] == 1
+    assert build_review_plan([_window("window-2", confidence=0.1)], cfg, usage=usage)["status"] == "budget_exceeded"
+
+
+def test_legacy_pre_ledger_audit_seeds_once_and_real_rows_prevent_double_count(tmp_path):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    legacy_audit = {
+        "usage": {"calls": 1, "frames": 3, "estimated_cost_usd": 0.03, "by_clip": {"1": {"calls": 1, "frames": 3, "estimated_cost_usd": 0.03}}},
+    }
+    assert usage_for_scope(db, 7, ["legacy-run"], {"legacy-run": legacy_audit})["calls"] == 1
+    assert usage_for_scope(db, 7, ["legacy-run"], {"legacy-run": legacy_audit})["calls"] == 1
+    assert len(ledger_rows_for_scope(db, 7, ["legacy-run"])) == 1
+
+    policy = _cfg()["perception"]["cloud_review"]
+    reserve_attempt(db, project_id=7, video_id=1, run_uuid="real-run", window_uuid="window-1", frame_count=3, estimated_cost_usd=0.03, policy=policy, scope_run_uuids=["real-run"])
+    reserve_attempt(db, project_id=7, video_id=1, run_uuid="real-run", window_uuid="window-2", frame_count=3, estimated_cost_usd=0.03, policy=policy, scope_run_uuids=["real-run"])
+    ledger_backed_audit = {
+        "ledger_backed": True,
+        "usage": {"calls": 2, "frames": 6, "estimated_cost_usd": 0.06, "by_clip": {"1": {"calls": 2, "frames": 6, "estimated_cost_usd": 0.06}}},
+    }
+    assert usage_for_scope(db, 7, ["real-run"], {"real-run": ledger_backed_audit})["calls"] == 2
+    assert len(ledger_rows_for_scope(db, 7, ["real-run"])) == 2
 
 
 def test_openai_cloud_review_uses_perception_timeout_at_request_layer():

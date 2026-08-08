@@ -88,6 +88,15 @@ def _seed_baselines(
     for run_uuid, audit in baseline_by_run.items():
         if not isinstance(audit, Mapping):
             continue
+        if bool(audit.get("ledger_backed")):
+            continue
+        real_row = con.execute(
+            "select 1 from cloud_review_budget_ledger "
+            "where project_id=? and run_uuid=? and status != 'baseline' limit 1",
+            (int(project_id), str(run_uuid)),
+        ).fetchone()
+        if real_row:
+            continue
         usage = audit.get("usage") if isinstance(audit.get("usage"), Mapping) else {}
         by_clip = usage.get("by_clip") if isinstance(usage, Mapping) else {}
         if not isinstance(by_clip, Mapping):

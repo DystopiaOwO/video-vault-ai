@@ -295,13 +295,15 @@ class OpenAICloudReviewProvider:
         frame_paths: list[Path],
         timestamps: list[float],
         context: Mapping[str, Any],
-        before_external_attempt: Callable[[], None] | None = None,
+        before_external_attempt: Callable[[], Any] | None = None,
+        after_external_attempt: Callable[[Any, str, str], None] | None = None,
     ) -> tuple[dict, dict]:
         parsed, raw = self._provider.analyze_window(
             frame_paths,
             timestamps,
             dict(context),
             before_external_attempt=before_external_attempt,
+            after_external_attempt=after_external_attempt,
         )
         return ({"review_status": "completed", "disposition": "needs_human_confirmation", **parsed}, raw)
 
@@ -372,7 +374,7 @@ def execute_review_plan(
                 "project_needs_review": True,
             }
 
-        def reserve_attempt(frame_count: int) -> None:
+        def reserve_attempt(frame_count: int) -> dict:
             if attempt_reserver is None:
                 record = {
                     "window_uuid": window_uuid,
@@ -388,9 +390,23 @@ def execute_review_plan(
             record.setdefault("attempt_number", len(window_attempts) + 1)
             record.setdefault("frame_count", int(frame_count))
             record.setdefault("estimated_cost_usd", round(int(frame_count) * policy["estimated_cost_per_frame_usd"], 6))
+            record.setdefault("status", "reserved")
+            record.setdefault("error", "")
             window_attempts.append(record)
             attempts.append(record)
             attempted_window_uuids.append(window_uuid)
+            return record
+
+        def finish_attempt(record: Mapping[str, Any] | None, status: str, error: str) -> None:
+            if not isinstance(record, dict):
+                return
+            record["status"] = str(status)
+            record["error"] = str(error)
+            if attempt_finalizer:
+                try:
+                    attempt_finalizer(record, status, error)
+                except Exception:
+                    pass
 
         try:
             if getattr(provider, "supports_attempt_callback", False):
@@ -398,20 +414,21 @@ def execute_review_plan(
                     "local_confidence": item.get("confidence"),
                     "window_uuid": window_uuid,
                     "segment_uuid": item.get("segment_uuid"),
-                }, before_external_attempt=lambda: reserve_attempt(len(paths)))
+                },
+                    before_external_attempt=lambda: reserve_attempt(len(paths)),
+                    after_external_attempt=finish_attempt,
+                )
             else:
-                reserve_attempt(len(paths))
+                record = reserve_attempt(len(paths))
                 parsed, raw = provider.review_window(paths, timestamps, {
                     "local_confidence": item.get("confidence"),
                     "window_uuid": window_uuid,
                     "segment_uuid": item.get("segment_uuid"),
                 })
-            if attempt_finalizer:
-                for record in window_attempts:
-                    try:
-                        attempt_finalizer(record, "completed", "")
-                    except Exception:
-                        pass
+                finish_attempt(record, "completed", "")
+            for record in window_attempts:
+                if record.get("status") == "reserved":
+                    finish_attempt(record, "completed", "")
             results.append({
                 "window_uuid": window_uuid,
                 "segment_uuid": str(item.get("segment_uuid") or ""),
@@ -427,12 +444,9 @@ def execute_review_plan(
                 },
             })
         except CloudReviewBudgetExceeded as exc:
-            if attempt_finalizer:
-                for record in window_attempts:
-                    try:
-                        attempt_finalizer(record, "failed", str(exc))
-                    except Exception:
-                        pass
+            for record in window_attempts:
+                if record.get("status") == "reserved":
+                    finish_attempt(record, "failed", str(exc))
             return {
                 "contract_version": CLOUD_REVIEW_CONTRACT_VERSION,
                 "status": "failed",
@@ -450,12 +464,9 @@ def execute_review_plan(
                 "project_needs_review": True,
             }
         except Exception as exc:  # provider failures must never become success
-            if attempt_finalizer:
-                for record in window_attempts:
-                    try:
-                        attempt_finalizer(record, "failed", str(exc))
-                    except Exception:
-                        pass
+            for record in window_attempts:
+                if record.get("status") == "reserved":
+                    finish_attempt(record, "failed", str(exc))
             return {
                 "contract_version": CLOUD_REVIEW_CONTRACT_VERSION,
                 "status": "failed",
