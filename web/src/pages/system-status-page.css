@@ -21,4 +21,6 @@
 .doctor-check p { margin: 6px 0; }
 .doctor-evidence { margin: 8px 0; padding: 8px; overflow: auto; background: #f5f7f9; border-radius: 5px; color: #465362; font-size: .78rem; white-space: pre-wrap; }
 .doctor-check small { color: #738090; }
+.doctor-check-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.doctor-check-footer button { padding: 4px 8px; font-size: .78rem; }
 @media (max-width: 700px) { .doctor-summary { grid-template-columns: repeat(2, minmax(100px, 1fr)); } }

@@ -25,12 +25,19 @@ export function SystemStatusPage() {
   const [mode, setMode] = useState<"default" | "quick" | "full">("default");
   const [error, setError] = useState("");
 
-  async function run(nextMode: "default" | "quick" | "full" = mode) {
+  async function run(nextMode: "default" | "quick" | "full" = mode, checkId?: string) {
     setLoading(true);
     setError("");
     try {
-      const result = await api.doctor(nextMode);
-      setReport(result);
+      const result = await api.doctor(nextMode, checkId);
+      if (checkId && report) {
+        const checks = report.checks.map((check) => check.check_id === checkId ? result.checks[0] || check : check);
+        const counts = (["pass", "warning", "blocked", "skipped"] as const).reduce((acc, status) => ({ ...acc, [status]: checks.filter((check) => check.status === status).length }), { pass: 0, warning: 0, blocked: 0, skipped: 0 });
+        const status = counts.blocked ? "blocked" : counts.warning || counts.skipped ? "warning" : "pass";
+        setReport({ ...report, generated_at: result.generated_at, status, ok: status !== "blocked", summary: counts, checks });
+      } else {
+        setReport(result);
+      }
       setMode(nextMode);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "系統狀態載入失敗");
@@ -94,7 +101,7 @@ export function SystemStatusPage() {
               <p>{check.summary}</p>
               {Object.keys(check.evidence || {}).length > 0 && <pre className="doctor-evidence">{JSON.stringify(check.evidence, null, 2)}</pre>}
               {check.remediation && <p className="muted">建議：{check.remediation}</p>}
-              <small>{check.duration_ms || 0} ms</small>
+              <div className="doctor-check-footer"><small>{check.duration_ms || 0} ms</small><button type="button" disabled={loading} onClick={() => void run(mode, check.check_id)}>重新檢查</button></div>
             </article>)}
           </div>
         </details>)}

@@ -574,8 +574,9 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json(_project_detail_for_api(cfg, project_detail(cfg, db, int(query.get("id", ["0"])[0]))))
             elif parsed.path == "/api/doctor":
                 mode = str(query.get("mode", ["default"])[0] or "default").lower()
+                check_id = str(query.get("check_id", [""])[0] or "").strip() or None
                 try:
-                    self._json(collect_doctor_report_from_config(cfg, mode=mode, repo_root=Path(__file__).resolve().parents[2]))
+                    self._json(collect_doctor_report_from_config(cfg, mode=mode, check_id=check_id, repo_root=Path(__file__).resolve().parents[2]))
                 except ValueError as exc:
                     self._json({"ok": False, "code": "invalid_doctor_mode", "error": str(exc)}, status=400)
             elif parsed.path == "/api/project/storyboard":

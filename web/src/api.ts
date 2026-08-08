@@ -594,7 +594,7 @@ async function json<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  doctor: (mode: "default" | "quick" | "full" = "default") => json<DoctorReport>(`/api/doctor?mode=${encodeURIComponent(mode)}`),
+  doctor: (mode: "default" | "quick" | "full" = "default", checkId?: string) => json<DoctorReport>(`/api/doctor?mode=${encodeURIComponent(mode)}${checkId ? `&check_id=${encodeURIComponent(checkId)}` : ""}`),
   projects: () => json<Project[]>("/api/projects"),
   project: (id: number, signal?: AbortSignal) => json<ProjectDetail>(`/api/project?id=${id}`, { signal }),
   jobs: (projectId: number, signal?: AbortSignal, sinceRevision?: number) => json<Job[] | JobsSnapshot>(`/api/jobs?project_id=${projectId}&meta=1${sinceRevision === undefined ? "" : `&since_revision=${sinceRevision}`}`, { signal }).then((result) => Array.isArray(result) ? { jobs: result } : result),

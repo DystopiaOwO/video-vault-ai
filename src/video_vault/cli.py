@@ -37,6 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     doctor_mode = doctor_parser.add_mutually_exclusive_group()
     doctor_mode.add_argument("--quick", action="store_const", const="quick", dest="doctor_mode")
     doctor_mode.add_argument("--full", action="store_const", const="full", dest="doctor_mode")
+    doctor_parser.add_argument("--check", dest="doctor_check", default=None, help="只重跑指定 check_id")
     doctor_parser.add_argument("--dev", action="store_true")
     bgm_parser = sub.add_parser("add-bgm")
     bgm_parser.add_argument("file")
@@ -85,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "doctor":
-        return run_doctor(args.config, json_output=args.json_output, mode=args.doctor_mode or "default", dev=args.dev)
+        return run_doctor(args.config, json_output=args.json_output, mode=args.doctor_mode or "default", dev=args.dev, check_id=args.doctor_check)
 
     cfg = load_config(args.config)
     db = db_path(cfg)

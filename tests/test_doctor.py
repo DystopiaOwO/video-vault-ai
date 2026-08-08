@@ -1,6 +1,9 @@
 import json
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
+
+import pytest
 
 import video_vault.cli as cli
 import video_vault.doctor as doctor
@@ -111,7 +114,7 @@ def test_cli_doctor_does_not_initialize_database(monkeypatch):
     monkeypatch.setattr(cli, "init_db", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("doctor must be read-only")))
 
     assert cli.main(["doctor", "--json", "--dev"]) == 0
-    assert calls == [( ("config.yaml",), {"json_output": "-", "mode": "default", "dev": True})]
+    assert calls == [( ("config.yaml",), {"json_output": "-", "mode": "default", "dev": True, "check_id": None})]
 
 
 def test_doctor_validates_declared_node_engine(tmp_path: Path, monkeypatch):
@@ -167,7 +170,138 @@ def test_report_surfaces_skipped_checks_as_warning_instead_of_total_green(tmp_pa
     monkeypatch.setattr(doctor, "_media_fixture_check", lambda *args: doctor._check("media.behavior", "runtime.media", "pass", "fixture"))
     monkeypatch.setattr(doctor, "_sqlite_fixture_check", lambda *args: doctor._check("storage.sqlite", "storage", "pass", "fixture"))
     monkeypatch.setattr(doctor, "_loopback_fixture_check", lambda *args: doctor._check("web.loopback", "frontend", "pass", "fixture"))
+    monkeypatch.setattr(doctor, "_library_layout_checks", lambda *args: [doctor._check("storage.library_root", "storage", "pass", "fixture")])
     report = doctor.collect_doctor_report(config, mode="full", repo_root=Path(__file__).resolve().parents[1])
     assert report["summary"]["skipped"] > 0
     assert report["status"] == "warning"
     assert report["ok"] is True
+
+
+def test_check_recursively_redacts_nested_evidence_and_url_credentials():
+    check = doctor._check(
+        "sensitive.probe",
+        "provider",
+        "blocked",
+        "probe",
+        evidence={
+            "nested": {
+                "api_key": "sk-secret-value",
+                "path": r"C:\素材\旅遊片段.mp4",
+                "items": ["Bearer secret-token", "https://user:password@example.test/models"],
+            },
+            "safe": {"api_key_present": True, "count": 2},
+        },
+    )
+    encoded = json.dumps(check, ensure_ascii=False)
+    assert "sk-secret-value" not in encoded
+    assert "旅遊片段.mp4" not in encoded
+    assert "password@example.test" not in encoded
+    assert check["evidence"]["nested"]["api_key"] == "<redacted>"
+    assert check["evidence"]["safe"]["api_key_present"] is True
+
+
+def test_full_media_probe_verifies_unicode_h264_aac_long_path_and_cleanup():
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg/FFprobe unavailable on this host")
+    result = doctor._media_fixture_check({"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe"}, "full")
+    assert result["status"] == "pass"
+    assert result["evidence"]["unicode_path"] is True
+    assert result["evidence"]["unicode_verified"] is True
+    assert result["evidence"]["codec_h264"] is True
+    assert result["evidence"]["codec_aac"] is True
+    assert result["evidence"]["long_path_attempted"] is True
+    assert result["evidence"]["long_path_verified"] is True
+    assert result["evidence"]["fixture_cleaned_up"] is True
+
+
+def test_hyperframes_full_probe_is_offline_no_install_and_missing_modules_blocks(tmp_path: Path, monkeypatch):
+    runtime = tmp_path / "tools" / "hyperframes"
+    runtime.mkdir(parents=True)
+    (runtime / "package.json").write_text(json.dumps({"dependencies": {"hyperframes": "0.7.76"}}), encoding="utf-8")
+    (runtime / "package-lock.json").write_text(json.dumps({"packages": {"": {}, "node_modules/hyperframes": {"version": "0.7.76"}}}), encoding="utf-8")
+    missing = doctor._hyperframes_check(tmp_path, "full")
+    assert missing["status"] == "blocked"
+    (runtime / "node_modules").mkdir()
+    calls = []
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "node" if name.startswith("node") else "npx")
+    monkeypatch.setattr(doctor.subprocess, "run", lambda command, **kwargs: calls.append((command, kwargs)) or SimpleNamespace(returncode=0, stdout="ok", stderr=""))
+    result = doctor._hyperframes_check(tmp_path, "full")
+    assert result["status"] == "pass"
+    assert result["evidence"]["offline"] is True
+    assert result["evidence"]["no_install"] is True
+    assert result["evidence"]["fixture_cleaned_up"] is True
+    assert "--no-install" in calls[0][0]
+    assert "render" in calls[0][0]
+
+
+def test_media_probe_reports_encode_failure_and_cleans_fixture(monkeypatch):
+    monkeypatch.setattr(doctor, "_resolve_executable", lambda value: str(value or "ffmpeg"))
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="encoder unavailable"))
+    result = doctor._media_fixture_check({"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe"}, "full")
+    assert result["status"] == "blocked"
+    assert result["evidence"]["ffmpeg_error"] == "encode_failed"
+    assert result["evidence"]["fixture_cleaned_up"] is True
+
+
+class _JsonResponse:
+    status = 200
+
+    def __init__(self, payload):
+        self.payload = json.dumps(payload).encode("utf-8")
+
+    def read(self):
+        return self.payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def test_provider_matrix_model_missing_capability_missing_and_story_contract(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(doctor, "urlopen", lambda *args, **kwargs: _JsonResponse({"data": [{"id": "other-model"}]}))
+    cfg = {"ai": {"provider": "local", "local": {"base_url": "http://127.0.0.1:1234/v1", "model": "missing-model"}}, "story": {"provider": "local_text", "base_url": "http://127.0.0.1:1234/v1", "model": "missing-story-model"}}
+    model = doctor._provider_model_check(cfg, "full")
+    caps = doctor._provider_capability_check(cfg, "full")
+    story = doctor._story_provider_check(cfg, "full")
+    assert model["status"] == "blocked"
+    assert caps["status"] == "blocked"
+    assert story["status"] == "blocked"
+
+
+def test_cloud_contract_never_calls_network_and_reports_key_presence(monkeypatch):
+    monkeypatch.setenv("VID6_CLOUD_KEY", "secret-value")
+    monkeypatch.setattr(doctor, "urlopen", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cloud doctor must not call network")))
+    cfg = {"ai": {"cloud": {"model": "test-model", "api_key_env": "VID6_CLOUD_KEY"}}, "perception": {"cloud_review": {"enabled": True, "provider": "mock", "timeout_seconds": 30}}}
+    result = doctor._cloud_config_check(cfg)
+    assert result["status"] == "pass"
+    assert result["evidence"]["api_key_present"] is True
+    assert result["evidence"]["network_request"] is False
+
+
+def test_asset_lock_parse_and_optional_asset_contracts(tmp_path: Path):
+    (tmp_path / "web").mkdir()
+    (tmp_path / "tools" / "hyperframes").mkdir(parents=True)
+    (tmp_path / "web" / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "web" / "package-lock.json").write_text("not-json", encoding="utf-8")
+    (tmp_path / "tools" / "hyperframes" / "package-lock.json").write_text("{}", encoding="utf-8")
+    checks = {item["check_id"]: item for item in doctor._asset_checks(tmp_path, {})}
+    assert checks["configuration.web_lockfile_parse"]["status"] == "blocked"
+    assert checks["asset.lut"]["status"] == "skipped"
+    assert checks["asset.bgm"]["status"] == "skipped"
+    assert checks["asset.retention"]["status"] == "skipped"
+
+
+def test_full_sqlite_fixture_checks_schema_and_cleanup():
+    result = doctor._sqlite_fixture_check(Path.cwd(), "full")
+    assert result["status"] == "pass"
+    assert result["evidence"]["missing_tables"] == []
+    assert result["evidence"]["fixture_cleaned_up"] is True
+
+
+def test_single_check_does_not_run_unrequested_expensive_probe(tmp_path: Path, monkeypatch):
+    config, _, _, _ = _config(tmp_path)
+    monkeypatch.setattr(doctor, "_media_fixture_check", lambda *args: (_ for _ in ()).throw(AssertionError("media probe must not run")))
+    report = doctor.collect_doctor_report(config, mode="full", check_id="provider.active", repo_root=Path(__file__).resolve().parents[1])
+    assert report["checks"][0]["check_id"] == "provider.active"
