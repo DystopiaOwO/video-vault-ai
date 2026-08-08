@@ -91,9 +91,8 @@ function detail(overrides: Partial<ProjectDetail> = {}): ProjectDetail {
   };
 }
 
-function renderWorkspace(input = detail()) {
+function renderWorkspace(input = detail(), refreshProject = vi.fn(async () => [])) {
   const setMessage = vi.fn();
-  const refreshProject = vi.fn(async () => []);
   const mutationControls = createProjectMutationControls(new ProjectMutationCoordinator());
   const merged = { ...detail(), ...input, story: input.story || detail().story };
   const view = render(<StoryUnderstandingWorkspace detail={merged} setMessage={setMessage} refreshProject={refreshProject} mutationControls={mutationControls} />);
@@ -165,6 +164,23 @@ describe("StoryUnderstandingWorkspace", () => {
     expect(screen.getByLabelText("duplicate suppression evidence").textContent).toContain("segment-duplicate → representative segment-a");
     expect(screen.getByLabelText("raw normalized effective audit").textContent).toContain("Raw provider audit");
     expect(screen.getByLabelText("章節 1 視覺片段 cards").querySelector('[data-segment-card="segment-a"]')).toBeTruthy();
+  });
+
+  it.each([
+    ["refresh rejection", new Error("refresh failed")],
+    ["refresh abort", Object.assign(new Error("signal is aborted without reason"), { name: "AbortError" })],
+  ])("keeps Apply success semantics when %s follows a successful API call", async (_label, refreshError) => {
+    const apply = vi.spyOn(api, "applyStory").mockResolvedValue({ ok: true, approval_invalidated: true });
+    const refreshProject = vi.fn(async () => { throw refreshError; });
+    const { setMessage } = renderWorkspace(detail(), refreshProject);
+
+    fireEvent.click(screen.getByRole("button", { name: "套用到既有分鏡" }));
+
+    await waitFor(() => expect(apply).toHaveBeenCalledWith(1, "gen-1", 7));
+    await waitFor(() => expect(setMessage).toHaveBeenLastCalledWith(expect.stringContaining("故事已套用到分鏡")));
+    expect(setMessage).not.toHaveBeenLastCalledWith(expect.stringContaining("套用分鏡失敗"));
+    expect(setMessage).toHaveBeenLastCalledWith(expect.stringContaining("請重新整理"));
+    expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true });
   });
 
   it("marks story lock dirty and preserves it across polling until review save", async () => {

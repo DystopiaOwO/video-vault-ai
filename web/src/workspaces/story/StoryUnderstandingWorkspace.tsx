@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type ProjectDetail, type StoryChapter, type StoryGeneration } from "../../api";
 import { formatApiError } from "../../api";
-import type { ProjectMutationControls } from "../../projectMutation";
+import { refreshFailureMessage, type ProjectMutationControls } from "../../projectMutation";
 import "./story-understanding.css";
 
 type Props = {
@@ -132,8 +132,13 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
     try {
       const result = await api.applyStory(detail.project.id, generation.story_generation_uuid, detail.project_revision);
       if (!result.ok) throw new Error(result.error || "套用分鏡失敗");
-      await refreshProject({ forceFresh: true });
-      setMessage(result.approval_invalidated ? "故事已套用到分鏡；輸出內容變更，請重新核准。" : "故事已套用到分鏡。");
+      const successMessage = result.approval_invalidated ? "故事已套用到分鏡；輸出內容變更，請重新核准。" : "故事已套用到分鏡。";
+      try {
+        await refreshProject({ forceFresh: true });
+        setMessage(successMessage);
+      } catch (refreshError) {
+        setMessage(`${refreshFailureMessage(successMessage, refreshError)}，請重新整理`);
+      }
     } catch (error) {
       setMessage(`套用分鏡失敗：${formatApiError(error)}`);
     } finally {
