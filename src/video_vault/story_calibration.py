@@ -11,10 +11,17 @@ from typing import Any, Iterable, Mapping
 from .approval_snapshot import load_approval_snapshot
 from .database import connect
 from .project import list_projects, project_dir
-from .story_profiles import load_project_story_settings
+from .story_profiles import STORY_PROFILE_IDS, load_project_story_settings
 
 
 CALIBRATION_SCHEMA_VERSION = 1
+
+
+def _validated_profile_id(profile_id: str) -> str:
+    key = str(profile_id or "").strip()
+    if key not in STORY_PROFILE_IDS:
+        raise ValueError(f"未知 Story Profile：{key}")
+    return key
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -25,10 +32,12 @@ def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
 
 
 def calibration_path(cfg: Mapping[str, Any], profile_id: str) -> Path:
-    return Path(str(cfg["library_root"])) / "08_projects" / "calibration" / f"{str(profile_id)}.json"
+    key = _validated_profile_id(profile_id)
+    return Path(str(cfg["library_root"])) / "08_projects" / "calibration" / f"{key}.json"
 
 
 def compute_calibration(records: Iterable[Mapping[str, Any]], profile_id: str) -> dict[str, Any]:
+    profile_id = _validated_profile_id(profile_id)
     approved = [dict(item) for item in records if bool(item.get("approved")) and str(item.get("story_profile") or profile_id) == profile_id]
     if not approved:
         return {"schema_version": CALIBRATION_SCHEMA_VERSION, "profile_id": profile_id, "status": "insufficient_data", "sample_count": 0, "metrics": {}}
@@ -108,6 +117,7 @@ def _generation_for_project(db: Path, project_id: int, generation_uuid: str) -> 
 
 
 def collect_approved_calibration_records(cfg: Mapping[str, Any], db: Path, profile_id: str) -> list[dict[str, Any]]:
+    profile_id = _validated_profile_id(profile_id)
     records: list[dict[str, Any]] = []
     for project in list_projects(db):
         project_id = int(project.get("id") or 0)
@@ -131,7 +141,10 @@ def collect_approved_calibration_records(cfg: Mapping[str, Any], db: Path, profi
         manifest = approval.get("manifest") or {}
         manifest_segments = [item for item in manifest.get("segments") or [] if isinstance(item, Mapping)]
         durations = [float(item.get("duration_seconds") or item.get("timeline_duration_seconds") or 0) for item in manifest_segments]
-        story = _generation_for_project(db, project_id, str(project.get("current_story_generation_uuid") or ""))
+        approved_generation_uuid = str(approval.get("story_generation_uuid") or "")
+        if not approved_generation_uuid:
+            continue
+        story = _generation_for_project(db, project_id, approved_generation_uuid)
         effective_story = story.get("review_state") or story.get("normalized_response") or {}
         chapters = [item for item in effective_story.get("chapters") or [] if isinstance(item, Mapping)]
         duration_by_id = {str(item.get("segment_id") or ""): float(item.get("duration_seconds") or item.get("timeline_duration_seconds") or 0) for item in manifest_segments}

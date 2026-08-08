@@ -961,15 +961,27 @@ def apply_story_generation_to_storyboard(
     if existing is None:
         raise ValueError("尚未建立 storyboard，請先到分鏡審核建立分鏡後再套用故事")
     state = _storyboard_state_from_generation(generation, existing)
-    storyboard_file = Path(str(project_dir(dict(cfg), int(project_id)) / "storyboard.json"))
-    previous_bytes = storyboard_file.read_bytes() if storyboard_file.is_file() else None
+    folder = project_dir(dict(cfg), int(project_id))
+    rollback_files = {
+        folder / name: (folder / name).read_bytes() if (folder / name).is_file() else None
+        for name in ("storyboard.json", "review_status.json", "project_plan.json")
+    }
+    previous_project = project(db, int(project_id))
     try:
         result = update_storyboard(dict(cfg), db, int(project_id), state, return_result=True, base_revision=base_revision)
     except Exception:
-        if previous_bytes is not None:
-            storyboard_file.write_bytes(previous_bytes)
-        else:
-            storyboard_file.unlink(missing_ok=True)
+        for path, content in rollback_files.items():
+            if content is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+        if previous_project:
+            with connect(db) as con:
+                con.execute(
+                    "update projects set status=?, project_revision=?, updated_at=? where id=?",
+                    (previous_project["status"], previous_project["project_revision"], previous_project["updated_at"], int(project_id)),
+                )
         raise
     return {"generation": generation, "storyboard": result["state"], "render_changed": result["render_changed"], "approval_invalidated": result["approval_invalidated"]}
 

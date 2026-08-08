@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import threading
 from typing import Any, Mapping
 
 from .project_lifecycle import project_commit
@@ -15,6 +16,7 @@ CREATOR_PROFILE_SCHEMA_VERSION = 1
 STORY_PROFILE_SCHEMA_VERSION = 1
 STORY_PROFILE_IDS = ("travel_diary", "coffee_matcha_diary", "roasting_diary", "general_diary")
 _TITLE_CARD_DENSITIES = {"low", "medium", "high"}
+_CREATOR_PROFILE_LOCK = threading.RLock()
 
 
 class CreatorProfileRevisionConflict(RuntimeError):
@@ -135,6 +137,16 @@ def load_creator_profile(cfg: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def save_creator_profile(
+    cfg: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    *,
+    expected_version: int | None = None,
+) -> dict[str, Any]:
+    with _CREATOR_PROFILE_LOCK:
+        return _save_creator_profile_unlocked(cfg, profile, expected_version=expected_version)
+
+
+def _save_creator_profile_unlocked(
     cfg: Mapping[str, Any],
     profile: Mapping[str, Any],
     *,

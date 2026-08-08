@@ -49,7 +49,9 @@ def _effective_segment(row: Mapping[str, Any], clip_order: int) -> dict[str, Any
         return {}
     user_summary = str(row.get("user_summary") or "").strip()
     ai_visual_summary = str(row.get("ai_visual_summary") or row.get("visual_summary") or "").strip()
-    context = story_context(user_summary, ai_visual_summary, str(row.get("activity") or row.get("group") or ""))
+    tags = [str(tag).strip() for tag in (row.get("tags") or []) if str(tag).strip()] if isinstance(row.get("tags"), list) else [item.strip() for item in str(row.get("tags") or "").split(",") if item.strip()]
+    fallback_activity = " ".join([str(row.get("activity") or ""), str(row.get("group") or ""), *tags]).strip()
+    context = story_context(user_summary, ai_visual_summary, fallback_activity)
     return {
         "segment_uuid": segment_id,
         "project_media_uuid": str(row.get("project_media_id") or row.get("project_media_uuid") or ""),
@@ -67,7 +69,7 @@ def _effective_segment(row: Mapping[str, Any], clip_order: int) -> dict[str, Any
         "duplicate_group": str(row.get("duplicate_group") or ""),
         "natural_audio_recommendation": str(row.get("natural_audio_recommendation") or "unknown"),
         "confidence": round(float(row.get("confidence") or row.get("score") or 0), 6),
-        "tags": sorted(str(tag).strip() for tag in (row.get("tags") or []) if str(tag).strip()) if isinstance(row.get("tags"), list) else sorted(str(row.get("tags") or "").split(",")),
+        "tags": sorted(tags),
         "activity": str(row.get("activity") or row.get("group") or ""),
         "time_of_day": str(row.get("time_of_day") or ""),
         "story_context": context,

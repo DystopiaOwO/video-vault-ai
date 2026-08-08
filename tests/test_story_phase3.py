@@ -11,7 +11,7 @@ import pytest
 from video_vault.database import add_analysis, connect, init_db, upsert_video
 from video_vault.project import build_project_plan, create_project, project_dir, project_detail, save_segment_review
 from video_vault.project_lifecycle import CancellationRequested, ProjectRevisionConflict, current_revision
-from video_vault.story_calibration import compute_calibration, reset_calibration
+from video_vault.story_calibration import calibration_path, compute_calibration, reset_calibration
 from video_vault.story_generation import (
     LocalTextStoryProvider,
     StoryGenerationError,
@@ -461,6 +461,34 @@ def test_apply_rejects_stale_snapshot_and_preserves_storyboard_bytes(tmp_path: P
     assert storyboard_file.read_bytes() == before
 
 
+def test_apply_failure_restores_storyboard_review_plan_and_project_row(tmp_path: Path, monkeypatch):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    generation = generate_project_story(cfg, db, project_id)
+    folder = project_dir(cfg, project_id)
+    tracked = {name: (folder / name).read_bytes() if (folder / name).is_file() else None for name in ("storyboard.json", "review_status.json", "project_plan.json")}
+    with connect(db) as con:
+        before_project = dict(con.execute("select * from projects where id=?", (project_id,)).fetchone())
+
+    import video_vault.story_generation as story_generation_module
+    from video_vault.storyboard import update_storyboard as real_update_storyboard
+
+    def fail_after_mutation(*args, **kwargs):
+        real_update_storyboard(*args, **kwargs)
+        raise RuntimeError("simulated apply publish failure")
+
+    monkeypatch.setattr(story_generation_module, "update_storyboard", fail_after_mutation)
+    with pytest.raises(RuntimeError, match="simulated apply publish failure"):
+        story_generation_module.apply_story_generation_to_storyboard(cfg, db, project_id, generation["story_generation_uuid"])
+
+    for name, content in tracked.items():
+        path = folder / name
+        assert (path.read_bytes() if path.is_file() else None) == content
+    with connect(db) as con:
+        after_project = dict(con.execute("select * from projects where id=?", (project_id,)).fetchone())
+    assert after_project["status"] == before_project["status"]
+    assert after_project["project_revision"] == before_project["project_revision"]
+
+
 def test_human_review_preserves_app_owned_chapter_identity(tmp_path: Path):
     cfg, db, project_id, _ = _fixture(tmp_path)
     generation = generate_project_story(cfg, db, project_id)
@@ -485,6 +513,28 @@ def test_creator_profile_noop_keeps_version_and_stale_write_is_rejected(tmp_path
     save_creator_profile(cfg, {**current, "wording_style": "新的語氣"}, expected_version=version)
     with pytest.raises(CreatorProfileRevisionConflict):
         save_creator_profile(cfg, {**current, "wording_style": "過期寫入"}, expected_version=version)
+
+
+def test_creator_profile_concurrent_same_version_has_one_winner(tmp_path: Path):
+    cfg, _, _, _ = _fixture(tmp_path)
+    current = load_creator_profile(cfg)
+    version = int(current["profile_version"])
+
+    def write(style: str):
+        try:
+            return "ok", save_creator_profile(cfg, {**current, "wording_style": style}, expected_version=version)
+        except CreatorProfileRevisionConflict:
+            return "conflict", None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(write, ["並行寫入 A", "並行寫入 B"]))
+    assert sorted(result[0] for result in results) == ["conflict", "ok"]
+    assert load_creator_profile(cfg)["profile_version"] == version + 1
+
+
+def test_calibration_rejects_untrusted_profile_path(tmp_path: Path):
+    with pytest.raises(ValueError, match="未知 Story Profile"):
+        calibration_path({"library_root": str(tmp_path)}, "..\\outside")
 
 
 def test_story_input_uses_story_context_provenance_without_filename_semantics(tmp_path: Path):
