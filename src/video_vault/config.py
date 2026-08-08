@@ -29,6 +29,17 @@ DEFAULT_CONFIG = {
             "min_frames": 3,
             "max_frames": 5,
         },
+        "audio": {
+            "enabled": True,
+            "policy_name": "local-pcm-vad-events",
+            "policy_version": 1,
+            "sample_rate": 16000,
+            "window_seconds": 1.0,
+            "hop_seconds": 0.5,
+            "vad_threshold_db": -48.0,
+            "max_analysis_seconds": 1800,
+            "ffmpeg_timeout_seconds": 180,
+        },
         "cloud_review": {
             "enabled": False,
             "provider": "mock",

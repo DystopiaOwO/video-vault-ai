@@ -71,7 +71,8 @@ create table if not exists analysis_runs (
   sampling_manifest_json text default '{}',
   window_manifest_json text default '[]',
   window_results_json text default '[]',
-  window_validation_json text default '{}'
+  window_validation_json text default '{}',
+  audio_perception_json text default '{}'
 );
 create table if not exists analysis_run_frames (
   run_uuid text not null,
@@ -270,6 +271,7 @@ def init_db(db: Path) -> None:
                 "window_manifest_json": "text default '[]'",
                 "window_results_json": "text default '[]'",
                 "window_validation_json": "text default '{}'",
+                "audio_perception_json": "text default '{}'",
                 "interrupted_at": "text",
                 "published_revision": "integer",
             },

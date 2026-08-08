@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import json
 
+from .audio_perception import AudioPerceptionError, analyze_audio_file
 from .analyzer.multi_frame import (
     MultiFrameValidationError,
     build_frame_windows,
@@ -26,6 +27,7 @@ from .perception_runs import (
     restore_metadata_paths,
     run_staging_dir,
     set_run_frame_manifest,
+    set_run_audio_perception,
     set_run_window_manifest,
     set_run_window_results,
     set_run_window_validation,
@@ -193,6 +195,8 @@ def run_project_perception(
         set_run_window_validation(db, run_uuid, result.get("window_validation") or {})
         if result.get("multi_frame_contract"):
             set_run_provider_contract(db, run_uuid, result["multi_frame_contract"])
+        audio_perception = _run_local_audio_perception(cfg, video, run, result.get("segments") or [])
+        set_run_audio_perception(db, run_uuid, audio_perception)
         sampling["actual_vision_calls"] = int(result.get("vision_calls") or 0)
         sampling["cache_hits"] = int(result.get("cache_hits") or 0)
         set_run_sampling_manifest(db, run_uuid, sampling)
@@ -253,6 +257,8 @@ def run_project_perception(
             published_row = segment_by_window.get(window_uuid)
             if published_row:
                 segment_result["segment_uuid"] = str(published_row.get("segment_uuid") or "")
+        _attach_published_audio_segment_ids(audio_perception, published_segments)
+        set_run_audio_perception(db, run_uuid, audio_perception)
         set_run_segment_uuid_mapping(
             db,
             run_uuid,
@@ -294,6 +300,7 @@ def run_project_perception(
         return {
             **result,
             "sampling": sampling,
+            "audio_perception": audio_perception,
             "run": completed,
             "segment_identity_migration": migration,
             "project_segment_state_migrations": project_migrations,
@@ -323,6 +330,70 @@ def run_project_perception(
 def _raise_if_cancelled(should_cancel) -> None:
     if should_cancel and should_cancel():
         raise PerceptionCancelled("perception cancelled by user")
+
+
+def _run_local_audio_perception(cfg: dict, video: dict, run: dict, visual_segments: list[dict]) -> dict:
+    audio_config = ((cfg.get("perception") or {}).get("audio") or {})
+    if not bool(audio_config.get("enabled", False)):
+        return {
+            "schema_version": "audio-perception-v1",
+            "status": "disabled",
+            "provider": "local",
+            "model": "pcm-features-v1",
+            "audit": {
+                "local_only": True,
+                "transcription_requested": False,
+                "cloud_audio_requested": False,
+                "user_decisions_overridden": False,
+            },
+            "candidates": [],
+        }
+    try:
+        return analyze_audio_file(
+            Path(video["current_path"]),
+            cfg,
+            video_id=int(video["id"]),
+            duration_seconds=float(video.get("duration_seconds") or 0),
+            source_fingerprint=(run.get("input_snapshot") or {}).get("source") if isinstance(run.get("input_snapshot"), dict) else None,
+            visual_segments=visual_segments,
+        )
+    except AudioPerceptionError as exc:
+        return {
+            "schema_version": "audio-perception-v1",
+            "status": "failed",
+            "provider": "local",
+            "model": "pcm-features-v1",
+            "error": str(exc),
+            "audit": {
+                "local_only": True,
+                "transcription_requested": False,
+                "cloud_audio_requested": False,
+                "user_decisions_overridden": False,
+            },
+            "candidates": [],
+        }
+
+
+def _attach_published_audio_segment_ids(audio_perception: dict, published_segments: list[dict]) -> None:
+    """Replace pending visual-window identities with the published stable UUID."""
+
+    for candidate in audio_perception.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        start = float(candidate.get("start_seconds") or 0)
+        end = float(candidate.get("end_seconds") or start)
+        best = None
+        for segment in published_segments:
+            overlap = max(
+                0.0,
+                min(end, float(segment.get("end_seconds") or 0))
+                - max(start, float(segment.get("start_seconds") or 0)),
+            )
+            if overlap > 0 and (best is None or overlap > best[0]):
+                best = (overlap, segment)
+        if best and best[1].get("segment_uuid"):
+            candidate["segment_uuid"] = str(best[1]["segment_uuid"])
+            candidate["segment_identity_source"] = "visual_segment_uuid"
 
 
 def _sample_reason_counts(samples: list[dict]) -> dict[str, int]:

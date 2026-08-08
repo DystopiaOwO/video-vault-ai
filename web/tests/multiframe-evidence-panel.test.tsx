@@ -62,4 +62,41 @@ describe("MultiFrameEvidencePanel", () => {
     await waitFor(() => expect(save).toHaveBeenCalledWith(7, "segment_1", expect.objectContaining({ action: "走路" }), 3));
     save.mockRestore();
   });
+
+  it("shows local audio candidates and saves a user decision without resending perception", async () => {
+    const save = vi.spyOn(api, "saveSegmentEvidence").mockResolvedValue({ ok: true, path: "segment_review.json" });
+    render(<MultiFrameEvidencePanel clip={{
+      filename: "travel.mp4",
+      perception_run: {
+        current_status: "succeeded",
+        current_audio_perception: {
+          schema_version: "audio-perception-v1",
+          status: "succeeded",
+          audit: { local_only: true, transcription_requested: false, cloud_audio_requested: false },
+          summary: { windows_analyzed: 1 },
+          candidates: [{
+            audio_window_uuid: "audio-window-1",
+            segment_uuid: "segment-audio-1",
+            start_seconds: 1,
+            end_seconds: 2,
+            event: "dialogue",
+            confidence: 0.84,
+            natural_audio_recommendation: "keep",
+            user_audio_decision: "duck",
+            decision_source: "human",
+          }],
+        },
+      },
+    }} projectId={7} projectRevision={3} />);
+
+    expect(screen.getByRole("region", { name: "travel.mp4 音訊感知證據" })).toBeTruthy();
+    expect(screen.getByText(/local-only/)).toBeTruthy();
+    expect(screen.getByText(/使用者決策：duck/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "改為 mute" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(7, "segment-audio-1", {
+      natural_audio_recommendation: "mute",
+      locked: true,
+    }, 3));
+    save.mockRestore();
+  });
 });

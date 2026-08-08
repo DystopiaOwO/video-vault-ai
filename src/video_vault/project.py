@@ -54,6 +54,7 @@ def sync_project_files(cfg: dict, db: Path, project_id: int) -> list[dict]:
         display_clip_dir.mkdir(parents=True, exist_ok=True)
         display_name = str(video.get("filename") or src.name)
         perception_state = perception_states.get(int(video["id"]), {})
+        perception_state = _merge_audio_user_decisions(perception_state, _segment_review(cfg, project_id))
         default_sampling_policy = resolved_sampling_policy(cfg)
         current_sampling = perception_state.get("current_sampling_manifest") or {}
         ai_visual_summary = _visual_summary(db, int(video["id"]))
@@ -420,6 +421,39 @@ def _public_bgm_row(row: dict) -> dict:
         )
         if key in row
     }
+
+
+def _merge_audio_user_decisions(perception_state: dict, reviews: list[dict]) -> dict:
+    """Expose human audio overrides without mutating the local AI audit."""
+
+    audio = perception_state.get("current_audio_perception")
+    if not isinstance(audio, dict) or not isinstance(audio.get("candidates"), list):
+        return perception_state
+    by_segment = {
+        str(row.get("segment_id") or ""): row
+        for row in reviews
+        if isinstance(row, dict) and str(row.get("segment_id") or "")
+    }
+    if not by_segment:
+        return perception_state
+    result = deepcopy(perception_state)
+    merged_audio = deepcopy(audio)
+    audit = dict(merged_audio.get("audit") or {})
+    changed = False
+    for candidate in merged_audio.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        review = by_segment.get(str(candidate.get("segment_uuid") or ""))
+        if not review or "natural_audio_recommendation" not in review:
+            continue
+        candidate["user_audio_decision"] = str(review.get("natural_audio_recommendation") or "")
+        candidate["decision_source"] = "human"
+        changed = True
+    if changed:
+        audit["user_decisions_overridden"] = True
+        merged_audio["audit"] = audit
+    result["current_audio_perception"] = merged_audio
+    return result
 
 
 def project_segments(cfg: dict, project_id: int, plan: dict, *, apply_storyboard: bool = True, db: Path | None = None) -> list[dict]:
