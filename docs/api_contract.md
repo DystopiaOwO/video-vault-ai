@@ -14,6 +14,8 @@
 - `POST /api/project/analyze`：`{"project_id": 1, "force": false}`
 - `POST /api/project/analyze-job`：背景內容感知，`{"project_id": 1, "force": false}`
 - `POST /api/project/analyze-video`：單支素材感知，可覆寫本次 sampling，`{"project_id": 1, "video_id": 2, "sampling": {"mode": "adaptive", "preset": "dense", "baseline_interval_seconds": 3, "max_frames_per_clip": 240}}`
+- `POST /api/project/cloud-review/plan`：建立低信心／規則衝突／使用者指定的 cloud review preflight；只回傳選定抽幀數、provider、估算成本與 privacy contract，不上傳素材，`{"project_id": 1, "window_uuids": ["window_..."]}`
+- `POST /api/project/cloud-review`：依 preflight 選定 window 送 optional cloud review，必須傳 `base_revision`；每 clip/project 的 call、frame、estimated-cost caps 由設定限制，失敗時保留 local result 並標記 needs-review。
 - `POST /api/project/build-plan`：`{"project_id": 1}`
 - `POST /api/project/segments`：儲存片段審核、順序與時間微調，`{"project_id": 1, "segments": [...]}`
 - `POST /api/project/bgm`：把 BGM 加到專案，`{"project_id": 1, "bgm_id": 1}`

@@ -41,7 +41,55 @@ export type PerceptionRunState = {
   current_window_manifest?: Array<{ window_uuid?: string; start_seconds?: number; end_seconds?: number; frames?: Array<{ timestamp_seconds?: number; sample_reasons?: string[] }> }>;
   current_window_results?: PerceptionWindowResult[];
   current_window_validation?: { status?: string; needs_review_reasons?: string[]; checks?: Array<Record<string, unknown>> };
+  current_cloud_review?: CloudReviewAudit;
   multi_frame_contract?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
+export type CloudReviewWindow = {
+  project_id: number;
+  video_id: number;
+  run_uuid: string;
+  window_uuid: string;
+  segment_uuid?: string;
+  ordinal?: number;
+  start_seconds?: number;
+  end_seconds?: number;
+  frame_timestamps?: number[];
+  frame_count: number;
+  confidence: number;
+  reasons: string[];
+  rejected_reason?: string;
+  source_paths_exposed: false;
+};
+
+export type CloudReviewPlan = {
+  contract_version: string;
+  status: "ready" | "disabled" | "no_eligible_windows" | "budget_exceeded" | string;
+  provider: string;
+  policy: Record<string, unknown>;
+  windows: CloudReviewWindow[];
+  rejected_windows: CloudReviewWindow[];
+  estimated_calls: number;
+  estimated_frames: number;
+  estimated_cost_usd: number;
+  budget_usage?: { calls: number; frames: number; estimated_cost_usd: number; by_clip?: Record<string, { calls: number; frames: number; estimated_cost_usd: number }> };
+  budget_limits?: Record<string, number>;
+  privacy: { full_video_upload: false; payload: string; source_paths_exposed: false };
+};
+
+export type CloudReviewAudit = {
+  contract_version?: string;
+  status?: string;
+  provider?: string;
+  model?: string;
+  error?: string;
+  completed_count?: number;
+  attempt_count?: number;
+  actual_attempt_count?: number;
+  attempts?: Array<{ reservation_uuid?: string; window_uuid?: string; run_uuid?: string; video_id?: number; attempt_number?: number; frame_count?: number; estimated_cost_usd?: number }>;
+  usage?: { calls: number; frames: number; estimated_cost_usd: number; by_clip?: Record<string, { calls: number; frames: number; estimated_cost_usd: number }> };
+  windows?: Array<CloudReviewWindow & { result?: Record<string, unknown> | null }>;
   [key: string]: unknown;
 };
 
@@ -518,6 +566,10 @@ export const api = {
     json<{ ok: boolean; message?: string }>("/api/project/analyze-job", post({ project_id: projectId, force, base_revision: baseRevision })),
   analyzeVideo: (projectId: number, videoId: number, baseRevision?: number, sampling?: SamplingOverride) =>
     json<{ ok: boolean; message?: string }>("/api/project/analyze-video", post({ project_id: projectId, video_id: videoId, base_revision: baseRevision, sampling })),
+  cloudReviewPlan: (projectId: number, windowUuids?: string[]) =>
+    json<{ ok: boolean; plan?: CloudReviewPlan; project_revision?: number; error?: string }>("/api/project/cloud-review/plan", post({ project_id: projectId, window_uuids: windowUuids })),
+  cloudReview: (projectId: number, baseRevision?: number, windowUuids?: string[]) =>
+    json<{ ok: boolean; review_status?: string; cloud_review?: CloudReviewAudit; project_revision?: number; local_result_preserved?: boolean; error?: string; code?: string }>("/api/project/cloud-review", post({ project_id: projectId, base_revision: baseRevision, window_uuids: windowUuids })),
   saveClipSummary: (projectId: number, videoId: number, userSummary: string, baseRevision?: number) =>
     json<{ ok: boolean; plan_rebuilt?: boolean; error?: string; code?: string; project_revision?: number }>("/api/project/clip-summary", post({ project_id: projectId, video_id: videoId, user_summary: userSummary, base_revision: baseRevision })),
   colorAnalyze: (projectId: number, force = false, baseRevision?: number) =>

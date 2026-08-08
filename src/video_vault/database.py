@@ -188,7 +188,7 @@ IDENTITY_NAMESPACE = uuid5(NAMESPACE_URL, "video-vault-ai/stable-identities/v1")
 
 def connect(db: Path) -> sqlite3.Connection:
     db.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(db)
+    con = sqlite3.connect(db, timeout=30)
     con.row_factory = sqlite3.Row
     return con
 

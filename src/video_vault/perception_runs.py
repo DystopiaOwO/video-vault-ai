@@ -37,6 +37,7 @@ RUN_COLUMNS = {
     "window_manifest_json": "text default '[]'",
     "window_results_json": "text default '[]'",
     "window_validation_json": "text default '{}'",
+    "cloud_review_json": "text default '{}'",
 }
 
 PROJECT_MEDIA_RUN_COLUMNS = {
@@ -294,6 +295,7 @@ def analysis_run(db: Path, run_uuid: str) -> dict:
         "window_manifest_json",
         "window_results_json",
         "window_validation_json",
+        "cloud_review_json",
     ):
         raw = result.pop(key, "") or ""
         result[key.removesuffix("_json")] = json.loads(raw) if raw else {}
@@ -367,6 +369,17 @@ def set_run_window_validation(db: Path, run_uuid: str, validation: dict) -> None
         con.execute(
             "update analysis_runs set window_validation_json=? where run_uuid=?",
             (json.dumps(validation, ensure_ascii=False, sort_keys=True), str(run_uuid)),
+        )
+
+
+def set_run_cloud_review(db: Path, run_uuid: str, review: dict) -> None:
+    """Persist cloud review audit without replacing local perception output."""
+
+    ensure_perception_schema(db)
+    with connect(db) as con:
+        con.execute(
+            "update analysis_runs set cloud_review_json=? where run_uuid=?",
+            (json.dumps(review, ensure_ascii=False, sort_keys=True), str(run_uuid)),
         )
 
 
@@ -734,6 +747,7 @@ def perception_states_for_project(db: Path, project_id: int) -> dict[int, dict]:
                 current.window_manifest_json as current_window_manifest_json,
                 current.window_results_json as current_window_results_json,
                 current.window_validation_json as current_window_validation_json,
+                current.cloud_review_json as current_cloud_review_json,
                 success.generation as last_success_generation,
                 success.finished_at as last_success_finished_at,
                 exists(select 1 from segments s where s.video_id=pv.video_id) as has_segments
@@ -767,6 +781,8 @@ def perception_states_for_project(db: Path, project_id: int) -> dict[int, dict]:
         data["current_window_results"] = json.loads(raw_window_results) if raw_window_results else []
         raw_window_validation = str(data.pop("current_window_validation_json", "") or "")
         data["current_window_validation"] = json.loads(raw_window_validation) if raw_window_validation else {}
+        raw_cloud_review = str(data.pop("current_cloud_review_json", "") or "")
+        data["current_cloud_review"] = json.loads(raw_cloud_review) if raw_cloud_review else {}
         data["stale_fallback_available"] = bool(
             data.get("last_successful_analysis_run_uuid")
             and not data["analysis_current"]

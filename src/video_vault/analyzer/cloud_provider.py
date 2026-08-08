@@ -6,7 +6,9 @@ import json
 import os
 import time
 import urllib.request
+from typing import Any, Callable
 
+from ..cloud_review_ledger import CloudReviewBudgetExceeded
 from .frame_analysis import PROMPT_VERSION, TAGS, has_cjk
 from .multi_frame import MULTI_FRAME_PROMPT_VERSION, parse_window_response
 
@@ -21,36 +23,71 @@ class CloudProvider:
     def __init__(self, cfg: dict):
         cloud = cfg.get("ai", {}).get("cloud", {})
         self.model = cloud.get("model") or "gpt-4.1-mini"
+        self.timeout_seconds = max(1.0, float(cloud.get("timeout_seconds") or 60))
         self.api_key = os.environ.get(cloud.get("api_key_env", "OPENAI_API_KEY"), "")
 
-    def analyze_frame(self, frame_path: Path, timestamp: float, video: dict) -> tuple[dict, dict]:
+    def analyze_frame(
+        self,
+        frame_path: Path,
+        timestamp: float,
+        video: dict,
+        before_external_attempt: Callable[[], Any] | None = None,
+        after_external_attempt: Callable[[Any, str, str], None] | None = None,
+    ) -> tuple[dict, dict]:
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is not set")
         body = self._request_body(frame_path, timestamp, video)
         last_error = None
         for attempt in range(3):
+            reservation = None
             try:
+                reservation = before_external_attempt() if before_external_attempt else None
                 raw = self._post(body)
                 parsed = _parse(raw)
                 if not has_cjk(parsed["summary"] + parsed["suggested_use"]):
+                    if after_external_attempt:
+                        after_external_attempt(reservation, "completed", "")
+                    reservation = before_external_attempt() if before_external_attempt else None
                     raw = self._post(self._request_body(frame_path, timestamp, video, "你剛剛回英文了。請重新輸出同一個 JSON，但 summary 與 suggested_use 必須全部使用繁體中文。"))
                     parsed = _parse(raw)
+                if after_external_attempt:
+                    after_external_attempt(reservation, "completed", "")
                 return parsed, raw
+            except CloudReviewBudgetExceeded:
+                raise
             except Exception as exc:
+                if after_external_attempt and reservation is not None:
+                    after_external_attempt(reservation, "failed", str(exc))
                 last_error = exc
                 time.sleep(2 ** attempt)
         raise RuntimeError(f"vision API failed after retries: {last_error}")
 
-    def analyze_window(self, frame_paths: list[Path], timestamps: list[float], video: dict) -> tuple[dict, dict]:
+    def analyze_window(
+        self,
+        frame_paths: list[Path],
+        timestamps: list[float],
+        video: dict,
+        before_external_attempt: Callable[[], Any] | None = None,
+        after_external_attempt: Callable[[Any, str, str], None] | None = None,
+    ) -> tuple[dict, dict]:
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is not set")
         body = self._window_request_body(frame_paths, timestamps, video)
         last_error: Exception | None = None
         for attempt in range(3):
+            reservation = None
             try:
+                reservation = before_external_attempt() if before_external_attempt else None
                 raw = self._post(body)
-                return parse_window_response(raw), raw
+                parsed = parse_window_response(raw)
+                if after_external_attempt:
+                    after_external_attempt(reservation, "completed", "")
+                return parsed, raw
+            except CloudReviewBudgetExceeded:
+                raise
             except Exception as exc:
+                if after_external_attempt and reservation is not None:
+                    after_external_attempt(reservation, "failed", str(exc))
                 last_error = exc
                 time.sleep(2 ** attempt)
         raise RuntimeError(f"vision multi-frame API failed after retries: {last_error}") from last_error
@@ -105,7 +142,7 @@ class CloudProvider:
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=60) as res:
+        with urllib.request.urlopen(req, timeout=self.timeout_seconds) as res:
             return json.loads(res.read().decode("utf-8"))
 
 

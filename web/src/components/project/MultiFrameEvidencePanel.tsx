@@ -107,6 +107,10 @@ export function MultiFrameEvidencePanel({ clip, projectId, projectRevision, setM
       {contract?.provider ? ` · Provider：${String(contract.provider)}` : ""}
       {contract?.model ? ` · 模型：${String(contract.model)}` : ""}
     </div>
+    {perception.current_cloud_review?.status && <div role="status" className="muted">
+      雲端複判：{perception.current_cloud_review.status === "completed" ? "已完成，仍需人工確認" : "未完成；已保留本地結果並標記待審"}
+      {perception.current_cloud_review.error ? `（${String(perception.current_cloud_review.error)}）` : ""}
+    </div>}
     {results.map((item) => <WindowEvidence key={item.window_uuid} item={item} projectId={projectId} projectRevision={projectRevision} setMessage={setMessage} onSaved={onSaved} clip={clip} />)}
     <div className="row">
       <a className="buttonlink" href="#workspace-storyboard">前往分鏡審核修改</a>
