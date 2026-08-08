@@ -1,4 +1,6 @@
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Lock
 
 import video_vault.cloud_review as cloud_review
 
@@ -9,6 +11,13 @@ from video_vault.cloud_review import (
     execute_review_plan,
 )
 from video_vault.database import init_db, project
+from video_vault.cloud_review_ledger import (
+    CloudReviewBudgetExceeded,
+    ensure_cloud_review_ledger,
+    ledger_rows_for_scope,
+    reserve_attempt,
+    usage_for_scope,
+)
 from video_vault.project import create_project
 import video_vault.ui as ui
 
@@ -205,6 +214,157 @@ def test_ui_unavailable_review_preserves_local_result_and_marks_project_needs_re
     assert result["local_result_preserved"] is True
     assert project(db, project_id)["status"] == "needs_review"
     assert saved and saved[0]["status"] == "failed"
+
+
+def test_atomic_one_call_budget_allows_only_one_concurrent_provider_entry(tmp_path, monkeypatch):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    ensure_cloud_review_ledger(db)
+    plan = build_review_plan([_window("window-1", confidence=0.1)], _cfg(
+        max_calls_per_clip=1,
+        max_frames_per_clip=3,
+        max_calls_per_project=1,
+        max_frames_per_project=3,
+        max_estimated_cost_usd_per_clip=0.03,
+        max_estimated_cost_usd_per_project=0.03,
+    ))
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"frame")
+    barrier = Barrier(2)
+    provider_entries = 0
+    provider_lock = Lock()
+
+    class Provider:
+        name = "test"
+        model = "test"
+
+        def review_window(self, *_args, **_kwargs):
+            nonlocal provider_entries
+            with provider_lock:
+                provider_entries += 1
+            return ({"review_status": "completed"}, {"audit": True})
+
+    monkeypatch.setattr(cloud_review, "cloud_review_provider", lambda _cfg: Provider())
+
+    def run_one():
+        barrier.wait()
+
+        def reserve(item, frame_count):
+            barrier.wait()
+            return reserve_attempt(
+                db,
+                project_id=7,
+                video_id=1,
+                run_uuid="run-1",
+                window_uuid=str(item["window_uuid"]),
+                frame_count=frame_count,
+                estimated_cost_usd=0.03,
+                policy=plan["policy"],
+                scope_run_uuids=["run-1"],
+            )
+
+        return cloud_review.execute_review_plan(plan, {"window-1": [frame, frame, frame]}, _cfg(), attempt_reserver=reserve)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = [future.result() for future in (pool.submit(run_one), pool.submit(run_one))]
+
+    assert provider_entries == 1
+    assert sorted(outcome["status"] for outcome in outcomes) == ["completed", "failed"]
+    assert len(ledger_rows_for_scope(db, 7, ["run-1"])) == 1
+
+
+def test_reserved_attempt_survives_finalize_failure_and_blocks_reuse(tmp_path):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    policy = _cfg(
+        max_calls_per_clip=1,
+        max_frames_per_clip=3,
+        max_calls_per_project=1,
+        max_frames_per_project=3,
+        max_estimated_cost_usd_per_clip=0.03,
+        max_estimated_cost_usd_per_project=0.03,
+    )["perception"]["cloud_review"]
+    first = reserve_attempt(
+        db,
+        project_id=7,
+        video_id=1,
+        run_uuid="run-1",
+        window_uuid="window-1",
+        frame_count=3,
+        estimated_cost_usd=0.03,
+        policy=policy,
+        scope_run_uuids=["run-1"],
+    )
+    assert first["reservation_uuid"]
+    assert usage_for_scope(db, 7, ["run-1"])["calls"] == 1
+    try:
+        reserve_attempt(
+            db,
+            project_id=7,
+            video_id=1,
+            run_uuid="run-1",
+            window_uuid="window-2",
+            frame_count=3,
+            estimated_cost_usd=0.03,
+            policy=policy,
+            scope_run_uuids=["run-1"],
+        )
+    except CloudReviewBudgetExceeded:
+        pass
+    else:
+        raise AssertionError("a durable reservation must block reuse after finalize/crash")
+    assert ledger_rows_for_scope(db, 7, ["run-1"])[0]["status"] == "reserved"
+
+
+def test_retry_attempts_are_each_reserved_and_audited_without_breaking_caps(monkeypatch, tmp_path):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    ensure_cloud_review_ledger(db)
+    cfg = _cfg(
+        provider="openai",
+        max_calls_per_clip=3,
+        max_frames_per_clip=6,
+        max_calls_per_project=3,
+        max_frames_per_project=6,
+        max_estimated_cost_usd_per_clip=0.06,
+        max_estimated_cost_usd_per_project=0.06,
+    )
+    cfg["ai"] = {"cloud": {"api_key_env": "VID9_TEST_KEY", "model": "test"}}
+    monkeypatch.setenv("VID9_TEST_KEY", "test-key")
+    provider = cloud_review.OpenAICloudReviewProvider(cfg)
+    provider._provider._post = lambda _body: (_ for _ in ()).throw(RuntimeError("transient"))
+    valid = {"output_text": "{}"}
+    calls = iter([RuntimeError("transient"), valid])
+    provider._provider._post = lambda _body: (lambda result: (_ for _ in ()).throw(result) if isinstance(result, Exception) else result)(next(calls))
+    monkeypatch.setattr(cloud_review, "cloud_review_provider", lambda _cfg: provider)
+    plan = build_review_plan([_window("window-1", confidence=0.1)], cfg)
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"frame")
+
+    def reserve(item, frame_count):
+        return reserve_attempt(
+            db,
+            project_id=7,
+            video_id=1,
+            run_uuid="run-1",
+            window_uuid=str(item["window_uuid"]),
+            frame_count=frame_count,
+            estimated_cost_usd=frame_count * 0.01,
+            policy=plan["policy"],
+            scope_run_uuids=["run-1"],
+        )
+
+    outcome = cloud_review.execute_review_plan(plan, {"window-1": [frame, frame, frame]}, cfg, attempt_reserver=reserve)
+    assert outcome["status"] == "completed"
+    assert len(outcome["attempts"]) == 2
+    assert outcome["results"][0]["audit"]["attempt_count"] == 2
+    assert outcome["usage"]["calls"] == 2
+    assert outcome["usage"]["frames"] == 6
+    assert outcome["usage"]["estimated_cost_usd"] == 0.06
+    assert len(ledger_rows_for_scope(db, 7, ["run-1"])) == 2
+
+    exhausted = build_review_plan([_window("window-2", confidence=0.1)], cfg, usage=usage_for_scope(db, 7, ["run-1"]))
+    assert exhausted["status"] == "budget_exceeded"
 
 
 def test_openai_cloud_review_uses_perception_timeout_at_request_layer():

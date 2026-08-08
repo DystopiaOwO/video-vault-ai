@@ -6,7 +6,9 @@ import json
 import os
 import time
 import urllib.request
+from typing import Callable
 
+from ..cloud_review_ledger import CloudReviewBudgetExceeded
 from .frame_analysis import PROMPT_VERSION, TAGS, has_cjk
 from .multi_frame import MULTI_FRAME_PROMPT_VERSION, parse_window_response
 
@@ -24,33 +26,55 @@ class CloudProvider:
         self.timeout_seconds = max(1.0, float(cloud.get("timeout_seconds") or 60))
         self.api_key = os.environ.get(cloud.get("api_key_env", "OPENAI_API_KEY"), "")
 
-    def analyze_frame(self, frame_path: Path, timestamp: float, video: dict) -> tuple[dict, dict]:
+    def analyze_frame(
+        self,
+        frame_path: Path,
+        timestamp: float,
+        video: dict,
+        before_external_attempt: Callable[[], None] | None = None,
+    ) -> tuple[dict, dict]:
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is not set")
         body = self._request_body(frame_path, timestamp, video)
         last_error = None
         for attempt in range(3):
             try:
+                if before_external_attempt:
+                    before_external_attempt()
                 raw = self._post(body)
                 parsed = _parse(raw)
                 if not has_cjk(parsed["summary"] + parsed["suggested_use"]):
+                    if before_external_attempt:
+                        before_external_attempt()
                     raw = self._post(self._request_body(frame_path, timestamp, video, "你剛剛回英文了。請重新輸出同一個 JSON，但 summary 與 suggested_use 必須全部使用繁體中文。"))
                     parsed = _parse(raw)
                 return parsed, raw
+            except CloudReviewBudgetExceeded:
+                raise
             except Exception as exc:
                 last_error = exc
                 time.sleep(2 ** attempt)
         raise RuntimeError(f"vision API failed after retries: {last_error}")
 
-    def analyze_window(self, frame_paths: list[Path], timestamps: list[float], video: dict) -> tuple[dict, dict]:
+    def analyze_window(
+        self,
+        frame_paths: list[Path],
+        timestamps: list[float],
+        video: dict,
+        before_external_attempt: Callable[[], None] | None = None,
+    ) -> tuple[dict, dict]:
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is not set")
         body = self._window_request_body(frame_paths, timestamps, video)
         last_error: Exception | None = None
         for attempt in range(3):
             try:
+                if before_external_attempt:
+                    before_external_attempt()
                 raw = self._post(body)
                 return parse_window_response(raw), raw
+            except CloudReviewBudgetExceeded:
+                raise
             except Exception as exc:
                 last_error = exc
                 time.sleep(2 ** attempt)

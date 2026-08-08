@@ -85,6 +85,9 @@ export type CloudReviewAudit = {
   model?: string;
   error?: string;
   completed_count?: number;
+  attempt_count?: number;
+  actual_attempt_count?: number;
+  attempts?: Array<{ reservation_uuid?: string; window_uuid?: string; run_uuid?: string; video_id?: number; attempt_number?: number; frame_count?: number; estimated_cost_usd?: number }>;
   usage?: { calls: number; frames: number; estimated_cost_usd: number; by_clip?: Record<string, { calls: number; frames: number; estimated_cost_usd: number }> };
   windows?: Array<CloudReviewWindow & { result?: Record<string, unknown> | null }>;
   [key: string]: unknown;

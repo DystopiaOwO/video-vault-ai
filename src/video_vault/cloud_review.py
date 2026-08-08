@@ -8,10 +8,11 @@ an entire video as input and never mutates local frames or stable segments.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 import json
 
 from .analyzer.cloud_provider import CloudProvider
+from .cloud_review_ledger import CloudReviewBudgetExceeded
 
 
 CLOUD_REVIEW_CONTRACT_VERSION = "cloud-review-v1"
@@ -277,6 +278,7 @@ class OpenAICloudReviewProvider:
     """OpenAI adapter behind the generic CloudReviewProvider contract."""
 
     name = "openai"
+    supports_attempt_callback = True
 
     def __init__(self, cfg: Mapping[str, Any]):
         policy = cloud_review_config(cfg)
@@ -288,8 +290,19 @@ class OpenAICloudReviewProvider:
         adapter_cfg = {"ai": {"cloud": cloud}}
         self._provider = CloudProvider(adapter_cfg)
 
-    def review_window(self, frame_paths: list[Path], timestamps: list[float], context: Mapping[str, Any]) -> tuple[dict, dict]:
-        parsed, raw = self._provider.analyze_window(frame_paths, timestamps, dict(context))
+    def review_window(
+        self,
+        frame_paths: list[Path],
+        timestamps: list[float],
+        context: Mapping[str, Any],
+        before_external_attempt: Callable[[], None] | None = None,
+    ) -> tuple[dict, dict]:
+        parsed, raw = self._provider.analyze_window(
+            frame_paths,
+            timestamps,
+            dict(context),
+            before_external_attempt=before_external_attempt,
+        )
         return ({"review_status": "completed", "disposition": "needs_human_confirmation", **parsed}, raw)
 
 
@@ -309,10 +322,14 @@ def execute_review_plan(
     plan: Mapping[str, Any],
     frame_paths_by_window: Mapping[str, list[Path]],
     cfg: Mapping[str, Any],
+    *,
+    attempt_reserver: Callable[[Mapping[str, Any], int], Mapping[str, Any]] | None = None,
+    attempt_finalizer: Callable[[Mapping[str, Any], str, str], None] | None = None,
 ) -> dict:
     """Execute selected frames and fail closed on any provider failure."""
 
     attempted_window_uuids: list[str] = []
+    attempts: list[dict] = []
     policy = cloud_review_config(cfg)
     try:
         provider = cloud_review_provider(cfg)
@@ -325,6 +342,7 @@ def execute_review_plan(
             "results": [],
             "completed_count": 0,
             "attempted_window_uuids": attempted_window_uuids,
+            "attempts": attempts,
             "usage": empty_review_usage(),
             "local_result_preserved": True,
             "project_needs_review": True,
@@ -334,13 +352,66 @@ def execute_review_plan(
         window_uuid = str(item.get("window_uuid") or "")
         paths = list(frame_paths_by_window.get(window_uuid) or [])
         timestamps = [float(value) for value in item.get("frame_timestamps") or []]
-        attempted_window_uuids.append(window_uuid)
+        window_attempts: list[dict] = []
+
+        expected_frames = int(item.get("frame_count") or len(timestamps))
+        if len(paths) != expected_frames or len(paths) != len(timestamps):
+            return {
+                "contract_version": CLOUD_REVIEW_CONTRACT_VERSION,
+                "status": "failed",
+                "provider": getattr(provider, "name", str(plan.get("provider") or "unknown")),
+                "model": getattr(provider, "model", None),
+                "error": "cloud review frame payload does not match the reserved plan",
+                "results": results,
+                "completed_count": len(results),
+                "failed_window_uuid": window_uuid,
+                "attempted_window_uuids": attempted_window_uuids,
+                "attempts": attempts,
+                "usage": _attempted_usage(attempts, policy),
+                "local_result_preserved": True,
+                "project_needs_review": True,
+            }
+
+        def reserve_attempt(frame_count: int) -> None:
+            if attempt_reserver is None:
+                record = {
+                    "window_uuid": window_uuid,
+                    "attempt_number": len(window_attempts) + 1,
+                    "frame_count": int(frame_count),
+                    "estimated_cost_usd": round(int(frame_count) * policy["estimated_cost_per_frame_usd"], 6),
+                }
+            else:
+                record = dict(attempt_reserver(item, int(frame_count)))
+            record.setdefault("window_uuid", window_uuid)
+            record.setdefault("video_id", int(item.get("video_id") or 0))
+            record.setdefault("run_uuid", str(item.get("run_uuid") or ""))
+            record.setdefault("attempt_number", len(window_attempts) + 1)
+            record.setdefault("frame_count", int(frame_count))
+            record.setdefault("estimated_cost_usd", round(int(frame_count) * policy["estimated_cost_per_frame_usd"], 6))
+            window_attempts.append(record)
+            attempts.append(record)
+            attempted_window_uuids.append(window_uuid)
+
         try:
-            parsed, raw = provider.review_window(paths, timestamps, {
-                "local_confidence": item.get("confidence"),
-                "window_uuid": window_uuid,
-                "segment_uuid": item.get("segment_uuid"),
-            })
+            if getattr(provider, "supports_attempt_callback", False):
+                parsed, raw = provider.review_window(paths, timestamps, {
+                    "local_confidence": item.get("confidence"),
+                    "window_uuid": window_uuid,
+                    "segment_uuid": item.get("segment_uuid"),
+                }, before_external_attempt=lambda: reserve_attempt(len(paths)))
+            else:
+                reserve_attempt(len(paths))
+                parsed, raw = provider.review_window(paths, timestamps, {
+                    "local_confidence": item.get("confidence"),
+                    "window_uuid": window_uuid,
+                    "segment_uuid": item.get("segment_uuid"),
+                })
+            if attempt_finalizer:
+                for record in window_attempts:
+                    try:
+                        attempt_finalizer(record, "completed", "")
+                    except Exception:
+                        pass
             results.append({
                 "window_uuid": window_uuid,
                 "segment_uuid": str(item.get("segment_uuid") or ""),
@@ -348,9 +419,43 @@ def execute_review_plan(
                 "provider": provider.name,
                 "model": provider.model,
                 "result": parsed,
-                "audit": {"frame_count": len(paths), "raw": _scrub_raw(raw)},
+                "audit": {
+                    "frame_count": len(paths),
+                    "attempt_count": len(window_attempts),
+                    "attempts": [_scrub_raw(record) for record in window_attempts],
+                    "raw": _scrub_raw(raw),
+                },
             })
+        except CloudReviewBudgetExceeded as exc:
+            if attempt_finalizer:
+                for record in window_attempts:
+                    try:
+                        attempt_finalizer(record, "failed", str(exc))
+                    except Exception:
+                        pass
+            return {
+                "contract_version": CLOUD_REVIEW_CONTRACT_VERSION,
+                "status": "failed",
+                "provider": getattr(provider, "name", str(plan.get("provider") or "unknown")),
+                "model": getattr(provider, "model", None),
+                "error": str(exc),
+                "code": CloudReviewBudgetExceeded.code,
+                "results": results,
+                "completed_count": len(results),
+                "failed_window_uuid": window_uuid,
+                "attempted_window_uuids": attempted_window_uuids,
+                "attempts": attempts,
+                "usage": _attempted_usage(attempts, policy),
+                "local_result_preserved": True,
+                "project_needs_review": True,
+            }
         except Exception as exc:  # provider failures must never become success
+            if attempt_finalizer:
+                for record in window_attempts:
+                    try:
+                        attempt_finalizer(record, "failed", str(exc))
+                    except Exception:
+                        pass
             return {
                 "contract_version": CLOUD_REVIEW_CONTRACT_VERSION,
                 "status": "failed",
@@ -361,7 +466,8 @@ def execute_review_plan(
                 "completed_count": len(results),
                 "failed_window_uuid": window_uuid,
                 "attempted_window_uuids": attempted_window_uuids,
-                "usage": _attempted_usage(plan, attempted_window_uuids, policy),
+                "attempts": attempts,
+                "usage": _attempted_usage(attempts, policy),
                 "local_result_preserved": True,
                 "project_needs_review": True,
             }
@@ -373,19 +479,17 @@ def execute_review_plan(
         "results": results,
         "completed_count": len(results),
         "attempted_window_uuids": attempted_window_uuids,
-        "usage": _attempted_usage(plan, attempted_window_uuids, policy),
+        "attempts": attempts,
+        "usage": _attempted_usage(attempts, policy),
     }
 
 
-def _attempted_usage(plan: Mapping[str, Any], attempted_window_uuids: list[str], policy: Mapping[str, Any]) -> dict:
+def _attempted_usage(attempts: list[Mapping[str, Any]], policy: Mapping[str, Any]) -> dict:
     usage = empty_review_usage()
-    attempted = set(attempted_window_uuids)
-    for item in plan.get("windows") or []:
-        if str(item.get("window_uuid") or "") not in attempted:
-            continue
-        frames = int(item.get("frame_count") or len(item.get("frame_timestamps") or []))
+    for item in attempts:
+        frames = int(item.get("frame_count") or 0)
         clip_id = str(item.get("video_id") or "")
-        cost = frames * float(policy["estimated_cost_per_frame_usd"])
+        cost = float(item.get("estimated_cost_usd") or (frames * float(policy["estimated_cost_per_frame_usd"])))
         usage["calls"] += 1
         usage["frames"] += frames
         usage["estimated_cost_usd"] = round(usage["estimated_cost_usd"] + cost, 6)
