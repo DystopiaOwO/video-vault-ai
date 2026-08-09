@@ -21,11 +21,11 @@ QA review 使用獨立 `review_version` 做 optimistic concurrency。Review 不�
 
 Delivery QA 對正式 Render Report fail closed：Report 必須存在且可解析，`manifest_hash`、`output_sha256` 必須與核准 manifest／實際輸出 exact match，且 `qc.passed`、full decode 與 timestamp continuity 都必須明確為 `true`。缺失、空白或損壞 provenance 一律是 `blocked`。
 
-Flash 檢查使用正式輸出的 FFmpeg `signalstats` brightness samples，只有快速 brightness reversal 才形成 timestamped flash events；scene cut 不會直接當成 flash，片頭／片尾 fade-to-black 仍是獨立 finding。Audio 檢查會重新計算核准 manifest 每個 segment 的 cache key，並比對 Render Report 的 segment keys、BGM used 與 fingerprint；role、fade 或 BGM provenance 不一致一律 blocked。
+Flash 檢查使用正式輸出的 FFmpeg `signalstats` brightness samples，只有快速 brightness reversal 才形成 timestamped flash events；scene cut 不會直接當成 flash，片頭／片尾 fade-to-black 仍是獨立 finding。FFmpeg 成功但 samples 為 0 或少於 reversal 判斷所需數量時，`black_flash` 會以 structured `blocked` 保留 sample count 與 reason，不得當成 pass。Audio 檢查會重新計算核准 manifest 每個 segment 的 cache key，並逐筆要求 Render Report segment 是 object、cache key 非空、count 與 ordered keys 全部 exact match；BGM used 與 fingerprint 也必須一致，role、fade 或 BGM provenance 不一致一律 blocked。
 
 ## Profiles
 
-`travel_diary`、`coffee_matcha_diary`、`roasting_diary`（映射至 coffee/matcha QA 門檻）與 `general_diary` 使用不同 freeze/silence/repeat thresholds。全域、profile 與 project override 都會在每項 check 的 `threshold_source` 留下 resolved value 與來源；known malformed／negative／NaN／Inf 與 unknown threshold key 會保留 structured audit 並阻止 `deliverable_ready`，不會靜默 fallback。
+`travel_diary`、`coffee_matcha_diary`、`roasting_diary`（映射至 coffee/matcha QA 門檻）與 `general_diary` 使用不同 freeze/silence/repeat thresholds。全域、profile 與 project override 都會在每項 check 的 `threshold_source` 留下 resolved value 與來源；known malformed／negative／NaN／Inf 與 unknown threshold key 會保留 structured audit 並阻止 `deliverable_ready`，不會靜默 fallback。project `qa_settings.json` 缺檔代表沒有 project override；存在時必須是 valid JSON object，malformed JSON 或 non-object root 會產生 `threshold_config=blocked`。
 
 ## Attribution
 

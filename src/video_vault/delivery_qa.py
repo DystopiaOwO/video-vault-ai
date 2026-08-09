@@ -36,6 +36,7 @@ QA_CONTRACT_NAME = "formal-delivery-qa"
 QA_CONTRACT_VERSION = "delivery-qa-v1"
 QA_STATUSES = frozenset({"pass", "warning", "blocked", "skipped"})
 QA_LIFECYCLE_STATES = frozenset({"needs_qa", "qa_blocked", "qa_needs_review", "deliverable_ready"})
+FLASH_MIN_BRIGHTNESS_SAMPLES = 3
 
 _QA_LOCK = threading.RLock()
 _TOKEN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -389,14 +390,34 @@ def resolve_qa_profile(cfg: Mapping[str, Any], db: Path, project_id: int) -> dic
         "config.global",
         threshold_validation,
     )
-    project_override = _read_json(project_dir(dict(cfg), int(project_id)) / "qa_settings.json")
-    _apply_threshold_override(
-        thresholds,
-        threshold_sources,
-        project_override.get("threshold_overrides"),
-        "project.override",
-        threshold_validation,
-    )
+    project_override_path = project_dir(dict(cfg), int(project_id)) / "qa_settings.json"
+    project_override, project_settings_status, project_settings_reason = _read_optional_json(project_override_path)
+    threshold_validation["project_settings"] = {
+        "status": project_settings_status,
+        "source": "project.qa_settings",
+        "override_applied": False,
+    }
+    if project_settings_status == "blocked":
+        threshold_validation["project_settings"]["reason"] = project_settings_reason or "invalid_json_object"
+        _record_invalid_threshold_override(
+            threshold_validation,
+            "project.qa_settings",
+            project_settings_reason or "qa_settings.json must contain a valid JSON object",
+        )
+    elif project_settings_status == "valid" and project_override is not None:
+        before = len(threshold_validation["valid_overrides"])
+        _apply_threshold_override(
+            thresholds,
+            threshold_sources,
+            project_override.get("threshold_overrides"),
+            "project.override",
+            threshold_validation,
+        )
+        applied = threshold_validation["valid_overrides"][before:]
+        threshold_validation["project_settings"].update({
+            "override_applied": bool(applied),
+            "resolved_values": {str(item["key"]): item["resolved_value"] for item in applied},
+        })
     if threshold_validation["invalid_overrides"] or threshold_validation["unknown_thresholds"]:
         threshold_validation["status"] = "blocked"
     return {
@@ -742,18 +763,51 @@ def _black_flash_check(analysis: Mapping[str, Any], thresholds: Mapping[str, Any
         for item in flashes
     ]
     scene_changes = [float(item) for item in events.get("scene_change") or []]
+    try:
+        brightness_sample_count = max(0, int(analysis.get("brightness_sample_count") or 0))
+    except (TypeError, ValueError, OverflowError):
+        brightness_sample_count = 0
+    flash_detection_reason = str(analysis.get("flash_detection_reason") or "")
+    if not flash_detection_reason:
+        flash_detection_reason = (
+            "no_brightness_samples"
+            if brightness_sample_count == 0
+            else "insufficient_brightness_samples"
+            if brightness_sample_count < FLASH_MIN_BRIGHTNESS_SAMPLES
+            else "brightness_samples_sufficient_for_reversal"
+        )
     metrics = {
         "events": black + flashes,
         "black_event_count": len(black),
         "flash_event_count": len(flashes),
         "scene_change_count": len(scene_changes),
         "max_scene_change_cluster": _max_cluster(scene_changes, float(thresholds["flash_cluster_window_seconds"])),
-        "brightness_sample_count": int(analysis.get("brightness_sample_count") or 0),
+        "brightness_sample_count": brightness_sample_count,
         "brightness_range": _safe_value(analysis.get("brightness_range") or {}),
+        "flash_detection": {
+            "status": "ready" if brightness_sample_count >= FLASH_MIN_BRIGHTNESS_SAMPLES else "blocked",
+            "minimum_samples": FLASH_MIN_BRIGHTNESS_SAMPLES,
+            "sample_count": brightness_sample_count,
+            "reason": flash_detection_reason,
+        },
     }
     if not analysis.get("ok"):
         metrics["analysis_error"] = analysis.get("error_code") or "analysis_failed"
         return _check("black_flash", "blocked", "黑畫面與閃爍分析未完成", metrics, severity="high", remediation="修正 FFmpeg decode/filters 後重新執行 Delivery QA")
+    if brightness_sample_count < FLASH_MIN_BRIGHTNESS_SAMPLES:
+        summary = (
+            "FFmpeg 成功但沒有可用 brightness/YAVG samples，無法判斷閃爍 reversal"
+            if brightness_sample_count == 0
+            else f"FFmpeg 成功但 brightness/YAVG samples 僅 {brightness_sample_count} 筆，少於 reversal 判斷所需 {FLASH_MIN_BRIGHTNESS_SAMPLES} 筆"
+        )
+        return _check(
+            "black_flash",
+            "blocked",
+            summary,
+            metrics,
+            severity="high",
+            remediation="確認 signalstats/YAVG evidence extraction 成功後重新執行 Delivery QA",
+        )
     long_black = [item for item in black if float(item.get("duration_seconds") or 0) >= float(thresholds["black_block_seconds"])]
     edge_tolerance = float(thresholds["edge_fade_tolerance_seconds"])
     likely_fades = [
@@ -948,19 +1002,44 @@ def _audio_render_provenance(manifest: Mapping[str, Any], render_report: Mapping
         except (OSError, TypeError, ValueError, KeyError) as exc:
             expected_keys.append("")
             segment_failures.append({"index": index, "reason": "approved segment cache key unavailable", "error": _safe_error(exc)})
-    reported_segments = render_report.get("segments") if isinstance(render_report.get("segments"), list) else []
-    reported_keys = [
-        str(item.get("cache_key") or "")
-        for item in reported_segments
-        if isinstance(item, Mapping)
-    ]
-    if len(reported_segments) != len(expected_segments):
-        segment_failures.append({
-            "reason": "segment count mismatch",
-            "approved_count": len(expected_segments),
-            "reported_count": len(reported_segments),
+    raw_reported_segments = render_report.get("segments")
+    reported_segments = raw_reported_segments if isinstance(raw_reported_segments, list) else []
+    reported_keys: list[str] = []
+    reported_segment_errors: list[dict[str, Any]] = []
+    if not isinstance(raw_reported_segments, list):
+        reported_segment_errors.append({
+            "reason": "reported segments must be an array",
+            "reported_type": type(raw_reported_segments).__name__ if raw_reported_segments is not None else "missing",
         })
-    for index, (expected, actual) in enumerate(zip(expected_keys, reported_keys)):
+    for index, item in enumerate(reported_segments):
+        if not isinstance(item, Mapping):
+            reported_keys.append("")
+            reported_segment_errors.append({"index": index, "reason": "reported segment must be an object"})
+            continue
+        cache_key = item.get("cache_key")
+        if not isinstance(cache_key, str) or not cache_key.strip():
+            reported_keys.append("")
+            reported_segment_errors.append({"index": index, "reason": "reported segment cache_key missing or empty"})
+            continue
+        # Preserve the reported value byte-for-byte for the exact ordered
+        # comparison; whitespace must not be silently normalized.
+        reported_keys.append(cache_key)
+    approved_count = len(expected_segments)
+    approved_key_count = len(expected_keys)
+    reported_count = len(reported_segments)
+    reported_key_count = len(reported_keys)
+    if reported_count != approved_count or reported_key_count != approved_key_count or reported_key_count != reported_count:
+        segment_failures.append({
+            "reason": "segment/key count mismatch",
+            "approved_segment_count": approved_count,
+            "approved_key_count": approved_key_count,
+            "reported_segment_count": reported_count,
+            "reported_key_count": reported_key_count,
+        })
+    segment_failures.extend(reported_segment_errors)
+    for index in range(max(len(expected_keys), len(reported_keys))):
+        expected = expected_keys[index] if index < len(expected_keys) else ""
+        actual = reported_keys[index] if index < len(reported_keys) else ""
         if not expected or expected != actual:
             segment_failures.append({
                 "index": index,
@@ -1000,6 +1079,10 @@ def _audio_render_provenance(manifest: Mapping[str, Any], render_report: Mapping
         "approved_segment_cache_keys": expected_keys,
         "reported_segment_cache_keys": reported_keys,
         "segment_mismatches": segment_failures,
+        "approved_segment_count": approved_count,
+        "approved_key_count": approved_key_count,
+        "reported_segment_count": reported_count,
+        "reported_key_count": reported_key_count,
         "approved_audio_contract": [
             {
                 "segment_id": str(segment.get("segment_id") or segment.get("segment_uuid") or ""),
@@ -1177,6 +1260,13 @@ def _analyze_output(cfg: Mapping[str, Any], output: Path, thresholds: Mapping[st
         parsed["brightness_range"] = {"min": round(min(values), 3), "max": round(max(values), 3)}
     else:
         parsed["brightness_range"] = {}
+    parsed["flash_detection_reason"] = (
+        "no_brightness_samples"
+        if len(brightness_samples) == 0
+        else "insufficient_brightness_samples"
+        if len(brightness_samples) < FLASH_MIN_BRIGHTNESS_SAMPLES
+        else "brightness_samples_sufficient_for_reversal"
+    )
     parsed["events"]["flash"] = _detect_flash_events(brightness_samples, thresholds)
     return {"ok": result.returncode == 0, "returncode": result.returncode, "error_code": "" if result.returncode == 0 else "ffmpeg_analysis_failed", **parsed}
 
@@ -1788,6 +1878,24 @@ def _read_json(path: Path) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return {}
+
+
+def _read_optional_json(path: Path) -> tuple[dict[str, Any] | None, str, str]:
+    """Read an optional object JSON file without conflating absent and invalid."""
+
+    try:
+        if not path.exists():
+            return None, "absent", ""
+        if path.is_symlink() or not path.is_file():
+            return None, "blocked", "qa_settings.json must be a regular file"
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None, "blocked", "qa_settings.json contains malformed JSON"
+    except (OSError, TypeError, ValueError):
+        return None, "blocked", "qa_settings.json could not be read"
+    if not isinstance(value, Mapping):
+        return None, "blocked", "qa_settings.json root must be an object"
+    return dict(value), "valid", ""
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:

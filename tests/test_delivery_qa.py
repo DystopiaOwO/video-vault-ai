@@ -68,7 +68,7 @@ def _fixture(tmp_path: Path, monkeypatch, *, analysis=None, loudness=True):
     probe = MediaProbe(output, 4.0, True, True, 1920, 1080, 30.0, 30, 1, "yuv420p", "h264", "aac", 48000, 2, frame_count=120, video_end_seconds=4.0, audio_end_seconds=4.0)
     monkeypatch.setattr(delivery_qa, "probe_media", lambda *args: probe)
     monkeypatch.setattr(delivery_qa, "_probe_stream_details", lambda *args: {"ok": True, "format_name": "mov,mp4", "video_stream_count": 1, "audio_stream_count": 1, "sample_aspect_ratio": "1:1", "display_aspect_ratio": "16:9", "rotation_degrees": 0, "audio_channel_layout": "stereo", "faststart": True})
-    monkeypatch.setattr(delivery_qa, "_analyze_output", lambda *args, **kwargs: analysis or {"ok": True, "events": {"black": [], "freeze": [], "silence": [], "flash": []}, "crop_observations": [[1920, 1080, 0, 0]], "max_volume_db": -1.3, "invalid_sample_count": 0})
+    monkeypatch.setattr(delivery_qa, "_analyze_output", lambda *args, **kwargs: analysis or {"ok": True, "events": {"black": [], "freeze": [], "silence": [], "flash": []}, "brightness_sample_count": 3, "brightness_range": {"min": 16, "max": 235}, "flash_detection_reason": "brightness_samples_sufficient_for_reversal", "crop_observations": [[1920, 1080, 0, 0]], "max_volume_db": -1.3, "invalid_sample_count": 0})
 
     def evidence(*args, **kwargs):
         del kwargs
@@ -183,9 +183,9 @@ def test_container_contract_fails_closed_on_duration_faststart_and_channel_layou
 
 def test_black_flash_distinguishes_edge_fade_from_interior_black_and_flash_clusters():
     thresholds = delivery_qa._PROFILE_THRESHOLDS["travel_diary"]
-    edge = {"ok": True, "events": {"black": [{"start_seconds": 0, "end_seconds": 1.2, "duration_seconds": 1.2}], "flash": []}}
-    interior = {"ok": True, "events": {"black": [{"start_seconds": 3, "end_seconds": 4.2, "duration_seconds": 1.2}], "flash": []}}
-    flashing = {"ok": True, "events": {"black": [], "flash": [1, 1.1, 1.2, 1.3, 1.4]}}
+    edge = {"ok": True, "brightness_sample_count": 3, "events": {"black": [{"start_seconds": 0, "end_seconds": 1.2, "duration_seconds": 1.2}], "flash": []}}
+    interior = {"ok": True, "brightness_sample_count": 3, "events": {"black": [{"start_seconds": 3, "end_seconds": 4.2, "duration_seconds": 1.2}], "flash": []}}
+    flashing = {"ok": True, "brightness_sample_count": 3, "events": {"black": [], "flash": [1, 1.1, 1.2, 1.3, 1.4]}}
     assert delivery_qa._black_flash_check(edge, thresholds, 10)["status"] == "warning"
     assert delivery_qa._black_flash_check(interior, thresholds, 10)["status"] == "blocked"
     assert delivery_qa._black_flash_check(flashing, thresholds, 10)["status"] == "warning"
@@ -204,7 +204,7 @@ def test_flash_parser_uses_brightness_reversal_not_scene_cuts_and_keeps_fade_sep
     parsed = delivery_qa._parse_analysis_log(log)
     flashes = delivery_qa._detect_flash_events(parsed["brightness_samples"], thresholds)
     assert [event["timestamp_seconds"] for event in flashes] == [pytest.approx(0.033333), pytest.approx(0.066667)]
-    assert delivery_qa._black_flash_check({"ok": True, "events": {"flash": flashes, "scene_change": [0.033333]}}, thresholds, 1)["status"] == "warning"
+    assert delivery_qa._black_flash_check({"ok": True, "brightness_sample_count": 3, "events": {"flash": flashes, "scene_change": [0.033333]}}, thresholds, 1)["status"] == "warning"
 
     hard_cut = delivery_qa._detect_flash_events([
         {"timestamp_seconds": 0, "yavg": 16},
@@ -212,9 +212,26 @@ def test_flash_parser_uses_brightness_reversal_not_scene_cuts_and_keeps_fade_sep
         {"timestamp_seconds": 0.066, "yavg": 235},
     ], thresholds)
     assert hard_cut == []
-    fade = delivery_qa._black_flash_check({"ok": True, "events": {"black": [{"start_seconds": 0, "end_seconds": 1.2, "duration_seconds": 1.2}], "flash": []}}, thresholds, 10)
+    fade = delivery_qa._black_flash_check({"ok": True, "brightness_sample_count": 3, "events": {"black": [{"start_seconds": 0, "end_seconds": 1.2, "duration_seconds": 1.2}], "flash": []}}, thresholds, 10)
     assert fade["status"] == "warning"
     assert fade["metrics"]["flash_event_count"] == 0
+
+
+def test_black_flash_fails_closed_when_ffmpeg_succeeds_without_reversal_evidence():
+    thresholds = delivery_qa._PROFILE_THRESHOLDS["travel_diary"]
+    no_samples = delivery_qa._black_flash_check({"ok": True, "brightness_sample_count": 0, "events": {"black": [], "flash": []}}, thresholds, 10)
+    assert no_samples["status"] == "blocked"
+    assert no_samples["metrics"]["brightness_sample_count"] == 0
+    assert no_samples["metrics"]["flash_detection"]["reason"] == "no_brightness_samples"
+
+    insufficient = delivery_qa._black_flash_check({"ok": True, "brightness_sample_count": 2, "events": {"black": [], "flash": []}}, thresholds, 10)
+    assert insufficient["status"] == "blocked"
+    assert insufficient["metrics"]["brightness_sample_count"] == 2
+    assert insufficient["metrics"]["flash_detection"]["reason"] == "insufficient_brightness_samples"
+
+    sufficient = delivery_qa._black_flash_check({"ok": True, "brightness_sample_count": 3, "events": {"black": [], "flash": []}}, thresholds, 10)
+    assert sufficient["status"] == "pass"
+    assert sufficient["metrics"]["flash_detection"]["status"] == "ready"
 
 
 def test_travel_freeze_and_silence_only_block_when_overlap_exceeds_profile_threshold():
@@ -294,6 +311,64 @@ def test_audio_provenance_blocks_wrong_segment_keys_and_bgm_and_accepts_correct_
 
     wrong_bgm = {**correct, "bgm": {"used": False, "fingerprint": {}}}
     assert delivery_qa._audio_check(analysis, probe, wrong_bgm, manifest, delivery_qa._GENERAL_THRESHOLDS)["status"] == "blocked"
+
+    second_segment = {**manifest["segments"][0], "segment_id": "segment-2", "source_in_seconds": 10, "source_out_seconds": 20}
+    two_segment_manifest = {**manifest, "segments": [manifest["segments"][0], second_segment]}
+    first_key = build_segment_cache_key(two_segment_manifest, two_segment_manifest["segments"][0])
+    second_key = build_segment_cache_key(two_segment_manifest, two_segment_manifest["segments"][1])
+    exact_report = {**correct, "segments": [{"cache_key": first_key}, {"cache_key": second_key}]}
+    exact = delivery_qa._audio_render_provenance(two_segment_manifest, exact_report)
+    assert exact["failures"] == []
+    assert exact["metrics"]["approved_segment_count"] == 2
+    assert exact["metrics"]["approved_key_count"] == 2
+    assert exact["metrics"]["reported_segment_count"] == 2
+    assert exact["metrics"]["reported_key_count"] == 2
+
+    for reported_segments in (
+        [{"cache_key": first_key}, {"cache_key": second_key}, "corrupt trailing entry"],
+        [{"cache_key": first_key}, "corrupt middle entry", {"cache_key": second_key}],
+        [{"cache_key": first_key}, {}],
+        [{"cache_key": first_key}, {"cache_key": second_key}, {"cache_key": first_key}],
+    ):
+        malformed = delivery_qa._audio_render_provenance(two_segment_manifest, {**correct, "segments": reported_segments})
+        assert malformed["failures"], malformed
+
+
+def test_qa_settings_absent_valid_and_malformed_are_distinct_and_fail_closed(tmp_path: Path, monkeypatch):
+    cfg = {"library_root": str(tmp_path)}
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    project_id = create_project_row(db, "qa settings", content_type="travel_diary")
+    folder = project_dir(cfg, project_id)
+
+    absent = delivery_qa.resolve_qa_profile(cfg, db, project_id)
+    assert absent["threshold_validation"]["project_settings"]["status"] == "absent"
+    assert delivery_qa._threshold_config_check(absent)["status"] == "pass"
+
+    settings = folder / "qa_settings.json"
+    settings.write_text(json.dumps({"threshold_overrides": {"flash_brightness_delta": 80}}), encoding="utf-8")
+    valid = delivery_qa.resolve_qa_profile(cfg, db, project_id)
+    assert valid["threshold_validation"]["project_settings"]["status"] == "valid"
+    assert valid["threshold_validation"]["project_settings"]["source"] == "project.qa_settings"
+    assert valid["threshold_validation"]["project_settings"]["resolved_values"] == {"flash_brightness_delta": 80.0}
+    assert delivery_qa._threshold_config_check(valid)["status"] == "pass"
+
+    settings.write_text("{ malformed", encoding="utf-8")
+    malformed = delivery_qa.resolve_qa_profile(cfg, db, project_id)
+    assert malformed["threshold_validation"]["project_settings"]["status"] == "blocked"
+    assert delivery_qa._threshold_config_check(malformed)["status"] == "blocked"
+
+    settings.write_text("[]", encoding="utf-8")
+    non_object = delivery_qa.resolve_qa_profile(cfg, db, project_id)
+    assert non_object["threshold_validation"]["project_settings"]["status"] == "blocked"
+    assert delivery_qa._threshold_config_check(non_object)["status"] == "blocked"
+
+    (tmp_path / "run").mkdir()
+    run_cfg, run_db, run_project, run_folder, _source, run_output, snapshot, job_id = _fixture(tmp_path / "run", monkeypatch)
+    (run_folder / "qa_settings.json").write_text("{ malformed", encoding="utf-8")
+    blocked_report = run_delivery_qa(run_cfg, run_db, run_project, render_job_uuid=job_id, output_path=run_output, approval_snapshot=snapshot, render_manifest_hash="a" * 64)
+    assert next(item for item in blocked_report["checks"] if item["check_id"] == "threshold_config")["status"] == "blocked"
+    assert blocked_report["lifecycle_status"] == "qa_blocked"
 
 
 def test_continuity_audits_duplicate_group_chapters_and_maps_events_to_stable_uuid():
