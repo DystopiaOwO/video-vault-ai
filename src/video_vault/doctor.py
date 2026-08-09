@@ -36,6 +36,40 @@ DOCTOR_STATUSES = frozenset({"pass", "warning", "blocked", "skipped"})
 DOCTOR_MODES = frozenset({"default", "quick", "full"})
 _SENSITIVE_KEY = re.compile(r"(?:api[_-]?key|token|authorization|secret|password|credential|private[_-]?key)", re.IGNORECASE)
 _MEDIA_SUFFIX = re.compile(r"\.(?:mp4|mov|mkv|avi|webm|m4v|mp3|wav|m4a|aac|flac|jpg|jpeg|png|webp|gif|ttf|otf|cube)(?:$|[?#])", re.IGNORECASE)
+_WINDOWS_LONG_PATH_THRESHOLD = 260
+_FALSE_VALUES = frozenset({"", "0", "false", "no", "off"})
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _optional_bool(value: object, *, default: bool = False) -> tuple[bool, str | None]:
+    """Parse optional config booleans without treating arbitrary strings as true."""
+
+    if value is None:
+        return default, None
+    if isinstance(value, bool):
+        return value, None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value == 0:
+            return False, None
+        if value == 1:
+            return True, None
+        return default, "invalid_boolean_number"
+    normalized = str(value).strip().lower()
+    if normalized in _FALSE_VALUES:
+        return False, None
+    if normalized in _TRUE_VALUES:
+        return True, None
+    return default, "invalid_boolean_value"
+
+
+def _safe_float(value: object, *, default: float = 0.0) -> tuple[float, str | None]:
+    try:
+        parsed = default if value in (None, "") else float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default, "invalid_number"
+    if parsed != parsed or parsed in {float("inf"), float("-inf")}:
+        return default, "invalid_number"
+    return parsed, None
 
 
 class _SystemProxy:
@@ -437,15 +471,34 @@ def _story_provider_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
 
 
 def _cloud_config_check(cfg: Mapping[str, Any]) -> dict[str, Any]:
-    raw_enabled = ((cfg.get("perception") or {}).get("cloud_review") or {}).get("enabled")
-    enabled = raw_enabled if isinstance(raw_enabled, bool) else str(raw_enabled or "").strip().lower() not in {"", "0", "false", "no", "off"}
+    perception_raw = cfg.get("perception")
+    if perception_raw in (None, ""):
+        perception: Mapping[str, Any] = {}
+    elif isinstance(perception_raw, Mapping):
+        perception = perception_raw
+    else:
+        return _check("provider.cloud_review", "provider", "blocked", "perception 設定必須是 object", evidence={"error_code": "expected_object", "network_request": False}, remediation="修正 perception 設定格式。")
+    review_raw = perception.get("cloud_review")
+    if review_raw in (None, ""):
+        review: dict[str, Any] = {}
+    elif isinstance(review_raw, Mapping):
+        review = dict(review_raw)
+    else:
+        return _check("provider.cloud_review", "provider", "blocked", "cloud_review 設定必須是 object", evidence={"error_code": "expected_object", "network_request": False}, remediation="修正 perception.cloud_review 設定格式。")
+    raw_enabled = review.get("enabled")
+    enabled, enabled_error = _optional_bool(raw_enabled)
+    if enabled_error:
+        return _check("provider.cloud_review", "provider", "blocked", "cloud review enabled 設定無效", evidence={"enabled": "invalid", "error_code": enabled_error, "network_request": False}, remediation="enabled 只能使用 true/false、yes/no、on/off 或 1/0。")
     if not enabled:
         return _check("provider.cloud_review", "provider", "skipped", "cloud review 未啟用，未檢查或呼叫付費 provider", evidence={"enabled": False, "network_request": False})
-    review = dict(((cfg.get("perception") or {}).get("cloud_review") or {}))
-    cloud = dict((cfg.get("ai") or {}).get("cloud") or {})
+    ai_raw = cfg.get("ai")
+    ai = ai_raw if isinstance(ai_raw, Mapping) else {}
+    cloud_raw = ai.get("cloud")
+    cloud = dict(cloud_raw) if isinstance(cloud_raw, Mapping) else {}
     key_name = str(cloud.get("api_key_env") or "OPENAI_API_KEY")
-    complete = bool(review.get("provider")) and bool(cloud.get("model")) and bool(os.environ.get(key_name)) and float(review.get("timeout_seconds") or 0) > 0
-    return _check("provider.cloud_review", "provider", "pass" if complete else "blocked", "cloud review config/key contract 通過；未發送付費請求" if complete else "cloud review enabled contract 不完整", evidence={"enabled": True, "provider_configured": bool(review.get("provider")), "model_configured": bool(cloud.get("model")), "api_key_present": bool(os.environ.get(key_name)), "timeout_configured": float(review.get("timeout_seconds") or 0) > 0, "network_request": False}, remediation=None if complete else "設定 cloud review provider、model、API key 與 timeout；doctor 不會發送付費 request。")
+    timeout, timeout_error = _safe_float(review.get("timeout_seconds"), default=0.0)
+    complete = not timeout_error and bool(review.get("provider")) and bool(cloud.get("model")) and bool(os.environ.get(key_name)) and timeout > 0
+    return _check("provider.cloud_review", "provider", "pass" if complete else "blocked", "cloud review config/key contract 通過；未發送付費請求" if complete else "cloud review enabled contract 不完整", evidence={"enabled": True, "provider_configured": bool(review.get("provider")), "model_configured": bool(cloud.get("model")), "api_key_present": bool(os.environ.get(key_name)), "timeout_configured": timeout > 0 if not timeout_error else False, "timeout_error_code": timeout_error, "network_request": False}, remediation=None if complete else "設定 cloud review provider、model、API key 與有效 timeout；doctor 不會發送付費 request。")
 
 
 def _sqlite_fixture_check(repo: Path, mode: str) -> dict[str, Any]:
@@ -457,16 +510,126 @@ def _sqlite_fixture_check(repo: Path, mode: str) -> dict[str, Any]:
             fixture_root = Path(raw)
             db = fixture_root / "健檢 fixture" / "doctor.sqlite3"
             db.parent.mkdir(parents=True)
-            from .database import SCHEMA
+            legacy_connection = sqlite3.connect(db)
+            try:
+                legacy_connection.executescript(
+                    """
+                    create table videos (
+                        id integer primary key,
+                        original_path text unique,
+                        current_path text,
+                        filename text,
+                        category text,
+                        status text default 'new'
+                    );
+                    create table frames (
+                        id integer primary key,
+                        video_id integer,
+                        timestamp_seconds real,
+                        frame_path text,
+                        vision_summary text
+                    );
+                    create table segments (
+                        id integer primary key,
+                        video_id integer,
+                        start_seconds real,
+                        end_seconds real,
+                        segment_type text,
+                        title text,
+                        reason text,
+                        tags text,
+                        score real,
+                        suggested_use text
+                    );
+                    create table projects (
+                        id integer primary key,
+                        name text,
+                        status text default 'draft'
+                    );
+                    create table project_videos (
+                        project_id integer not null,
+                        video_id integer not null,
+                        summary_override text,
+                        primary key(project_id, video_id)
+                    );
+                    create table bgm_tracks (
+                        id integer primary key,
+                        title text,
+                        artist text,
+                        file_path text,
+                        source_url text,
+                        license_name text,
+                        license_url text,
+                        attribution_required integer default 0
+                    );
+                    """
+                )
+                legacy_connection.execute(
+                    "insert into videos(id, original_path, current_path, filename, category, status) values(1, ?, ?, ?, ?, ?)",
+                    ("legacy-source", "legacy-source", "legacy-clip.mp4", "travel", "perceived"),
+                )
+                legacy_connection.execute(
+                    "insert into frames(id, video_id, timestamp_seconds, frame_path, vision_summary) values(1, 1, 0, ?, ?)",
+                    ("legacy-frame", "legacy AI snapshot"),
+                )
+                legacy_connection.execute(
+                    "insert into segments(id, video_id, start_seconds, end_seconds, segment_type, title) values(7, 1, 0, 2, ?, ?)",
+                    ("content", "legacy segment"),
+                )
+                legacy_connection.execute("insert into projects(id, name) values(3, ?)", ("legacy project",))
+                legacy_connection.execute(
+                    "insert into project_videos(project_id, video_id, summary_override) values(3, 1, ?)",
+                    ("legacy user summary",),
+                )
+                legacy_connection.execute(
+                    "insert into bgm_tracks(id, title, license_name, license_url, attribution_required) values(9, ?, ?, ?, 0)",
+                    ("legacy bgm", "CC0", "https://license.invalid/cc0"),
+                )
+                legacy_connection.commit()
+            finally:
+                legacy_connection.close()
 
+            # This is intentionally the production migration entry point.  Do
+            # not create with the current SCHEMA and then validate that same
+            # schema; the legacy fixture above must be upgraded in place.
+            from .database import init_db
+
+            init_db(db)
+            gc.collect()
             connection = sqlite3.connect(db)
             try:
-                connection.executescript(SCHEMA)
-                required_tables = set(re.findall(r"create\s+table\s+if\s+not\s+exists\s+([A-Za-z_][A-Za-z0-9_]*)", SCHEMA, re.IGNORECASE))
+                required_tables = {"videos", "frames", "segments", "analysis_runs", "projects", "project_videos", "bgm_tracks", "story_generations"}
                 table_cursor = connection.execute("select name from sqlite_master where type='table'")
                 present_tables = {str(row[0]) for row in table_cursor.fetchall()}
                 table_cursor.close()
                 missing_tables = sorted(required_tables - present_tables)
+                expected_columns = {
+                    "segments": {"segment_uuid", "revision", "natural_audio_recommendation", "confidence"},
+                    "project_videos": {"project_media_uuid", "display_name", "user_summary", "summary_migration_state", "ownership_state"},
+                    "bgm_tracks": {"attribution_status", "license_status", "verification_source", "verification_provenance"},
+                }
+                missing_columns: dict[str, list[str]] = {}
+                for table, columns in expected_columns.items():
+                    column_cursor = connection.execute(f"pragma table_info({table})")
+                    actual_columns = {str(row[1]) for row in column_cursor.fetchall()}
+                    column_cursor.close()
+                    missing_columns[table] = sorted(columns - actual_columns)
+                segment_row = connection.execute("select segment_uuid from segments where id=7").fetchone()
+                project_media_row = connection.execute("select project_media_uuid, display_name, user_summary, summary_migration_state from project_videos where project_id=3 and video_id=1").fetchone()
+                bgm_row = connection.execute("select attribution_status, license_status, verification_source from bgm_tracks where id=9").fetchone()
+                backfill = {
+                    "segment_uuid": bool(segment_row and segment_row[0]),
+                    "project_media_uuid": bool(project_media_row and project_media_row[0]),
+                    "display_name": bool(project_media_row and project_media_row[1] == "legacy-clip.mp4"),
+                    "user_summary": bool(project_media_row and project_media_row[2] == "legacy user summary"),
+                    "summary_migration_state": bool(project_media_row and project_media_row[3] == "migrated"),
+                    "bgm_license_state": bool(bgm_row and bgm_row[0] and bgm_row[1] and bgm_row[2] == "legacy_migration"),
+                }
+                index_cursor = connection.execute("select name from sqlite_master where type='index'")
+                indexes = {str(row[0]) for row in index_cursor.fetchall()}
+                index_cursor.close()
+                required_indexes = {"idx_segments_segment_uuid", "idx_project_videos_media_uuid"}
+                indexes_ok = required_indexes <= indexes
                 connection.execute("create table if not exists doctor_probe (value text)")
                 connection.execute("begin")
                 connection.execute("insert into doctor_probe values ('rollback')")
@@ -490,8 +653,20 @@ def _sqlite_fixture_check(repo: Path, mode: str) -> dict[str, Any]:
             if fixture_root.exists():
                 time.sleep(0.05)
         cleaned = fixture_root is not None and not fixture_root.exists()
-        valid = remaining == 0 and not missing_tables and cleaned
-        return _check("storage.sqlite", "storage", "pass" if valid else "blocked", "isolated SQLite migration/schema/rollback probe passed" if valid else "isolated SQLite migration/schema/rollback probe failed", evidence={"fixture": "isolated", "schema_contract_version": "database-schema-v1", "required_table_count": len(required_tables), "missing_tables": missing_tables, "rollback_clean": remaining == 0, "fixture_cleaned_up": cleaned}, remediation=None if valid else "檢查 SQLite migration schema consistency 與 temporary fixture cleanup。")
+        valid = remaining == 0 and not missing_tables and all(not values for values in missing_columns.values()) and all(backfill.values()) and indexes_ok and cleaned
+        evidence = {
+            "fixture": "isolated_legacy_schema",
+            "production_init_db": True,
+            "migration_contract": "database.init_db",
+            "required_table_count": len(required_tables),
+            "missing_tables": missing_tables,
+            "missing_columns": missing_columns,
+            "backfill": backfill,
+            "indexes": {name: name in indexes for name in sorted(required_indexes)},
+            "rollback_clean": remaining == 0,
+            "fixture_cleaned_up": cleaned,
+        }
+        return _check("storage.sqlite", "storage", "pass" if valid else "blocked", "isolated legacy SQLite migration/backfill/rollback probe passed" if valid else "isolated legacy SQLite migration/backfill/rollback probe failed", evidence=evidence, remediation=None if valid else "檢查 production database.init_db migration、backfill、index 與 temporary fixture cleanup。")
     except Exception as exc:
         return _check("storage.sqlite", "storage", "blocked", "isolated SQLite fixture failed", evidence={"fixture": "isolated", "error_code": type(exc).__name__, "error_message": _redact_text(exc)}, remediation="檢查 Python SQLite runtime 與 migration。")
 
@@ -503,7 +678,7 @@ def _media_fixture_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
     ffprobe = _resolve_executable(cfg.get("ffprobe_path"))
     if not ffmpeg or not ffprobe:
         return _check("media.behavior", "runtime.media", "blocked", "FFmpeg/FFprobe 不可用，無法執行 fixture probe", evidence={"ffmpeg": bool(ffmpeg), "ffprobe": bool(ffprobe)}, remediation="先修正 FFmpeg/FFprobe dependency。")
-    evidence: dict[str, Any] = {"ffmpeg": True, "ffprobe": True, "unicode_path": False, "unicode_verified": False, "codec_h264": False, "codec_aac": False, "long_path_attempted": False, "long_path_verified": False, "fixture_cleaned_up": False}
+    evidence: dict[str, Any] = {"ffmpeg": True, "ffprobe": True, "unicode_path": False, "unicode_verified": False, "codec_h264": False, "codec_aac": False, "long_path_threshold": _WINDOWS_LONG_PATH_THRESHOLD, "long_path_attempted": False, "long_path_length": None, "long_path_verified": "not_verified", "long_path_status": "not_verified", "fixture_cleaned_up": False}
     fixture_root: Path | None = None
     try:
         with tempfile.TemporaryDirectory(prefix="video-vault-doctor-media-") as raw:
@@ -526,21 +701,29 @@ def _media_fixture_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
                 evidence["codec_h264"] = "h264" in codec_names
                 evidence["codec_aac"] = "aac" in codec_names
                 evidence["unicode_verified"] = probed.returncode == 0 and evidence["unicode_path"] and evidence["codec_h264"] and evidence["codec_aac"]
-                long_dir = fixture_root / ("long-path-" + ("nested-" * 18) + "測試")
-                long_dir.mkdir(parents=True)
-                long_output = long_dir / "long-path-probe.mp4"
-                evidence["long_path_attempted"] = True
-                evidence["long_path_length"] = len(str(long_output))
-                try:
-                    shutil.copyfile(output, long_output)
-                    evidence["long_path_verified"] = long_output.is_file()
-                except OSError as exc:
-                    evidence["long_path_error_code"] = type(exc).__name__
+                if os.name == "nt":
+                    long_dir = fixture_root / ("long-path-" + ("nested-" * 45) + "測試")
+                    long_output = long_dir / "long-path-probe.mp4"
+                    evidence["long_path_attempted"] = True
+                    evidence["long_path_length"] = len(str(long_output))
+                    if evidence["long_path_length"] <= _WINDOWS_LONG_PATH_THRESHOLD:
+                        evidence["long_path_status"] = "blocked"
+                    else:
+                        try:
+                            long_dir.mkdir(parents=True)
+                            shutil.copyfile(output, long_output)
+                            evidence["long_path_verified"] = long_output.is_file()
+                            evidence["long_path_status"] = "pass" if evidence["long_path_verified"] else "blocked"
+                        except OSError as exc:
+                            evidence["long_path_error_code"] = type(exc).__name__
+                            evidence["long_path_status"] = "blocked"
+                else:
+                    evidence["long_path_status"] = "skipped"
         evidence["fixture_cleaned_up"] = fixture_root is not None and not fixture_root.exists()
         codec_ok = bool(evidence["unicode_verified"])
-        long_ok = bool(evidence["long_path_verified"])
+        long_ok = evidence["long_path_status"] in {"pass", "skipped"}
         status = "blocked" if not codec_ok else "warning" if not long_ok or not evidence["fixture_cleaned_up"] else "pass"
-        summary = "isolated H.264/AAC Unicode-path probe passed" if status == "pass" else "H.264/AAC probe passed but long-path or cleanup coverage is incomplete" if status == "warning" else "H.264/AAC Unicode-path probe failed"
+        summary = "isolated H.264/AAC Unicode-path probe passed" if status == "pass" and evidence["long_path_status"] == "pass" else "isolated H.264/AAC probe passed; Windows long-path not applicable on this OS" if status == "pass" else "H.264/AAC probe passed but Windows long-path or cleanup coverage is incomplete" if status == "warning" else "H.264/AAC Unicode-path probe failed"
         return _check("media.behavior", "runtime.media", status, summary, evidence=evidence, remediation=None if status == "pass" else "確認 FFmpeg codec、Windows long-path policy 與 temporary fixture cleanup。")
     except (OSError, subprocess.TimeoutExpired) as exc:
         return _check("media.behavior", "runtime.media", "blocked", "media fixture probe failed", evidence={"error_code": type(exc).__name__}, remediation="確認 FFmpeg/FFprobe timeout、codec 與暫存權限。")
@@ -615,15 +798,52 @@ def _temp_directory_check(mode: str) -> dict[str, Any]:
     return _check("runtime.temp", "runtime", status, "OS temporary directory fixture passed" if status == "pass" else "OS temporary directory fixture cleanup failed", evidence={"exists": True, "writable": True, "unicode_file": ok, "fixture_cleaned_up": cleaned}, remediation=None if status == "pass" else "確認 temporary fixture cleanup 與權限。")
 
 
-def _free_disk_check(cfg: Mapping[str, Any]) -> dict[str, Any]:
+def _volume_probe(path: Path) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Return disk evidence for the configured filesystem, never temp fallback."""
+
+    target = path.expanduser()
+    probe_path = target
+    while not probe_path.exists() and probe_path != probe_path.parent:
+        probe_path = probe_path.parent
     try:
-        usage = shutil.disk_usage(Path(tempfile.gettempdir()))
-        free_bytes = int(usage.free)
+        usage = shutil.disk_usage(probe_path)
     except OSError as exc:
-        return _check("runtime.free_disk", "runtime", "blocked", "無法取得 temporary volume free disk", evidence={"error_code": type(exc).__name__}, remediation="確認 temporary volume 可查詢磁碟空間。")
-    minimum = int(((cfg.get("render") or {}).get("minimum_free_disk_bytes") or 0))
-    status = "pass" if free_bytes >= minimum else "blocked"
-    return _check("runtime.free_disk", "runtime", status, "temporary volume free disk 足夠" if status == "pass" else "temporary volume free disk 低於設定下限", evidence={"free_bytes": free_bytes, "minimum_required_bytes": minimum}, remediation=None if status == "pass" else "釋放磁碟空間或調整明確的 render free-disk policy。")
+        return None, {"error_code": type(exc).__name__, "path_exists": target.exists()}
+    drive, _ = os.path.splitdrive(str(probe_path))
+    return {"free_bytes": int(usage.free), "total_bytes": int(usage.total), "path_exists": target.exists(), "volume": drive or probe_path.anchor or "unknown"}, None
+
+
+def _free_disk_checks(cfg: Mapping[str, Any]) -> list[dict[str, Any]]:
+    temp_path = Path(tempfile.gettempdir())
+    library_value = str(cfg.get("library_root") or "").strip()
+    library_path = Path(library_value).expanduser() if library_value else Path("")
+    render_path = library_path / "99_exports" if library_value else Path("")
+    temp_evidence, temp_error = _volume_probe(temp_path)
+    temp_status = "blocked" if temp_error or temp_evidence is None else "pass"
+    temp_payload = {"filesystem": "os_temp", "configured_path": str(temp_path), **(temp_evidence or temp_error or {})}
+    temp_check = _check("runtime.free_disk.temp", "runtime", temp_status, "OS temporary volume free disk 可查詢" if temp_status == "pass" else "無法取得 OS temporary volume free disk", evidence=temp_payload, remediation=None if temp_status == "pass" else "確認 OS temporary volume 可查詢磁碟空間。")
+
+    minimum, minimum_error = _safe_float(((cfg.get("render") or {}).get("minimum_free_disk_bytes") if isinstance(cfg.get("render") or {}, Mapping) else None), default=0.0)
+    if minimum_error is None and minimum < 0:
+        minimum_error = "negative_number"
+    render_evidence, render_error = _volume_probe(render_path) if library_value else (None, {"error_code": "library_root_missing"})
+    render_status = "blocked" if minimum_error or render_error or render_evidence is None else "pass" if render_evidence["free_bytes"] >= minimum else "blocked"
+    render_payload = {
+        "filesystem": "render_library",
+        "configured_path": str(render_path),
+        "minimum_required_bytes": int(minimum) if minimum >= 0 else 0,
+        "minimum_error_code": minimum_error,
+        "minimum_applied_to": "render/library volume",
+        **(render_evidence or render_error or {}),
+    }
+    render_check = _check("runtime.free_disk.render", "runtime", render_status, "render/library volume free disk 足夠" if render_status == "pass" else "render/library volume free disk 不足或無法驗證", evidence=render_payload, remediation=None if render_status == "pass" else "確認實際 render/library volume 可用空間與 minimum_free_disk_bytes。")
+    return [temp_check, render_check]
+
+
+def _free_disk_check(cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """Compatibility wrapper for callers that expect one render-volume check."""
+
+    return _free_disk_checks(cfg)[1]
 
 
 def _asset_checks(repo: Path, cfg: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -636,30 +856,58 @@ def _asset_checks(repo: Path, cfg: Mapping[str, Any]) -> list[dict[str, Any]]:
         _check("configuration.web_lockfile_parse", "configuration", "pass", "WebUI lockfile 可解析", evidence={"parse": True}) if package_lock.is_file() and _parse_json_file(package_lock) else _check("configuration.web_lockfile_parse", "configuration", "blocked" if package_lock.is_file() else "skipped", "WebUI lockfile 無法解析" if package_lock.is_file() else "未檢查缺失 WebUI lockfile", evidence={"parse": False}, remediation="修正 web/package-lock.json。" if package_lock.is_file() else None),
         _check("configuration.hyperframes_lockfile", "configuration", "pass" if hyperframes_lock.is_file() else "blocked", "HyperFrames lockfile 存在" if hyperframes_lock.is_file() else "HyperFrames lockfile 不存在", evidence={"exists": hyperframes_lock.is_file()}, remediation="補齊 pinned HyperFrames package-lock.json。" if not hyperframes_lock.is_file() else None),
     ]
-    font = str(((cfg.get("render") or {}).get("visual_font_path") or "")).strip()
+    sections: dict[str, dict[str, Any]] = {}
+    for section_name in ("render", "color", "bgm", "retention"):
+        raw_section = cfg.get(section_name)
+        if raw_section in (None, ""):
+            sections[section_name] = {}
+        elif isinstance(raw_section, Mapping):
+            sections[section_name] = dict(raw_section)
+        else:
+            checks.append(_check(f"configuration.{section_name}", "configuration", "blocked", f"{section_name} 設定必須是 object", evidence={"valid": False, "error_code": "expected_object"}, remediation=f"修正 {section_name} 設定格式。"))
+            sections[section_name] = {}
+    render = sections["render"]
+    font = str((render.get("visual_font_path") or "")).strip()
     if not font:
         checks.append(_check("asset.font", "assets", "skipped", "未指定自訂字型，使用系統 fallback", evidence={"configured": False}))
     else:
         exists = Path(font).expanduser().is_file()
         checks.append(_check("asset.font", "assets", "pass" if exists else "warning", "自訂字型可用" if exists else "自訂字型不存在，將使用 fallback", evidence={"configured": True, "exists": exists}, remediation=None if exists else "修正字型設定或移除自訂字型路徑。"))
-    color = dict(cfg.get("color") or {})
+    color = sections["color"]
     color_mode = str(color.get("default_mode") or color.get("mode") or "none")
     if color_mode in {"dji_lut", "dji_dlog", "dji_dlog_m"}:
         lut = str(color.get("lut_path") or "")
         checks.append(_check("asset.lut", "assets", "pass" if Path(lut).is_file() else "blocked", "啟用 LUT 可用" if Path(lut).is_file() else "啟用 LUT 但 LUT asset 缺失", evidence={"enabled": True, "exists": Path(lut).is_file()}, remediation=None if Path(lut).is_file() else "提供設定的 .cube LUT asset。"))
     else:
         checks.append(_check("asset.lut", "assets", "skipped", "未啟用 LUT；略過 optional asset", evidence={"enabled": False}))
-    bgm = dict(cfg.get("bgm") or {})
-    if bool(bgm.get("enabled")):
+    bgm = sections["bgm"]
+    bgm_enabled, bgm_error = _optional_bool(bgm.get("enabled"))
+    if bgm_error:
+        checks.append(_check("asset.bgm", "assets", "blocked", "BGM enabled 設定無效", evidence={"enabled": "invalid", "error_code": bgm_error}, remediation="bgm.enabled 只能使用 true/false、yes/no、on/off 或 1/0。"))
+    elif bgm_enabled:
         bgm_root = str(bgm.get("root") or bgm.get("directory") or "")
         checks.append(_check("asset.bgm", "assets", "pass" if bgm_root and Path(bgm_root).is_dir() else "blocked", "啟用 BGM asset 可用" if bgm_root and Path(bgm_root).is_dir() else "啟用 BGM 但 asset directory 缺失", evidence={"enabled": True, "exists": bool(bgm_root and Path(bgm_root).is_dir())}, remediation=None if bgm_root and Path(bgm_root).is_dir() else "提供 BGM asset directory。"))
     else:
         checks.append(_check("asset.bgm", "assets", "skipped", "未啟用 BGM；略過 optional asset", evidence={"enabled": False}))
-    retention = dict(cfg.get("retention") or {})
-    if bool(retention.get("enabled")):
+    retention = sections["retention"]
+    retention_enabled, retention_error = _optional_bool(retention.get("enabled"))
+    if retention_error:
+        checks.append(_check("asset.retention", "assets", "blocked", "retention enabled 設定無效", evidence={"enabled": "invalid", "error_code": retention_error}, remediation="retention.enabled 只能使用 true/false、yes/no、on/off 或 1/0。"))
+    elif retention_enabled:
         policy = retention.get("policy") if isinstance(retention.get("policy"), Mapping) else retention
-        valid = all(float(policy.get(key, 0)) >= 0 for key in ("cache_max_age_days", "preview_max_age_days", "failed_grace_days"))
-        checks.append(_check("asset.retention", "assets", "pass" if valid else "blocked", "retention policy contract 可用" if valid else "retention policy contract 無效", evidence={"enabled": True, "policy_valid": valid}, remediation=None if valid else "修正 retention policy 的非負數欄位。"))
+        if not isinstance(policy, Mapping):
+            checks.append(_check("asset.retention", "assets", "blocked", "retention policy 必須是 object", evidence={"enabled": True, "policy_valid": False, "error_code": "expected_object"}, remediation="修正 retention policy 格式。"))
+        else:
+            numeric_errors: dict[str, str] = {}
+            numeric_values: dict[str, float] = {}
+            for key in ("cache_max_age_days", "preview_max_age_days", "failed_grace_days"):
+                numeric_values[key], error = _safe_float(policy.get(key), default=0.0)
+                if error:
+                    numeric_errors[key] = error
+                elif numeric_values[key] < 0:
+                    numeric_errors[key] = "negative_number"
+            valid = not numeric_errors
+            checks.append(_check("asset.retention", "assets", "pass" if valid else "blocked", "retention policy contract 可用" if valid else "retention policy contract 無效", evidence={"enabled": True, "policy_valid": valid, "numeric_errors": numeric_errors}, remediation=None if valid else "修正 retention policy 的有效非負數欄位。"))
     else:
         checks.append(_check("asset.retention", "assets", "skipped", "未啟用 retention；略過 optional policy", evidence={"enabled": False}))
     return checks
@@ -698,7 +946,8 @@ def collect_doctor_report(
 
     def add(check: dict[str, Any] | Callable[[], dict[str, Any]], identifier: str | None = None) -> None:
         check_id_value = identifier or (check["check_id"] if isinstance(check, Mapping) else "")
-        if requested_check is not None and check_id_value != requested_check:
+        is_free_disk_compatibility_alias = requested_check == "runtime.free_disk" and check_id_value in {"runtime.free_disk.temp", "runtime.free_disk.render"}
+        if requested_check is not None and check_id_value != requested_check and not is_free_disk_compatibility_alias:
             return
         result = check() if callable(check) else check
         checks.append(_timed(result["check_id"], result["category"], lambda result=result: result))
@@ -731,7 +980,8 @@ def collect_doctor_report(
     add(lambda: _cloud_config_check(cfg), "provider.cloud_review")
     add(lambda: _media_fixture_check(cfg, selected_mode), "media.behavior")
     add(lambda: _temp_directory_check(selected_mode), "runtime.temp")
-    add(lambda: _free_disk_check(cfg), "runtime.free_disk")
+    for item in _free_disk_checks(cfg):
+        add(item)
     add(lambda: _sqlite_fixture_check(repo, selected_mode), "storage.sqlite")
     add(lambda: _loopback_fixture_check(selected_mode), "web.loopback")
     for item in _asset_checks(repo, cfg):

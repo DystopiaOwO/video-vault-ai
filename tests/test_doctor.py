@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import shutil
 from types import SimpleNamespace
@@ -204,13 +205,21 @@ def test_full_media_probe_verifies_unicode_h264_aac_long_path_and_cleanup():
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         pytest.skip("FFmpeg/FFprobe unavailable on this host")
     result = doctor._media_fixture_check({"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe"}, "full")
-    assert result["status"] == "pass"
+    assert result["status"] in {"pass", "warning"}
     assert result["evidence"]["unicode_path"] is True
     assert result["evidence"]["unicode_verified"] is True
     assert result["evidence"]["codec_h264"] is True
     assert result["evidence"]["codec_aac"] is True
-    assert result["evidence"]["long_path_attempted"] is True
-    assert result["evidence"]["long_path_verified"] is True
+    assert result["evidence"]["long_path_threshold"] == 260
+    if os.name == "nt":
+        assert result["evidence"]["long_path_attempted"] is True
+        assert result["evidence"]["long_path_length"] > result["evidence"]["long_path_threshold"]
+        assert result["evidence"]["long_path_status"] in {"pass", "blocked"}
+        if result["evidence"]["long_path_status"] == "pass":
+            assert result["evidence"]["long_path_verified"] is True
+    else:
+        assert result["evidence"]["long_path_status"] == "skipped"
+        assert result["evidence"]["long_path_verified"] == "not_verified"
     assert result["evidence"]["fixture_cleaned_up"] is True
 
 
@@ -296,7 +305,11 @@ def test_asset_lock_parse_and_optional_asset_contracts(tmp_path: Path):
 def test_full_sqlite_fixture_checks_schema_and_cleanup():
     result = doctor._sqlite_fixture_check(Path.cwd(), "full")
     assert result["status"] == "pass", result["evidence"]
+    assert result["evidence"]["production_init_db"] is True
     assert result["evidence"]["missing_tables"] == []
+    assert all(not values for values in result["evidence"]["missing_columns"].values())
+    assert all(result["evidence"]["backfill"].values())
+    assert all(result["evidence"]["indexes"].values())
     assert result["evidence"]["fixture_cleaned_up"] is True
 
 
@@ -305,3 +318,75 @@ def test_single_check_does_not_run_unrequested_expensive_probe(tmp_path: Path, m
     monkeypatch.setattr(doctor, "_media_fixture_check", lambda *args: (_ for _ in ()).throw(AssertionError("media probe must not run")))
     report = doctor.collect_doctor_report(config, mode="full", check_id="provider.active", repo_root=Path(__file__).resolve().parents[1])
     assert report["checks"][0]["check_id"] == "provider.active"
+
+
+def test_free_disk_checks_use_temp_and_render_library_volumes_separately(monkeypatch):
+    calls = []
+
+    def fake_exists(path: Path) -> bool:
+        return str(path) in {"C:\\temp", "D:\\VideoLibrary\\99_exports"} or path.anchor in {"C:\\", "D:\\"}
+
+    def fake_usage(path):
+        calls.append(str(path))
+        if str(path).upper().startswith("C:"):
+            return SimpleNamespace(free=10_000, total=20_000, used=10_000)
+        return SimpleNamespace(free=100, total=20_000, used=19_900)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+    monkeypatch.setattr(doctor.tempfile, "gettempdir", lambda: "C:\\temp")
+    monkeypatch.setattr(doctor.shutil, "disk_usage", fake_usage)
+    checks = {item["check_id"]: item for item in doctor._free_disk_checks({"library_root": "D:\\VideoLibrary", "render": {"minimum_free_disk_bytes": 150}})}
+
+    assert checks["runtime.free_disk.temp"]["status"] == "pass"
+    assert checks["runtime.free_disk.render"]["status"] == "blocked"
+    assert checks["runtime.free_disk.render"]["evidence"]["minimum_applied_to"] == "render/library volume"
+    assert any(path.upper().startswith("C:") for path in calls)
+    assert any(path.upper().startswith("D:") for path in calls)
+
+
+def test_legacy_free_disk_check_id_returns_both_volume_checks(tmp_path: Path):
+    report = doctor.collect_doctor_report_from_config({"library_root": str(tmp_path)}, check_id="runtime.free_disk", repo_root=Path(__file__).resolve().parents[1])
+    assert {item["check_id"] for item in report["checks"]} == {"runtime.free_disk.temp", "runtime.free_disk.render"}
+
+
+def test_optional_disabled_assets_skip_and_malformed_enabled_is_blocked(tmp_path: Path):
+    disabled = {"library_root": str(tmp_path), "bgm": {"enabled": "false"}, "retention": {"enabled": "off", "cache_max_age_days": "not-a-number"}}
+    checks = {item["check_id"]: item for item in doctor._asset_checks(Path(__file__).resolve().parents[1], disabled)}
+    assert checks["asset.bgm"]["status"] == "skipped"
+    assert checks["asset.retention"]["status"] == "skipped"
+
+    malformed_enabled = {"library_root": str(tmp_path), "bgm": {"enabled": 2}, "retention": {"enabled": "maybe"}}
+    malformed_checks = {item["check_id"]: item for item in doctor._asset_checks(Path(__file__).resolve().parents[1], malformed_enabled)}
+    assert malformed_checks["asset.bgm"]["status"] == "blocked"
+    assert malformed_checks["asset.bgm"]["evidence"]["error_code"] == "invalid_boolean_number"
+    assert malformed_checks["asset.retention"]["status"] == "blocked"
+
+    malformed_policy = {"library_root": str(tmp_path), "retention": {"enabled": True, "cache_max_age_days": "not-a-number"}}
+    policy_checks = {item["check_id"]: item for item in doctor._asset_checks(Path(__file__).resolve().parents[1], malformed_policy)}
+    assert policy_checks["asset.retention"]["status"] == "blocked"
+    assert policy_checks["asset.retention"]["evidence"]["numeric_errors"]["cache_max_age_days"] == "invalid_number"
+
+
+def test_malformed_optional_config_is_structured_blocked_for_cli_and_api(tmp_path: Path):
+    config, _, _, _ = _config(tmp_path)
+    config.write_text(
+        "\n".join(
+            (
+                f'library_root: "{tmp_path}"',
+                "bgm:",
+                "  enabled: 2",
+                "retention:",
+                "  enabled: maybe",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    report = doctor.collect_doctor_report(config, repo_root=Path(__file__).resolve().parents[1])
+    checks = {item["check_id"]: item for item in report["checks"]}
+    assert checks["asset.bgm"]["status"] == "blocked"
+    assert checks["asset.retention"]["status"] == "blocked"
+    api_report = doctor.collect_doctor_report_from_config({"library_root": str(tmp_path), "bgm": {"enabled": 2}, "retention": {"enabled": "maybe"}}, repo_root=Path(__file__).resolve().parents[1])
+    api_checks = {item["check_id"]: item for item in api_report["checks"]}
+    assert api_checks["asset.bgm"]["status"] == "blocked"
+    assert api_checks["asset.retention"]["status"] == "blocked"
