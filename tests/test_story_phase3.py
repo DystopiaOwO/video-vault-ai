@@ -16,6 +16,7 @@ from video_vault.story_calibration import calibration_path, compute_calibration,
 from video_vault.story_generation import (
     LocalTextStoryProvider,
     StoryGenerationError,
+    StoryContextBudgetError,
     StoryValidationError,
     apply_story_generation_to_storyboard,
     generate_project_story,
@@ -622,15 +623,97 @@ def test_local_text_provider_allows_at_most_one_corrective_retry_and_audits(monk
         return Response(responses.pop(0))
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    output, raw = LocalTextStoryProvider("http://127.0.0.1:1234/v1", "test-model").generate_story({"story_profile_id": "general_diary"})
+    output, raw = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1",
+        "test-model",
+        context_length=32768,
+        context_source="test.provider_metadata",
+    ).generate_story({"story_profile_id": "general_diary"})
     assert output == valid
     assert raw["provider_audit"]["calls"] == 2
     assert raw["provider_audit"]["retries"] == 1
     assert len(raw["provider_audit"]["call_latencies_ms"]) == 2
     assert raw["provider_audit"]["strict_schema"] is True
+    assert raw["provider_audit"]["context_budget"]["status"] == "pass"
+    assert raw["provider_audit"]["context_budget"]["context_metadata_source"] == "test.provider_metadata"
     assert all(request["response_format"]["type"] == "json_schema" for request in requests)
     assert all(request["response_format"]["json_schema"]["strict"] is True for request in requests)
     assert all(request["response_format"]["json_schema"]["schema"]["properties"]["story_profile"]["enum"] == ["travel_diary", "coffee_matcha_diary", "roasting_diary", "general_diary"] for request in requests)
+
+
+def test_local_text_provider_blocks_oversized_input_before_http(monkeypatch):
+    calls = []
+
+    def fail_if_called(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("HTTP request must not be sent for an oversized StoryInput")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_if_called)
+    provider = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1",
+        "8k-model",
+        context_length=8192,
+        context_source="test.model_metadata.max_context_length",
+    )
+    snapshot = {"story_profile_id": "general_diary", "project_intent": "x" * 100000}
+    with pytest.raises(StoryContextBudgetError, match="estimated input .*available context") as caught:
+        provider.generate_story(snapshot)
+    budget = caught.value.budget
+    assert calls == []
+    assert budget["status"] == "blocked"
+    assert budget["reason_code"] == "estimated_input_exceeds_context"
+    assert budget["estimated_input_tokens"] > 8192
+    assert budget["available_context_tokens"] == 8192
+    assert "縮減 input" in str(caught.value)
+    assert "換用更大 context" in str(caught.value)
+
+
+def test_local_text_provider_unknown_context_blocks_before_http(monkeypatch):
+    calls = []
+
+    def fail_if_called(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("unknown context must block before HTTP")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_if_called)
+    provider = LocalTextStoryProvider("http://127.0.0.1:1234/v1", "unknown-model")
+    with pytest.raises(StoryContextBudgetError, match="context capacity unknown") as caught:
+        provider.generate_story({"story_profile_id": "general_diary"})
+    assert calls == []
+    assert caught.value.budget["reason_code"] == "context_capacity_unknown"
+    assert caught.value.budget["context_metadata_source"] == "unknown"
+    assert "estimated input" in str(caught.value)
+    assert "available context unknown" in str(caught.value)
+
+
+def test_generate_project_story_blocks_context_before_provider_request(tmp_path, monkeypatch):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    cfg["story"] = {
+        "provider": "local_text",
+        "model": "8k-model",
+        "base_url": "http://127.0.0.1:1234/v1",
+        "context_length": 8192,
+        "context_source": "test.model_metadata.max_context_length",
+    }
+    save_project_story_settings(cfg, db, project_id, {"project_intent": "x" * 100000})
+    calls = []
+
+    def fail_if_called(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("generation HTTP request must not be sent")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_if_called)
+    with pytest.raises(StoryContextBudgetError, match="estimated input .*available context") as caught:
+        generate_project_story(cfg, db, project_id, force=True)
+    assert calls == []
+    with connect(db) as con:
+        row = dict(con.execute("select status, error, validation_json from story_generations where project_id=? order by generation desc limit 1", (project_id,)).fetchone())
+    validation = json.loads(row["validation_json"])
+    assert row["status"] == "failed"
+    assert "estimated input" in row["error"]
+    assert validation["status"] == "blocked"
+    assert validation["context_budget"]["reason_code"] == "estimated_input_exceeds_context"
+    assert caught.value.budget["estimated_input_tokens"] > caught.value.budget["available_context_tokens"]
 
 
 def test_calibration_uses_approved_outputs_only_and_can_reset(tmp_path: Path):
