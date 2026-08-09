@@ -37,6 +37,7 @@ DOCTOR_MODES = frozenset({"default", "quick", "full"})
 _SENSITIVE_KEY = re.compile(r"(?:api[_-]?key|token|authorization|secret|password|credential|private[_-]?key)", re.IGNORECASE)
 _MEDIA_SUFFIX = re.compile(r"\.(?:mp4|mov|mkv|avi|webm|m4v|mp3|wav|m4a|aac|flac|jpg|jpeg|png|webp|gif|ttf|otf|cube)(?:$|[?#])", re.IGNORECASE)
 _WINDOWS_LONG_PATH_THRESHOLD = 260
+_WINDOWS_LONG_PATH_COMPONENT_LIMIT = 180
 _FALSE_VALUES = frozenset({"", "0", "false", "no", "off"})
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
@@ -671,6 +672,21 @@ def _sqlite_fixture_check(repo: Path, mode: str) -> dict[str, Any]:
         return _check("storage.sqlite", "storage", "blocked", "isolated SQLite fixture failed", evidence={"fixture": "isolated", "error_code": type(exc).__name__, "error_message": _redact_text(exc)}, remediation="檢查 Python SQLite runtime 與 migration。")
 
 
+def _windows_long_path_fixture_path(fixture_root: Path) -> Path:
+    """Build a >MAX_PATH fixture from ordinary-sized nested components."""
+
+    components: list[str] = []
+    output = fixture_root / "long-path-probe.mp4"
+    while len(components) < 4 or len(str(output)) <= _WINDOWS_LONG_PATH_THRESHOLD:
+        index = len(components) + 1
+        component = f"nested-long-path-{index:02d}-" + ("segment-" * 4) + "fixture"
+        if len(component) > _WINDOWS_LONG_PATH_COMPONENT_LIMIT:
+            raise ValueError("long-path fixture component exceeds safety limit")
+        components.append(component)
+        output = fixture_root.joinpath(*components, "long-path-probe.mp4")
+    return output
+
+
 def _media_fixture_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
     if mode != "full":
         return _check("media.behavior", "runtime.media", "skipped", "quick/default mode 未執行 FFmpeg/FFprobe behavior probe", evidence={"probe": "skipped"})
@@ -678,7 +694,7 @@ def _media_fixture_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
     ffprobe = _resolve_executable(cfg.get("ffprobe_path"))
     if not ffmpeg or not ffprobe:
         return _check("media.behavior", "runtime.media", "blocked", "FFmpeg/FFprobe 不可用，無法執行 fixture probe", evidence={"ffmpeg": bool(ffmpeg), "ffprobe": bool(ffprobe)}, remediation="先修正 FFmpeg/FFprobe dependency。")
-    evidence: dict[str, Any] = {"ffmpeg": True, "ffprobe": True, "unicode_path": False, "unicode_verified": False, "codec_h264": False, "codec_aac": False, "long_path_threshold": _WINDOWS_LONG_PATH_THRESHOLD, "long_path_attempted": False, "long_path_length": None, "long_path_verified": "not_verified", "long_path_status": "not_verified", "fixture_cleaned_up": False}
+    evidence: dict[str, Any] = {"ffmpeg": True, "ffprobe": True, "unicode_path": False, "unicode_verified": False, "codec_h264": False, "codec_aac": False, "long_path_threshold": _WINDOWS_LONG_PATH_THRESHOLD, "long_path_length": None, "max_component_length": None, "long_path_attempted": False, "long_path_verified": "not_verified", "long_path_status": "not_verified", "fixture_cleaned_up": False}
     fixture_root: Path | None = None
     try:
         with tempfile.TemporaryDirectory(prefix="video-vault-doctor-media-") as raw:
@@ -701,18 +717,27 @@ def _media_fixture_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
                 evidence["codec_h264"] = "h264" in codec_names
                 evidence["codec_aac"] = "aac" in codec_names
                 evidence["unicode_verified"] = probed.returncode == 0 and evidence["unicode_path"] and evidence["codec_h264"] and evidence["codec_aac"]
+                long_output = _windows_long_path_fixture_path(fixture_root)
+                fixture_components = long_output.relative_to(fixture_root).parts
+                evidence["long_path_length"] = len(str(long_output))
+                evidence["max_component_length"] = max(len(component) for component in fixture_components)
                 if os.name == "nt":
-                    long_dir = fixture_root / ("long-path-" + ("nested-" * 45) + "測試")
-                    long_output = long_dir / "long-path-probe.mp4"
+                    long_dir = long_output.parent
                     evidence["long_path_attempted"] = True
-                    evidence["long_path_length"] = len(str(long_output))
-                    if evidence["long_path_length"] <= _WINDOWS_LONG_PATH_THRESHOLD:
+                    evidence["long_path_verified"] = False
+                    evidence["long_path_mkdir"] = False
+                    evidence["long_path_copy"] = False
+                    evidence["long_path_read"] = False
+                    if evidence["long_path_length"] <= _WINDOWS_LONG_PATH_THRESHOLD or evidence["max_component_length"] > _WINDOWS_LONG_PATH_COMPONENT_LIMIT:
                         evidence["long_path_status"] = "blocked"
                     else:
                         try:
                             long_dir.mkdir(parents=True)
+                            evidence["long_path_mkdir"] = long_dir.is_dir()
                             shutil.copyfile(output, long_output)
-                            evidence["long_path_verified"] = long_output.is_file()
+                            evidence["long_path_copy"] = long_output.is_file()
+                            evidence["long_path_read"] = long_output.read_bytes() == output.read_bytes()
+                            evidence["long_path_verified"] = bool(evidence["long_path_mkdir"] and evidence["long_path_copy"] and evidence["long_path_read"])
                             evidence["long_path_status"] = "pass" if evidence["long_path_verified"] else "blocked"
                         except OSError as exc:
                             evidence["long_path_error_code"] = type(exc).__name__

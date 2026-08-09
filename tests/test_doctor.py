@@ -211,16 +211,32 @@ def test_full_media_probe_verifies_unicode_h264_aac_long_path_and_cleanup():
     assert result["evidence"]["codec_h264"] is True
     assert result["evidence"]["codec_aac"] is True
     assert result["evidence"]["long_path_threshold"] == 260
+    assert result["evidence"]["long_path_length"] > result["evidence"]["long_path_threshold"]
+    assert result["evidence"]["max_component_length"] <= doctor._WINDOWS_LONG_PATH_COMPONENT_LIMIT
     if os.name == "nt":
         assert result["evidence"]["long_path_attempted"] is True
-        assert result["evidence"]["long_path_length"] > result["evidence"]["long_path_threshold"]
         assert result["evidence"]["long_path_status"] in {"pass", "blocked"}
         if result["evidence"]["long_path_status"] == "pass":
             assert result["evidence"]["long_path_verified"] is True
+            assert result["evidence"]["long_path_mkdir"] is True
+            assert result["evidence"]["long_path_copy"] is True
+            assert result["evidence"]["long_path_read"] is True
+        else:
+            assert result["evidence"]["long_path_verified"] is False
     else:
         assert result["evidence"]["long_path_status"] == "skipped"
         assert result["evidence"]["long_path_verified"] == "not_verified"
     assert result["evidence"]["fixture_cleaned_up"] is True
+
+
+def test_windows_long_path_fixture_uses_safe_nested_components(tmp_path: Path):
+    long_output = doctor._windows_long_path_fixture_path(tmp_path)
+    components = long_output.relative_to(tmp_path).parts
+
+    assert len(str(long_output)) > doctor._WINDOWS_LONG_PATH_THRESHOLD
+    assert len(components) >= 5
+    assert all(len(component) <= doctor._WINDOWS_LONG_PATH_COMPONENT_LIMIT for component in components)
+    assert max(len(component) for component in components) <= doctor._WINDOWS_LONG_PATH_COMPONENT_LIMIT
 
 
 def test_hyperframes_full_probe_is_offline_no_install_and_missing_modules_blocks(tmp_path: Path, monkeypatch):
