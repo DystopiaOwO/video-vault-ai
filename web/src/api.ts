@@ -455,6 +455,8 @@ export type StoryGeneration = {
   schema_version?: number;
   creator_profile_version?: number;
   project_story_profile_version?: number;
+  applied_to_storyboard_revision?: number;
+  applied_at?: string;
   normalized_response?: { project_summary?: string; chapters?: StoryChapter[]; overall_confidence?: number; needs_review_reasons?: string[]; suppressed_segments?: SuppressedSegment[] };
   review_state?: { chapters?: StoryChapter[]; project_summary?: string; source?: string; locked?: boolean; suppressed_segments?: SuppressedSegment[] };
   validation?: Record<string, unknown>;
@@ -495,6 +497,8 @@ export type StoryDetail = {
   last_successful_story_generation_uuid?: string;
   current_input_hash?: string;
   current_generation_is_stale?: boolean;
+  current_generation_state?: "current" | "stale_before_apply" | "generation_archived_after_apply" | string;
+  generation_archived_after_apply?: boolean;
   calibration?: StoryCalibration;
 };
 
@@ -725,7 +729,7 @@ export const api = {
   updateStoryReview: (projectId: number, storyGenerationUuid: string, review: Record<string, unknown>, baseRevision?: number) =>
     json<{ ok: boolean; generation?: StoryGeneration; error?: string; code?: string }>("/api/project/story/review", post({ project_id: projectId, story_generation_uuid: storyGenerationUuid, review, base_revision: baseRevision })),
   applyStory: (projectId: number, storyGenerationUuid: string, baseRevision?: number) =>
-    json<{ ok: boolean; storyboard?: StoryboardState; render_changed?: boolean; approval_invalidated?: boolean; generation?: StoryGeneration; error?: string; code?: string }>("/api/project/story/apply", post({ project_id: projectId, story_generation_uuid: storyGenerationUuid, base_revision: baseRevision })),
+    json<{ ok: boolean; storyboard?: StoryboardState; render_changed?: boolean; approval_invalidated?: boolean; apply_succeeded?: boolean; apply_state?: string; generation_state?: string; idempotent?: boolean; project_revision?: number; generation?: StoryGeneration; error?: string; code?: string }>("/api/project/story/apply", post({ project_id: projectId, story_generation_uuid: storyGenerationUuid, base_revision: baseRevision })),
   storyCalibration: (projectId: number) => json<StoryCalibration>(`/api/project/story/calibration?project_id=${projectId}`),
   recalculateStoryCalibration: (projectId: number, profileId?: string) => json<{ ok: boolean; calibration?: StoryCalibration; error?: string }>("/api/project/story/calibration", post({ project_id: projectId, profile_id: profileId, action: "recalculate" })),
   resetStoryCalibration: (projectId: number, profileId?: string) => json<{ ok: boolean; calibration?: StoryCalibration; error?: string }>("/api/project/story/calibration", post({ project_id: projectId, profile_id: profileId, action: "reset" })),

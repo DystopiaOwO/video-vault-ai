@@ -279,6 +279,15 @@ def project_story_detail(cfg: Mapping[str, Any], db: Path, project_id: int) -> d
         current_input_hash = str(build_story_input_snapshot(cfg, db, project_id).get("input_hash") or "")
     except (OSError, TypeError, ValueError):
         current_input_hash = ""
+    current_is_stale = bool(current and current_input_hash and current.get("input_hash") != current_input_hash)
+    generation_archived_after_apply = bool(current_is_stale and current and current.get("applied_at"))
+    current_generation_state = (
+        "generation_archived_after_apply"
+        if generation_archived_after_apply
+        else "stale_before_apply"
+        if current_is_stale
+        else "current"
+    )
     return {
         "settings": settings,
         "creator_profile": creator,
@@ -288,7 +297,9 @@ def project_story_detail(cfg: Mapping[str, Any], db: Path, project_id: int) -> d
         "current_story_generation_uuid": current_uuid,
         "last_successful_story_generation_uuid": str(row["last_successful_story_generation_uuid"] or ""),
         "current_input_hash": current_input_hash,
-        "current_generation_is_stale": bool(current and current_input_hash and current.get("input_hash") != current_input_hash),
+        "current_generation_is_stale": current_is_stale,
+        "current_generation_state": current_generation_state,
+        "generation_archived_after_apply": generation_archived_after_apply,
         "calibration": calibration_for_profile(cfg, db, str(settings.get("profile_id") or "general_diary")),
     }
 
@@ -1099,6 +1110,36 @@ def _storyboard_state_from_generation(generation: Mapping[str, Any], existing: M
     return {"schema_version": int(existing.get("schema_version") or 1), "groups": groups, "segments": next_segments}
 
 
+def _restore_story_apply_state(
+    db: Path,
+    project_id: int,
+    generation_uuid: str,
+    generation_before: Mapping[str, Any],
+    project_before: Mapping[str, Any] | None,
+    rollback_files: Mapping[Path, bytes | None],
+) -> None:
+    """Compensate every Apply side effect when the success boundary fails."""
+    for path, content in rollback_files.items():
+        if content is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+
+    with connect(db) as con:
+        if project_before:
+            project_fields = {key: value for key, value in dict(project_before).items() if key != "id"}
+            con.execute(
+                f"update projects set {', '.join(f'{key}=?' for key in project_fields)} where id=?",
+                (*project_fields.values(), int(project_id)),
+            )
+        generation_fields = {key: value for key, value in dict(generation_before).items() if key != "id"}
+        con.execute(
+            f"update story_generations set {', '.join(f'{key}=?' for key in generation_fields)} where story_generation_uuid=?",
+            (*generation_fields.values(), str(generation_uuid)),
+        )
+
+
 def apply_story_generation_to_storyboard(
     cfg: Mapping[str, Any],
     db: Path,
@@ -1107,40 +1148,92 @@ def apply_story_generation_to_storyboard(
     *,
     base_revision: int | None = None,
 ) -> dict[str, Any]:
-    generation = get_story_generation(db, generation_uuid, include_internal=True)
-    _assert_generation_project(generation, project_id)
-    if str(generation.get("status")) != "succeeded":
-        raise StoryGenerationError("只有成功且已驗證的故事 generation 可以套用")
-    current_snapshot = build_story_input_snapshot(cfg, db, int(project_id))
-    if str(generation.get("input_hash") or "") != str(current_snapshot.get("input_hash") or ""):
-        raise StoryGenerationError("故事 generation 的 input_hash 已過期，請重新計算目前 StoryInputSnapshot 後再套用")
-    existing = load_storyboard(dict(cfg), int(project_id))
-    if existing is None:
-        raise ValueError("尚未建立 storyboard，請先到分鏡審核建立分鏡後再套用故事")
-    state = _storyboard_state_from_generation(generation, existing)
-    folder = project_dir(dict(cfg), int(project_id))
-    rollback_files = {
-        folder / name: (folder / name).read_bytes() if (folder / name).is_file() else None
-        for name in ("storyboard.json", "review_status.json", "project_plan.json")
-    }
-    previous_project = project(db, int(project_id))
+    rollback_files: dict[Path, bytes | None] | None = None
+    generation_before: Mapping[str, Any] | None = None
+    project_before: Mapping[str, Any] | None = None
+    rollback_ready = False
+    result_payload: dict[str, Any] | None = None
+    commit = None
     try:
-        result = update_storyboard(dict(cfg), db, int(project_id), state, return_result=True, base_revision=base_revision)
-    except Exception:
-        for path, content in rollback_files.items():
-            if content is None:
-                path.unlink(missing_ok=True)
+        # Use the project lock for the complete mutation and marker boundary.
+        # Duplicate idempotence intentionally checks base_revision only after
+        # seeing whether this generation was already applied.
+        with project_commit(db, int(project_id), None) as active_commit:
+            commit = active_commit
+            generation = get_story_generation(db, generation_uuid, include_internal=True)
+            _assert_generation_project(generation, project_id)
+            if generation.get("applied_at"):
+                existing = load_storyboard(dict(cfg), int(project_id))
+                if existing is None:
+                    raise ValueError("尚未建立 storyboard，請先到分鏡審核建立分鏡後再套用故事")
+                result_payload = {
+                    "generation": get_story_generation(db, generation_uuid, include_internal=False),
+                    "storyboard": existing,
+                    "render_changed": False,
+                    "approval_invalidated": False,
+                    "apply_succeeded": True,
+                    "apply_state": "apply_succeeded",
+                    "generation_state": "generation_archived_after_apply",
+                    "idempotent": True,
+                    "project_revision": current_revision(db, int(project_id)),
+                }
             else:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(content)
-        if previous_project:
-            with connect(db) as con:
-                con.execute(
-                    "update projects set status=?, project_revision=?, updated_at=? where id=?",
-                    (previous_project["status"], previous_project["project_revision"], previous_project["updated_at"], int(project_id)),
-                )
+                check_base_revision(db, int(project_id), base_revision)
+                if str(generation.get("status")) != "succeeded":
+                    raise StoryGenerationError("只有成功且已驗證的故事 generation 可以套用")
+                current_snapshot = build_story_input_snapshot(cfg, db, int(project_id))
+                if str(generation.get("input_hash") or "") != str(current_snapshot.get("input_hash") or ""):
+                    raise StoryGenerationError("故事 generation 的 input_hash 已過期，請重新計算目前 StoryInputSnapshot 後再套用")
+                existing = load_storyboard(dict(cfg), int(project_id))
+                if existing is None:
+                    raise ValueError("尚未建立 storyboard，請先到分鏡審核建立分鏡後再套用故事")
+                state = _storyboard_state_from_generation(generation, existing)
+                folder = project_dir(dict(cfg), int(project_id))
+                rollback_files = {
+                    folder / name: (folder / name).read_bytes() if (folder / name).is_file() else None
+                    for name in ("storyboard.json", "review_status.json", "project_plan.json")
+                }
+                with connect(db) as con:
+                    generation_before = dict(con.execute(
+                        "select * from story_generations where story_generation_uuid=?",
+                        (str(generation_uuid),),
+                    ).fetchone() or {})
+                project_before = dict(project(db, int(project_id)) or {})
+                rollback_ready = True
+                try:
+                    result = update_storyboard(dict(cfg), db, int(project_id), state, return_result=True, base_revision=base_revision)
+                    applied_revision = active_commit.base_revision + (1 if result["render_changed"] else 0)
+                    _update_generation(
+                        db,
+                        generation_uuid,
+                        applied_to_storyboard_revision=applied_revision,
+                        applied_at=_now(),
+                    )
+                except Exception:
+                    _restore_story_apply_state(db, int(project_id), generation_uuid, generation_before, project_before, rollback_files)
+                    rollback_ready = False
+                    raise
+                result_payload = {
+                    "storyboard": result["state"],
+                    "render_changed": result["render_changed"],
+                    "approval_invalidated": result["approval_invalidated"],
+                    "apply_succeeded": True,
+                    "apply_state": "apply_succeeded",
+                    "generation_state": "generation_archived_after_apply",
+                    "idempotent": False,
+                }
+        rollback_ready = False
+    except Exception:
+        if rollback_ready and rollback_files is not None and generation_before is not None:
+            _restore_story_apply_state(db, int(project_id), generation_uuid, generation_before, project_before, rollback_files)
         raise
-    return {"generation": generation, "storyboard": result["state"], "render_changed": result["render_changed"], "approval_invalidated": result["approval_invalidated"]}
+
+    if result_payload is None or commit is None:
+        raise StoryGenerationError("故事 Apply 未建立成功結果")
+    if not result_payload.get("idempotent"):
+        result_payload["generation"] = get_story_generation(db, generation_uuid, include_internal=False)
+        result_payload["project_revision"] = int(commit.new_revision if commit.new_revision is not None else current_revision(db, int(project_id)))
+    return result_payload
 
 
 __all__ = [

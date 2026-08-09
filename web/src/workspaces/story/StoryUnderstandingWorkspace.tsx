@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type ProjectDetail, type StoryChapter, type StoryGeneration } from "../../api";
+import { api, ApiError, type ProjectDetail, type StoryChapter, type StoryGeneration } from "../../api";
 import { formatApiError } from "../../api";
 import { refreshFailureMessage, type ProjectMutationControls } from "../../projectMutation";
 import type { ProjectDataLoadOptions } from "../../projectDataLoader";
@@ -13,6 +13,15 @@ type Props = {
 };
 
 type SegmentWithUuid = { segment_uuid?: string };
+type ApplyUiState =
+  | "idle"
+  | "applying"
+  | "apply_succeeded"
+  | "post_apply_refresh_pending"
+  | "post_apply_refresh_failed"
+  | "generation_archived_after_apply"
+  | "apply_failed"
+  | "stale_before_apply";
 
 function draftFor(generation?: StoryGeneration) {
   const response = generation?.normalized_response || {};
@@ -34,6 +43,8 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
   const [creatorDirty, setCreatorDirty] = useState(false);
   const [draftDirty, setDraftDirty] = useState(false);
   const [lockedDirty, setLockedDirty] = useState(false);
+  const [applyUiState, setApplyUiState] = useState<ApplyUiState>("idle");
+  const [appliedGenerationUuid, setAppliedGenerationUuid] = useState("");
 
   useEffect(() => {
     if (!settingsDirty) setSettings(story?.settings || {});
@@ -45,6 +56,12 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
   }, [story?.current_story_generation_uuid, story?.settings, story?.creator_profile, story?.current_generation, settingsDirty, creatorDirty, draftDirty, lockedDirty]);
 
   const generation = story?.current_generation;
+  useEffect(() => {
+    if (generation?.story_generation_uuid && appliedGenerationUuid && generation.story_generation_uuid !== appliedGenerationUuid) {
+      setAppliedGenerationUuid("");
+      setApplyUiState("idle");
+    }
+  }, [generation?.story_generation_uuid, appliedGenerationUuid]);
   const chapters = draft.chapters;
   async function saveSettings() {
     const mutation = mutationControls.beginProjectMutation(detail.project.id, "story");
@@ -130,18 +147,38 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
     const mutation = mutationControls.beginProjectMutation(detail.project.id, "story");
     if (!mutation) return;
     setBusy("apply");
+    setApplyUiState("applying");
     try {
       const result = await api.applyStory(detail.project.id, generation.story_generation_uuid, detail.project_revision);
-      if (!result.ok) throw new Error(result.error || "套用分鏡失敗");
+      if (!result.ok) {
+        if (result.code === "stale_story_generation") {
+          setApplyUiState("stale_before_apply");
+          setMessage(`套用已拒絕：${result.error || "故事 generation 已過期，未修改既有分鏡。"}`);
+          return;
+        }
+        setApplyUiState("apply_failed");
+        throw new Error(result.error || "套用分鏡失敗");
+      }
+      setAppliedGenerationUuid(generation.story_generation_uuid);
+      setApplyUiState("apply_succeeded");
       const successMessage = result.approval_invalidated ? "故事已套用到分鏡；輸出內容變更，請重新核准。" : "故事已套用到分鏡。";
+      setApplyUiState("post_apply_refresh_pending");
       try {
         await refreshProject({ forceFresh: true, throwOnError: true });
-        setMessage(successMessage);
+        setApplyUiState("generation_archived_after_apply");
+        setMessage(`${successMessage} 舊 generation 已歷史化，請查看最新專案與 review state。`);
       } catch (refreshError) {
-        setMessage(`${refreshFailureMessage(successMessage, refreshError)}，請重新整理`);
+        setApplyUiState("post_apply_refresh_failed");
+        setMessage(`${refreshFailureMessage(successMessage, refreshError)}；Apply 已成功，請重新整理最新專案狀態。`);
       }
     } catch (error) {
-      setMessage(`套用分鏡失敗：${formatApiError(error)}`);
+      if (error instanceof ApiError && error.status === 409 && error.payload.code === "stale_project_revision") {
+        setApplyUiState("stale_before_apply");
+        setMessage(`套用已拒絕：${formatApiError(error)}`);
+      } else {
+        setApplyUiState("apply_failed");
+        setMessage(`套用分鏡失敗：${formatApiError(error)}`);
+      }
     } finally {
       mutationControls.finishProjectMutation(mutation);
       setBusy("");
@@ -218,6 +255,23 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
   const normalized = generation?.normalized_response || {};
   const suppressed = review.suppressed_segments || normalized.suppressed_segments || [];
   const dirty = settingsDirty || creatorDirty || draftDirty || lockedDirty;
+  const backendGenerationArchived = story?.generation_archived_after_apply === true
+    || story?.current_generation_state === "generation_archived_after_apply"
+    || Boolean(generation?.applied_at);
+  const applySucceededForCurrentGeneration = Boolean(
+    generation
+    && (backendGenerationArchived || appliedGenerationUuid === generation.story_generation_uuid)
+    && applyUiState !== "apply_failed"
+    && applyUiState !== "stale_before_apply",
+  );
+  const generationArchivedAfterApply = backendGenerationArchived
+    || (applySucceededForCurrentGeneration && applyUiState !== "post_apply_refresh_pending");
+  const staleBeforeApply = Boolean(
+    story?.current_generation_is_stale
+    && !generationArchivedAfterApply
+    && story?.current_generation_state !== "generation_archived_after_apply",
+  );
+  const applyBlocked = Boolean(busy) || staleBeforeApply || applySucceededForCurrentGeneration;
 
   return <section className="story-understanding card" aria-label="專案故事理解" data-unsaved-text-draft={dirty ? "true" : undefined}>
     <div className="story-understanding-heading">
@@ -255,7 +309,11 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
     {!generation && <p className="inline-empty">尚未生成故事。請先儲存設定，再按「生成故事」。</p>}
     {generation && <>
       <div className="story-generation-meta"><b>{generation.story_generation_uuid}</b><span>{generation.provider} / {generation.model}</span><span>input {generation.input_hash?.slice(0, 12)}</span><span>狀態：{generation.status}</span></div>
-      {story?.current_generation_is_stale && <p className="story-stale" role="alert">目前 StoryInputSnapshot 已變更；此 generation 過期，Apply 會 fail closed，請重新生成。</p>}
+      {staleBeforeApply && <p className="story-stale" role="alert">目前 StoryInputSnapshot 已變更；此 generation 在 Apply 前已過期，操作會 fail closed，未修改既有分鏡。請重新生成。</p>}
+      {generationArchivedAfterApply && <p className="story-success" role="status">此 generation 已成功套用並歷史化；請查看最新 project 與 review state。若輸出內容已變更，需重新核准。</p>}
+      {applyUiState === "applying" && <p className="muted" role="status">正在套用故事到既有分鏡，等待 Apply API 完成…</p>}
+      {applyUiState === "post_apply_refresh_pending" && <p className="story-success" role="status">Apply 已成功，正在更新最新 project 與 review state…</p>}
+      {applyUiState === "post_apply_refresh_failed" && <p className="story-stale" role="alert">Apply 已成功，但最新 project / review state 尚未載入；請重新整理，不會自動重送 Apply。</p>}
       <div className="story-audit" aria-label="故事 audit"><span>raw provider calls：{generation.provider_audit?.calls ?? "—"}</span><span>corrective retry：{generation.provider_audit?.retries ?? 0}</span><span>latency：{generation.provider_audit?.total_latency_ms ?? "—"} ms</span><span>validation：{String(generation.validation?.status || "unknown")}</span><span>effective source：{generation.story_audit?.effective?.source || "normalized"}</span></div>
       <div className="story-audit-details" aria-label="raw normalized effective audit">
         <details><summary>Raw provider audit</summary><pre>{JSON.stringify(generation.story_audit?.raw || { provider: generation.provider, model: generation.model, input_hash: generation.input_hash }, null, 2)}</pre></details>
@@ -296,7 +354,7 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
       <div className="row story-actions">
         <button type="button" disabled={Boolean(busy)} onClick={() => void saveReview()}>{busy === "review" ? "儲存中…" : "儲存故事修改"}</button>
         <button type="button" disabled={Boolean(busy)} onClick={() => { setLockedDirty(true); setLocked((value) => !value); }}>{locked ? "解除鎖定故事" : "鎖定故事修改"}</button>
-        <button type="button" className="primary" disabled={Boolean(busy)} onClick={() => void applyToStoryboard()}>{busy === "apply" ? "套用中…" : "套用到既有分鏡"}</button>
+        <button type="button" className="primary" disabled={applyBlocked} onClick={() => void applyToStoryboard()}>{busy === "apply" ? "套用中…" : staleBeforeApply ? "不可套用：generation 已過期" : applySucceededForCurrentGeneration ? "已套用；generation 已歷史化" : "套用到既有分鏡"}</button>
       </div>
       <p className="muted">套用前不會修改 storyboard.json、approval 或正式輸出；鎖定的既有分鏡片段會在套用時保留。</p>
     </>}

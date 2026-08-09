@@ -24,6 +24,7 @@
 #root .story-audit-details pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; }
 #root .story-actions { margin-top: 14px; }
 #root .story-stale { padding: 10px 12px; border: 1px solid #d59b32; border-radius: 8px; color: #7d4c00; background: #fff7e6; }
+#root .story-success { padding: 10px 12px; border: 1px solid #58a77b; border-radius: 8px; color: #17633b; background: #eefaf2; }
 #root .story-audit, #root .story-suppression, #root .story-calibration { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; padding: 10px; border: 1px solid var(--line, #d9e0ea); border-radius: 8px; color: var(--muted, #637083); font-size: 12px; }
 #root .story-suppression { display: grid; }
 #root .story-calibration { justify-content: space-between; align-items: center; }

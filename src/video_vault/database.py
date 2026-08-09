@@ -178,6 +178,8 @@ create table if not exists story_generations (
   created_at text default current_timestamp,
   finished_at text,
   published_revision integer,
+  applied_to_storyboard_revision integer,
+  applied_at text,
   previous_successful_generation_uuid text default '',
   error text default ''
 );
@@ -274,6 +276,14 @@ def init_db(db: Path) -> None:
                 "audio_perception_json": "text default '{}'",
                 "interrupted_at": "text",
                 "published_revision": "integer",
+            },
+        )
+        _ensure_columns(
+            con,
+            "story_generations",
+            {
+                "applied_to_storyboard_revision": "integer",
+                "applied_at": "text",
             },
         )
         _ensure_columns(
