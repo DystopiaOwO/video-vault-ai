@@ -19,11 +19,22 @@ from .story_input import STORY_INPUT_PROMPT_VERSION, build_story_input_snapshot
 from .story_profiles import load_creator_profile, load_project_story_settings, story_profile_definition
 from .story_calibration import calibration_for_profile
 from .storyboard import load_storyboard, update_storyboard
+from .story_context_budget import (
+    DEFAULT_RESERVED_OUTPUT_TOKENS,
+    context_budget_error_message,
+    preflight_story_context,
+)
 
 
 STORY_OUTPUT_SCHEMA_VERSION = 1
 STORY_PROMPT_VERSION = "project-story-v1"
 STORY_GENERATION_STATUSES = {"queued", "running", "validating", "publishing", "succeeded", "failed", "cancelled", "interrupted"}
+STORY_SYSTEM_PROMPT = (
+    "你是 video-vault-ai 的 project story planner。只能輸出嚴格 JSON。"
+    "只能引用輸入提供的 segment_uuid，不得發明事件、地點、參數或不存在的內容。"
+    "不要要求圖片，不要輸出 frame bytes、image_url 或 base64。"
+    "不得決定 approval 或 render。咖啡、抹茶與烘豆不得自行寫成教學、業配或虛構專業參數。"
+)
 
 _STORY_OUTPUT_JSON_SCHEMA = {
     "type": "json_schema",
@@ -96,9 +107,21 @@ class StoryValidationError(StoryGenerationError):
     pass
 
 
+class StoryContextBudgetError(StoryGenerationError):
+    """A StoryInput request was blocked before network generation."""
+
+    def __init__(self, message: str, budget: Mapping[str, Any]):
+        super().__init__(message)
+        self.budget = dict(budget)
+        self.audit = {"context_budget": dict(budget), "error": message}
+
+
 class StoryProvider(Protocol):
     provider: str
     model: str
+
+    def context_metadata(self) -> Mapping[str, Any]:
+        """Return model context capacity and its auditable source."""
 
     def generate_story(self, snapshot: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         """Return parsed model output and the provider response for audit."""
@@ -106,6 +129,14 @@ class StoryProvider(Protocol):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _context_length_or_none(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _canonical(value: Any) -> str:
@@ -339,6 +370,13 @@ class MockStoryProvider:
     provider = "mock"
     model = "deterministic-story-v1"
 
+    def context_metadata(self) -> dict[str, Any]:
+        return {
+            "context_capacity_tokens": 1_000_000,
+            "source": "built_in_mock_contract",
+            "verified": True,
+        }
+
     def generate_story(self, snapshot: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         profile_id = str(snapshot.get("story_profile_id") or "general_diary")
         segments = list(snapshot.get("segments") or [])
@@ -392,10 +430,28 @@ class LocalTextStoryProvider:
         "natural_audio_intent", "title_card_suggestion", "notes", "confidence", "needs_review_reasons",
     }
 
-    def __init__(self, base_url: str, model: str, timeout_seconds: float = 180.0):
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        timeout_seconds: float = 180.0,
+        context_length: int | None = None,
+        context_source: str = "unknown",
+        reserved_output_tokens: int = DEFAULT_RESERVED_OUTPUT_TOKENS,
+    ):
         self.base_url = str(base_url).rstrip("/")
         self.model = str(model)
         self.timeout_seconds = float(timeout_seconds)
+        self.context_length = _context_length_or_none(context_length)
+        self.context_source = str(context_source or "unknown")
+        self.reserved_output_tokens = int(reserved_output_tokens or DEFAULT_RESERVED_OUTPUT_TOKENS)
+
+    def context_metadata(self) -> dict[str, Any]:
+        return {
+            "context_capacity_tokens": self.context_length,
+            "source": self.context_source,
+            "metadata_status": "verified" if self.context_length else "unknown",
+        }
 
     def _strict_parse(self, content: Any) -> dict[str, Any]:
         try:
@@ -441,18 +497,28 @@ class LocalTextStoryProvider:
         content = (((raw.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
         if isinstance(content, list):
             content = "".join(str(item.get("text") or item) if isinstance(item, Mapping) else str(item) for item in content)
-        return self._strict_parse(content), raw, (time.perf_counter() - started) * 1000
+        try:
+            parsed = self._strict_parse(content)
+        except StoryValidationError as exc:
+            exc.raw_content = str(content)
+            raise
+        return parsed, raw, (time.perf_counter() - started) * 1000
 
     def generate_story(self, snapshot: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-        system = (
-            "你是 video-vault-ai 的 project story planner。只能輸出嚴格 JSON。"
-            "只能引用輸入提供的 segment_uuid，不得發明事件、地點、參數或不存在的內容。"
-            "不要要求圖片，不要輸出 frame bytes、image_url 或 base64。"
-            "不得決定 approval 或 render。咖啡、抹茶與烘豆不得自行寫成教學、業配或虛構專業參數。"
+        budget = preflight_story_context(
+            snapshot,
+            self,
+            system_prompt=STORY_SYSTEM_PROMPT,
+            reserved_output_tokens=self.reserved_output_tokens,
         )
+        if not budget["request_allowed"]:
+            error = StoryContextBudgetError(context_budget_error_message(budget), budget)
+            raise error
+        system = STORY_SYSTEM_PROMPT
         base_messages = [{"role": "system", "content": system}, {"role": "user", "content": _canonical(snapshot)}]
         attempts: list[dict[str, Any]] = []
         latencies: list[float] = []
+        request_budgets: list[dict[str, Any]] = []
         last_error: StoryValidationError | None = None
         for attempt in range(2):
             messages = list(base_messages)
@@ -461,22 +527,63 @@ class LocalTextStoryProvider:
                     {"role": "assistant", "content": attempts[-1].get("content", "")},
                     {"role": "user", "content": "上一個輸出不符合 strict schema。只修正 schema，重新輸出完整 JSON，不要解釋。"},
                 ])
-            payload = {"model": self.model, "temperature": 0, "response_format": _STORY_OUTPUT_JSON_SCHEMA, "messages": messages}
+            budget = preflight_story_context(
+                snapshot,
+                self,
+                system_prompt=STORY_SYSTEM_PROMPT,
+                request_messages=messages,
+                reserved_output_tokens=self.reserved_output_tokens,
+            )
+            request_budgets.append({"attempt": attempt + 1, "budget": budget})
+            if not budget["request_allowed"]:
+                error = StoryContextBudgetError(context_budget_error_message(budget), budget)
+                error.audit = {
+                    "calls": attempt,
+                    "retries": attempt,
+                    "request_budgets": request_budgets,
+                    "context_budget": budget,
+                    "blocked_retry_budget": budget if attempt > 0 else None,
+                    "error": str(error),
+                }
+                raise error
+            payload = {
+                "model": self.model,
+                "temperature": 0,
+                "max_tokens": self.reserved_output_tokens,
+                "response_format": _STORY_OUTPUT_JSON_SCHEMA,
+                "messages": messages,
+            }
             started = time.perf_counter()
             try:
                 output, raw, latency = self._request(payload)
                 latencies.append(round(latency, 3))
                 attempts.append({"content": json.dumps(output, ensure_ascii=False, sort_keys=True), "error": ""})
-                audit = {"calls": attempt + 1, "retries": attempt, "call_latencies_ms": latencies, "total_latency_ms": round(sum(latencies), 3), "strict_schema": True}
+                audit = {
+                    "calls": attempt + 1,
+                    "retries": attempt,
+                    "call_latencies_ms": latencies,
+                    "total_latency_ms": round(sum(latencies), 3),
+                    "strict_schema": True,
+                    "context_budget": budget,
+                    "request_budgets": request_budgets,
+                }
                 return output, {**dict(raw), "provider_audit": audit}
             except StoryValidationError as exc:
                 last_error = exc
                 latencies.append(round((time.perf_counter() - started) * 1000, 3))
-                attempts.append({"content": "", "error": str(exc)})
+                attempts.append({"content": str(getattr(exc, "raw_content", "")), "error": str(exc)})
                 if attempt == 1:
                     break
         error = last_error or StoryValidationError("本地文字模型 strict schema 驗證失敗")
-        error.audit = {"calls": 2, "retries": 1, "call_latencies_ms": latencies, "total_latency_ms": round(sum(latencies), 3), "strict_schema": True, "error": str(error)}
+        error.audit = {
+            "calls": 2,
+            "retries": 1,
+            "call_latencies_ms": latencies,
+            "total_latency_ms": round(sum(latencies), 3),
+            "strict_schema": True,
+            "request_budgets": request_budgets,
+            "error": str(error),
+        }
         raise error
 
 
@@ -491,7 +598,30 @@ def provider_from_config(cfg: Mapping[str, Any], provider_override: str | None =
         model = str(story_cfg.get("model") or local.get("model") or "")
         if not model:
             raise StoryGenerationError("未設定本地文字模型名稱")
-        return LocalTextStoryProvider(base_url, model, float(story_cfg.get("timeout_seconds") or 180))
+        context_length = (
+            story_cfg.get("context_length")
+            or story_cfg.get("max_context_length")
+            or story_cfg.get("context_capacity_tokens")
+        )
+        context_source = story_cfg.get("context_source")
+        for metadata_key, source_name in (("model_metadata", "config.story.model_metadata"), ("model_context", "config.story.model_context")):
+            metadata = story_cfg.get(metadata_key)
+            if isinstance(metadata, Mapping):
+                context_length = context_length or metadata.get("max_context_length") or metadata.get("context_length") or metadata.get("context_capacity_tokens")
+                context_source = context_source or metadata.get("source") or source_name
+        if context_length in (None, ""):
+            context_length = local.get("context_length") or local.get("max_context_length") or local.get("context_capacity_tokens")
+            context_source = context_source or ("config.ai.local.context_length" if context_length not in (None, "") else None)
+        if context_length not in (None, "") and not context_source:
+            context_source = "config.story.context_length"
+        return LocalTextStoryProvider(
+            base_url,
+            model,
+            float(story_cfg.get("timeout_seconds") or 180),
+            context_length=_context_length_or_none(context_length),
+            context_source=str(context_source or "unknown"),
+            reserved_output_tokens=int(story_cfg.get("max_output_tokens") or DEFAULT_RESERVED_OUTPUT_TOKENS),
+        )
     raise StoryGenerationError(f"不支援的文字故事 provider：{provider}")
 
 
@@ -749,6 +879,20 @@ def generate_project_story(
     }
     _insert_generation(db, values)
     try:
+        story_cfg = dict(cfg.get("story") or {})
+        context_budget = preflight_story_context(
+            snapshot,
+            provider,
+            system_prompt=STORY_SYSTEM_PROMPT,
+            reserved_output_tokens=int(story_cfg.get("max_output_tokens") or DEFAULT_RESERVED_OUTPUT_TOKENS),
+        )
+        _update_generation(
+            db,
+            generation_uuid,
+            validation_json={"status": context_budget["status"], "context_budget": context_budget},
+        )
+        if not context_budget["request_allowed"]:
+            raise StoryContextBudgetError(context_budget_error_message(context_budget), context_budget)
         if should_cancel and should_cancel():
             raise CancellationRequested("故事生成已取消")
         cached = None if force else _cache_load(_cache_dir(cfg, project_id), key)
@@ -768,8 +912,14 @@ def generate_project_story(
         _atomic_json(generation_path / "input_snapshot.json", snapshot)
         _atomic_json(generation_path / "raw_response.json", raw)
         _atomic_json(generation_path / "normalized_response.json", normalized)
-        _atomic_json(generation_path / "validation.json", {"status": "passed", "cache_hit": cache_hit, "cache_key": key})
-        _update_generation(db, generation_uuid, status="publishing", raw_response_json=raw, normalized_response_json=normalized, validation_json={"status": "passed", "cache_hit": cache_hit, "cache_key": key})
+        validation = {
+            "status": "passed",
+            "cache_hit": cache_hit,
+            "cache_key": key,
+            "context_budget": context_budget,
+        }
+        _atomic_json(generation_path / "validation.json", validation)
+        _update_generation(db, generation_uuid, status="publishing", raw_response_json=raw, normalized_response_json=normalized, validation_json=validation)
         if should_cancel and should_cancel():
             raise CancellationRequested("故事生成已取消")
         with project_commit(db, project_id, base_revision=base) as commit:
@@ -802,6 +952,13 @@ def generate_project_story(
         fields = {"status": "failed", "finished_at": _now(), "error": str(exc)}
         if audit:
             fields["raw_response_json"] = {"provider_audit": audit}
+            blocked_retry_budget = audit.get("blocked_retry_budget")
+            if isinstance(blocked_retry_budget, Mapping):
+                fields["validation_json"] = {
+                    "status": "blocked",
+                    "context_budget": dict(blocked_retry_budget),
+                    "request_budgets": list(audit.get("request_budgets") or []),
+                }
         _update_generation(db, generation_uuid, **fields)
         raise
 
@@ -993,6 +1150,7 @@ __all__ = [
     "STORY_OUTPUT_SCHEMA_VERSION",
     "STORY_PROMPT_VERSION",
     "StoryGenerationError",
+    "StoryContextBudgetError",
     "StoryValidationError",
     "apply_story_generation_to_storyboard",
     "generate_project_story",

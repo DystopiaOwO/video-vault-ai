@@ -293,6 +293,8 @@ def test_provider_matrix_model_missing_capability_missing_and_story_contract(tmp
     assert model["status"] == "blocked"
     assert caps["status"] == "blocked"
     assert story["status"] == "blocked"
+    assert story["evidence"]["context_capacity"] is None
+    assert story["evidence"]["context_metadata_source"] == "unknown"
 
 
 def test_cloud_contract_never_calls_network_and_reports_key_presence(monkeypatch):

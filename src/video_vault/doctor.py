@@ -457,18 +457,33 @@ def _story_provider_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
     story = dict(cfg.get("story") or {})
     provider = str(story.get("provider") or "mock").lower()
     model = str(story.get("model") or "")
+    local = dict((cfg.get("ai") or {}).get("local") or {})
+    context_length = story.get("context_length") or story.get("max_context_length") or story.get("context_capacity_tokens")
+    context_source = story.get("context_source")
+    if context_length in (None, ""):
+        context_length = local.get("context_length") or local.get("max_context_length") or local.get("context_capacity_tokens")
+        context_source = context_source or ("config.ai.local.context_length" if context_length not in (None, "") else None)
+    try:
+        context_length = int(context_length) if context_length not in (None, "") and int(context_length) > 0 else None
+    except (TypeError, ValueError):
+        context_length = None
+    context_evidence = {
+        "context_capacity": context_length,
+        "context_metadata_source": str(context_source or ("built_in_mock_contract" if provider == "mock" else "unknown")),
+        "context_metadata_status": "verified" if context_length or provider == "mock" else "unknown",
+    }
     if provider == "mock":
-        return _check("provider.story", "provider", "pass", "Story Provider mock contract 可用", evidence={"provider": "mock", "model_exists": True, "network_request": False})
+        return _check("provider.story", "provider", "pass", "Story Provider mock contract 可用", evidence={"provider": "mock", "model_exists": True, "network_request": False, **context_evidence})
     if provider not in {"local_text", "local"}:
-        return _check("provider.story", "provider", "blocked", "不支援的 Story Provider", evidence={"provider": provider, "model_exists": False}, remediation="改用 mock 或 local_text Story Provider。")
+        return _check("provider.story", "provider", "blocked", "不支援的 Story Provider", evidence={"provider": provider, "model_exists": False, **context_evidence}, remediation="改用 mock 或 local_text Story Provider。")
     base_url = str(story.get("base_url") or "").rstrip("/")
     if not base_url or not model:
-        return _check("provider.story", "provider", "blocked", "Story Provider endpoint/model contract 缺失", evidence={"provider": provider, "endpoint_configured": bool(base_url), "model_configured": bool(model)}, remediation="設定 story.base_url 與 story.model。")
+        return _check("provider.story", "provider", "blocked", "Story Provider endpoint/model contract 缺失", evidence={"provider": provider, "endpoint_configured": bool(base_url), "model_configured": bool(model), **context_evidence}, remediation="設定 story.base_url 與 story.model。")
     if mode != "full":
-        return _check("provider.story", "provider", "skipped", "default/quick 未查詢 Story Provider model existence", evidence={"provider": provider, "model_configured": True, "model_exists": "unverified", "probe": "skipped"}, remediation="使用 --full 查詢 Story Provider /models。")
+        return _check("provider.story", "provider", "skipped", "default/quick 未查詢 Story Provider model existence", evidence={"provider": provider, "model_configured": True, "model_exists": "unverified", "probe": "skipped", **context_evidence}, remediation="使用 --full 查詢 Story Provider /models。")
     reachable, models = _local_models(base_url)
     exists = model in {str(item.get("id") or item.get("name") or "") for item in models}
-    return _check("provider.story", "provider", "pass" if reachable and exists else "blocked", "Story Provider model contract 通過" if reachable and exists else "Story Provider model probe failed", evidence={"provider": provider, "connectivity": reachable, "model_exists": exists, "model_count": len(models), "network_scope": "local"}, remediation=None if reachable and exists else "啟動 Story Provider endpoint 並確認 model。")
+    return _check("provider.story", "provider", "pass" if reachable and exists else "blocked", "Story Provider model contract 通過" if reachable and exists else "Story Provider model probe failed", evidence={"provider": provider, "connectivity": reachable, "model_exists": exists, "model_count": len(models), "network_scope": "local", **context_evidence}, remediation=None if reachable and exists else "啟動 Story Provider endpoint 並確認 model。")
 
 
 def _cloud_config_check(cfg: Mapping[str, Any]) -> dict[str, Any]:
