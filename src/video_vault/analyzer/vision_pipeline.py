@@ -149,19 +149,17 @@ def analyze_frame_windows(
     evidence_root = evidence_root or (Path(cfg["library_root"]) / "05_index" / "multi_frame_evidence")
     validation_reports: list[dict] = []
     eligible: list[dict] = []
+    invalid_windows: list[dict] = []
     for window in planned_windows:
         validation = validate_window(window)
         window["validation"] = validation
         validation_reports.append({"window_uuid": window.get("window_uuid"), **validation})
-        if validation["status"] == "blocked":
-            raise MultiFrameValidationError(
-                f"multi-frame window {window.get('window_uuid')} blocked: "
-                + ", ".join(validation.get("needs_review_reasons") or [])
-            )
         if validation["status"] == "pass":
             eligible.append(window)
+        else:
+            invalid_windows.append(window)
 
-    if not eligible:
+    if invalid_windows or not eligible:
         for window in planned_windows:
             write_window_evidence(
                 window,
@@ -170,10 +168,18 @@ def analyze_frame_windows(
                 evidence_root,
                 ffmpeg_path=str(cfg.get("ffmpeg_path") or "ffmpeg"),
             )
-        reasons = ["insufficient_evidence_frames"]
+        reasons: list[str] = []
+        for window in invalid_windows:
+            for reason in (window.get("validation") or {}).get("needs_review_reasons") or []:
+                if reason not in reasons:
+                    reasons.append(str(reason))
+        if not reasons:
+            reasons.append("missing_mandatory_window_results")
         if not bool(capability.get("supports_multi_image")):
-            reasons.append("multi_frame_capability_unverified")
+            if "multi_frame_capability_unverified" not in reasons:
+                reasons.append("multi_frame_capability_unverified")
         provenance = model_provenance(provider, capability)
+        planned_window_uuids = [str(window.get("window_uuid") or "") for window in planned_windows]
         return {
             "provider": provider.provider,
             "model": provider.model,
@@ -185,6 +191,8 @@ def analyze_frame_windows(
                 "status": "blocked",
                 "checks": validation_reports,
                 "evidence_artifact_ids": [str(window.get("window_uuid") or "") for window in planned_windows],
+                "planned_window_uuids": planned_window_uuids,
+                "covered_window_uuids": [],
                 "needs_review_reasons": reasons,
             },
             "multi_frame_contract": {
@@ -197,6 +205,8 @@ def analyze_frame_windows(
                 "supports_multi_frame": bool(capability.get("supports_multi_image")),
                 "max_images": max_images,
                 "capability": capability,
+                "mandatory_window_uuids": planned_window_uuids,
+                "covered_window_uuids": [],
                 "status": "blocked",
                 "failure_reasons": reasons,
             },
@@ -364,6 +374,8 @@ def analyze_frame_windows(
             "status": overall_status,
             "checks": validation_reports,
             "evidence_artifact_ids": [str(item.get("window_uuid") or "") for item in window_results],
+            "planned_window_uuids": [str(item.get("window_uuid") or "") for item in planned_windows],
+            "covered_window_uuids": [str(item.get("window_uuid") or "") for item in window_results],
             "needs_review_reasons": [] if overall_status == "pass" else ["window_validation_warning"],
         },
         "multi_frame_contract": {
@@ -376,6 +388,8 @@ def analyze_frame_windows(
             "supports_multi_frame": bool(capability.get("supports_multi_image")),
             "max_images": max_images,
             "capability": capability,
+            "mandatory_window_uuids": [str(item.get("window_uuid") or "") for item in planned_windows],
+            "covered_window_uuids": [str(item.get("window_uuid") or "") for item in window_results],
             "status": overall_status,
         },
         "cache_hits": cache_hits,

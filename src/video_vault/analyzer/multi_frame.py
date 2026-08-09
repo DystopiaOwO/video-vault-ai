@@ -70,10 +70,58 @@ def multi_frame_publish_errors(result: Mapping[str, Any]) -> list[str]:
         errors.append("missing_model_provider")
     if not str(contract.get("model") or ""):
         errors.append("missing_model_provenance")
+
+    planned_windows = result.get("window_manifest")
+    if not isinstance(planned_windows, list) or not planned_windows:
+        errors.append("missing_mandatory_window_manifest")
+        planned_windows = []
+    planned_uuids = [
+        str(window.get("window_uuid") or "")
+        for window in planned_windows
+        if isinstance(window, Mapping)
+    ]
+    if len(planned_uuids) != len(planned_windows) or any(not uuid for uuid in planned_uuids):
+        errors.append("mandatory_window_manifest_has_missing_uuid")
+    if len(set(planned_uuids)) != len(planned_uuids):
+        errors.append("mandatory_window_manifest_has_duplicate_uuid")
+
+    validation = result.get("window_validation")
+    checks = validation.get("checks") if isinstance(validation, Mapping) else None
+    if not isinstance(checks, list) or len(checks) != len(planned_windows):
+        errors.append("window_validation_coverage_missing")
+        checks = []
+    check_uuids = [
+        str(check.get("window_uuid") or "")
+        for check in checks
+        if isinstance(check, Mapping)
+    ]
+    if len(check_uuids) != len(checks) or set(check_uuids) != set(planned_uuids):
+        errors.append("window_validation_coverage_mismatch")
+    if len(set(check_uuids)) != len(check_uuids):
+        errors.append("window_validation_coverage_duplicate_uuid")
+    if isinstance(validation, Mapping) and str(validation.get("status") or "") != "pass":
+        errors.append("window_validation_not_pass")
+    for check in checks:
+        if isinstance(check, Mapping) and str(check.get("status") or "") != "pass":
+            errors.append(
+                f"mandatory_window_{str(check.get('window_uuid') or 'unknown')}_validation_not_pass"
+            )
+
     results = result.get("window_results")
     if not isinstance(results, list) or not results:
         errors.append("missing_evidence_window_results")
         results = []
+    result_uuids = [
+        str(window_result.get("window_uuid") or "")
+        for window_result in results
+        if isinstance(window_result, Mapping)
+    ]
+    if len(result_uuids) != len(results) or any(not uuid for uuid in result_uuids):
+        errors.append("window_result_has_missing_uuid")
+    if len(set(result_uuids)) != len(result_uuids):
+        errors.append("window_result_has_duplicate_uuid")
+    if set(result_uuids) != set(planned_uuids):
+        errors.append("window_result_coverage_mismatch")
     for index, window_result in enumerate(results):
         if not isinstance(window_result, Mapping):
             errors.append(f"window_result_{index}_is_not_an_object")
@@ -97,11 +145,18 @@ def multi_frame_publish_errors(result: Mapping[str, Any]) -> list[str]:
     segments = result.get("segments")
     if not isinstance(segments, list) or len(segments) != len(results):
         errors.append("published_segments_do_not_match_evidence_windows")
-    elif any(
-        not isinstance(segment, Mapping) or not str(segment.get("window_uuid") or "")
+        segments = []
+    segment_uuids = [
+        str(segment.get("window_uuid") or "")
         for segment in segments
-    ):
+        if isinstance(segment, Mapping)
+    ]
+    if len(segment_uuids) != len(segments) or any(not uuid for uuid in segment_uuids):
         errors.append("published_segment_missing_window_uuid")
+    if len(set(segment_uuids)) != len(segment_uuids):
+        errors.append("published_segment_has_duplicate_uuid")
+    if set(segment_uuids) != set(result_uuids):
+        errors.append("published_segment_coverage_mismatch")
     return errors
 
 

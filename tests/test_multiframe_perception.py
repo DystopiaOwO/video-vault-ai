@@ -1,4 +1,5 @@
 from pathlib import Path
+import copy
 import json
 
 import pytest
@@ -16,6 +17,7 @@ from video_vault.analyzer.multi_frame import (
     write_window_evidence,
 )
 from video_vault.analyzer import vision_pipeline
+from video_vault.config import load_config
 from video_vault.database import connect, init_db, project_videos, upsert_video
 from video_vault.project import create_project
 import video_vault.project_perception as project_perception
@@ -133,10 +135,70 @@ def test_insufficient_evidence_blocks_without_single_frame_fallback(tmp_path):
     assert result["window_validation"]["status"] == "blocked"
     assert "insufficient_evidence_frames" in result["window_validation"]["needs_review_reasons"]
     assert result["multi_frame_contract"]["status"] == "blocked"
-    assert multi_frame_publish_errors(result) == [
-        "multi_frame_contract_not_pass",
-        "missing_evidence_window_results",
+    errors = multi_frame_publish_errors(result)
+    assert "multi_frame_contract_not_pass" in errors
+    assert "missing_evidence_window_results" in errors
+
+
+def test_mixed_pass_and_insufficient_windows_fail_closed(tmp_path):
+    pass_root = tmp_path / "pass"
+    skipped_root = tmp_path / "skipped"
+    pass_root.mkdir()
+    skipped_root.mkdir()
+    planned = [
+        build_frame_windows(_manifest(pass_root, 4), 20)[0],
+        build_frame_windows(_manifest(skipped_root, 2), 20)[0],
     ]
+    result = vision_pipeline.analyze_frame_windows(
+        {"duration_seconds": 20, "filename": "mixed.mp4", "category": "travel"},
+        {
+            "library_root": str(tmp_path),
+            "ffmpeg_path": "missing-ffmpeg",
+            "ai": {"provider": "mock", "model": "mock-v1"},
+        },
+        [],
+        duration_seconds=20,
+        evidence_root=tmp_path / "evidence",
+        windows=planned,
+    )
+    assert result["window_validation"]["status"] == "blocked"
+    assert result["window_results"] == []
+    assert result["segments"] == []
+    assert result["vision_calls"] == 0
+    assert "insufficient_evidence_frames" in result["window_validation"]["needs_review_reasons"]
+    assert "window_validation_not_pass" in multi_frame_publish_errors(result)
+
+
+def test_publish_gate_rejects_duplicate_or_mismatched_window_uuids(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        multi_frame,
+        "_write_contact_sheet",
+        lambda _paths, output, _ffmpeg: (output.write_bytes(b"sheet"), "")[1],
+    )
+    result = vision_pipeline.analyze_frame_windows(
+        {"duration_seconds": 20, "filename": "uuid.mp4", "category": "coffee"},
+        {
+            "library_root": str(tmp_path),
+            "ffmpeg_path": "missing-ffmpeg",
+            "ai": {"provider": "mock", "model": "mock-v1"},
+        },
+        _manifest(tmp_path, 6),
+        duration_seconds=20,
+        evidence_root=tmp_path / "evidence",
+    )
+    assert multi_frame_publish_errors(result) == []
+
+    duplicate = copy.deepcopy(result)
+    duplicate["segments"][1]["window_uuid"] = duplicate["segments"][0]["window_uuid"]
+    duplicate_errors = multi_frame_publish_errors(duplicate)
+    assert "published_segment_has_duplicate_uuid" in duplicate_errors
+    assert "published_segment_coverage_mismatch" in duplicate_errors
+
+    mismatch = copy.deepcopy(result)
+    mismatch["window_results"][0]["window_uuid"] = "window_unplanned"
+    mismatch_errors = multi_frame_publish_errors(mismatch)
+    assert "window_result_coverage_mismatch" in mismatch_errors
+    assert "published_segment_coverage_mismatch" in mismatch_errors
 
 
 def test_normalize_window_result_rejects_action_outside_window(tmp_path):
@@ -265,19 +327,19 @@ def test_project_perception_persists_multiframe_run_results(tmp_path, monkeypatc
         "current_path": str(source),
         "filename": source.name,
         "category": "coffee",
-        "duration_seconds": 20,
+        "duration_seconds": 16,
         "status": "uploaded",
     })
     project_id = create_project(db, "multi-frame", [video_id], category="coffee")
     cfg = {
         "library_root": str(tmp_path),
-        "frame_interval_seconds": 5,
+        "frame_interval_seconds": 4,
         "frame_height": 720,
         "ffmpeg_path": "missing-ffmpeg",
         "ffprobe_path": "missing-ffprobe",
         "sampling": {
             "mode": "fixed",
-            "baseline_interval_seconds": 5,
+            "baseline_interval_seconds": 4,
             "policy_name": "test",
             "policy_version": 1,
             "max_frames_per_clip": 20,
@@ -316,6 +378,55 @@ def test_project_perception_persists_multiframe_run_results(tmp_path, monkeypatc
     assert multi_frame_publish_errors(result) == []
     normalized = Path(run["staging_path"]) / "evidence" / run["window_results"][0]["window_uuid"] / "normalized.json"
     assert json.loads(normalized.read_text(encoding="utf-8"))["segment_uuid"] == run["window_results"][0]["segment_uuid"]
+
+
+def test_loaded_yaml_false_uses_explicit_legacy_single_frame_contract(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    yaml_library_root = str(tmp_path).replace("\\", "/")
+    config_path.write_text(
+        f"library_root: {yaml_library_root}\n"
+        "frame_interval_seconds: 5\n"
+        "perception:\n"
+        "  multi_frame:\n"
+        "    enabled: false\n"
+        "  audio:\n"
+        "    enabled: false\n"
+        "ai:\n"
+        "  provider: mock\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(str(config_path))
+    assert cfg["perception"]["multi_frame"]["enabled"] is False
+
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    video_id = upsert_video(db, {
+        "original_path": str(source), "current_path": str(source), "filename": source.name,
+        "category": "coffee", "duration_seconds": 20, "status": "uploaded",
+    })
+    project_id = create_project(db, "legacy-yaml", [video_id], category="coffee")
+
+    def fake_extract(_source: Path, out_dir: Path, _cfg: dict) -> list[Path]:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        paths = []
+        for index in range(4):
+            path = out_dir / f"frame_{index:02}.jpg"
+            path.write_bytes(f"frame-{index}".encode())
+            paths.append(path)
+        return paths
+
+    monkeypatch.setattr(project_perception, "extract_frames", fake_extract)
+    monkeypatch.setattr(project_perception, "rename_after_perception", lambda _cfg, _db, video: video)
+    monkeypatch.setattr(project_perception, "perceive_output", lambda *args, **kwargs: None)
+    monkeypatch.setattr(project_perception, "write_plan_files", lambda *args, **kwargs: None)
+    monkeypatch.setattr(project_perception, "build_project_plan", lambda *args, **kwargs: {})
+
+    result = run_project_perception(cfg, db, project_id, dict(project_videos(db, project_id)[0]))
+    assert result["run"]["status"] == "succeeded"
+    assert result["window_results"] == []
+    assert result["segments"]
 
 
 def test_project_perception_does_not_publish_blocked_evidence(tmp_path, monkeypatch):

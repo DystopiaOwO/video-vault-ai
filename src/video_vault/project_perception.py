@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 
 from .audio_perception import AudioPerceptionError, analyze_audio_file
+from .config import parse_bool
 from .analyzer.multi_frame import (
     MultiFrameValidationError,
     build_frame_windows,
@@ -147,8 +148,10 @@ def run_project_perception(
         _raise_if_cancelled(should_cancel)
 
         multi_frame_config = ((cfg.get("perception") or {}).get("multi_frame") or {})
-        multi_frame_enabled = bool(
-            multi_frame_config.get("enabled", "sampling" in cfg)
+        multi_frame_enabled = (
+            parse_bool(multi_frame_config.get("enabled"), default=False)
+            if "enabled" in multi_frame_config
+            else "sampling" in cfg
         )
         max_images = 0
         if multi_frame_enabled:
