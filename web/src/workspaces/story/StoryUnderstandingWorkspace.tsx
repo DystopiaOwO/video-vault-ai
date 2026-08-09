@@ -15,6 +15,7 @@ type Props = {
 type SegmentWithUuid = { segment_uuid?: string };
 type ApplyUiState =
   | "idle"
+  | "applying"
   | "apply_succeeded"
   | "post_apply_refresh_pending"
   | "post_apply_refresh_failed"
@@ -146,7 +147,7 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
     const mutation = mutationControls.beginProjectMutation(detail.project.id, "story");
     if (!mutation) return;
     setBusy("apply");
-    setApplyUiState("post_apply_refresh_pending");
+    setApplyUiState("applying");
     try {
       const result = await api.applyStory(detail.project.id, generation.story_generation_uuid, detail.project_revision);
       if (!result.ok) {
@@ -161,6 +162,7 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
       setAppliedGenerationUuid(generation.story_generation_uuid);
       setApplyUiState("apply_succeeded");
       const successMessage = result.approval_invalidated ? "故事已套用到分鏡；輸出內容變更，請重新核准。" : "故事已套用到分鏡。";
+      setApplyUiState("post_apply_refresh_pending");
       try {
         await refreshProject({ forceFresh: true, throwOnError: true });
         setApplyUiState("generation_archived_after_apply");
@@ -309,6 +311,7 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
       <div className="story-generation-meta"><b>{generation.story_generation_uuid}</b><span>{generation.provider} / {generation.model}</span><span>input {generation.input_hash?.slice(0, 12)}</span><span>狀態：{generation.status}</span></div>
       {staleBeforeApply && <p className="story-stale" role="alert">目前 StoryInputSnapshot 已變更；此 generation 在 Apply 前已過期，操作會 fail closed，未修改既有分鏡。請重新生成。</p>}
       {generationArchivedAfterApply && <p className="story-success" role="status">此 generation 已成功套用並歷史化；請查看最新 project 與 review state。若輸出內容已變更，需重新核准。</p>}
+      {applyUiState === "applying" && <p className="muted" role="status">正在套用故事到既有分鏡，等待 Apply API 完成…</p>}
       {applyUiState === "post_apply_refresh_pending" && <p className="story-success" role="status">Apply 已成功，正在更新最新 project 與 review state…</p>}
       {applyUiState === "post_apply_refresh_failed" && <p className="story-stale" role="alert">Apply 已成功，但最新 project / review state 尚未載入；請重新整理，不會自動重送 Apply。</p>}
       <div className="story-audit" aria-label="故事 audit"><span>raw provider calls：{generation.provider_audit?.calls ?? "—"}</span><span>corrective retry：{generation.provider_audit?.retries ?? 0}</span><span>latency：{generation.provider_audit?.total_latency_ms ?? "—"} ms</span><span>validation：{String(generation.validation?.status || "unknown")}</span><span>effective source：{generation.story_audit?.effective?.source || "normalized"}</span></div>

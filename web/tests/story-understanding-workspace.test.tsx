@@ -210,6 +210,9 @@ describe("StoryUnderstandingWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "套用到既有分鏡" }));
     fireEvent.click(screen.getByRole("button", { name: "套用中…" }));
     expect(apply).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("status").textContent).toContain("正在套用故事");
+    expect(screen.queryByText(/Apply 已成功/)).toBeNull();
+    expect(screen.queryByText(/已成功套用/)).toBeNull();
 
     resolveApply?.({ ok: true, approval_invalidated: true });
     await waitFor(() => expect(screen.getByRole("status").textContent).toContain("已成功套用"));

@@ -582,6 +582,36 @@ def test_apply_failure_restores_storyboard_review_plan_and_project_row(tmp_path:
     assert after_project["project_revision"] == before_project["project_revision"]
 
 
+def test_apply_marker_failure_restores_all_apply_state(tmp_path: Path, monkeypatch):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    generation = generate_project_story(cfg, db, project_id)
+    folder = project_dir(cfg, project_id)
+    tracked = {name: (folder / name).read_bytes() if (folder / name).is_file() else None for name in ("storyboard.json", "review_status.json", "project_plan.json")}
+    with connect(db) as con:
+        before_project = dict(con.execute("select * from projects where id=?", (project_id,)).fetchone())
+        before_generation = dict(con.execute("select * from story_generations where story_generation_uuid=?", (generation["story_generation_uuid"],)).fetchone())
+
+    import video_vault.story_generation as story_generation_module
+    real_update_generation = story_generation_module._update_generation
+
+    def fail_after_marker_persist(*args, **kwargs):
+        real_update_generation(*args, **kwargs)
+        raise RuntimeError("simulated applied marker persistence failure")
+
+    monkeypatch.setattr(story_generation_module, "_update_generation", fail_after_marker_persist)
+    with pytest.raises(RuntimeError, match="simulated applied marker persistence failure"):
+        story_generation_module.apply_story_generation_to_storyboard(cfg, db, project_id, generation["story_generation_uuid"])
+
+    for name, content in tracked.items():
+        path = folder / name
+        assert (path.read_bytes() if path.is_file() else None) == content
+    with connect(db) as con:
+        after_project = dict(con.execute("select * from projects where id=?", (project_id,)).fetchone())
+        after_generation = dict(con.execute("select * from story_generations where story_generation_uuid=?", (generation["story_generation_uuid"],)).fetchone())
+    assert after_project == before_project
+    assert after_generation == before_generation
+
+
 def test_human_review_preserves_app_owned_chapter_identity(tmp_path: Path):
     cfg, db, project_id, _ = _fixture(tmp_path)
     generation = generate_project_story(cfg, db, project_id)
