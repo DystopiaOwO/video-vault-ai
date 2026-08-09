@@ -15,6 +15,7 @@ from video_vault.project_lifecycle import CancellationRequested, ProjectRevision
 from video_vault.story_calibration import calibration_path, compute_calibration, reset_calibration
 from video_vault.story_generation import (
     LocalTextStoryProvider,
+    STORY_SYSTEM_PROMPT,
     StoryGenerationError,
     StoryContextBudgetError,
     StoryValidationError,
@@ -26,6 +27,7 @@ from video_vault.story_generation import (
     update_story_generation_review,
     validate_story_output,
 )
+from video_vault.story_context_budget import preflight_story_context
 from video_vault.story_input import build_story_input_snapshot, story_input_hash
 from video_vault.story_profiles import CreatorProfileRevisionConflict, StorySettingsRevisionConflict, load_creator_profile, load_project_story_settings, save_creator_profile, save_project_story_settings
 from video_vault.storyboard import generate_storyboard, load_storyboard
@@ -636,9 +638,147 @@ def test_local_text_provider_allows_at_most_one_corrective_retry_and_audits(monk
     assert raw["provider_audit"]["strict_schema"] is True
     assert raw["provider_audit"]["context_budget"]["status"] == "pass"
     assert raw["provider_audit"]["context_budget"]["context_metadata_source"] == "test.provider_metadata"
+    assert all(request["max_tokens"] == 2048 for request in requests)
+    assert len(raw["provider_audit"]["request_budgets"]) == 2
+    assert all(item["budget"]["status"] == "pass" for item in raw["provider_audit"]["request_budgets"])
+    assert requests[1]["messages"][2]["role"] == "assistant"
+    assert json.loads(requests[1]["messages"][2]["content"]) == {"unknown": True}
     assert all(request["response_format"]["type"] == "json_schema" for request in requests)
     assert all(request["response_format"]["json_schema"]["strict"] is True for request in requests)
     assert all(request["response_format"]["json_schema"]["schema"]["properties"]["story_profile"]["enum"] == ["travel_diary", "coffee_matcha_diary", "roasting_diary", "general_diary"] for request in requests)
+
+
+def test_corrective_retry_recomputes_budget_and_blocks_second_http(monkeypatch):
+    snapshot = {"story_profile_id": "general_diary", "project_intent": "近界限測試"}
+    provider = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1",
+        "retry-model",
+        context_length=100000,
+        context_source="test.model_metadata.max_context_length",
+        reserved_output_tokens=512,
+    )
+    first_messages = [
+        {"role": "system", "content": STORY_SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))},
+    ]
+    first_budget = preflight_story_context(
+        snapshot,
+        provider,
+        system_prompt=STORY_SYSTEM_PROMPT,
+        request_messages=first_messages,
+        reserved_output_tokens=provider.reserved_output_tokens,
+    )
+    provider.context_length = first_budget["estimated_input_tokens"] + provider.reserved_output_tokens
+    invalid_content = json.dumps({"unknown": "x" * 5000}, ensure_ascii=False)
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": invalid_content}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(json.loads(request.data.decode("utf-8")))
+        if len(requests) > 1:
+            raise AssertionError("retry HTTP request must be blocked by retry preflight")
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(StoryContextBudgetError, match="estimated input .*available context") as caught:
+        provider.generate_story(snapshot)
+    assert len(requests) == 1
+    assert requests[0]["max_tokens"] == 512
+    audit = caught.value.audit
+    assert audit["calls"] == 1
+    assert audit["blocked_retry_budget"]["status"] == "blocked"
+    assert len(audit["request_budgets"]) == 2
+    assert audit["request_budgets"][0]["budget"]["status"] == "pass"
+    assert audit["request_budgets"][1]["budget"]["status"] == "blocked"
+    assert audit["request_budgets"][1]["budget"]["estimated_input_tokens"] > audit["request_budgets"][0]["budget"]["estimated_input_tokens"]
+
+
+def test_audited_tokenizer_is_preferred_and_near_limit_fallback_cannot_underestimate():
+    class TokenizerProvider:
+        provider = "local_text"
+        model = "tokenizer-model"
+
+        def __init__(self):
+            self.context_length = 100000
+
+        def context_metadata(self):
+            return {
+                "context_capacity_tokens": self.context_length,
+                "source": "test.model_metadata",
+                "tokenizer_source": "test.tokenizer.v1",
+                "tokenizer_verified": True,
+            }
+
+        def estimate_input_tokens(self, messages):
+            return 321
+
+    tokenizer_provider = TokenizerProvider()
+    tokenizer_budget = preflight_story_context(
+        {"story_profile_id": "general_diary", "project_intent": "任何內容"},
+        tokenizer_provider,
+        system_prompt=STORY_SYSTEM_PROMPT,
+        reserved_output_tokens=512,
+    )
+    assert tokenizer_budget["estimated_input_tokens"] == 321
+    assert tokenizer_budget["token_estimator"]["estimator"] == "provider-model-tokenizer-v1"
+    assert tokenizer_budget["token_estimator"]["tokenizer_source"] == "test.tokenizer.v1"
+
+    near_limit_snapshot = {
+        "story_profile_id": "coffee_matcha_diary",
+        "project_identity": {"project_id": 13, "name": "咖啡／旅行：!?"},
+        "segments": [
+            {
+                "segment_uuid": "7daef442-464c-4db7-aae2-7f53fdaee68c",
+                "project_media_uuid": "media_" + "a" * 64,
+                "title": "手沖咖啡！細節、比例、溫度？",
+                "story_context": "中文 CJK 標點，『保留』；不要低估 token。",
+                "human_override": {"include": True, "manual_order": 1, "locked": False},
+            },
+        ],
+        "input_hash": "b" * 64,
+    }
+    fallback_provider = TokenizerProvider()
+    fallback_provider.context_metadata = lambda: {
+        "context_capacity_tokens": fallback_provider.context_length,
+        "source": "test.model_metadata",
+    }
+    fallback_provider.context_length = 1000000
+    fallback_budget = preflight_story_context(
+        near_limit_snapshot,
+        fallback_provider,
+        system_prompt=STORY_SYSTEM_PROMPT,
+        reserved_output_tokens=512,
+    )
+    estimate = fallback_budget["token_estimator"]
+    assert estimate["estimator"] == "utf8-bytes-upper-bound-v2"
+    assert estimate["tokenizer_source"] == "fail_closed_utf8_byte_upper_bound"
+    assert estimate["estimated_input_tokens"] == estimate["input_bytes"]
+    fallback_provider.context_length = estimate["estimated_input_tokens"] + 511
+    blocked = preflight_story_context(
+        near_limit_snapshot,
+        fallback_provider,
+        system_prompt=STORY_SYSTEM_PROMPT,
+        reserved_output_tokens=512,
+    )
+    assert blocked["status"] == "blocked"
+    assert blocked["reason_code"] == "estimated_input_exceeds_context"
+    fallback_provider.context_length = estimate["estimated_input_tokens"] + 512
+    allowed = preflight_story_context(
+        near_limit_snapshot,
+        fallback_provider,
+        system_prompt=STORY_SYSTEM_PROMPT,
+        reserved_output_tokens=512,
+    )
+    assert allowed["status"] == "pass"
 
 
 def test_local_text_provider_blocks_oversized_input_before_http(monkeypatch):
@@ -714,6 +854,69 @@ def test_generate_project_story_blocks_context_before_provider_request(tmp_path,
     assert validation["status"] == "blocked"
     assert validation["context_budget"]["reason_code"] == "estimated_input_exceeds_context"
     assert caught.value.budget["estimated_input_tokens"] > caught.value.budget["available_context_tokens"]
+
+
+def test_generate_project_story_persists_blocked_retry_budget(tmp_path, monkeypatch):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    cfg["story"] = {"provider": "local_text", "model": "retry-model", "base_url": "http://127.0.0.1:1234/v1"}
+    provider = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1",
+        "retry-model",
+        context_length=100000,
+        context_source="test.model_metadata.max_context_length",
+        reserved_output_tokens=512,
+    )
+    original_generate = provider.generate_story
+
+    def controlled_generate(snapshot):
+        first_messages = [
+            {"role": "system", "content": STORY_SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))},
+        ]
+        first_budget = preflight_story_context(
+            snapshot,
+            provider,
+            system_prompt=STORY_SYSTEM_PROMPT,
+            request_messages=first_messages,
+            reserved_output_tokens=provider.reserved_output_tokens,
+        )
+        provider.context_length = first_budget["estimated_input_tokens"] + provider.reserved_output_tokens
+        return original_generate(snapshot)
+
+    import video_vault.story_generation as story_generation_module
+    monkeypatch.setattr(story_generation_module, "provider_from_config", lambda *_args, **_kwargs: provider)
+    invalid_content = json.dumps({"unknown": "x" * 5000}, ensure_ascii=False)
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": invalid_content}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        calls.append(json.loads(request.data.decode("utf-8")))
+        return Response()
+
+    provider.generate_story = controlled_generate
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(StoryContextBudgetError):
+        generate_project_story(cfg, db, project_id, force=True)
+    assert len(calls) == 1
+    with connect(db) as con:
+        row = dict(con.execute("select status, raw_response_json, validation_json from story_generations where project_id=? order by generation desc limit 1", (project_id,)).fetchone())
+    raw = json.loads(row["raw_response_json"])
+    validation = json.loads(row["validation_json"])
+    audit = raw["provider_audit"]
+    assert row["status"] == "failed"
+    assert audit["blocked_retry_budget"]["status"] == "blocked"
+    assert len(audit["request_budgets"]) == 2
+    assert validation["status"] == "blocked"
+    assert len(validation["request_budgets"]) == 2
 
 
 def test_calibration_uses_approved_outputs_only_and_can_reset(tmp_path: Path):

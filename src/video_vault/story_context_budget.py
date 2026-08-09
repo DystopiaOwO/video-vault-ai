@@ -3,34 +3,80 @@
 from __future__ import annotations
 
 import json
-import math
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 
 STORY_CONTEXT_BUDGET_CONTRACT_VERSION = "story-context-budget-v1"
 DEFAULT_RESERVED_OUTPUT_TOKENS = 2048
-TOKEN_ESTIMATOR_VERSION = "utf8-bytes-div3-conservative-v1"
+TOKEN_ESTIMATOR_VERSION = "utf8-bytes-upper-bound-v2"
 
 
 def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def estimate_story_input_tokens(snapshot: Mapping[str, Any], *, system_prompt: str = "") -> dict[str, int | str]:
-    """Estimate request input conservatively without requiring a provider tokenizer."""
+def _default_messages(snapshot: Mapping[str, Any], system_prompt: str) -> list[dict[str, Any]]:
+    return [
+        {"role": "system", "content": str(system_prompt)},
+        {"role": "user", "content": _canonical(snapshot)},
+    ]
 
-    snapshot_json = _canonical(snapshot)
-    system_bytes = len(str(system_prompt).encode("utf-8"))
-    snapshot_bytes = len(snapshot_json.encode("utf-8"))
-    message_overhead_bytes = len('{"role":"system","content":""}{"role":"user","content":""}'.encode("utf-8"))
-    total_bytes = system_bytes + snapshot_bytes + message_overhead_bytes
-    estimated = max(1, math.ceil(total_bytes / 3))
+
+def _audited_provider_token_count(provider: Any, messages: Sequence[Mapping[str, Any]], metadata: Mapping[str, Any]) -> tuple[int, str] | None:
+    source = str(metadata.get("tokenizer_source") or "")
+    if not source or metadata.get("tokenizer_verified") is not True:
+        return None
+    for method_name in ("estimate_input_tokens", "count_tokens", "tokenize"):
+        method = getattr(provider, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            value = method(messages)
+            if isinstance(value, Mapping):
+                value = value.get("tokens") or value.get("token_count")
+            if isinstance(value, (list, tuple)):
+                value = len(value)
+            parsed = _positive_int(value)
+        except (TypeError, ValueError, OSError):
+            parsed = None
+        if parsed is not None:
+            return parsed, source
+    return None
+
+
+def estimate_story_input_tokens(
+    snapshot: Mapping[str, Any],
+    *,
+    system_prompt: str = "",
+    request_messages: Sequence[Mapping[str, Any]] | None = None,
+    provider: Any | None = None,
+) -> dict[str, int | str]:
+    """Estimate the exact request shape, preferring audited tokenizer metadata."""
+
+    messages = list(request_messages or _default_messages(snapshot, system_prompt))
+    messages_json = _canonical(messages)
+    total_bytes = len(messages_json.encode("utf-8"))
+    metadata = provider_context_metadata(provider) if provider is not None else {}
+    audited_count = _audited_provider_token_count(provider, messages, metadata) if provider is not None else None
+    if audited_count is not None:
+        estimated, tokenizer_source = audited_count
+        estimator = "provider-model-tokenizer-v1"
+        guarantee = "provider/model tokenizer declared verified by provider metadata"
+    else:
+        # A tokenizer can always split a UTF-8 byte stream into at most one token
+        # per byte; this is intentionally an upper bound and may over-block.
+        estimated = max(1, total_bytes)
+        tokenizer_source = "fail_closed_utf8_byte_upper_bound"
+        estimator = TOKEN_ESTIMATOR_VERSION
+        guarantee = "upper bound: one token cannot represent fewer than one encoded byte"
     return {
-        "estimator": TOKEN_ESTIMATOR_VERSION,
+        "estimator": estimator,
+        "estimator_guarantee": guarantee,
+        "tokenizer_source": tokenizer_source,
         "estimated_input_tokens": int(estimated),
         "input_bytes": int(total_bytes),
-        "system_prompt_bytes": int(system_bytes),
-        "snapshot_bytes": int(snapshot_bytes),
+        "message_count": int(len(messages)),
+        "request_messages_bytes": int(total_bytes),
     }
 
 
@@ -64,12 +110,18 @@ def preflight_story_context(
     provider: Any,
     *,
     system_prompt: str = "",
+    request_messages: Sequence[Mapping[str, Any]] | None = None,
     reserved_output_tokens: int = DEFAULT_RESERVED_OUTPUT_TOKENS,
 ) -> dict[str, Any]:
     """Return an auditable allow/block contract before any provider request."""
 
-    estimate = estimate_story_input_tokens(snapshot, system_prompt=system_prompt)
     metadata = provider_context_metadata(provider)
+    estimate = estimate_story_input_tokens(
+        snapshot,
+        system_prompt=system_prompt,
+        request_messages=request_messages,
+        provider=provider,
+    )
     capacity = metadata.get("context_capacity_tokens")
     reserved = _positive_int(reserved_output_tokens) or DEFAULT_RESERVED_OUTPUT_TOKENS
     estimated_input = int(estimate["estimated_input_tokens"])

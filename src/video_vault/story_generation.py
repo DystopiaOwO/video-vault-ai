@@ -497,7 +497,12 @@ class LocalTextStoryProvider:
         content = (((raw.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
         if isinstance(content, list):
             content = "".join(str(item.get("text") or item) if isinstance(item, Mapping) else str(item) for item in content)
-        return self._strict_parse(content), raw, (time.perf_counter() - started) * 1000
+        try:
+            parsed = self._strict_parse(content)
+        except StoryValidationError as exc:
+            exc.raw_content = str(content)
+            raise
+        return parsed, raw, (time.perf_counter() - started) * 1000
 
     def generate_story(self, snapshot: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         budget = preflight_story_context(
@@ -513,6 +518,7 @@ class LocalTextStoryProvider:
         base_messages = [{"role": "system", "content": system}, {"role": "user", "content": _canonical(snapshot)}]
         attempts: list[dict[str, Any]] = []
         latencies: list[float] = []
+        request_budgets: list[dict[str, Any]] = []
         last_error: StoryValidationError | None = None
         for attempt in range(2):
             messages = list(base_messages)
@@ -521,7 +527,32 @@ class LocalTextStoryProvider:
                     {"role": "assistant", "content": attempts[-1].get("content", "")},
                     {"role": "user", "content": "上一個輸出不符合 strict schema。只修正 schema，重新輸出完整 JSON，不要解釋。"},
                 ])
-            payload = {"model": self.model, "temperature": 0, "response_format": _STORY_OUTPUT_JSON_SCHEMA, "messages": messages}
+            budget = preflight_story_context(
+                snapshot,
+                self,
+                system_prompt=STORY_SYSTEM_PROMPT,
+                request_messages=messages,
+                reserved_output_tokens=self.reserved_output_tokens,
+            )
+            request_budgets.append({"attempt": attempt + 1, "budget": budget})
+            if not budget["request_allowed"]:
+                error = StoryContextBudgetError(context_budget_error_message(budget), budget)
+                error.audit = {
+                    "calls": attempt,
+                    "retries": attempt,
+                    "request_budgets": request_budgets,
+                    "context_budget": budget,
+                    "blocked_retry_budget": budget if attempt > 0 else None,
+                    "error": str(error),
+                }
+                raise error
+            payload = {
+                "model": self.model,
+                "temperature": 0,
+                "max_tokens": self.reserved_output_tokens,
+                "response_format": _STORY_OUTPUT_JSON_SCHEMA,
+                "messages": messages,
+            }
             started = time.perf_counter()
             try:
                 output, raw, latency = self._request(payload)
@@ -534,16 +565,25 @@ class LocalTextStoryProvider:
                     "total_latency_ms": round(sum(latencies), 3),
                     "strict_schema": True,
                     "context_budget": budget,
+                    "request_budgets": request_budgets,
                 }
                 return output, {**dict(raw), "provider_audit": audit}
             except StoryValidationError as exc:
                 last_error = exc
                 latencies.append(round((time.perf_counter() - started) * 1000, 3))
-                attempts.append({"content": "", "error": str(exc)})
+                attempts.append({"content": str(getattr(exc, "raw_content", "")), "error": str(exc)})
                 if attempt == 1:
                     break
         error = last_error or StoryValidationError("本地文字模型 strict schema 驗證失敗")
-        error.audit = {"calls": 2, "retries": 1, "call_latencies_ms": latencies, "total_latency_ms": round(sum(latencies), 3), "strict_schema": True, "error": str(error)}
+        error.audit = {
+            "calls": 2,
+            "retries": 1,
+            "call_latencies_ms": latencies,
+            "total_latency_ms": round(sum(latencies), 3),
+            "strict_schema": True,
+            "request_budgets": request_budgets,
+            "error": str(error),
+        }
         raise error
 
 
@@ -912,6 +952,13 @@ def generate_project_story(
         fields = {"status": "failed", "finished_at": _now(), "error": str(exc)}
         if audit:
             fields["raw_response_json"] = {"provider_audit": audit}
+            blocked_retry_budget = audit.get("blocked_retry_budget")
+            if isinstance(blocked_retry_budget, Mapping):
+                fields["validation_json"] = {
+                    "status": "blocked",
+                    "context_budget": dict(blocked_retry_budget),
+                    "request_budgets": list(audit.get("request_budgets") or []),
+                }
         _update_generation(db, generation_uuid, **fields)
         raise
 
