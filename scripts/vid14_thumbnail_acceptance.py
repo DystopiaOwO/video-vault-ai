@@ -6,19 +6,50 @@ from pathlib import Path
 import argparse
 import json
 import multiprocessing
+import os
 import socket
+import threading
 import time
 from urllib.request import urlopen
 
 from video_vault.database import add_analysis, init_db, upsert_video
 from video_vault.project import build_project_plan, create_project
-from video_vault.source_fingerprint import reset_source_fingerprint_cache, source_fingerprint_metrics
+from video_vault.source_fingerprint import reset_source_fingerprint_cache, source_fingerprint_metrics, source_stat
 from video_vault.storyboard import generate_storyboard
 from video_vault.ui import run_ui
 
 
-def _serve(cfg: dict, port: int) -> None:
-    run_ui(cfg, "127.0.0.1", port)
+def _serve(cfg: dict, port: int, ready, stop, metrics_pipe) -> None:
+    """Run UI and return metrics from the actual server process."""
+
+    reset_source_fingerprint_cache()
+    server_error: BaseException | None = None
+
+    def run() -> None:
+        nonlocal server_error
+        try:
+            run_ui(cfg, "127.0.0.1", port)
+        except BaseException as exc:  # pragma: no cover - exercised by acceptance failures
+            server_error = exc
+
+    thread = threading.Thread(target=run, name="vid14-ui", daemon=True)
+    thread.start()
+    try:
+        _wait_for_port(port)
+        ready.set()
+        stop.wait()
+    except BaseException as exc:  # pragma: no cover - exercised by acceptance failures
+        server_error = exc
+        ready.set()
+    finally:
+        message = {
+            "pid": os.getpid(),
+            "metrics": source_fingerprint_metrics(),
+        }
+        if server_error is not None:
+            message["error"] = repr(server_error)
+        metrics_pipe.send(message)
+        metrics_pipe.close()
 
 
 def _wait_for_port(port: int) -> None:
@@ -55,7 +86,7 @@ def main() -> int:
     if isolated_source.exists():
         isolated_source.unlink()
     isolated_source.hardlink_to(source)
-    before = {"path": str(source), "size": source.stat().st_size, "mtime_ns": source.stat().st_mtime_ns}
+    before = {"path": str(source), **source_stat(source)}
 
     db = isolated_root / "05_index" / "video_vault.sqlite3"
     init_db(db)
@@ -106,21 +137,39 @@ def main() -> int:
     generation_metrics = source_fingerprint_metrics()
 
     reset_source_fingerprint_cache()
-    process = multiprocessing.Process(target=_serve, args=(cfg, args.port), daemon=True)
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    stop = context.Event()
+    parent_pipe, child_pipe = context.Pipe(duplex=False)
+    process = context.Process(target=_serve, args=(cfg, args.port, ready, stop, child_pipe), daemon=True)
     process.start()
+    server_message: dict = {}
     try:
-        _wait_for_port(args.port)
+        if not ready.wait(35):
+            raise TimeoutError(f"UI did not listen on {args.port}")
         storyboard_api, storyboard_ms = _get_json(f"http://127.0.0.1:{args.port}/api/project/storyboard?project_id={project_id}")
         status_api, status_ms = _get_json(f"http://127.0.0.1:{args.port}/api/project?id={project_id}")
-        api_metrics = source_fingerprint_metrics()
     finally:
-        process.terminate()
+        stop.set()
+        if parent_pipe.poll(20):
+            server_message = parent_pipe.recv()
+        else:
+            server_message = {"error": "server did not return metrics before timeout"}
+        parent_pipe.close()
+        if process.is_alive():
+            process.terminate()
         process.join(timeout=10)
         if process.is_alive():
             process.kill()
             process.join(timeout=5)
 
-    after = {"path": str(source), "size": source.stat().st_size, "mtime_ns": source.stat().st_mtime_ns}
+    if server_message.get("error"):
+        raise RuntimeError(server_message["error"])
+    api_metrics = dict(server_message.get("metrics") or {})
+    if int(api_metrics.get("full_hash_calls", -1)) != 0:
+        raise AssertionError(f"storyboard/status API hashed source in server process: {api_metrics}")
+
+    after = {"path": str(source), **source_stat(source)}
     report = {
         "acceptance": "VID-14 Windows large-source storyboard/status API",
         "source": before,
@@ -137,6 +186,8 @@ def main() -> int:
         "storyboard_api_segment_count": len(storyboard_api.get("segments") or {}),
         "status_api_storyboard_segment_count": len((status_api.get("storyboard") or {}).get("segments") or {}),
         "api_fingerprint_metrics": api_metrics,
+        "api_metrics_source": "server_child_process_pipe",
+        "server_pid": server_message.get("pid"),
         "production_data_modified": False,
     }
     output.parent.mkdir(parents=True, exist_ok=True)

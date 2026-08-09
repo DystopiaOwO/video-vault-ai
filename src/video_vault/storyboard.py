@@ -13,11 +13,13 @@ from typing import Any, Mapping
 from .source_fingerprint import (
     parse_source_fingerprint,
     peek_source_fingerprint,
+    persisted_fingerprint_for_stat,
     resolve_source_fingerprint,
+    source_stat,
 )
 
 STORYBOARD_SCHEMA_VERSION = 1
-THUMBNAIL_CONTRACT_VERSION = 1
+THUMBNAIL_CONTRACT_VERSION = 2
 THUMBNAIL_RATIOS = (0.25, 0.5, 0.75)
 
 
@@ -523,15 +525,18 @@ def _thumbnail_path(
     *,
     source_fingerprint: Mapping[str, Any] | None = None,
 ) -> Path | None:
-    stat = source.stat()
-    fingerprint = dict(source_fingerprint or resolve_source_fingerprint(source))
-    if len(str(fingerprint.get("sha256") or "")) != 64:
+    stat = source_stat(source)
+    candidate = source_fingerprint or resolve_source_fingerprint(source)
+    fingerprint = persisted_fingerprint_for_stat(
+        source,
+        candidate,
+        stat=stat,
+    )
+    if fingerprint is None:
         return None
     payload = {
         "contract_version": THUMBNAIL_CONTRACT_VERSION,
-        "source_path": str(source),
-        "source_size": stat.st_size,
-        "source_mtime_ns": stat.st_mtime_ns,
+        "source_size": int(stat["size"]),
         "source_sha256": str(fingerprint["sha256"]),
         "start_seconds": round(start, 6),
         "end_seconds": round(end, 6),
