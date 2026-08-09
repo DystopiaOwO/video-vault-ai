@@ -1,0 +1,26 @@
+.system-status-page .muted { color: #647383; line-height: 1.5; }
+.system-status-page .system-status-hero { align-items: center; }
+.doctor-status, .doctor-check-heading span { border-radius: 999px; padding: 4px 9px; font-weight: 700; font-size: .82rem; }
+.doctor-pass { color: #176b43; background: #dcf5e7; }
+.doctor-warning { color: #8a5b00; background: #fff1c9; }
+.doctor-blocked { color: #9a2d2d; background: #ffe0e0; }
+.doctor-skipped { color: #5b6570; background: #e9edf2; }
+.system-status-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+.doctor-summary { display: grid; grid-template-columns: repeat(4, minmax(100px, 1fr)); gap: 10px; margin: 14px 0; }
+.doctor-summary > div { background: white; border: 1px solid #d8dee6; border-radius: 8px; padding: 12px; display: flex; justify-content: space-between; }
+.doctor-summary b { font-size: 1.3rem; }
+.doctor-category { background: white; border: 1px solid #d8dee6; border-radius: 8px; margin: 12px 0; overflow: hidden; }
+.doctor-category summary { cursor: pointer; display: flex; justify-content: space-between; padding: 12px 14px; }
+.doctor-checks { display: grid; gap: 8px; padding: 0 10px 10px; }
+.doctor-check { border: 1px solid #d8dee6; border-left: 4px solid #aab5c0; border-radius: 6px; padding: 10px 12px; }
+.doctor-check-pass { border-left-color: #36a269; }
+.doctor-check-warning { border-left-color: #d69a20; }
+.doctor-check-blocked { border-left-color: #cb4c4c; }
+.doctor-check-skipped { border-left-color: #8b98a5; }
+.doctor-check-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.doctor-check p { margin: 6px 0; }
+.doctor-evidence { margin: 8px 0; padding: 8px; overflow: auto; background: #f5f7f9; border-radius: 5px; color: #465362; font-size: .78rem; white-space: pre-wrap; }
+.doctor-check small { color: #738090; }
+.doctor-check-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.doctor-check-footer button { padding: 4px 8px; font-size: .78rem; }
+@media (max-width: 700px) { .doctor-summary { grid-template-columns: repeat(2, minmax(100px, 1fr)); } }
