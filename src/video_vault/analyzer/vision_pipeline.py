@@ -13,6 +13,7 @@ from .multi_frame import (
     MultiFrameUnsupported,
     MultiFrameValidationError,
     build_frame_windows,
+    model_provenance,
     normalize_window_result,
     atomic_write_json,
     provider_capability,
@@ -130,9 +131,10 @@ def analyze_frame_windows(
 ) -> dict:
     """Analyze explicit 3-5 frame windows through a provider contract.
 
-    A short clip with fewer than three usable samples is explicitly marked
-    ``skipped`` and uses the existing frame contract for compatibility. A
-    provider that cannot consume multi-image input is always rejected.
+    A short clip with fewer than three usable samples is returned as a blocked
+    formal result. It never invokes the single-frame analyzer or produces
+    publishable segments. A provider that cannot consume multi-image input is
+    always rejected.
     """
 
     provider = provider_from_config(cfg)
@@ -147,19 +149,17 @@ def analyze_frame_windows(
     evidence_root = evidence_root or (Path(cfg["library_root"]) / "05_index" / "multi_frame_evidence")
     validation_reports: list[dict] = []
     eligible: list[dict] = []
+    invalid_windows: list[dict] = []
     for window in planned_windows:
         validation = validate_window(window)
         window["validation"] = validation
         validation_reports.append({"window_uuid": window.get("window_uuid"), **validation})
-        if validation["status"] == "blocked":
-            raise MultiFrameValidationError(
-                f"multi-frame window {window.get('window_uuid')} blocked: "
-                + ", ".join(validation.get("needs_review_reasons") or [])
-            )
         if validation["status"] == "pass":
             eligible.append(window)
+        else:
+            invalid_windows.append(window)
 
-    if not eligible:
+    if invalid_windows or not eligible:
         for window in planned_windows:
             write_window_evidence(
                 window,
@@ -168,32 +168,51 @@ def analyze_frame_windows(
                 evidence_root,
                 ffmpeg_path=str(cfg.get("ffmpeg_path") or "ffmpeg"),
             )
-        legacy = analyze_frame_manifest(
-            video,
-            cfg,
-            frame_manifest,
-            progress,
-            should_cancel,
-            duration_seconds=duration,
-        )
-        legacy["window_manifest"] = planned_windows
-        legacy["window_results"] = []
-        legacy["window_validation"] = {
-            "status": "skipped",
-            "checks": validation_reports,
-            "evidence_artifact_ids": [str(window.get("window_uuid") or "") for window in planned_windows],
-            "needs_review_reasons": ["insufficient_evidence_frames"],
-        }
-        legacy["multi_frame_contract"] = {
-            "version": MULTI_FRAME_CONTRACT_VERSION,
-            "schema_version": 1,
-            "prompt_version": MULTI_FRAME_PROMPT_VERSION,
+        reasons: list[str] = []
+        for window in invalid_windows:
+            for reason in (window.get("validation") or {}).get("needs_review_reasons") or []:
+                if reason not in reasons:
+                    reasons.append(str(reason))
+        if not reasons:
+            reasons.append("missing_mandatory_window_results")
+        if not bool(capability.get("supports_multi_image")):
+            if "multi_frame_capability_unverified" not in reasons:
+                reasons.append("multi_frame_capability_unverified")
+        provenance = model_provenance(provider, capability)
+        planned_window_uuids = [str(window.get("window_uuid") or "") for window in planned_windows]
+        return {
             "provider": provider.provider,
             "model": provider.model,
-            "status": "skipped",
-            "capability": capability,
+            "frames": [],
+            "segments": [],
+            "window_manifest": planned_windows,
+            "window_results": [],
+            "window_validation": {
+                "status": "blocked",
+                "checks": validation_reports,
+                "evidence_artifact_ids": [str(window.get("window_uuid") or "") for window in planned_windows],
+                "planned_window_uuids": planned_window_uuids,
+                "covered_window_uuids": [],
+                "needs_review_reasons": reasons,
+            },
+            "multi_frame_contract": {
+                "version": MULTI_FRAME_CONTRACT_VERSION,
+                "schema_version": 1,
+                "prompt_version": MULTI_FRAME_PROMPT_VERSION,
+                "provider": provider.provider,
+                "model": provider.model,
+                "model_provenance": provenance,
+                "supports_multi_frame": bool(capability.get("supports_multi_image")),
+                "max_images": max_images,
+                "capability": capability,
+                "mandatory_window_uuids": planned_window_uuids,
+                "covered_window_uuids": [],
+                "status": "blocked",
+                "failure_reasons": reasons,
+            },
+            "cache_hits": 0,
+            "vision_calls": 0,
         }
-        return legacy
 
     if not bool(capability.get("supports_multi_image")):
         raise MultiFrameUnsupported(
@@ -289,6 +308,7 @@ def analyze_frame_windows(
             "cache_key": key,
             "cache_hit": cache_hit,
             "validation": validation,
+            "model_provenance": model_provenance(provider, capability),
             "evidence": evidence,
             **normalized,
         }
@@ -354,6 +374,8 @@ def analyze_frame_windows(
             "status": overall_status,
             "checks": validation_reports,
             "evidence_artifact_ids": [str(item.get("window_uuid") or "") for item in window_results],
+            "planned_window_uuids": [str(item.get("window_uuid") or "") for item in planned_windows],
+            "covered_window_uuids": [str(item.get("window_uuid") or "") for item in window_results],
             "needs_review_reasons": [] if overall_status == "pass" else ["window_validation_warning"],
         },
         "multi_frame_contract": {
@@ -362,9 +384,12 @@ def analyze_frame_windows(
             "prompt_version": str(getattr(provider, "multi_frame_prompt_version", MULTI_FRAME_PROMPT_VERSION)),
             "provider": provider.provider,
             "model": provider.model,
+            "model_provenance": model_provenance(provider, capability),
             "supports_multi_frame": bool(capability.get("supports_multi_image")),
             "max_images": max_images,
             "capability": capability,
+            "mandatory_window_uuids": [str(item.get("window_uuid") or "") for item in planned_windows],
+            "covered_window_uuids": [str(item.get("window_uuid") or "") for item in window_results],
             "status": overall_status,
         },
         "cache_hits": cache_hits,

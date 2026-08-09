@@ -128,6 +128,22 @@ def check_tools(cfg: dict) -> list[str]:
     return missing
 
 
+def parse_bool(value: object, *, default: bool = False) -> bool:
+    """Normalize YAML/config booleans without treating ``"false"`` as true."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "on", "1"}:
+            return True
+        if normalized in {"false", "no", "off", "0"}:
+            return False
+    return default
+
+
 def _merge(base: dict, extra: dict) -> dict:
     out = dict(base)
     for key, value in extra.items():
@@ -160,6 +176,8 @@ def _parse_yaml(text: str) -> dict:
 
 def _scalar(value: str):
     value = value.strip("'\"")
+    if value.lower() in {"true", "false"}:
+        return value.lower() == "true"
     if value.isdigit():
         return int(value)
     return value

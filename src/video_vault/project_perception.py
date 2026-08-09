@@ -4,9 +4,11 @@ from pathlib import Path
 import json
 
 from .audio_perception import AudioPerceptionError, analyze_audio_file
+from .config import parse_bool
 from .analyzer.multi_frame import (
     MultiFrameValidationError,
     build_frame_windows,
+    multi_frame_publish_errors,
     provider_capability,
     update_window_evidence_segment_uuid,
 )
@@ -146,8 +148,10 @@ def run_project_perception(
         _raise_if_cancelled(should_cancel)
 
         multi_frame_config = ((cfg.get("perception") or {}).get("multi_frame") or {})
-        multi_frame_enabled = bool(
-            multi_frame_config.get("enabled", "sampling" in cfg)
+        multi_frame_enabled = (
+            parse_bool(multi_frame_config.get("enabled"), default=False)
+            if "enabled" in multi_frame_config
+            else "sampling" in cfg
         )
         max_images = 0
         if multi_frame_enabled:
@@ -186,11 +190,33 @@ def run_project_perception(
             result.setdefault("window_manifest", windows)
             result.setdefault("window_results", [])
             result.setdefault("window_validation", {"status": "skipped", "reason": "legacy config"})
-        if multi_frame_enabled and (result.get("window_validation") or {}).get("status") == "blocked":
-            raise MultiFrameValidationError(
-                "multi-frame evidence validation blocked: "
-                + ", ".join((result.get("window_validation") or {}).get("needs_review_reasons") or [])
-            )
+        if multi_frame_enabled:
+            publish_errors = multi_frame_publish_errors(result)
+            if publish_errors:
+                validation = dict(result.get("window_validation") or {})
+                validation["status"] = "blocked"
+                reasons = list(validation.get("needs_review_reasons") or [])
+                for reason in publish_errors:
+                    if reason not in reasons:
+                        reasons.append(reason)
+                validation["needs_review_reasons"] = reasons
+                result["window_validation"] = validation
+                set_run_window_results(db, run_uuid, result.get("window_results") or [])
+                set_run_window_validation(db, run_uuid, validation)
+                if result.get("multi_frame_contract"):
+                    set_run_provider_contract(db, run_uuid, result["multi_frame_contract"])
+                sampling["actual_vision_calls"] = int(result.get("vision_calls") or 0)
+                sampling["cache_hits"] = int(result.get("cache_hits") or 0)
+                set_run_sampling_manifest(db, run_uuid, sampling)
+                result_path = staging / "result.json"
+                result_path.write_text(
+                    json.dumps(result, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                set_run_output_path(db, run_uuid, result_path)
+                raise MultiFrameValidationError(
+                    "multi-frame evidence validation blocked: " + ", ".join(publish_errors)
+                )
         set_run_window_results(db, run_uuid, result.get("window_results") or [])
         set_run_window_validation(db, run_uuid, result.get("window_validation") or {})
         if result.get("multi_frame_contract"):
