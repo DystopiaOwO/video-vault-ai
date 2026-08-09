@@ -23,9 +23,11 @@ from typing import Any, Mapping
 import uuid
 
 from .artifact_retention import register_artifact
+from .bgm_pipeline import bgm_fingerprint
 from .final_qc import sha256_file
 from .media_probe import MediaProbe, probe_media
 from .project import project_dir
+from .segment_cache import build_segment_cache_key
 
 
 QA_RUN_SCHEMA_VERSION = 1
@@ -45,7 +47,9 @@ _GENERAL_THRESHOLDS: dict[str, float | int] = {
     "black_cluster_count_warning": 3,
     "edge_fade_tolerance_seconds": 1.5,
     "flash_cluster_window_seconds": 1.0,
-    "flash_cluster_count_warning": 5,
+    "flash_cluster_count_warning": 2,
+    "flash_brightness_delta": 45.0,
+    "flash_reversal_window_seconds": 0.75,
     "scene_change_threshold": 0.70,
     "freeze_warning_seconds": 2.5,
     "silence_warning_seconds": 4.0,
@@ -162,12 +166,13 @@ def run_delivery_qa(
         "mtime_ns": int(output.stat().st_mtime_ns) if output.is_file() and not output.is_symlink() else 0,
         "duration_seconds": round(float(probe.duration_seconds), 6) if probe else 0.0,
     }
-    render_report = _read_json(output.with_name(output.name + ".render.json")) if output.is_file() else {}
+    render_report, render_report_status = _load_render_report(output.with_name(output.name + ".render.json")) if output.is_file() else ({}, "missing")
     stream_details = _probe_stream_details(str(cfg.get("ffprobe_path") or "ffprobe"), output) if probe else {"ok": False, "error_code": "probe_unavailable"}
     analysis = _analyze_output(cfg, output, profile["resolved_thresholds"], runner=runner) if probe else {"ok": False, "error_code": "probe_unavailable", "events": {}}
 
     checks = [
-        _container_check(probe, probe_error, stream_details, manifest, render_report, expected_manifest_hash, fingerprint, profile["resolved_thresholds"]),
+        _container_check(probe, probe_error, stream_details, manifest, render_report, expected_manifest_hash, fingerprint, profile["resolved_thresholds"], render_report_status=render_report_status),
+        _threshold_config_check(profile),
         _black_flash_check(analysis, profile["resolved_thresholds"], float(probe.duration_seconds) if probe else 0.0),
         _freeze_silence_check(analysis, profile["resolved_thresholds"], profile["profile_id"]),
         _border_crop_check(analysis, probe, stream_details, manifest, profile["resolved_thresholds"]),
@@ -359,23 +364,75 @@ def resolve_qa_profile(cfg: Mapping[str, Any], db: Path, project_id: int) -> dic
 
     thresholds = dict(_PROFILE_THRESHOLDS[profile_id])
     threshold_sources = {key: f"{QA_CONTRACT_VERSION}:{profile_id}" for key in thresholds}
+    threshold_validation: dict[str, Any] = {
+        "status": "pass",
+        "valid_overrides": [],
+        "invalid_overrides": [],
+        "unknown_thresholds": [],
+    }
     configured = cfg.get("delivery_qa") if isinstance(cfg.get("delivery_qa"), Mapping) else {}
     profile_overrides = configured.get("profiles") if isinstance(configured.get("profiles"), Mapping) else {}
-    for label, override in (
-        ("config.profile", profile_overrides.get(profile_id) if isinstance(profile_overrides, Mapping) else None),
-        ("config.global", configured.get("threshold_overrides")),
-    ):
-        if isinstance(override, Mapping):
-            _merge_thresholds(thresholds, threshold_sources, override, label)
+    configured_profiles = configured.get("profiles")
+    if configured_profiles not in (None, {}) and not isinstance(configured_profiles, Mapping):
+        _record_invalid_threshold_override(threshold_validation, "config.profiles", "profiles must be an object")
+    _apply_threshold_override(
+        thresholds,
+        threshold_sources,
+        profile_overrides.get(profile_id) if isinstance(profile_overrides, Mapping) else None,
+        "config.profile",
+        threshold_validation,
+    )
+    _apply_threshold_override(
+        thresholds,
+        threshold_sources,
+        configured.get("threshold_overrides"),
+        "config.global",
+        threshold_validation,
+    )
     project_override = _read_json(project_dir(dict(cfg), int(project_id)) / "qa_settings.json")
-    if isinstance(project_override.get("threshold_overrides"), Mapping):
-        _merge_thresholds(thresholds, threshold_sources, project_override["threshold_overrides"], "project.override")
+    _apply_threshold_override(
+        thresholds,
+        threshold_sources,
+        project_override.get("threshold_overrides"),
+        "project.override",
+        threshold_validation,
+    )
+    if threshold_validation["invalid_overrides"] or threshold_validation["unknown_thresholds"]:
+        threshold_validation["status"] = "blocked"
     return {
         "profile_id": profile_id,
         "source": source,
         "resolved_thresholds": thresholds,
         "threshold_sources": threshold_sources,
+        "threshold_validation": threshold_validation,
     }
+
+
+def _threshold_config_check(profile: Mapping[str, Any]) -> dict[str, Any]:
+    validation = _mapping(profile.get("threshold_validation"))
+    status = "blocked" if str(validation.get("status") or "pass") != "pass" else "pass"
+    invalid = list(validation.get("invalid_overrides") or [])
+    unknown = list(validation.get("unknown_thresholds") or [])
+    metrics = {
+        "validation": _safe_value(validation),
+        "resolved_thresholds": _safe_value(profile.get("resolved_thresholds") or {}),
+        "threshold_sources": _safe_value(profile.get("threshold_sources") or {}),
+    }
+    if status == "blocked":
+        reasons = []
+        if invalid:
+            reasons.append(f"{len(invalid)} 個 threshold override 無效")
+        if unknown:
+            reasons.append(f"{len(unknown)} 個 threshold key 未知")
+        return _check(
+            "threshold_config",
+            "blocked",
+            "；".join(reasons) or "threshold override validation failed",
+            metrics,
+            severity="high",
+            remediation="修正已記錄的 threshold override；不要依賴 silent fallback default",
+        )
+    return _check("threshold_config", "pass", "threshold override 已驗證並記錄 resolved value/source", metrics)
 
 
 def load_current_delivery_qa(cfg: Mapping[str, Any], project_id: int) -> dict[str, Any]:
@@ -558,14 +615,25 @@ def _container_check(
     expected_manifest_hash: str,
     fingerprint: Mapping[str, Any],
     thresholds: Mapping[str, Any],
+    *,
+    render_report_status: str = "ok",
 ) -> dict[str, Any]:
     metrics: dict[str, Any] = {
         "output_fingerprint": dict(fingerprint),
         "manifest_hash_expected": expected_manifest_hash,
         "manifest_hash_reported": str(render_report.get("manifest_hash") or ""),
+        "render_report": {
+            "status": str(render_report_status or "invalid"),
+            "present": render_report_status != "missing",
+            "parseable": render_report_status == "ok",
+        },
         "stream_contract": _safe_value(stream_details),
     }
     failures: list[str] = []
+    if render_report_status != "ok":
+        failures.append(
+            "Render Report 缺失" if render_report_status == "missing" else "Render Report 無法解析"
+        )
     if probe is None:
         failures.append("正式輸出無法由 FFprobe 驗證")
         metrics["probe_error"] = probe_error or "probe_unavailable"
@@ -617,11 +685,15 @@ def _container_check(
         metrics["audio_channel_layout_contract"] = {"expected": expected_layout, "actual": actual_layout}
         if expected_layout and actual_layout != expected_layout:
             failures.append("audio channel layout 與核准 render contract 不一致")
-    if expected_manifest_hash and str(render_report.get("manifest_hash") or "") not in {"", expected_manifest_hash}:
-        failures.append("Render Report manifest hash 不一致")
+    reported_manifest_hash = str(render_report.get("manifest_hash") or "")
+    if not expected_manifest_hash:
+        failures.append("核准 manifest_hash 缺失")
+    elif reported_manifest_hash != expected_manifest_hash:
+        failures.append("Render Report manifest hash 缺失或不一致")
     reported_sha = str(render_report.get("output_sha256") or "")
-    if reported_sha and reported_sha != str(fingerprint.get("sha256") or ""):
-        failures.append("正式輸出 fingerprint 與 Render Report 不一致")
+    actual_sha = str(fingerprint.get("sha256") or "")
+    if not reported_sha or not actual_sha or reported_sha != actual_sha:
+        failures.append("正式輸出 fingerprint 缺失或與 Render Report 不一致")
     if not bool(stream_details.get("ok")):
         failures.append("container/stream detail probe 未完成")
     faststart_required = bool(
@@ -642,12 +714,12 @@ def _container_check(
         "full_decode_ok": decode.get("ok"),
         "timestamp_monotonic": measurements.get("timestamp_monotonic"),
     }
-    if qc and qc.get("passed") is not True:
-        failures.append("Render Report final QC 未通過")
-    if decode and decode.get("ok") is not True:
-        failures.append("Render Report full decode 未通過")
-    if measurements.get("timestamp_monotonic") is False:
-        failures.append("Render Report packet timestamp 不連續")
+    if qc.get("passed") is not True:
+        failures.append("Render Report final QC 缺失或未通過")
+    if decode.get("ok") is not True:
+        failures.append("Render Report full decode 缺失或未通過")
+    if measurements.get("timestamp_monotonic") is not True:
+        failures.append("Render Report packet timestamp continuity 缺失或未通過")
     return _check(
         "container_manifest",
         "blocked" if failures else "pass",
@@ -661,14 +733,23 @@ def _container_check(
 def _black_flash_check(analysis: Mapping[str, Any], thresholds: Mapping[str, Any], duration_seconds: float = 0.0) -> dict[str, Any]:
     events = _mapping(analysis.get("events"))
     black = [dict(item) for item in events.get("black") or [] if isinstance(item, Mapping)]
-    flashes = [float(item) for item in events.get("flash") or []]
+    flashes = [
+        dict(item) if isinstance(item, Mapping) else {"kind": "flash", "timestamp_seconds": float(item)}
+        for item in events.get("flash") or []
+    ]
+    flash_timestamps = [
+        float(item.get("timestamp_seconds") or item.get("start_seconds") or 0)
+        for item in flashes
+    ]
     scene_changes = [float(item) for item in events.get("scene_change") or []]
     metrics = {
-        "events": black + [{"kind": "flash", "timestamp_seconds": value} for value in flashes],
+        "events": black + flashes,
         "black_event_count": len(black),
         "flash_event_count": len(flashes),
         "scene_change_count": len(scene_changes),
         "max_scene_change_cluster": _max_cluster(scene_changes, float(thresholds["flash_cluster_window_seconds"])),
+        "brightness_sample_count": int(analysis.get("brightness_sample_count") or 0),
+        "brightness_range": _safe_value(analysis.get("brightness_range") or {}),
     }
     if not analysis.get("ok"):
         metrics["analysis_error"] = analysis.get("error_code") or "analysis_failed"
@@ -682,7 +763,7 @@ def _black_flash_check(analysis: Mapping[str, Any], thresholds: Mapping[str, Any
     ]
     interior_long_black = [item for item in long_black if item not in likely_fades]
     dense_black = _max_cluster([float(item.get("start_seconds") or 0) for item in black], float(thresholds["black_cluster_window_seconds"]))
-    dense_flash = _max_cluster(flashes, float(thresholds["flash_cluster_window_seconds"]))
+    dense_flash = _max_cluster(flash_timestamps, float(thresholds["flash_cluster_window_seconds"]))
     metrics.update({"long_black_count": len(long_black), "interior_long_black_count": len(interior_long_black), "likely_edge_fade_count": len(likely_fades), "max_black_cluster": dense_black, "max_flash_cluster": dense_flash})
     if interior_long_black:
         return _check("black_flash", "blocked", f"偵測到 {len(interior_long_black)} 段非片頭/片尾的過長黑畫面", metrics, severity="high", remediation="檢查轉場、缺幀或空白片段，修正後重新輸出並重跑 QA")
@@ -787,6 +868,9 @@ def _audio_check(analysis: Mapping[str, Any], probe: MediaProbe | None, render_r
     }
     failures: list[str] = []
     warnings: list[str] = []
+    provenance = _audio_render_provenance(manifest, render_report)
+    metrics["render_audio_provenance"] = provenance["metrics"]
+    failures.extend(provenance["failures"])
     if probe is None or not probe.has_audio:
         failures.append("正式輸出缺少可驗證的音訊")
     if not analysis.get("ok"):
@@ -850,6 +934,132 @@ def _audio_check(analysis: Mapping[str, Any], probe: MediaProbe | None, render_r
     if warnings:
         return _check("audio", "warning", "；".join(warnings), metrics, severity="medium", remediation="人工聆聽 evidence 與成片；確認屬刻意音量設計後填寫接受理由")
     return _check("audio", "pass", "音訊 stream、loudness、peak、尾端與 role 契約通過", metrics)
+
+
+def _audio_render_provenance(manifest: Mapping[str, Any], render_report: Mapping[str, Any]) -> dict[str, Any]:
+    """Verify that the formal report proves the approved audio contract was rendered."""
+
+    expected_segments = _ordered_segments(manifest)
+    expected_keys: list[str] = []
+    segment_failures: list[dict[str, Any]] = []
+    for index, segment in enumerate(expected_segments):
+        try:
+            expected_keys.append(build_segment_cache_key(manifest, segment))
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            expected_keys.append("")
+            segment_failures.append({"index": index, "reason": "approved segment cache key unavailable", "error": _safe_error(exc)})
+    reported_segments = render_report.get("segments") if isinstance(render_report.get("segments"), list) else []
+    reported_keys = [
+        str(item.get("cache_key") or "")
+        for item in reported_segments
+        if isinstance(item, Mapping)
+    ]
+    if len(reported_segments) != len(expected_segments):
+        segment_failures.append({
+            "reason": "segment count mismatch",
+            "approved_count": len(expected_segments),
+            "reported_count": len(reported_segments),
+        })
+    for index, (expected, actual) in enumerate(zip(expected_keys, reported_keys)):
+        if not expected or expected != actual:
+            segment_failures.append({
+                "index": index,
+                "reason": "segment cache key mismatch",
+                "approved_cache_key": expected,
+                "reported_cache_key": actual,
+            })
+
+    expected_bgm = next(
+        (_mapping(item) for item in manifest.get("bgm") or [] if isinstance(item, Mapping)),
+        {},
+    )
+    reported_bgm = _mapping(render_report.get("bgm"))
+    expected_bgm_used = bool(expected_bgm)
+    reported_bgm_used = reported_bgm.get("used") is True
+    expected_bgm_fp: dict[str, Any] = {}
+    bgm_error = ""
+    if expected_bgm_used:
+        try:
+            expected_bgm_fp = bgm_fingerprint(expected_bgm)
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            bgm_error = _safe_error(exc)
+    reported_bgm_fp = _mapping(reported_bgm.get("fingerprint"))
+    bgm_fingerprint_match = bool(
+        expected_bgm_used
+        and not bgm_error
+        and reported_bgm_used
+        and reported_bgm_fp
+        and reported_bgm_fp == expected_bgm_fp
+    ) if expected_bgm_used else bool(
+        not expected_bgm_used
+        and "used" in reported_bgm
+        and reported_bgm.get("used") is False
+        and reported_bgm_fp == {}
+    )
+    provenance_metrics = {
+        "approved_segment_cache_keys": expected_keys,
+        "reported_segment_cache_keys": reported_keys,
+        "segment_mismatches": segment_failures,
+        "approved_audio_contract": [
+            {
+                "segment_id": str(segment.get("segment_id") or segment.get("segment_uuid") or ""),
+                "role": str(_mapping(segment.get("audio")).get("role") or segment.get("audio_role") or ""),
+                "fade_in_seconds": _mapping(segment.get("audio")).get("fade_in_seconds"),
+                "fade_out_seconds": _mapping(segment.get("audio")).get("fade_out_seconds"),
+            }
+            for segment in expected_segments
+        ],
+        "bgm": {
+            "approved_used": expected_bgm_used,
+            "reported_used": reported_bgm.get("used"),
+            "fingerprint_match": bgm_fingerprint_match,
+            "approved_fingerprint": _fingerprint_audit(expected_bgm_fp),
+            "reported_fingerprint": _fingerprint_audit(reported_bgm_fp),
+            "error": bgm_error,
+        },
+    }
+    failures: list[str] = []
+    if segment_failures:
+        failures.append("Render Report segment cache key 與核准 audio contract 不一致")
+    if not bgm_fingerprint_match:
+        failures.append("Render Report BGM used/fingerprint 與核准 BGM contract 不一致")
+    return {"failures": failures, "metrics": _safe_value(provenance_metrics)}
+
+
+def _fingerprint_audit(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value.get(key)
+        for key in (
+            "track_id",
+            "source_size",
+            "source_mtime_ns",
+            "source_sha256",
+            "gain_db",
+            "start_seconds",
+            "loop",
+            "fade_in_seconds",
+            "fade_out_seconds",
+        )
+        if key in value
+    }
+
+
+def _ordered_segments(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
+    indexed = [
+        (index, dict(item))
+        for index, item in enumerate(manifest.get("segments") or [])
+        if isinstance(item, Mapping)
+    ]
+    return [
+        item
+        for _index, item in sorted(
+            indexed,
+            key=lambda pair: (
+                int(pair[1].get("order")) if str(pair[1].get("order") or "").lstrip("-").isdigit() else pair[0],
+                pair[0],
+            ),
+        )
+    ]
 
 
 def _continuity_check(manifest: Mapping[str, Any], snapshot: Mapping[str, Any], thresholds: Mapping[str, Any]) -> dict[str, Any]:
@@ -945,6 +1155,7 @@ def _analyze_output(cfg: Mapping[str, Any], output: Path, thresholds: Mapping[st
     configured = cfg.get("delivery_qa") if isinstance(cfg.get("delivery_qa"), Mapping) else {}
     timeout = max(30.0, float(configured.get("timeout_seconds") or 600))
     video_filter = (
+        "signalstats,metadata=mode=print:key=lavfi.signalstats.YAVG,"
         "cropdetect=24:16:0,"
         f"blackdetect=d={float(thresholds['black_block_seconds']) / 2:.3f}:pix_th=0.10,"
         f"freezedetect=n=-50dB:d={float(thresholds['freeze_warning_seconds']) / 2:.3f},"
@@ -959,6 +1170,14 @@ def _analyze_output(cfg: Mapping[str, Any], output: Path, thresholds: Mapping[st
     except OSError as exc:
         return {"ok": False, "returncode": None, "error_code": _safe_error(exc), "events": {}}
     parsed = _parse_analysis_log((result.stderr or "") + "\n" + (result.stdout or ""))
+    brightness_samples = parsed.pop("brightness_samples", [])
+    parsed["brightness_sample_count"] = len(brightness_samples)
+    if brightness_samples:
+        values = [float(item["yavg"]) for item in brightness_samples]
+        parsed["brightness_range"] = {"min": round(min(values), 3), "max": round(max(values), 3)}
+    else:
+        parsed["brightness_range"] = {}
+    parsed["events"]["flash"] = _detect_flash_events(brightness_samples, thresholds)
     return {"ok": result.returncode == 0, "returncode": result.returncode, "error_code": "" if result.returncode == 0 else "ffmpeg_analysis_failed", **parsed}
 
 
@@ -969,11 +1188,26 @@ def _parse_analysis_log(text: str) -> dict[str, Any]:
     flashes: list[float] = []
     scene_changes: list[float] = []
     crops: list[list[int]] = []
+    brightness_samples: list[dict[str, float]] = []
+    frame_timestamp: float | None = None
+    frame_yavg: float | None = None
     freeze_start: float | None = None
     silence_start: float | None = None
     max_volume: float | None = None
     invalid_sample_count: int | None = None
     for line in text.splitlines():
+        frame_match = re.search(r"frame:\s*\d+\s+pts:\s*[-\d]+\s+pts_time:\s*([-\d.]+)", line)
+        if frame_match:
+            if frame_timestamp is not None and frame_yavg is not None:
+                brightness_samples.append({"timestamp_seconds": round(frame_timestamp, 6), "yavg": round(frame_yavg, 6)})
+            frame_timestamp = float(frame_match.group(1))
+            frame_yavg = None
+        yavg_match = re.search(r"(?:lavfi\.signalstats\.)?YAVG=([-+\d.eE]+)", line)
+        if yavg_match and frame_timestamp is not None:
+            try:
+                frame_yavg = float(yavg_match.group(1))
+            except ValueError:
+                frame_yavg = None
         match = re.search(r"black_start:([\d.]+)\s+black_end:([\d.]+)\s+black_duration:([\d.]+)", line)
         if match:
             black.append(_interval("black", *map(float, match.groups())))
@@ -1007,12 +1241,58 @@ def _parse_analysis_log(text: str) -> dict[str, Any]:
         match = re.search(r"Number of (?:NaNs|Infs|denormals):\s*(\d+)", line, re.IGNORECASE)
         if match:
             invalid_sample_count = max(int(match.group(1)), int(invalid_sample_count or 0))
+    if frame_timestamp is not None and frame_yavg is not None:
+        brightness_samples.append({"timestamp_seconds": round(frame_timestamp, 6), "yavg": round(frame_yavg, 6)})
     return {
         "events": {"black": black, "freeze": freeze, "silence": silence, "flash": flashes, "scene_change": scene_changes},
+        "brightness_samples": brightness_samples,
         "crop_observations": crops[-500:],
         "max_volume_db": max_volume,
         "invalid_sample_count": invalid_sample_count,
     }
+
+
+def _detect_flash_events(samples: list[Mapping[str, Any]], thresholds: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for item in samples:
+        timestamp = _finite(item.get("timestamp_seconds"))
+        yavg = _finite(item.get("yavg"))
+        if timestamp is None or yavg is None:
+            continue
+        rows.append((timestamp, yavg))
+    rows.sort(key=lambda item: item[0])
+    if len(rows) < 3:
+        return []
+    delta_threshold = max(1.0, float(thresholds.get("flash_brightness_delta") or 45.0))
+    reversal_window = max(0.05, float(thresholds.get("flash_reversal_window_seconds") or 0.75))
+    transitions: list[dict[str, Any]] = []
+    for previous, current in zip(rows, rows[1:]):
+        delta = current[1] - previous[1]
+        if abs(delta) < delta_threshold:
+            continue
+        transitions.append({
+            "timestamp_seconds": round(current[0], 6),
+            "brightness_before": round(previous[1], 3),
+            "brightness_after": round(current[1], 3),
+            "delta_brightness": round(delta, 3),
+            "direction": "up" if delta > 0 else "down",
+        })
+    flash_indexes: set[int] = set()
+    for index, transition in enumerate(transitions):
+        for next_index in range(index + 1, len(transitions)):
+            following = transitions[next_index]
+            if following["timestamp_seconds"] - transition["timestamp_seconds"] > reversal_window:
+                break
+            if transition["direction"] != following["direction"]:
+                flash_indexes.update((index, next_index))
+                break
+    events: list[dict[str, Any]] = []
+    for index in sorted(flash_indexes):
+        transition = dict(transitions[index])
+        transition["kind"] = "flash"
+        transition["cluster_id"] = f"flash-{index + 1}"
+        events.append(transition)
+    return events
 
 
 def _probe_stream_details(ffprobe: str, output: Path) -> dict[str, Any]:
@@ -1253,7 +1533,7 @@ def _safe_user_text(value: object) -> str:
 def _attach_threshold_audit(checks: list[dict[str, Any]], profile: Mapping[str, Any]) -> None:
     keys = {
         "container_manifest": ("duration_tolerance_seconds",),
-        "black_flash": ("black_block_seconds", "black_cluster_window_seconds", "black_cluster_count_warning", "edge_fade_tolerance_seconds", "flash_cluster_window_seconds", "flash_cluster_count_warning", "scene_change_threshold"),
+        "black_flash": ("black_block_seconds", "black_cluster_window_seconds", "black_cluster_count_warning", "edge_fade_tolerance_seconds", "flash_cluster_window_seconds", "flash_cluster_count_warning", "flash_brightness_delta", "flash_reversal_window_seconds", "scene_change_threshold"),
         "freeze_silence": ("freeze_warning_seconds", "silence_warning_seconds", "freeze_silence_block_seconds"),
         "border_crop_safe_area": ("border_tolerance_pixels",),
         "audio": ("loudness_min_lufs", "loudness_max_lufs", "true_peak_limit_db", "clipping_peak_warning_db", "av_tail_tolerance_seconds", "bgm_tail_tolerance_seconds"),
@@ -1270,18 +1550,84 @@ def _attach_threshold_audit(checks: list[dict[str, Any]], profile: Mapping[str, 
         }
 
 
-def _merge_thresholds(target: dict[str, float | int], sources: dict[str, str], override: Mapping[str, Any], source: str) -> None:
-    for key, current in list(target.items()):
-        if key not in override:
-            continue
+def _apply_threshold_override(
+    target: dict[str, float | int],
+    sources: dict[str, str],
+    override: Any,
+    source: str,
+    validation: dict[str, Any],
+) -> None:
+    if override in (None, {}):
+        return
+    if not isinstance(override, Mapping):
+        _record_invalid_threshold_override(validation, source, "override must be an object")
+        return
+    _merge_thresholds(target, sources, override, source, validation=validation)
+
+
+def _record_invalid_threshold_override(validation: dict[str, Any], source: str, reason: str, key: str = "") -> None:
+    validation.setdefault("invalid_overrides", []).append({
+        "source": str(source),
+        "key": str(key or "<override>"),
+        "reason": str(reason),
+    })
+
+
+def _threshold_audit_value(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
         try:
-            parsed = int(override[key]) if isinstance(current, int) and not isinstance(current, bool) else float(override[key])
+            number = float(value)
         except (TypeError, ValueError, OverflowError):
+            return str(value)
+        return number if math.isfinite(number) else str(value)
+    return _safe_user_text(value)[:120]
+
+
+def _merge_thresholds(
+    target: dict[str, float | int],
+    sources: dict[str, str],
+    override: Mapping[str, Any],
+    source: str,
+    *,
+    validation: dict[str, Any] | None = None,
+) -> None:
+    for raw_key, raw_value in override.items():
+        key = str(raw_key)
+        if key not in target:
+            if validation is not None:
+                validation.setdefault("unknown_thresholds", []).append({
+                    "source": str(source),
+                    "key": key,
+                    "value": _threshold_audit_value(raw_value),
+                })
             continue
-        if not math.isfinite(float(parsed)) or float(parsed) < 0:
+        current = target[key]
+        try:
+            if isinstance(raw_value, bool):
+                raise ValueError("boolean is not a numeric threshold")
+            number = float(raw_value)
+            if not math.isfinite(number) or number < 0:
+                raise ValueError("threshold must be finite and non-negative")
+            if isinstance(current, int) and not isinstance(current, bool):
+                if not number.is_integer():
+                    raise ValueError("integer threshold must be a whole number")
+                parsed: float | int = int(number)
+            else:
+                parsed = number
+        except (TypeError, ValueError, OverflowError):
+            if validation is not None:
+                _record_invalid_threshold_override(validation, source, "value must be finite, non-negative, and match threshold type", key)
             continue
         target[key] = parsed
         sources[key] = source
+        if validation is not None:
+            validation.setdefault("valid_overrides", []).append({
+                "source": str(source),
+                "key": key,
+                "resolved_value": parsed,
+            })
 
 
 def _rotation(video: Mapping[str, Any]) -> int:
@@ -1422,6 +1768,18 @@ def _finite(value: Any) -> float | None:
 
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _load_render_report(path: Path) -> tuple[dict[str, Any], str]:
+    if not path.is_file() or path.is_symlink():
+        return {}, "missing"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return {}, "unparseable"
+    if not isinstance(value, dict) or not value:
+        return {}, "invalid"
+    return value, "ok"
 
 
 def _read_json(path: Path) -> dict[str, Any]:

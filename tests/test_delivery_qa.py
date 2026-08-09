@@ -7,9 +7,11 @@ import pytest
 import video_vault.delivery_qa as delivery_qa
 from video_vault.database import create_project_row, init_db, project_revision
 from video_vault.delivery_qa import DeliveryQAError, QAReviewVersionConflict, delivery_qa_for_api, review_delivery_qa, run_delivery_qa
+from video_vault.bgm_pipeline import bgm_fingerprint
 from video_vault.media_probe import MediaProbe
 from video_vault.project import project_dir
 from video_vault.render_job_store import RenderJobStore
+from video_vault.segment_cache import build_segment_cache_key
 
 
 def _sha(path: Path) -> str:
@@ -53,7 +55,15 @@ def _fixture(tmp_path: Path, monkeypatch, *, analysis=None, loudness=True):
         "approval_snapshot_id": snapshot["snapshot_id"],
         "approval_snapshot_hash": snapshot["snapshot_hash"],
     }), encoding="utf-8")
-    render_report = {"manifest_hash": manifest_hash, "output_sha256": _sha(output), "loudness": {"final": {"measured_I": -14.0, "measured_TP": -1.2}} if loudness else {}}
+    render_report = {
+        "manifest_hash": manifest_hash,
+        "output_sha256": _sha(output),
+        "loudness": {"final": {"measured_I": -14.0, "measured_TP": -1.2}} if loudness else {},
+        "segments": [{"segment_id": "segment-uuid-1", "cache_key": build_segment_cache_key(manifest, manifest["segments"][0])}],
+        "bgm": {"used": False, "fingerprint": {}},
+        "qc": {"passed": True},
+        "measurements": {"decode": {"ok": True}, "timestamp_monotonic": True},
+    }
     output.with_name(output.name + ".render.json").write_text(json.dumps(render_report), encoding="utf-8")
     probe = MediaProbe(output, 4.0, True, True, 1920, 1080, 30.0, 30, 1, "yuv420p", "h264", "aac", 48000, 2, frame_count=120, video_end_seconds=4.0, audio_end_seconds=4.0)
     monkeypatch.setattr(delivery_qa, "probe_media", lambda *args: probe)
@@ -86,7 +96,7 @@ def test_run_persists_safe_versioned_contract_and_human_gate(tmp_path: Path, mon
     assert report["contract"]["version"] == "delivery-qa-v1"
     assert report["lifecycle_status"] == "qa_needs_review"
     assert report["deliverable_ready"] is False
-    assert report["summary"] == {"pass": 7, "warning": 0, "blocked": 0, "skipped": 0}
+    assert report["summary"] == {"pass": 8, "warning": 0, "blocked": 0, "skipped": 0}
     assert all(check["evidence_artifact_ids"] for check in report["checks"])
     assert all(check["status"] == "pass" for check in report["checks"])
     serialized = (folder / "qa" / report["qa_run_uuid"] / "report.json").read_text(encoding="utf-8")
@@ -181,6 +191,32 @@ def test_black_flash_distinguishes_edge_fade_from_interior_black_and_flash_clust
     assert delivery_qa._black_flash_check(flashing, thresholds, 10)["status"] == "warning"
 
 
+def test_flash_parser_uses_brightness_reversal_not_scene_cuts_and_keeps_fade_separate():
+    thresholds = delivery_qa._PROFILE_THRESHOLDS["travel_diary"]
+    log = "\n".join([
+        "[Parsed_metadata_1] frame:0 pts:0 pts_time:0",
+        "[Parsed_metadata_1] lavfi.signalstats.YAVG=16",
+        "[Parsed_metadata_1] frame:1 pts:1 pts_time:0.033333",
+        "[Parsed_metadata_1] lavfi.signalstats.YAVG=235",
+        "[Parsed_metadata_1] frame:2 pts:2 pts_time:0.066667",
+        "[Parsed_metadata_1] lavfi.signalstats.YAVG=16",
+    ])
+    parsed = delivery_qa._parse_analysis_log(log)
+    flashes = delivery_qa._detect_flash_events(parsed["brightness_samples"], thresholds)
+    assert [event["timestamp_seconds"] for event in flashes] == [pytest.approx(0.033333), pytest.approx(0.066667)]
+    assert delivery_qa._black_flash_check({"ok": True, "events": {"flash": flashes, "scene_change": [0.033333]}}, thresholds, 1)["status"] == "warning"
+
+    hard_cut = delivery_qa._detect_flash_events([
+        {"timestamp_seconds": 0, "yavg": 16},
+        {"timestamp_seconds": 0.033, "yavg": 235},
+        {"timestamp_seconds": 0.066, "yavg": 235},
+    ], thresholds)
+    assert hard_cut == []
+    fade = delivery_qa._black_flash_check({"ok": True, "events": {"black": [{"start_seconds": 0, "end_seconds": 1.2, "duration_seconds": 1.2}], "flash": []}}, thresholds, 10)
+    assert fade["status"] == "warning"
+    assert fade["metrics"]["flash_event_count"] == 0
+
+
 def test_travel_freeze_and_silence_only_block_when_overlap_exceeds_profile_threshold():
     thresholds = delivery_qa._PROFILE_THRESHOLDS["travel_diary"]
     atmosphere = {"ok": True, "events": {"freeze": [{"start_seconds": 0, "end_seconds": 5, "duration_seconds": 5}], "silence": [{"start_seconds": 0, "end_seconds": 5, "duration_seconds": 5}]}}
@@ -189,20 +225,75 @@ def test_travel_freeze_and_silence_only_block_when_overlap_exceeds_profile_thres
     assert delivery_qa._freeze_silence_check(stalled, thresholds, "travel_diary")["status"] == "blocked"
 
 
-def test_audio_check_audits_clipping_invalid_samples_bgm_coverage_and_effective_roles():
+def test_audio_check_audits_clipping_invalid_samples_bgm_coverage_and_effective_roles(tmp_path: Path):
+    source = tmp_path / "segment.mp4"
+    source.write_bytes(b"segment")
+    bgm_source = tmp_path / "bgm.mp3"
+    bgm_source.write_bytes(b"bgm")
     probe = MediaProbe(Path("formal.mp4"), 10.0, True, True, 1920, 1080, 30.0, 30, 1, "yuv420p", "h264", "aac", 48000, 2, frame_count=300, video_end_seconds=10.0, audio_end_seconds=10.0)
     manifest = {
         "expected_duration_seconds": 10,
-        "segments": [{"audio_role": "keep_original", "audio": {"role": "mute", "fade_in_seconds": 0.1, "fade_out_seconds": 0.1}}],
-        "bgm": [{"loop": False, "start_seconds": 0, "duration_seconds": 2, "fade_in_seconds": 0, "fade_out_seconds": 0}],
+        "segments": [{"segment_id": "segment-1", "source_file": str(source), "audio_role": "keep_original", "audio": {"role": "mute", "fade_in_seconds": 0.1, "fade_out_seconds": 0.1}}],
+        "bgm": [{"track_id": 1, "source_path": str(bgm_source), "loop": False, "start_seconds": 0, "duration_seconds": 2, "fade_in_seconds": 0, "fade_out_seconds": 0}],
     }
-    render_report = {"loudness": {"final": {"measured_I": -14, "measured_TP": -1.2}}}
+    render_report = {
+        "loudness": {"final": {"measured_I": -14, "measured_TP": -1.2}},
+        "segments": [{"cache_key": build_segment_cache_key(manifest, manifest["segments"][0])}],
+        "bgm": {"used": True, "fingerprint": bgm_fingerprint(manifest["bgm"][0])},
+    }
     warning = delivery_qa._audio_check({"ok": True, "events": {"silence": []}, "max_volume_db": -0.01, "invalid_sample_count": 0}, probe, render_report, manifest, delivery_qa._GENERAL_THRESHOLDS)
     assert warning["status"] == "warning"
     assert warning["metrics"]["audio_roles"] == {"mute": 1}
     assert "提前終止" in warning["summary"]
     blocked = delivery_qa._audio_check({"ok": True, "events": {"silence": []}, "max_volume_db": 0, "invalid_sample_count": 1}, probe, render_report, manifest, delivery_qa._GENERAL_THRESHOLDS)
     assert blocked["status"] == "blocked"
+
+
+def test_audio_provenance_blocks_wrong_segment_keys_and_bgm_and_accepts_correct_contract(tmp_path: Path):
+    source = tmp_path / "segment.mp4"
+    source.write_bytes(b"segment")
+    bgm_source = tmp_path / "bgm.mp3"
+    bgm_source.write_bytes(b"bgm")
+    manifest = {
+        "expected_duration_seconds": 10,
+        "segments": [{
+            "segment_id": "segment-1",
+            "source_file": str(source),
+            "source_in_seconds": 0,
+            "source_out_seconds": 10,
+            "timeline_duration_seconds": 10,
+            "audio_role": "mute",
+            "audio": {"role": "mute", "fade_in_seconds": 0.1, "fade_out_seconds": 0.2},
+        }],
+        "bgm": [{
+            "track_id": 1,
+            "source_path": str(bgm_source),
+            "loop": True,
+            "start_seconds": 0,
+            "duration_seconds": 2,
+            "fade_in_seconds": 0.2,
+            "fade_out_seconds": 0.2,
+        }],
+    }
+    probe = MediaProbe(Path("formal.mp4"), 10.0, True, True, 1920, 1080, 30.0, 30, 1, "yuv420p", "h264", "aac", 48000, 2, frame_count=300, video_end_seconds=10.0, audio_end_seconds=10.0)
+    analysis = {"ok": True, "events": {"silence": []}, "max_volume_db": -1.3, "invalid_sample_count": 0}
+    correct = {
+        "loudness": {"final": {"measured_I": -14, "measured_TP": -1.2}},
+        "segments": [{"cache_key": build_segment_cache_key(manifest, manifest["segments"][0])}],
+        "bgm": {"used": True, "fingerprint": bgm_fingerprint(manifest["bgm"][0])},
+    }
+    assert delivery_qa._audio_check(analysis, probe, correct, manifest, delivery_qa._GENERAL_THRESHOLDS)["status"] == "pass"
+
+    keep_manifest = {**manifest, "segments": [{**manifest["segments"][0], "audio": {"role": "keep", "fade_in_seconds": 0.1, "fade_out_seconds": 0.2}}]}
+    wrong_segment = {**correct, "segments": [{"cache_key": build_segment_cache_key(keep_manifest, keep_manifest["segments"][0])}]}
+    assert delivery_qa._audio_check(analysis, probe, wrong_segment, manifest, delivery_qa._GENERAL_THRESHOLDS)["status"] == "blocked"
+
+    fade_manifest = {**manifest, "segments": [{**manifest["segments"][0], "audio": {"role": "lower", "fade_in_seconds": 0.1, "fade_out_seconds": 0.8}}]}
+    wrong_fade = {**correct, "segments": [{"cache_key": build_segment_cache_key(fade_manifest, fade_manifest["segments"][0])}]}
+    assert delivery_qa._audio_check(analysis, probe, wrong_fade, manifest, delivery_qa._GENERAL_THRESHOLDS)["status"] == "blocked"
+
+    wrong_bgm = {**correct, "bgm": {"used": False, "fingerprint": {}}}
+    assert delivery_qa._audio_check(analysis, probe, wrong_bgm, manifest, delivery_qa._GENERAL_THRESHOLDS)["status"] == "blocked"
 
 
 def test_continuity_audits_duplicate_group_chapters_and_maps_events_to_stable_uuid():
@@ -248,3 +339,50 @@ def test_delivery_qa_schema_declares_fail_closed_status_and_redaction_invariant(
     assert schema["properties"]["schema_version"]["const"] == 1
     assert schema["properties"]["sensitive_data_redacted"]["const"] is True
     assert schema["$defs"]["check"]["properties"]["status"]["enum"] == ["pass", "warning", "blocked", "skipped"]
+
+
+def test_render_report_required_provenance_is_fail_closed():
+    probe = MediaProbe(Path("formal.mp4"), 4.0, True, True, 1920, 1080, 30.0, 30, 1, "yuv420p", "h264", "aac", 48000, 2, frame_count=120, video_end_seconds=4.0, audio_end_seconds=4.0)
+    manifest = {"expected_duration_seconds": 4, "profile": {"width": 1920, "height": 1080, "fps": 30.0, "pixel_format": "yuv420p", "video_codec": "h264", "audio_codec": "aac", "audio_sample_rate": 48000, "audio_channels": 2}}
+    fingerprint = {"sha256": "b" * 64, "size_bytes": 10}
+    missing = delivery_qa._container_check(probe, "", {"ok": True, "faststart": True}, manifest, {}, "a" * 64, fingerprint, delivery_qa._GENERAL_THRESHOLDS, render_report_status="missing")
+    assert missing["status"] == "blocked"
+    assert "Render Report" in missing["summary"]
+    corrupt = delivery_qa._container_check(probe, "", {"ok": True, "faststart": True}, manifest, {}, "a" * 64, fingerprint, delivery_qa._GENERAL_THRESHOLDS, render_report_status="unparseable")
+    assert corrupt["status"] == "blocked"
+    assert corrupt["metrics"]["render_report"]["parseable"] is False
+    incomplete = delivery_qa._container_check(probe, "", {"ok": True, "faststart": True}, manifest, {"manifest_hash": "a" * 64, "output_sha256": "b" * 64, "qc": {"passed": True}}, "a" * 64, fingerprint, delivery_qa._GENERAL_THRESHOLDS)
+    assert incomplete["status"] == "blocked"
+    assert "full decode" in incomplete["summary"]
+    assert "timestamp continuity" in incomplete["summary"]
+
+
+def test_invalid_threshold_override_blocks_and_valid_override_records_source(tmp_path: Path, monkeypatch):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    project_id = create_project_row(db, "thresholds", content_type="travel_diary")
+    cfg = {"library_root": str(tmp_path), "delivery_qa": {"threshold_overrides": {
+        "black_block_seconds": "oops",
+        "flash_brightness_delta": -1,
+        "scene_change_threshold": float("nan"),
+        "mystery_threshold": 3,
+    }}}
+    profile = delivery_qa.resolve_qa_profile(cfg, db, project_id)
+    assert profile["threshold_validation"]["status"] == "blocked"
+    assert len(profile["threshold_validation"]["invalid_overrides"]) == 3
+    assert profile["threshold_validation"]["unknown_thresholds"][0]["key"] == "mystery_threshold"
+    check = delivery_qa._threshold_config_check(profile)
+    assert check["status"] == "blocked"
+
+    valid_cfg = {"library_root": str(tmp_path), "delivery_qa": {"threshold_overrides": {"flash_brightness_delta": 80}}}
+    valid = delivery_qa.resolve_qa_profile(valid_cfg, db, project_id)
+    assert valid["resolved_thresholds"]["flash_brightness_delta"] == 80.0
+    assert valid["threshold_sources"]["flash_brightness_delta"] == "config.global"
+    assert valid["threshold_validation"]["valid_overrides"] == [{"source": "config.global", "key": "flash_brightness_delta", "resolved_value": 80.0}]
+
+    (tmp_path / "run").mkdir()
+    run_cfg, run_db, run_project, _folder, _source, run_output, snapshot, job_id = _fixture(tmp_path / "run", monkeypatch)
+    run_cfg["delivery_qa"] = {"threshold_overrides": {"black_block_seconds": "oops"}}
+    blocked_report = run_delivery_qa(run_cfg, run_db, run_project, render_job_uuid=job_id, output_path=run_output, approval_snapshot=snapshot, render_manifest_hash="a" * 64)
+    assert next(item for item in blocked_report["checks"] if item["check_id"] == "threshold_config")["status"] == "blocked"
+    assert blocked_report["lifecycle_status"] == "qa_blocked"
