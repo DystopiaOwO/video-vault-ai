@@ -262,7 +262,8 @@ def test_project_detail_exposes_openmontage_workflow_skeleton(tmp_path):
     workflow = project_detail(cfg, db, project_id)["workflow"]
 
     assert workflow["style"] == "openmontage_skeleton"
-    assert [stage["id"] for stage in workflow["stages"]] == ["import", "perception", "story", "review", "handoff", "render"]
+    assert [stage["id"] for stage in workflow["stages"]] == ["import", "perception", "story", "review", "handoff", "render", "delivery_qa"]
+    assert workflow["stages"][-1]["status"] == "needs_qa"
     assert workflow["stages"][0]["status"] == "done"
     assert workflow["stages"][2]["status"] == "done"
 

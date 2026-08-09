@@ -25,7 +25,7 @@ DEFAULT_POLICY: dict[str, Any] = {
     "minimum_free_disk_bytes": 0,
     "pinned_exemption": True,
 }
-PROTECTED_TYPES = {"source_media", "approval_snapshot", "formal_output", "manifest", "runtime_asset"}
+PROTECTED_TYPES = {"source_media", "approval_snapshot", "formal_output", "manifest", "runtime_asset", "qa_report", "qa_evidence"}
 
 
 class RetentionError(ValueError):
@@ -140,6 +140,7 @@ def reconcile_inventory(cfg: Mapping[str, Any], project_id: int) -> dict[str, An
         "approval_snapshot": folder / "approvals",
         "manifest": folder / "render_manifest.json",
         "log": folder / "logs",
+        "qa_evidence": folder / "qa",
     }
     discovered = 0
     for artifact_type, root in roots.items():
@@ -476,6 +477,8 @@ def _specific_type(default: str, path: Path, folder: Path) -> str:
         return "approval_snapshot"
     if relative.name == "render_manifest.json":
         return "manifest"
+    if relative.parts and relative.parts[0] == "qa":
+        return "qa_report" if relative.name in {"report.json", "REPORT.md"} else "qa_evidence"
     if "graded_clips" in relative.parts or "opencut_handoff" in relative.parts or "hyperframes" in relative.parts:
         return "handoff_package"
     if "color_previews" in relative.parts or "storyboard_previews" in relative.parts:

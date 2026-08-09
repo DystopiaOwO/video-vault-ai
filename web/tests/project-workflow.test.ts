@@ -73,6 +73,24 @@ describe("projectWorkflowSteps", () => {
     expect(stepState(detail({ workflow: { style: "test", current: "output", stages: [{ id: "final-output", label: "正式輸出", status: "succeeded", artifacts: [] }] } }))["輸出"]).toBe(true);
   });
 
+  it("requires an explicit human Delivery QA confirmation before delivery", () => {
+    const input = detail({
+      delivery_qa: {
+        schema_version: 1,
+        exists: true,
+        lifecycle_status: "qa_needs_review",
+        deliverable_ready: false,
+        summary: { pass: 6, warning: 0, blocked: 0, skipped: 0 },
+        checks: [],
+        human_review: { review_version: 1 },
+      },
+    });
+    expect(stepState(input)["交付"]).toBe(false);
+    input.delivery_qa!.lifecycle_status = "deliverable_ready";
+    input.delivery_qa!.deliverable_ready = true;
+    expect(stepState(input)["交付"]).toBe(true);
+  });
+
   it("accepts approval from the review state, render gate, or project status", () => {
     expect(stepState(detail({ review: { approved_by_user: true } }))["核准"]).toBe(true);
     expect(stepState(detail({ can_render: true }))["核准"]).toBe(true);

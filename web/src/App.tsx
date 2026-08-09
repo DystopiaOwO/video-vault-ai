@@ -24,6 +24,7 @@ import { ColorConsistencyWorkspace } from "./workspaces/color/ColorConsistencyWo
 import { StoryboardWorkspaceController } from "./workspaces/storyboard/StoryboardWorkspaceController";
 import { StorageWorkspace } from "./workspaces/storage/StorageWorkspace";
 import { StoryUnderstandingWorkspace } from "./workspaces/story/StoryUnderstandingWorkspace";
+import { DeliveryQAWorkspace } from "./workspaces/delivery/DeliveryQAWorkspace";
 import { SystemStatusPage } from "./pages/SystemStatusPage";
 import "./project-detail-polish.css";
 
@@ -443,7 +444,8 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
     ? Object.values(detail.storyboard.segments).filter((segment) => segment.included).length
     : detail.segments.filter((segment) => segment.include !== false).length;
   const workflowSteps = projectWorkflowSteps(detail, jobs);
-  const outputDone = workflowSteps[workflowSteps.length - 1]?.done ?? false;
+  const outputDone = workflowSteps.find((step) => step.label === "輸出")?.done ?? false;
+  const deliveryReady = Boolean(detail.delivery_qa?.deliverable_ready);
   const renderRunning = jobs.some((job) => Boolean(job.job_id) && ["queued", "running", "cancelling"].includes(job.status));
   const projectMutationBusy = Boolean(mutationBusy) || mutationControls.isProjectMutationBusy(detail.project.id);
 
@@ -460,6 +462,7 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
       <div><span>感知片段</span><b>{detail.segments.length}</b></div>
       <div><span>納入成片</span><b>{includedSegments}</b></div>
       <div><span>正式輸出</span><b>{outputDone ? "已完成" : detail.can_render ? "可開始" : "待核准"}</b></div>
+      <div><span>交付狀態</span><b>{deliveryReady ? "可交付" : detail.delivery_qa?.lifecycle_status === "qa_blocked" ? "QA 封鎖" : "待確認"}</b></div>
     </div>
     <WorkspaceNavigation />
 
@@ -501,6 +504,10 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
           </div>
         </Card>
       </div>
+    </div>
+
+    <div className="workspace-section" id="workspace-delivery" tabIndex={-1}>
+      <DeliveryQAWorkspace projectId={detail.project.id} deliveryQA={detail.delivery_qa} setMessage={setMessage} refreshProject={refreshCurrentProject} mutationControls={mutationControls} />
     </div>
 
     <div className="workspace-section" id="workspace-media" tabIndex={-1}>
@@ -736,6 +743,7 @@ function WorkspaceNavigation() {
     ["workspace-overview", "總覽"],
     ["workspace-storyboard", "分鏡"],
     ["workspace-review", "審核與輸出"],
+    ["workspace-delivery", "交付 QA"],
     ["workspace-media", "素材與調色"],
     ["workspace-audio", "音訊"],
     ["workspace-script", "故事整理"],
@@ -751,7 +759,7 @@ function WorkflowSkeleton({ detail }: { detail: ProjectDetail }) {
     <div className="workflow-grid">
       {detail.workflow.stages.map((stage) => <div className="workflow-card" key={stage.id}>
         <b>{stage.label}</b>
-        <span className={["done", "completed", "succeeded", "success"].includes(stage.status) ? "pill ok" : "pill"}>{projectStatusLabel(stage.status)}</span>
+        <span className={["done", "completed", "succeeded", "success", "deliverable_ready"].includes(stage.status) ? "pill ok" : "pill"}>{projectStatusLabel(stage.status)}</span>
         {stage.artifacts.length > 0 ? <details>
           <summary>{stage.artifacts.length} 個產物</summary>
           {stage.artifacts.map((artifact) => <code key={artifact} title={artifact}>{artifact}</code>)}
@@ -785,6 +793,10 @@ function projectStatusLabel(value: string): string {
     perceived: "已感知",
     pending: "等待中",
     ready: "已就緒",
+    needs_qa: "等待 QA",
+    qa_blocked: "QA 封鎖",
+    qa_needs_review: "等待最終預覽",
+    deliverable_ready: "可交付",
     queued: "佇列中",
     running: "執行中",
     cancelling: "取消中",

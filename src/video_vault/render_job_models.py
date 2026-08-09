@@ -9,7 +9,7 @@ import uuid
 
 
 JOB_STATUSES = frozenset({"queued", "running", "cancelling", "cancelled", "succeeded", "failed", "interrupted"})
-JOB_STAGES = frozenset({"queued", "validating", "segments", "assembling", "final_qc", "publishing", "done"})
+JOB_STAGES = frozenset({"queued", "validating", "segments", "assembling", "final_qc", "publishing", "delivery_qa", "done"})
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running", "cancelling"})
 FINISHED_JOB_STATUSES = frozenset({"cancelled", "succeeded", "failed", "interrupted"})
 
@@ -79,6 +79,10 @@ class RenderJob:
     segment_count: int = 0
     cache_hit: bool = False
     output_path: str = ""
+    qa_run_uuid: str = ""
+    delivery_state: str = "needs_qa"
+    qa_summary: dict[str, int] | None = None
+    qa_error: str = ""
     error: str = ""
     cancel_requested: bool = False
     process_id: int | None = None

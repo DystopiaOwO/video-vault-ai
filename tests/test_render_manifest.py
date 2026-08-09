@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from video_vault.database import add_analysis, init_db, upsert_video
+from video_vault.database import add_analysis, add_bgm_track, add_project_bgm, init_db, upsert_video
 from video_vault.color_consistency import default_color_state, save_project_color_state
-from video_vault.project import build_project_plan, create_project, project_detail, save_segment_review
-from video_vault.render_manifest import build_render_manifest, compile_render_manifest, manifest_hash, validate_render_manifest
+from video_vault.project import build_project_plan, create_project, project_detail, save_segment_review, update_segment_evidence
+from video_vault.render_manifest import _manifest_bgm, build_render_manifest, compile_render_manifest, manifest_hash, validate_render_manifest
 
 
 def _project(tmp_path: Path, count: int = 2) -> tuple[dict, Path, int]:
@@ -56,6 +56,24 @@ def test_manifest_uses_review_override_exclude_and_manual_order(tmp_path):
     assert segment["timeline_duration_seconds"] == 1.3125
     assert segment["order"] == 1
     assert Path(tmp_path, "08_projects", f"project_{project_id}", "render_manifest.json").exists()
+
+
+def test_manifest_carries_duplicate_group_for_delivery_qa_without_filename_semantics(tmp_path):
+    cfg, db, project_id = _project(tmp_path, count=1)
+    rows = project_detail(cfg, db, project_id)["segments"]
+    update_segment_evidence(cfg, db, project_id, rows[0]["segment_id"], {"duplicate_group": "perception-duplicate-group-1"})
+    manifest = compile_render_manifest(cfg, db, project_id)
+    assert manifest["segments"][0]["duplicate_group"] == "perception-duplicate-group-1"
+
+
+def test_manifest_carries_bgm_duration_for_delivery_coverage_audit(tmp_path):
+    cfg, db, project_id = _project(tmp_path, count=1)
+    bgm = tmp_path / "bgm.mp3"
+    bgm.write_bytes(b"fixture")
+    track_id = add_bgm_track(db, {"title": "fixture", "file_path": str(bgm), "duration_seconds": 12.5})
+    add_project_bgm(db, project_id, track_id)
+    tracks = _manifest_bgm(cfg, db, project_id, {"audio": {}}, validate_selected_bgm=False)
+    assert tracks[0]["duration_seconds"] == 12.5
 
 
 def test_manual_order_does_not_change_stable_segment_ids(tmp_path):

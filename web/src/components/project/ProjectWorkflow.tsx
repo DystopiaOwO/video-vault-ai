@@ -40,6 +40,8 @@ export function projectWorkflowSteps(detail: ProjectDetail, jobs: Job[]): Projec
   const storyDone = includedStoryboardSegments > 0 && (Boolean(detail.storyboard?.exists) || Boolean(detail.script.trim()));
   const approved = Boolean(detail.review?.approved_by_user) || detail.can_render || normalized(detail.project.status) === "approved";
   const outputDone = outputStageSucceeded(detail) || outputJobSucceeded(jobs);
+  const deliveryReady = Boolean(detail.delivery_qa?.deliverable_ready)
+    && normalized(detail.delivery_qa?.lifecycle_status) === "deliverable_ready";
 
   return [
     { label: "新增專案", done: true },
@@ -48,6 +50,7 @@ export function projectWorkflowSteps(detail: ProjectDetail, jobs: Job[]): Projec
     { label: "故事整理", done: storyDone },
     { label: "核准", done: approved },
     { label: "輸出", done: outputDone },
+    { label: "交付", done: deliveryReady },
   ];
 }
 

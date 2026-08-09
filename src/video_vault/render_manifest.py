@@ -350,6 +350,7 @@ def _manifest_segment(
         "user_notes": str(segment.get("user_notes") or ""),
         "title": str(segment.get("title") or ""),
         "suggested_use": str(segment.get("suggested_use") or ""),
+        "duplicate_group": str(segment.get("duplicate_group") or ""),
         # Group titles are display metadata.  Use the stable storyboard group
         # identity so renaming a group cannot change the approved render.
         "group_id": str(segment.get("storyboard_group_id") or segment.get("group_id") or ""),
@@ -434,6 +435,7 @@ def _manifest_bgm(
             "loop": bool(override.get("loop", True)),
             "fade_in_seconds": float(override.get("fade_in_seconds", 1.0)),
             "fade_out_seconds": float(override.get("fade_out_seconds", 2.0)),
+            "duration_seconds": float(item.get("duration_seconds") or 0.0),
         })
     return result
 

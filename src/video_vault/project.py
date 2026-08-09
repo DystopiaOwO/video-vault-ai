@@ -328,6 +328,7 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
     from .audio_state import audio_state_for_api
     from .storyboard import storyboard_for_api
     from .story_generation import project_story_detail
+    from .delivery_qa import delivery_qa_for_api
 
     public_bgm = []
     for bgm_row in project_bgm_tracks(db, project_id):
@@ -372,6 +373,7 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
         "audio": audio_state_for_api(cfg, project_id, db),
         "storyboard": storyboard_for_api(cfg, db, project_id),
         "story": project_story_detail(cfg, db, project_id),
+        "delivery_qa": delivery_qa_for_api(cfg, project_id),
     }
 
 
@@ -382,17 +384,31 @@ def project_workflow(cfg: dict, db: Path, project_id: int, plan: dict | None = N
     review = _read_json(folder / "review_status.json")
     project_segments(cfg, project_id, plan, db=db)
     outputs = folder / "output"
+    renders = folder / "renders"
+    from .delivery_qa import delivery_qa_for_api
+
+    delivery_qa = delivery_qa_for_api(cfg, project_id)
     stages = [
         _stage("import", "匯入素材", bool(clips), [folder / "source"]),
         _stage("perception", "內容感知", bool(clips) and all(c.get("analysis_current") for c in clips), [folder / "clips"]),
         _stage("story", "故事整理", bool(plan.get("groups")), [folder / "project_plan.json", folder / "project_script.md"]),
         _stage("review", "人工審核", review.get("approved_by_user") is True, [folder / "feedback", folder / "review_status.json"]),
         _stage("handoff", "剪輯交接", (outputs / "opencut_handoff").exists() or (outputs / "hyperframes").exists(), [outputs / "opencut_handoff", outputs / "hyperframes"]),
-        _stage("render", "正式輸出", any(outputs.glob("**/*.mp4")) if outputs.exists() else False, [outputs]),
+        _stage(
+            "render",
+            "正式輸出",
+            (any(outputs.glob("**/*.mp4")) if outputs.exists() else False)
+            or (any(renders.glob("*.mp4")) if renders.exists() else False),
+            [outputs, renders],
+        ),
+        {
+            **_stage("delivery_qa", "交付 QA", bool(delivery_qa.get("deliverable_ready")), [folder / "qa"]),
+            "status": str(delivery_qa.get("lifecycle_status") or "needs_qa"),
+        },
     ]
     if (folder / "storyboard.json").exists():
         stages.insert(3, _stage("storyboard", "分鏡審核", review.get("approved_by_user") is True, [folder / "storyboard.json", folder / "cache" / "storyboard"]))
-    return {"style": "openmontage_skeleton", "current": next((s["id"] for s in stages if s["status"] != "done"), "done"), "stages": stages}
+    return {"style": "openmontage_skeleton", "current": next((s["id"] for s in stages if s["status"] not in {"done", "deliverable_ready"}), "done"), "stages": stages}
 
 
 def _public_plan_bgm(plan: dict) -> dict:
