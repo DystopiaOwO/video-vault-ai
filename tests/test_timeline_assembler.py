@@ -40,3 +40,19 @@ def test_timeline_command_uses_concat_and_video_audio_copy():
     assert "-c:v copy" in text
     assert "-c:a copy" in text
     assert "-avoid_negative_ts make_zero" in text
+
+
+def test_timeline_command_can_reencode_audio_to_the_approved_duration():
+    command = build_timeline_command(
+        "ffmpeg",
+        Path("timeline.ffconcat"),
+        Path("out.mp4"),
+        duration_seconds=3,
+        profile={"audio_codec": "aac", "audio_sample_rate": 48000, "audio_channels": 2},
+        force_audio_filter=True,
+    )
+    text = " ".join(command)
+
+    assert "-c:a copy" not in text
+    assert "-map [aout]" in text
+    assert "apad,atrim=duration=3.000000,asetpts=PTS-STARTPTS" in text

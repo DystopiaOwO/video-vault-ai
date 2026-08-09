@@ -57,6 +57,7 @@ def build_timeline_command(
     profile: dict[str, Any] | None = None,
     video_filter: str | None = None,
     encoder_contract: dict[str, Any] | None = None,
+    force_audio_filter: bool = False,
 ) -> list[str]:
     command = [
         str(ffmpeg_path),
@@ -74,7 +75,9 @@ def build_timeline_command(
         "-map",
         "0:v:0",
     ]
-    if include_audio and not (normalization and normalization.get("enabled")):
+    audio_filter_enabled = bool(normalization and normalization.get("enabled"))
+    audio_filter_requested = include_audio and (audio_filter_enabled or force_audio_filter)
+    if include_audio and not audio_filter_requested:
         command += ["-map", "0:a:0"]
     if video_filter:
         if not profile or not encoder_contract:
@@ -90,14 +93,14 @@ def build_timeline_command(
             command += ["-r", str(profile["fps"]), "-fps_mode", "cfr", "-pix_fmt", str(profile["pixel_format"])]
         else:
             command += ["-c:v", "copy"]
-    if include_audio and normalization and normalization.get("enabled"):
+    if audio_filter_requested:
         if not profile:
             raise TimelineAssemblyError("audio normalization requires a render profile")
         command += [
             "-filter_complex",
             build_project_audio_filter(
                 profile,
-                normalization,
+                normalization if normalization is not None else {"enabled": False},
                 duration_seconds=duration_seconds,
             ),
             "-map",
