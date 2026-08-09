@@ -14,6 +14,7 @@ from .sampling import (
     resolved_sampling_policy,
     sampling_contract_hash,
 )
+from .source_fingerprint import parse_source_fingerprint, persisted_fingerprint_for_stat
 
 RUN_COLUMNS = {
     "run_uuid": "text",
@@ -563,6 +564,19 @@ def publish_staged_results(
         migration = _replace_segments_in_connection(con, video_id, segment_results)
         source_snapshot = run.get("input_snapshot", {}).get("source") if isinstance(run.get("input_snapshot"), dict) else None
         if source_snapshot:
+            existing_row = con.execute(
+                "select source_fingerprint_json from project_videos where video_id=? and current_analysis_run_uuid=?",
+                (video_id, str(run_uuid)),
+            ).fetchone()
+            existing = parse_source_fingerprint(existing_row[0] if existing_row else None)
+            try:
+                retained = persisted_fingerprint_for_stat(
+                    Path(str(source_snapshot.get("path") or "")),
+                    existing,
+                )
+            except (OSError, TypeError, ValueError):
+                retained = None
+            source_snapshot = retained or source_snapshot
             con.execute(
                 "update project_videos set source_fingerprint_json=?, ownership_state='project_owned', migration_generation=coalesce(migration_generation, 0)+1 where video_id=? and current_analysis_run_uuid=?",
                 (json.dumps(source_snapshot, ensure_ascii=False, sort_keys=True), video_id, str(run_uuid)),

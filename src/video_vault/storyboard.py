@@ -10,6 +10,12 @@ import re
 import subprocess
 from typing import Any, Mapping
 
+from .source_fingerprint import (
+    parse_source_fingerprint,
+    peek_source_fingerprint,
+    resolve_source_fingerprint,
+)
+
 STORYBOARD_SCHEMA_VERSION = 1
 THUMBNAIL_CONTRACT_VERSION = 1
 THUMBNAIL_RATIOS = (0.25, 0.5, 0.75)
@@ -359,9 +365,14 @@ def validate_storyboard(state: Mapping[str, Any], rows: list[dict[str, Any]]) ->
 def storyboard_for_api(cfg: dict, db: Path, project_id: int) -> dict[str, Any]:
     from .audio_state import effective_segment_audio_settings
     from .color_consistency import effective_color_settings, has_color_state, load_project_color_state
+    from .database import project_videos
 
     state = load_storyboard(cfg, project_id) or default_storyboard()
     rows = _raw_project_segments(cfg, db, project_id)
+    source_fingerprints = {
+        int(row["id"]): parse_source_fingerprint(dict(row).get("source_fingerprint_json"))
+        for row in project_videos(db, project_id)
+    }
     result = json.loads(json.dumps(state, ensure_ascii=False))
     color_state = load_project_color_state(cfg, project_id) if has_color_state(cfg, project_id) else None
     effective_roles: dict[str, str] = {}
@@ -373,7 +384,14 @@ def storyboard_for_api(cfg: dict, db: Path, project_id: int) -> dict[str, Any]:
         item["effective_color_enabled"] = bool(
             color_state is not None and effective_color_settings(color_state, segment_id).get("mode") != "none"
         )
-        thumbnail = thumbnail_path_for_state(cfg, db, project_id, segment_id, item.get("thumbnail_time_ratio", 0.5))
+        thumbnail = thumbnail_path_for_state(
+            cfg,
+            db,
+            project_id,
+            segment_id,
+            item.get("thumbnail_time_ratio", 0.5),
+            source_fingerprints=source_fingerprints,
+        )
         if thumbnail and thumbnail.is_file():
             item["thumbnail_url"] = f"/api/project/storyboard-thumbnail-file?project_id={project_id}&file={thumbnail.name}"
     result["summary"] = storyboard_summary(rows, state, effective_roles=effective_roles)
@@ -419,7 +437,22 @@ def generate_thumbnail(cfg: dict, db: Path, project_id: int, segment_id: str, ra
     source = Path(str(row.get("source_file") or "")).expanduser().resolve()
     if not source.is_file():
         raise ValueError("片段來源不存在")
-    path = _thumbnail_path(cfg, project_id, source, float(row["start_seconds"]), float(row["end_seconds"]), ratio)
+    fingerprint = resolve_source_fingerprint(
+        source,
+        _project_source_fingerprint(db, project_id, int(row["video_id"])),
+    )
+    _persist_source_fingerprint(db, project_id, int(row["video_id"]), fingerprint)
+    path = _thumbnail_path(
+        cfg,
+        project_id,
+        source,
+        float(row["start_seconds"]),
+        float(row["end_seconds"]),
+        ratio,
+        source_fingerprint=fingerprint,
+    )
+    if path is None:
+        raise RuntimeError("無法取得素材 fingerprint")
     if path.is_file() and path.stat().st_size > 0 and not force:
         return {"file": path.name, "cache_hit": True, "ratio": ratio}
     duration = max(0.1, float(row["end_seconds"]) - float(row["start_seconds"]))
@@ -436,7 +469,15 @@ def generate_thumbnail(cfg: dict, db: Path, project_id: int, segment_id: str, ra
     return {"file": path.name, "cache_hit": False, "ratio": ratio}
 
 
-def thumbnail_path_for_state(cfg: dict, db: Path, project_id: int, segment_id: str, ratio: float) -> Path | None:
+def thumbnail_path_for_state(
+    cfg: dict,
+    db: Path,
+    project_id: int,
+    segment_id: str,
+    ratio: float,
+    *,
+    source_fingerprints: Mapping[int, Mapping[str, Any]] | None = None,
+) -> Path | None:
     try:
         from .project import _read_json, project_segments
 
@@ -444,7 +485,19 @@ def thumbnail_path_for_state(cfg: dict, db: Path, project_id: int, segment_id: s
         if not row:
             return None
         source = Path(str(row.get("source_file") or "")).expanduser().resolve()
-        return _thumbnail_path(cfg, project_id, source, float(row["start_seconds"]), float(row["end_seconds"]), _ratio(ratio))
+        persisted = (source_fingerprints or {}).get(int(row.get("video_id") or 0))
+        fingerprint = peek_source_fingerprint(source, persisted)
+        if fingerprint is None:
+            return None
+        return _thumbnail_path(
+            cfg,
+            project_id,
+            source,
+            float(row["start_seconds"]),
+            float(row["end_seconds"]),
+            _ratio(ratio),
+            source_fingerprint=fingerprint,
+        )
     except (OSError, TypeError, ValueError):
         return None
 
@@ -460,20 +513,60 @@ def storyboard_thumbnail_path(cfg: dict, project_id: int, filename: str) -> Path
     return path
 
 
-def _thumbnail_path(cfg: dict, project_id: int, source: Path, start: float, end: float, ratio: float) -> Path:
+def _thumbnail_path(
+    cfg: dict,
+    project_id: int,
+    source: Path,
+    start: float,
+    end: float,
+    ratio: float,
+    *,
+    source_fingerprint: Mapping[str, Any] | None = None,
+) -> Path | None:
     stat = source.stat()
+    fingerprint = dict(source_fingerprint or resolve_source_fingerprint(source))
+    if len(str(fingerprint.get("sha256") or "")) != 64:
+        return None
     payload = {
         "contract_version": THUMBNAIL_CONTRACT_VERSION,
         "source_path": str(source),
         "source_size": stat.st_size,
         "source_mtime_ns": stat.st_mtime_ns,
-        "source_sha256": _sha256(source),
+        "source_sha256": str(fingerprint["sha256"]),
         "start_seconds": round(start, 6),
         "end_seconds": round(end, 6),
         "thumbnail_ratio": ratio,
     }
     key = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return storyboard_cache_dir(cfg, project_id) / f"{key}.jpg"
+
+
+def _persist_source_fingerprint(db: Path, project_id: int, video_id: int, fingerprint: Mapping[str, Any]) -> None:
+    from .database import connect
+
+    payload = json.dumps(dict(fingerprint), ensure_ascii=False, sort_keys=True)
+    with connect(db) as con:
+        row = con.execute(
+            "select source_fingerprint_json from project_videos where project_id=? and video_id=?",
+            (int(project_id), int(video_id)),
+        ).fetchone()
+        if row is None or str(row[0] or "") == payload:
+            return
+        con.execute(
+            "update project_videos set source_fingerprint_json=?, ownership_state='project_owned' where project_id=? and video_id=?",
+            (payload, int(project_id), int(video_id)),
+        )
+
+
+def _project_source_fingerprint(db: Path, project_id: int, video_id: int) -> dict[str, Any]:
+    from .database import connect
+
+    with connect(db) as con:
+        row = con.execute(
+            "select source_fingerprint_json from project_videos where project_id=? and video_id=?",
+            (int(project_id), int(video_id)),
+        ).fetchone()
+    return parse_source_fingerprint(row[0] if row else None)
 
 
 def _suggest_groups(plan: Mapping[str, Any], project_row: Mapping[str, Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -535,14 +628,6 @@ def _ratio(value: Any) -> float:
     if number not in THUMBNAIL_RATIOS:
         raise ValueError("代表畫格位置只能是 25%、50% 或 75%")
     return number
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 __all__ = [
