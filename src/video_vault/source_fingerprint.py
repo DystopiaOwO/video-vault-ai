@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 import hashlib
 import json
+import os
 import threading
 from typing import Any, Mapping
 
@@ -41,15 +42,20 @@ _METRICS = {
 
 def source_stat(path: Path) -> dict[str, Any]:
     stat = path.stat()
+    identity = {
+        "contract": SOURCE_IDENTITY_CONTRACT,
+        "platform": os.name,
+        "device": int(getattr(stat, "st_dev", 0) or 0),
+        "inode": int(getattr(stat, "st_ino", 0) or 0),
+    }
+    if os.name == "nt":
+        # Windows exposes creation time through st_ctime_ns. On Unix, ctime is
+        # metadata-change time and changes merely by creating a hardlink.
+        identity["ctime_ns"] = int(getattr(stat, "st_ctime_ns", 0) or 0)
     return {
         "size": int(stat.st_size),
         "mtime_ns": int(stat.st_mtime_ns),
-        "source_identity": {
-            "contract": SOURCE_IDENTITY_CONTRACT,
-            "device": int(getattr(stat, "st_dev", 0) or 0),
-            "inode": int(getattr(stat, "st_ino", 0) or 0),
-            "ctime_ns": int(getattr(stat, "st_ctime_ns", 0) or 0),
-        },
+        "source_identity": identity,
     }
 
 
