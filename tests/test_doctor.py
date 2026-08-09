@@ -323,18 +323,18 @@ def test_single_check_does_not_run_unrequested_expensive_probe(tmp_path: Path, m
 def test_free_disk_checks_use_temp_and_render_library_volumes_separately(monkeypatch):
     calls = []
 
-    def fake_exists(path: Path) -> bool:
-        return str(path) in {"C:\\temp", "D:\\VideoLibrary\\99_exports"} or path.anchor in {"C:\\", "D:\\"}
+    def fake_volume_probe(path: Path):
+        # Keep the C:/D: regression platform-neutral: pathlib on Ubuntu does
+        # not parse Windows drive paths, while the production probe is tested
+        # against real paths by the isolated Doctor acceptance.
+        path_text = str(path)
+        calls.append(path_text)
+        if path_text.upper().startswith("C:"):
+            return {"free_bytes": 10_000, "total_bytes": 20_000, "path_exists": True, "volume": "C:"}, None
+        return {"free_bytes": 100, "total_bytes": 20_000, "path_exists": True, "volume": "D:"}, None
 
-    def fake_usage(path):
-        calls.append(str(path))
-        if str(path).upper().startswith("C:"):
-            return SimpleNamespace(free=10_000, total=20_000, used=10_000)
-        return SimpleNamespace(free=100, total=20_000, used=19_900)
-
-    monkeypatch.setattr(Path, "exists", fake_exists)
+    monkeypatch.setattr(doctor, "_volume_probe", fake_volume_probe)
     monkeypatch.setattr(doctor.tempfile, "gettempdir", lambda: "C:\\temp")
-    monkeypatch.setattr(doctor.shutil, "disk_usage", fake_usage)
     checks = {item["check_id"]: item for item in doctor._free_disk_checks({"library_root": "D:\\VideoLibrary", "render": {"minimum_free_disk_bytes": 150}})}
 
     assert checks["runtime.free_disk.temp"]["status"] == "pass"
