@@ -13,6 +13,12 @@ class LoudnessError(RuntimeError):
     pass
 
 
+# AAC encoding can add inter-sample peak overshoot after the loudnorm filter
+# has already met its true-peak target.  Keep this margin in the product audio
+# contract and measure the encoded/decode result again in Final QC.
+AAC_TRUE_PEAK_HEADROOM_DB = 2.0
+
+
 @dataclass(frozen=True)
 class LoudnessMeasurement:
     measured_I: float
@@ -52,21 +58,35 @@ def measure_loudness(ffmpeg_path: str, source: Path, normalization: Mapping[str,
         raise LoudnessError("loudness analysis returned incomplete JSON") from exc
 
 
-def build_second_pass_command(ffmpeg_path: str, source: Path, output: Path, profile: Mapping[str, Any], measurement: LoudnessMeasurement) -> list[str]:
+def build_second_pass_command(
+    ffmpeg_path: str,
+    source: Path,
+    output: Path,
+    profile: Mapping[str, Any],
+    measurement: LoudnessMeasurement,
+    *,
+    duration_seconds: float | None = None,
+) -> list[str]:
+    limiter_limit = 10 ** ((measurement.true_peak_db - AAC_TRUE_PEAK_HEADROOM_DB) / 20.0)
     filter_value = (
         f"loudnorm=I={measurement.target_lufs:.3f}:TP={measurement.true_peak_db:.3f}:LRA=11:"
         f"measured_I={measurement.measured_I:.3f}:measured_LRA={measurement.measured_LRA:.3f}:"
         f"measured_TP={measurement.measured_TP:.3f}:measured_thresh={measurement.measured_thresh:.3f}:"
-        f"offset={measurement.offset:.3f}:linear=true:print_format=summary"
+        f"offset={measurement.offset:.3f}:linear=false:print_format=summary,"
+        f"alimiter=limit={limiter_limit:.8f}:level=false"
     )
-    return [
+    command = [
         str(ffmpeg_path), "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(Path(source).resolve()),
         "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-af", filter_value,
         "-c:a", str(profile["audio_codec"]), "-ar", str(profile["audio_sample_rate"]), "-ac", str(profile["audio_channels"]),
         "-color_primaries", str(profile.get("color_primaries") or "bt709"), "-color_trc", str(profile.get("color_transfer") or "bt709"),
         "-colorspace", str(profile.get("color_matrix") or "bt709"), "-color_range", str(profile.get("color_range") or "tv"),
-        "-movflags", "+faststart", "-f", "mp4", str(Path(output)),
+        "-movflags", "+faststart",
     ]
+    if duration_seconds is not None:
+        command += ["-t", f"{float(duration_seconds):.6f}"]
+    command += ["-f", "mp4", str(Path(output))]
+    return command
 
 
 def _loudnorm_json(text: str) -> dict[str, Any]:
@@ -77,4 +97,4 @@ def _loudnorm_json(text: str) -> dict[str, Any]:
     return json.loads(text[start:end + 1])
 
 
-__all__ = ["LoudnessError", "LoudnessMeasurement", "build_second_pass_command", "measure_loudness"]
+__all__ = ["AAC_TRUE_PEAK_HEADROOM_DB", "LoudnessError", "LoudnessMeasurement", "build_second_pass_command", "measure_loudness"]

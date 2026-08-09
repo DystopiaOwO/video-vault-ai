@@ -288,6 +288,7 @@ def render_project(
                 profile=manifest["profile"],
                 video_filter=visual_filter.expression if visual_filter else None,
                 encoder_contract=dict(encoder_contract or {}) if encoder_contract else None,
+                force_audio_filter=bool(normalization.get("enabled")),
             )
         else:
             command = build_bgm_mix_command(
@@ -320,7 +321,14 @@ def render_project(
             _execution_update(execution, stage="assembling", percent=92, message="正在量測並套用正式音量")
             loudness_analysis = measure_loudness(ffmpeg_path, partial, normalization)
             normalized_partial = partial.with_name(f".{partial.stem}.loudnorm.mp4")
-            loudness_command = build_second_pass_command(ffmpeg_path, partial, normalized_partial, manifest["profile"], loudness_analysis)
+            loudness_command = build_second_pass_command(
+                ffmpeg_path,
+                partial,
+                normalized_partial,
+                manifest["profile"],
+                loudness_analysis,
+                duration_seconds=expected,
+            )
             second_result = run_command(loudness_command, runner, expected_duration_seconds=expected)
             if int(getattr(second_result, "returncode", 0) or 0) != 0:
                 normalized_partial.unlink(missing_ok=True)
