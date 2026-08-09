@@ -8,6 +8,7 @@ from video_vault.analyzer.multi_frame import (
     MultiFrameValidationError,
     _partition_lengths,
     build_frame_windows,
+    multi_frame_publish_errors,
     normalize_window_result,
     parse_window_response,
     provider_capability,
@@ -112,6 +113,30 @@ def test_parse_window_response_accepts_chat_content_parts():
 def test_partition_respects_provider_maximum_images():
     assert _partition_lengths(6, min_frames=3, max_frames=3) == [3, 3]
     assert max(_partition_lengths(7, min_frames=3, max_frames=3)) <= 3
+
+
+def test_insufficient_evidence_blocks_without_single_frame_fallback(tmp_path):
+    result = vision_pipeline.analyze_frame_windows(
+        {"duration_seconds": 10, "filename": "short.mp4", "category": "coffee"},
+        {
+            "library_root": str(tmp_path),
+            "ffmpeg_path": "missing-ffmpeg",
+            "ai": {"provider": "mock", "model": "mock-v1"},
+        },
+        _manifest(tmp_path, 2),
+        duration_seconds=10,
+        evidence_root=tmp_path / "evidence",
+    )
+    assert result["window_results"] == []
+    assert result["segments"] == []
+    assert result["vision_calls"] == 0
+    assert result["window_validation"]["status"] == "blocked"
+    assert "insufficient_evidence_frames" in result["window_validation"]["needs_review_reasons"]
+    assert result["multi_frame_contract"]["status"] == "blocked"
+    assert multi_frame_publish_errors(result) == [
+        "multi_frame_contract_not_pass",
+        "missing_evidence_window_results",
+    ]
 
 
 def test_normalize_window_result_rejects_action_outside_window(tmp_path):
@@ -286,6 +311,9 @@ def test_project_perception_persists_multiframe_run_results(tmp_path, monkeypatc
     assert run["window_results"]
     assert run["window_validation"]["status"] == "pass"
     assert run["window_results"][0]["segment_uuid"]
+    assert run["window_results"][0]["model_provenance"]["provider"] == "mock"
+    assert run["window_results"][0]["model_provenance"]["model"] == "rules"
+    assert multi_frame_publish_errors(result) == []
     normalized = Path(run["staging_path"]) / "evidence" / run["window_results"][0]["window_uuid"] / "normalized.json"
     assert json.loads(normalized.read_text(encoding="utf-8"))["segment_uuid"] == run["window_results"][0]["segment_uuid"]
 
@@ -327,3 +355,57 @@ def test_project_perception_does_not_publish_blocked_evidence(tmp_path, monkeypa
         frame_count = con.execute("select count(*) from frames where video_id=?", (video_id,)).fetchone()[0]
     assert dict(run_row)["status"] == "failed"
     assert frame_count == 0
+
+
+def test_project_perception_fails_closed_on_insufficient_evidence(tmp_path, monkeypatch):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    video_id = upsert_video(db, {
+        "original_path": str(source), "current_path": str(source), "filename": source.name,
+        "category": "travel", "duration_seconds": 20, "status": "uploaded",
+    })
+    project_id = create_project(db, "insufficient-evidence", [video_id], category="travel")
+    cfg = {
+        "library_root": str(tmp_path), "frame_interval_seconds": 5, "frame_height": 720,
+        "ffmpeg_path": "missing-ffmpeg", "ffprobe_path": "missing-ffprobe",
+        "sampling": {"mode": "fixed", "baseline_interval_seconds": 5,
+                      "policy_name": "test", "policy_version": 1,
+                      "max_frames_per_clip": 20, "max_frames_per_minute": 60},
+        "ai": {"provider": "mock", "model": "mock-v1"},
+    }
+
+    def fake_extract(_source: Path, out_dir: Path, _cfg: dict) -> list[Path]:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        paths = []
+        for index in range(4):
+            path = out_dir / f"frame_{index:02}.jpg"
+            path.write_bytes(f"frame-{index}".encode())
+            paths.append(path)
+        return paths
+
+    monkeypatch.setattr(project_perception, "extract_frames", fake_extract)
+    monkeypatch.setattr(
+        project_perception,
+        "dedupe_visual_samples",
+        lambda paths, samples, _cfg, _policy: (paths[:2], samples[:2], {}),
+    )
+    with pytest.raises(MultiFrameValidationError, match="evidence validation blocked"):
+        run_project_perception(cfg, db, project_id, dict(project_videos(db, project_id)[0]))
+    with connect(db) as con:
+        run_row = con.execute(
+            "select status, window_results_json, window_validation_json from analysis_runs order by id desc limit 1"
+        ).fetchone()
+        segment_count = con.execute("select count(*) from segments where video_id=?", (video_id,)).fetchone()[0]
+        project_video = con.execute(
+            "select analysis_status from project_videos where video_id=? and project_id=?",
+            (video_id, project_id),
+        ).fetchone()
+    assert dict(run_row)["status"] == "failed"
+    assert json.loads(dict(run_row)["window_results_json"]) == []
+    validation = json.loads(dict(run_row)["window_validation_json"])
+    assert validation["status"] == "blocked"
+    assert "insufficient_evidence_frames" in validation["needs_review_reasons"]
+    assert segment_count == 0
+    assert dict(project_video)["analysis_status"] == "failed"

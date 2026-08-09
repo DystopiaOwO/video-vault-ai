@@ -164,6 +164,9 @@ def test_adaptive_perception_publishes_a_short_clip_without_tail_decode_failure(
             "max_frames_per_clip": 10,
             "max_frames_per_minute": 60,
         },
+        # This smoke test intentionally exercises the legacy single-frame
+        # contract; formal multi-frame perception must opt in explicitly.
+        "perception": {"multi_frame": {"enabled": False}},
         "ai": {"provider": "mock", "model": "rules"},
     }
 

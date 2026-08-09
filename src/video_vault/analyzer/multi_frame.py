@@ -44,6 +44,67 @@ class MultiFrameValidationError(MultiFrameError):
     """A window or provider response failed closed validation."""
 
 
+def model_provenance(provider: Any, capability: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the auditable model contract attached to every formal window."""
+
+    return {
+        "provider": str(getattr(provider, "provider", "") or ""),
+        "model": str(getattr(provider, "model", "") or ""),
+        "prompt_version": str(getattr(provider, "multi_frame_prompt_version", MULTI_FRAME_PROMPT_VERSION)),
+        "provider_contract_version": str(capability.get("provider_contract_version") or ""),
+        "capability_source": str(capability.get("capability_source") or ""),
+    }
+
+
+def multi_frame_publish_errors(result: Mapping[str, Any]) -> list[str]:
+    """Validate the minimum evidence/provenance contract before publishing."""
+
+    errors: list[str] = []
+    contract = result.get("multi_frame_contract")
+    if not isinstance(contract, Mapping):
+        errors.append("missing_multi_frame_contract")
+        contract = {}
+    if str(contract.get("status") or "") != "pass":
+        errors.append("multi_frame_contract_not_pass")
+    if not str(contract.get("provider") or ""):
+        errors.append("missing_model_provider")
+    if not str(contract.get("model") or ""):
+        errors.append("missing_model_provenance")
+    results = result.get("window_results")
+    if not isinstance(results, list) or not results:
+        errors.append("missing_evidence_window_results")
+        results = []
+    for index, window_result in enumerate(results):
+        if not isinstance(window_result, Mapping):
+            errors.append(f"window_result_{index}_is_not_an_object")
+            continue
+        provenance = window_result.get("model_provenance")
+        if not isinstance(provenance, Mapping):
+            errors.append(f"window_result_{index}_missing_model_provenance")
+            continue
+        if not str(provenance.get("provider") or "") or not str(provenance.get("model") or ""):
+            errors.append(f"window_result_{index}_incomplete_model_provenance")
+        elif (
+            str(provenance.get("provider") or "") != str(contract.get("provider") or "")
+            or str(provenance.get("model") or "") != str(contract.get("model") or "")
+        ):
+            errors.append(f"window_result_{index}_provenance_mismatch")
+        validation = window_result.get("validation")
+        if not isinstance(validation, Mapping) or str(validation.get("status") or "") != "pass":
+            errors.append(f"window_result_{index}_validation_not_pass")
+        if not str(window_result.get("window_uuid") or ""):
+            errors.append(f"window_result_{index}_missing_window_uuid")
+    segments = result.get("segments")
+    if not isinstance(segments, list) or len(segments) != len(results):
+        errors.append("published_segments_do_not_match_evidence_windows")
+    elif any(
+        not isinstance(segment, Mapping) or not str(segment.get("window_uuid") or "")
+        for segment in segments
+    ):
+        errors.append("published_segment_missing_window_uuid")
+    return errors
+
+
 def frame_fingerprint(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
