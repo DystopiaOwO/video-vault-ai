@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
 from .database import connect, init_db, project_videos
+from .source_fingerprint import parse_source_fingerprint, persisted_fingerprint_for_stat, resolve_source_fingerprint
 
 PROJECT_MEDIA_SCHEMA_VERSION = 2
 
@@ -42,9 +42,13 @@ def ensure_project_media_ownership(cfg: dict, db: Path, project_id: int) -> dict
             if not media_id:
                 continue
             current = str(row.get("source_fingerprint_json") or "{}").strip()
-            if current not in {"", "{}"} and str(row.get("ownership_state") or "") == "project_owned":
-                continue
             source = Path(str(row.get("current_path") or "")).expanduser()
+            if (
+                str(row.get("ownership_state") or "") == "project_owned"
+                and source.is_file()
+                and persisted_fingerprint_for_stat(source, parse_source_fingerprint(current)) is not None
+            ):
+                continue
             fingerprint = _fingerprint(source) if source.is_file() else {
                 "path": str(source), "size": 0, "mtime_ns": 0, "sha256": "", "missing": True,
             }
@@ -93,13 +97,7 @@ def rollback_project_media_ownership(cfg: dict, db: Path, project_id: int) -> bo
 
 
 def _fingerprint(path: Path) -> dict[str, Any]:
-    path = path.resolve()
-    stat = path.stat()
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return {"path": str(path), "size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns), "sha256": digest.hexdigest()}
+    return resolve_source_fingerprint(path)
 
 
 def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
