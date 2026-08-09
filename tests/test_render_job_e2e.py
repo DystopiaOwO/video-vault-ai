@@ -96,8 +96,13 @@ def test_background_render_job_reports_real_stages_and_final_cache(tmp_path: Pat
         first_output_hash = _sha256(output)
         assert output.with_name(output.name + ".render.json").exists()
         assert Path(final["log_path"]).exists()
-        assert (library / "08_projects" / f"project_{setup['project_id']}" / "renders" / "jobs" / f"{job_id}.json").exists()
         project_folder = library / "08_projects" / f"project_{setup['project_id']}"
+        assert final["qa_run_uuid"]
+        assert final["delivery_state"] in {"qa_blocked", "qa_needs_review"}
+        qa_report = project_folder / "qa" / final["qa_run_uuid"] / "report.json"
+        assert qa_report.is_file()
+        assert json.loads(qa_report.read_text(encoding="utf-8"))["deliverable_ready"] is False
+        assert (library / "08_projects" / f"project_{setup['project_id']}" / "renders" / "jobs" / f"{job_id}.json").exists()
         assert not list(project_folder.rglob("*.partial.mp4"))
         assert not list(project_folder.rglob("*.tmp"))
         assert all(_sha256(path) == digest for path, digest in source_hashes.items())

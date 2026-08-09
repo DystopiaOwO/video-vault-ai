@@ -98,6 +98,27 @@ def test_current_lifecycle_is_protected_without_explicit_references(tmp_path):
     assert output.exists()
 
 
+def test_delivery_qa_reports_and_evidence_are_reconciled_as_protected(tmp_path):
+    cfg = {"library_root": str(tmp_path)}
+    run = project_dir(cfg, 1) / "qa" / "qa-run-1"
+    run.mkdir(parents=True)
+    report = run / "report.json"
+    evidence = run / "event-strips" / "audio-001.jpg"
+    evidence.parent.mkdir()
+    report.write_text("{}", encoding="utf-8")
+    evidence.write_bytes(b"evidence")
+
+    reconciled = reconcile_inventory(cfg, 1)
+    records = {Path(item["path"]).name: item for item in reconciled["artifacts"]}
+
+    assert records["report.json"]["type"] == "qa_report"
+    assert records["audio-001.jpg"]["type"] == "qa_evidence"
+    plan = build_cleanup_plan(cfg, 1, {"preview_max_age_days": 0, "cache_max_age_days": 0})
+    protected_ids = {item["artifact_id"] for item in plan["protected"]}
+    assert records["report.json"]["artifact_id"] in protected_ids
+    assert records["audio-001.jpg"]["artifact_id"] in protected_ids
+
+
 def test_active_producer_job_protects_artifact_without_status_metadata(tmp_path):
     cfg = {"library_root": str(tmp_path)}
     project_dir(cfg, 1)

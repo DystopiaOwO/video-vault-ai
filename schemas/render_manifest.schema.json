@@ -63,6 +63,7 @@
         "audio_role": {"enum": ["keep_original", "lower_original", "mute"]},
         "scene_role": {"type": "string"},
         "story_position": {"type": "string"},
+        "duplicate_group": {"type": "string"},
         "user_notes": {"type": "string"}
       }
     }

@@ -14,6 +14,7 @@ from typing import Any, Callable
 from .ffmpeg_process_runner import ManagedFFmpegRunner
 from .project import can_project_render, project_dir
 from .database import project_revision
+from .delivery_qa import run_delivery_qa
 from .job_coordinator import JobCoordinator, JobState
 from .project_renderer import render_project
 from .render_job_models import ACTIVE_JOB_STATUSES, RenderCancelled, utc_now
@@ -550,7 +551,59 @@ class RenderJobManager:
             if coordinator_id:
                 self.coordinator.complete(coordinator_id)
             self.store.append_log(job_id, f"result: succeeded\noutput: {result.output_path}")
-            self.store.update(job_id, status="succeeded", stage="done", percent=100, message="正式輸出完成", output_path=str(result.output_path), cache_hit=bool(result.cache_hit), error="", process_id=None, finished_at=utc_now())
+            self.store.update(
+                job_id,
+                stage="delivery_qa",
+                percent=99,
+                message="正式輸出完成，正在執行交付 QA",
+                output_path=str(result.output_path),
+                cache_hit=bool(result.cache_hit),
+                error="",
+                process_id=None,
+            )
+            try:
+                if not Path(result.output_path).is_file():
+                    raise FileNotFoundError("published render output is unavailable for Delivery QA")
+                context.begin_ffmpeg("delivery_qa", 99, 1, float(getattr(result, "duration_seconds", 0) or 0), "正在執行交付 QA")
+                qa = run_delivery_qa(
+                    self.cfg,
+                    self.db,
+                    int(current["project_id"]),
+                    render_job_uuid=job_id,
+                    output_path=result.output_path,
+                    approval_snapshot=current.get("approval_snapshot") if isinstance(current.get("approval_snapshot"), dict) else None,
+                    render_manifest_hash=str(current.get("manifest_hash") or ""),
+                    runner=runner,
+                )
+                delivery_state = str(qa.get("lifecycle_status") or "needs_qa")
+                qa_run_uuid = str(qa.get("qa_run_uuid") or "")
+                qa_summary = dict(qa.get("summary") or {})
+                message = "正式輸出完成；交付 QA 已封鎖" if delivery_state == "qa_blocked" else "正式輸出完成；請進行人工最終預覽"
+                self.store.append_log(job_id, f"delivery_qa: {delivery_state}\nqa_run_uuid: {qa_run_uuid}")
+                qa_error = ""
+            except Exception as exc:  # QA state must not rewrite authoritative render success.
+                delivery_state = "needs_qa"
+                qa_run_uuid = ""
+                qa_summary = {}
+                message = "正式輸出完成；交付 QA 執行失敗，請重新檢查"
+                qa_error = str(getattr(exc, "code", "") or exc.__class__.__name__)
+                self.store.append_log(job_id, "delivery_qa: failed\n" + traceback.format_exc())
+            self.store.update(
+                job_id,
+                status="succeeded",
+                stage="done",
+                percent=100,
+                message=message,
+                output_path=str(result.output_path),
+                cache_hit=bool(result.cache_hit),
+                qa_run_uuid=qa_run_uuid,
+                delivery_state=delivery_state,
+                qa_summary=qa_summary,
+                qa_error=qa_error,
+                error="",
+                process_id=None,
+                finished_at=utc_now(),
+            )
         finally:
             with self._lock:
                 self._active.pop(job_id, None)

@@ -12,6 +12,7 @@ export type ProjectMutation =
   | "clip-summary"
   | "render"
   | "render-cancel"
+  | "delivery-qa"
   | "export";
 
 export type ProjectMutationChannel = "review" | "media" | "output";
@@ -39,6 +40,7 @@ const CHANNELS: Record<ProjectMutation, ProjectMutationChannel> = {
   "clip-summary": "media",
   render: "output",
   "render-cancel": "output",
+  "delivery-qa": "output",
   export: "output",
 };
 
@@ -61,6 +63,7 @@ export function mutationLabel(mutation: ProjectMutation): string {
     "clip-summary": "內容感知描述",
     render: "正式輸出",
     "render-cancel": "停止背景工作",
+    "delivery-qa": "交付 QA",
     export: "素材輸出",
   };
   return labels[mutation];

@@ -295,6 +295,58 @@ export type Job = {
   approval_snapshot_id?: string;
   approval_snapshot_hash?: string;
   encoder_contract?: { implementation?: string; fallback_reason?: string; [key: string]: unknown };
+  qa_run_uuid?: string;
+  delivery_state?: string;
+  qa_summary?: Record<string, number>;
+  qa_error?: string;
+};
+
+export type DeliveryQAEvidence = {
+  artifact_id: string;
+  type: string;
+  check_id: string;
+  timestamp_seconds?: number;
+  sha256?: string;
+  size_bytes?: number;
+};
+
+export type DeliveryQACheck = {
+  check_id: string;
+  schema_version: number;
+  status: "pass" | "warning" | "blocked" | "skipped" | string;
+  severity: string;
+  summary: string;
+  metrics: Record<string, unknown>;
+  evidence_artifact_ids: string[];
+  threshold_source: string | { contract_version?: string; profile_id?: string; thresholds?: Record<string, { value?: number; source?: string }> };
+  remediation: string;
+};
+
+export type DeliveryQAState = {
+  schema_version: number;
+  exists: boolean;
+  qa_run_uuid?: string;
+  render_job_uuid?: string;
+  lifecycle_status: "needs_qa" | "qa_blocked" | "qa_needs_review" | "deliverable_ready" | string;
+  automation_status?: string;
+  deliverable_ready: boolean;
+  profile?: { profile_id?: string; source?: string; resolved_thresholds?: Record<string, number>; threshold_sources?: Record<string, string> };
+  output_fingerprint?: { sha256?: string; size_bytes?: number; duration_seconds?: number };
+  summary: { pass: number; warning: number; blocked: number; skipped: number };
+  checks: DeliveryQACheck[];
+  evidence_index?: DeliveryQAEvidence[];
+  artifact_urls?: Record<string, string>;
+  output_url?: string;
+  currentity?: "current" | "historical" | string;
+  human_review: {
+    status?: string;
+    review_version: number;
+    operator?: string;
+    reviewed_at?: string | null;
+    reason?: string;
+    warning_acceptances?: Array<{ check_id: string; reason: string; operator?: string; accepted_at?: string }>;
+  };
+  sensitive_data_redacted?: boolean;
 };
 
 export type StorageArtifact = {
@@ -371,6 +423,7 @@ export type ProjectDetail = {
   audio: AudioState;
   storyboard: StoryboardState;
   story?: StoryDetail;
+  delivery_qa?: DeliveryQAState;
 };
 
 export type StoryChapter = {
@@ -555,6 +608,10 @@ export function formatApiError(error: unknown): string {
       const revision = typeof error.payload.project_revision === "number" ? `目前 project revision ${error.payload.project_revision}` : "目前 project revision 已更新";
       return `${revision}，請重新載入後再儲存，未套用這次舊內容。`;
     }
+    if (code === "stale_delivery_qa_review" || code === "stale_delivery_qa_run") {
+      const version = typeof error.payload.current_version === "number" ? `目前 review version ${error.payload.current_version}` : "目前 QA run 已更新";
+      return `Delivery QA ${version}，請重新載入後再操作。`;
+    }
     if (typeof error.payload.project_revision === "number") {
       return `目前版本 ${error.payload.project_revision}，請重新載入後再儲存，未套用這次舊內容。`;
     }
@@ -690,6 +747,12 @@ export const api = {
     json<{ ok: boolean; job?: Job; error?: string; reason?: string }>("/api/render-job/cancel", post({ job_id: jobId })),
   renderJobReport: (jobId: string) =>
     json<{ ok: boolean; report?: RenderReport; error?: string }>(`/api/render-job/report?id=${encodeURIComponent(jobId)}`),
+  deliveryQA: (projectId: number) =>
+    json<DeliveryQAState>(`/api/project/delivery-qa?project_id=${projectId}`),
+  reviewDeliveryQA: (projectId: number, qaRunUuid: string, action: "confirm" | "reject", expectedVersion: number, reason: string, warningAcceptances: Record<string, string> = {}) =>
+    json<{ ok: boolean; delivery_qa?: DeliveryQAState; error?: string; code?: string }>("/api/project/delivery-qa/review", post({ project_id: projectId, qa_run_uuid: qaRunUuid, action, expected_version: expectedVersion, reason, warning_acceptances: warningAcceptances })),
+  rerunDeliveryQA: (projectId: number) =>
+    json<{ ok: boolean; delivery_qa?: DeliveryQAState; error?: string; code?: string }>("/api/project/delivery-qa/rerun", post({ project_id: projectId })),
   cancelLegacyJob: (projectId: number, legacyJobKey: string) =>
     json<{ ok: boolean; message?: string; job?: Job; error?: string }>("/api/project/legacy-job/cancel", post({ project_id: projectId, legacy_job_key: legacyJobKey })),
   stopJobs: (projectId: number) =>

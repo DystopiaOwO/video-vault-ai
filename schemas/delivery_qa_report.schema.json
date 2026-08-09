@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://video-vault-ai.local/schemas/delivery_qa_report.schema.json",
+  "title": "video-vault-ai Formal Delivery QA Report",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "check_schema_version",
+    "contract",
+    "qa_run_uuid",
+    "render_job_uuid",
+    "render_manifest_hash",
+    "output_fingerprint",
+    "profile",
+    "automation_status",
+    "lifecycle_status",
+    "deliverable_ready",
+    "summary",
+    "checks",
+    "evidence_index",
+    "human_review",
+    "sensitive_data_redacted"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "check_schema_version": {"const": 1},
+    "contract": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"const": "formal-delivery-qa"},
+        "version": {"const": "delivery-qa-v1"}
+      }
+    },
+    "qa_run_uuid": {"type": "string", "minLength": 1},
+    "render_job_uuid": {"type": "string", "minLength": 1},
+    "render_manifest_hash": {"type": "string"},
+    "output_fingerprint": {
+      "type": "object",
+      "required": ["sha256", "size_bytes", "mtime_ns", "duration_seconds"]
+    },
+    "profile": {"type": "object"},
+    "automation_status": {"enum": ["pass", "warning", "blocked"]},
+    "lifecycle_status": {"enum": ["needs_qa", "qa_blocked", "qa_needs_review", "deliverable_ready"]},
+    "deliverable_ready": {"type": "boolean"},
+    "summary": {"type": "object"},
+    "checks": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/check"}},
+    "evidence_index": {"type": "array"},
+    "human_review": {"type": "object"},
+    "sensitive_data_redacted": {"const": true}
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "required": ["check_id", "schema_version", "status", "severity", "summary", "metrics", "evidence_artifact_ids", "threshold_source", "remediation"],
+      "properties": {
+        "check_id": {"type": "string", "minLength": 1},
+        "schema_version": {"const": 1},
+        "status": {"enum": ["pass", "warning", "blocked", "skipped"]},
+        "severity": {"enum": ["info", "low", "medium", "high"]},
+        "summary": {"type": "string"},
+        "metrics": {"type": "object"},
+        "evidence_artifact_ids": {"type": "array", "items": {"type": "string"}},
+        "threshold_source": {"type": "object"},
+        "remediation": {"type": "string"}
+      }
+    }
+  }
+}

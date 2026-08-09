@@ -109,6 +109,38 @@ def test_queue_is_fifo_and_only_one_render_runs(manager: RenderJobManager, monke
     assert started == [1, 2]
 
 
+def test_render_success_runs_delivery_qa_and_keeps_qa_blocker_separate(manager: RenderJobManager, monkeypatch, tmp_path: Path):
+    output = tmp_path / "formal.mp4"
+    output.write_bytes(b"formal")
+    calls = []
+    monkeypatch.setattr(manager_module, "render_project", lambda *args, **kwargs: SimpleNamespace(output_path=output, cache_hit=False))
+    monkeypatch.setattr(manager_module, "run_delivery_qa", lambda *args, **kwargs: calls.append(kwargs) or {"qa_run_uuid": "qa-run-1", "lifecycle_status": "qa_blocked", "summary": {"pass": 4, "warning": 0, "blocked": 2, "skipped": 0}})
+
+    created = manager.enqueue(1)
+    final = _wait_for(manager, created["job"]["job_id"], {"succeeded"})
+
+    assert len(calls) == 1
+    assert final["status"] == "succeeded"
+    assert final["delivery_state"] == "qa_blocked"
+    assert final["qa_run_uuid"] == "qa-run-1"
+    assert final["error"] == ""
+
+
+def test_delivery_qa_exception_does_not_rewrite_render_success(manager: RenderJobManager, monkeypatch, tmp_path: Path):
+    output = tmp_path / "formal.mp4"
+    output.write_bytes(b"formal")
+    monkeypatch.setattr(manager_module, "render_project", lambda *args, **kwargs: SimpleNamespace(output_path=output, cache_hit=False))
+    monkeypatch.setattr(manager_module, "run_delivery_qa", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("qa failed")))
+
+    created = manager.enqueue(1)
+    final = _wait_for(manager, created["job"]["job_id"], {"succeeded"})
+
+    assert final["status"] == "succeeded"
+    assert final["delivery_state"] == "needs_qa"
+    assert final["qa_error"] == "RuntimeError"
+    assert final["error"] == ""
+
+
 def test_queued_cancel_does_not_start_worker(manager: RenderJobManager, monkeypatch):
     release = threading.Event()
     started: list[int] = []

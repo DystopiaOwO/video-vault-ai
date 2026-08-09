@@ -22,6 +22,7 @@ from .audio_state import audio_state_for_api, update_audio_state
 from .artifact_retention import RetentionError, build_cleanup_plan, execute_cleanup_plan, free_disk_bytes, load_inventory, reconcile_inventory, set_artifact_pinned
 from .audio_preview import AudioPreviewError, audio_preview_file_path, render_project_audio_preview
 from .doctor import collect_doctor_report_from_config
+from .delivery_qa import DeliveryQAError, QAReviewVersionConflict, delivery_qa_artifact_path, delivery_qa_for_api, delivery_qa_output_path, rerun_current_delivery_qa, review_delivery_qa
 from .bgm_pipeline import BgmPipelineError, validate_bgm_track
 from .bgm import import_bgm, list_bgm
 from .color import render_color_preview
@@ -599,7 +600,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     "project_id": project_id,
                     "artifacts": public_artifacts,
                     "total_bytes": sum(int(item.get("size") or 0) for item in artifacts),
-                    "protected_bytes": sum(int(item.get("size") or 0) for item in artifacts if item.get("pinned") or item.get("type") in {"source_media", "approval_snapshot", "formal_output", "manifest"}),
+                    "protected_bytes": sum(int(item.get("size") or 0) for item in artifacts if item.get("pinned") or item.get("type") in {"source_media", "approval_snapshot", "formal_output", "manifest", "qa_report", "qa_evidence"}),
                     "pinned_count": sum(1 for item in artifacts if item.get("pinned")),
                     "free_bytes": free_disk_bytes(project_dir(cfg, project_id)),
                     "recovered_count": int(inventory.get("recovered") or 0),
@@ -630,6 +631,27 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 project_id = int(query.get("project_id", ["0"])[0] or 0)
                 result = render_api.list(project_id or None)
                 self._json(result)
+            elif parsed.path == "/api/project/delivery-qa":
+                self._json(delivery_qa_for_api(cfg, int(query.get("project_id", ["0"])[0] or 0)))
+            elif parsed.path == "/api/project/delivery-qa/artifact":
+                try:
+                    self._file(delivery_qa_artifact_path(
+                        cfg,
+                        int(query.get("project_id", ["0"])[0] or 0),
+                        query.get("run_uuid", [""])[0],
+                        query.get("artifact_id", [""])[0],
+                    ))
+                except (FileNotFoundError, ValueError):
+                    self.send_error(404)
+            elif parsed.path == "/api/project/delivery-qa/output":
+                try:
+                    self._file(delivery_qa_output_path(
+                        cfg,
+                        int(query.get("project_id", ["0"])[0] or 0),
+                        query.get("run_uuid", [""])[0],
+                    ))
+                except (FileNotFoundError, ValueError):
+                    self.send_error(404)
             elif parsed.path == "/api/project/color-preview-file":
                 try:
                     path = preview_file_path(cfg, int(query.get("project_id", ["0"])[0] or 0), query.get("file", [""])[0])
@@ -734,6 +756,10 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     "profile_version": exc.current,
                     "current_version": exc.current,
                 }, status=409)
+            except QAReviewVersionConflict as exc:
+                self._json(exc.as_dict(), status=409)
+            except DeliveryQAError as exc:
+                self._json(exc.as_dict(), status=exc.status)
             except WebSecurityError as exc:
                 self._json(exc.as_dict(), status=403)
             except RetentionError as exc:
@@ -1249,6 +1275,21 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json(render_api.create(int(data.get("project_id", 0)), str(data.get("output_path", ""))))
             elif path == "/api/render-job/cancel":
                 self._json(render_api.cancel(str(data.get("job_id", ""))))
+            elif path == "/api/project/delivery-qa/review":
+                project_id = int(data.get("project_id", 0))
+                result = review_delivery_qa(
+                    cfg,
+                    project_id,
+                    str(data.get("qa_run_uuid") or ""),
+                    action=str(data.get("action") or ""),
+                    expected_version=int(data.get("expected_version") or 0),
+                    reason=str(data.get("reason") or ""),
+                    warning_acceptances=data.get("warning_acceptances") if isinstance(data.get("warning_acceptances"), dict) else {},
+                )
+                self._json({"ok": True, "delivery_qa": result})
+            elif path == "/api/project/delivery-qa/rerun":
+                project_id = int(data.get("project_id", 0))
+                self._json({"ok": True, "delivery_qa": rerun_current_delivery_qa(cfg, db, project_id)})
             elif path == "/api/project/approve":
                 self._json(_approve_project_api(cfg, db, data))
             elif path == "/api/project/reject":

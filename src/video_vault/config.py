@@ -63,6 +63,12 @@ DEFAULT_CONFIG = {
         "minimum_free_disk_bytes": 0,
         "visual_font_path": "",
     },
+    "delivery_qa": {
+        "contract_version": "delivery-qa-v1",
+        "timeout_seconds": 600,
+        "threshold_overrides": {},
+        "profiles": {},
+    },
     "ai": {
         "provider": "mock",
         "local": {
