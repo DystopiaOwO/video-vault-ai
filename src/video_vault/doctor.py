@@ -23,9 +23,9 @@ import tempfile
 import threading
 import time
 from typing import Any, Callable, Mapping
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from .config import DEFAULT_CONFIG, load_config
 from .paths import db_path
@@ -40,6 +40,8 @@ _WINDOWS_LONG_PATH_THRESHOLD = 260
 _WINDOWS_LONG_PATH_COMPONENT_LIMIT = 180
 _FALSE_VALUES = frozenset({"", "0", "false", "no", "off"})
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_DOCTOR_PROBE_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+_STORY_RESERVED_OUTPUT_TOKENS = 2048
 
 
 def _optional_bool(value: object, *, default: bool = False) -> tuple[bool, str | None]:
@@ -114,6 +116,8 @@ def _redact_value(value: object, *, key: str = "") -> object:
     """Recursively sanitize all report evidence before it crosses a boundary."""
 
     key_token = str(key or "")
+    if (value is None or isinstance(value, (int, float))) and _SENSITIVE_KEY.search(key_token) and any(marker in key_token.lower() for marker in ("context", "estimated", "reserved", "count", "capacity")):
+        return value
     if _SENSITIVE_KEY.search(key_token) and not key_token.lower().endswith(("_present", "_configured", "_env", "_name")):
         return "<redacted>"
     if isinstance(value, Mapping):
@@ -398,6 +402,63 @@ def _local_models(base_url: str) -> tuple[bool, list[dict[str, Any]]]:
         return False, []
 
 
+def _local_multi_image_behavior_probe(base_url: str, model_name: str) -> dict[str, Any]:
+    """Probe only the configured local endpoint without starting/loading anything."""
+    image = f"data:image/png;base64,{_DOCTOR_PROBE_PNG}"
+    request_body = {
+        "model": str(model_name),
+        "temperature": 0,
+        "max_tokens": 64,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Return a short JSON object with key summary. Do not explain."},
+                {"type": "image_url", "image_url": {"url": image}},
+                {"type": "image_url", "image_url": {"url": image}},
+                {"type": "image_url", "image_url": {"url": image}},
+            ],
+        }],
+    }
+    evidence: dict[str, Any] = {
+        "probe": "local_multi_image_behavior",
+        "endpoint": "local_configured_endpoint_only",
+        "image_count": 3,
+        "network_scope": "loopback_or_configured_local_endpoint",
+        "cloud_fallback": False,
+        "paid_call": False,
+        "config_mutated": False,
+        "model_download": False,
+    }
+    request = Request(
+        str(base_url).rstrip("/") + "/chat/completions",
+        data=json.dumps(request_body).encode("utf-8"),
+        headers={"content-type": "application/json", "accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            status = int(getattr(response, "status", 200))
+            raw = response.read().decode("utf-8", errors="replace")
+        evidence["http_status"] = status
+        if status < 200 or status >= 300:
+            return {**evidence, "status": "endpoint_unavailable", "error_code": "http_non_success"}
+        payload = json.loads(raw)
+        choices = payload.get("choices") if isinstance(payload, Mapping) else None
+        content = choices[0].get("message", {}).get("content") if isinstance(choices, list) and choices and isinstance(choices[0], Mapping) else None
+        if not content or not isinstance(content, (str, list, Mapping)):
+            return {**evidence, "status": "malformed_response", "error_code": "missing_chat_completion_content"}
+        return {**evidence, "status": "pass", "capability": "verified_by_behavior", "response_shape": "chat_completion"}
+    except HTTPError as exc:
+        evidence.update({"http_status": int(exc.code), "error_code": "http_error"})
+        if int(exc.code) in {400, 405, 415, 422}:
+            return {**evidence, "status": "model_incapable"}
+        return {**evidence, "status": "endpoint_unavailable"}
+    except (URLError, TimeoutError, OSError) as exc:
+        return {**evidence, "status": "endpoint_unavailable", "error_code": type(exc).__name__}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {**evidence, "status": "malformed_response", "error_code": "invalid_json_response"}
+
+
 def _provider_model_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
     ai = dict(cfg.get("ai") or {})
     provider = str(ai.get("provider") or "mock").lower()
@@ -435,7 +496,7 @@ def _provider_capability_check(cfg: Mapping[str, Any], mode: str) -> dict[str, A
     if provider != "local":
         return _check("provider.capabilities", "provider", "blocked", "unsupported provider capability contract", evidence={"provider": provider, "required": required}, remediation="改用支援 provider。")
     if mode != "full":
-        return _check("provider.capabilities", "provider", "skipped", "default/quick 未驗證 local vision/multi-image capability", evidence={"provider": "local", "required": required, "verified": [], "probe": "skipped"}, remediation="使用 --full 由 local model metadata 驗證 capability。")
+        return _check("provider.capabilities", "provider", "skipped", "default/quick 未驗證 local vision/multi-image capability", evidence={"provider": "local", "required": required, "verified": [], "metadata_capability": {"status": "not_checked"}, "behavior_capability": {"status": "skipped"}, "probe": "skipped"}, remediation="使用 --full 執行 local metadata 與 behavior capability probe。")
     local = dict(ai.get("local") or {})
     base_url = str(local.get("base_url") or local.get("lmstudio_url") or "").rstrip("/")
     model_name = str(local.get("model") or "")
@@ -449,8 +510,36 @@ def _provider_capability_check(cfg: Mapping[str, Any], mode: str) -> dict[str, A
     else:
         verified = set()
     missing = sorted(set(required) - verified)
-    status = "pass" if reachable and model is not None and not missing else "blocked" if not reachable or model is None else "warning"
-    return _check("provider.capabilities", "provider", status, "local model capability contract 通過" if status == "pass" else "local model capability 未完整宣告" if status == "warning" else "local model/capability probe failed", evidence={"provider": "local", "model_exists": model is not None, "required": required, "verified": sorted(verified), "missing": missing}, remediation=None if status == "pass" else "確認 model metadata 宣告 vision 與 multi_image capability。")
+    metadata_capability = {
+        "status": "verified" if not missing and model is not None else "missing" if model is not None else "unavailable",
+        "verified": sorted(verified),
+        "missing": missing,
+        "source": "provider_model_metadata" if raw_caps is not None else "missing",
+    }
+    if not reachable:
+        behavior = {"status": "endpoint_unavailable", "probe": "not_run", "reason": "models_endpoint_unavailable"}
+    elif model is None:
+        behavior = {"status": "model_incapable", "probe": "not_run", "reason": "configured_model_missing"}
+    else:
+        behavior = _local_multi_image_behavior_probe(base_url, model_name)
+    evidence = {
+        "provider": "local",
+        "model_exists": model is not None,
+        "required": required,
+        "verified": sorted(verified),
+        "missing": missing,
+        "metadata_capability": metadata_capability,
+        "behavior_capability": behavior,
+        "capability_source": "verified_by_behavior" if behavior.get("status") == "pass" and missing else "provider_metadata+verified_by_behavior" if behavior.get("status") == "pass" else "provider_metadata" if not missing else "unverified",
+    }
+    if behavior.get("status") == "pass":
+        explicit_false = isinstance(raw_caps, Mapping) and raw_caps.get("multi_image") is False
+        status = "warning" if explicit_false else "pass"
+        summary = "local multi-image behavior probe 通過；metadata 未宣告，已 verified_by_behavior" if missing else "local multi-image metadata/behavior probe 通過"
+    else:
+        status = "blocked"
+        summary = f"local multi-image behavior probe {behavior.get('status') or 'failed'}"
+    return _check("provider.capabilities", "provider", status, summary, evidence=evidence, remediation=None if status == "pass" else "確認 local endpoint/model 與 multi-image response contract；doctor 不會 cloud fallback、下載模型或修改設定。")
 
 
 def _story_provider_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
@@ -467,23 +556,64 @@ def _story_provider_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
         context_length = int(context_length) if context_length not in (None, "") and int(context_length) > 0 else None
     except (TypeError, ValueError):
         context_length = None
+    if provider == "mock" and context_length is None:
+        context_length = 1_000_000
+        context_source = "built_in_mock_contract"
     context_evidence = {
         "context_capacity": context_length,
+        "context_capacity_tokens": context_length,
         "context_metadata_source": str(context_source or ("built_in_mock_contract" if provider == "mock" else "unknown")),
         "context_metadata_status": "verified" if context_length or provider == "mock" else "unknown",
+        "context_capacity_status": "known" if context_length else "unknown",
+        "generation_preflight": "story generation independently fail closed before request",
     }
     if provider == "mock":
-        return _check("provider.story", "provider", "pass", "Story Provider mock contract 可用", evidence={"provider": "mock", "model_exists": True, "network_request": False, **context_evidence})
+        return _check("provider.story", "provider", "pass", "Story Provider mock contract 可用", evidence={"provider": "mock", "model": model or "mock", "model_exists": True, "network_request": False, **context_evidence})
     if provider not in {"local_text", "local"}:
-        return _check("provider.story", "provider", "blocked", "不支援的 Story Provider", evidence={"provider": provider, "model_exists": False, **context_evidence}, remediation="改用 mock 或 local_text Story Provider。")
+        return _check("provider.story", "provider", "blocked", "不支援的 Story Provider", evidence={"provider": provider, "model": model, "model_exists": False, **context_evidence}, remediation="改用 mock 或 local_text Story Provider。")
     base_url = str(story.get("base_url") or "").rstrip("/")
     if not base_url or not model:
-        return _check("provider.story", "provider", "blocked", "Story Provider endpoint/model contract 缺失", evidence={"provider": provider, "endpoint_configured": bool(base_url), "model_configured": bool(model), **context_evidence}, remediation="設定 story.base_url 與 story.model。")
+        return _check("provider.story", "provider", "blocked", "Story Provider endpoint/model contract 缺失", evidence={"provider": provider, "model": model, "endpoint_configured": bool(base_url), "model_configured": bool(model), **context_evidence}, remediation="設定 story.base_url 與 story.model。")
     if mode != "full":
-        return _check("provider.story", "provider", "skipped", "default/quick 未查詢 Story Provider model existence", evidence={"provider": provider, "model_configured": True, "model_exists": "unverified", "probe": "skipped", **context_evidence}, remediation="使用 --full 查詢 Story Provider /models。")
+        return _check("provider.story", "provider", "skipped", "default/quick 未查詢 Story Provider model existence", evidence={"provider": provider, "model": model, "model_configured": True, "model_exists": "unverified", "probe": "skipped", **context_evidence}, remediation="使用 --full 查詢 Story Provider /models。")
     reachable, models = _local_models(base_url)
-    exists = model in {str(item.get("id") or item.get("name") or "") for item in models}
-    return _check("provider.story", "provider", "pass" if reachable and exists else "blocked", "Story Provider model contract 通過" if reachable and exists else "Story Provider model probe failed", evidence={"provider": provider, "connectivity": reachable, "model_exists": exists, "model_count": len(models), "network_scope": "local", **context_evidence}, remediation=None if reachable and exists else "啟動 Story Provider endpoint 並確認 model。")
+    model_record = next((item for item in models if str(item.get("id") or item.get("name") or "") == model), None)
+    exists = model_record is not None
+    if context_length is None and model_record is not None:
+        model_context = model_record.get("context_length") or model_record.get("max_context_length") or model_record.get("context_window") or model_record.get("context_capacity_tokens")
+        try:
+            context_length = int(model_context) if model_context not in (None, "") and int(model_context) > 0 else None
+        except (TypeError, ValueError):
+            context_length = None
+        if context_length:
+            context_source = "local_endpoint.model_metadata"
+            context_evidence.update({"context_capacity": context_length, "context_capacity_tokens": context_length, "context_metadata_source": context_source, "context_metadata_status": "verified"})
+    estimated_input = story.get("estimated_input_tokens") or story.get("input_token_estimate")
+    try:
+        estimated_input = int(estimated_input) if estimated_input not in (None, "") and int(estimated_input) > 0 else None
+    except (TypeError, ValueError):
+        estimated_input = None
+    context_evidence["reserved_output_tokens"] = _STORY_RESERVED_OUTPUT_TOKENS
+    context_evidence["estimated_input_tokens"] = estimated_input
+    if context_length is None:
+        context_evidence["context_capacity_status"] = "unknown"
+    elif context_length <= _STORY_RESERVED_OUTPUT_TOKENS or (estimated_input is not None and context_length < estimated_input + _STORY_RESERVED_OUTPUT_TOKENS):
+        context_evidence["context_capacity_status"] = "insufficient"
+    else:
+        context_evidence["context_capacity_status"] = "known"
+    if not reachable or not exists:
+        status = "blocked"
+        summary = "Story Provider model probe failed"
+    elif context_evidence["context_capacity_status"] == "insufficient":
+        status = "blocked"
+        summary = "Story Provider context capacity 明顯不足，generation preflight 將 blocked"
+    elif context_evidence["context_capacity_status"] == "unknown":
+        status = "warning"
+        summary = "Story Provider model 可用，但 context capacity unknown；generation preflight 仍會 fail closed"
+    else:
+        status = "pass"
+        summary = "Story Provider model/context contract 通過"
+    return _check("provider.story", "provider", status, summary, evidence={"provider": provider, "model": model, "connectivity": reachable, "model_exists": exists, "model_count": len(models), "network_scope": "local", **context_evidence}, remediation=None if status == "pass" else "提供可稽核 context metadata，或縮減 Story input / 改用足夠 context 的本地模型；不會自動切 cloud。")
 
 
 def _cloud_config_check(cfg: Mapping[str, Any]) -> dict[str, Any]:
@@ -702,6 +832,25 @@ def _windows_long_path_fixture_path(fixture_root: Path) -> Path:
     return output
 
 
+def _windows_extended_path(path: Path) -> str:
+    """Return a Windows extended-length path while remaining portable in tests."""
+    raw = os.path.abspath(str(path))
+    if os.name != "nt":
+        return raw
+    if raw.startswith("\\\\?\\"):
+        return raw
+    if raw.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + raw.lstrip("\\")
+    return "\\\\?\\" + raw
+
+
+def _extended_path_exists(path: Path) -> bool:
+    try:
+        return os.path.exists(_windows_extended_path(path))
+    except OSError:
+        return False
+
+
 def _media_fixture_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
     if mode != "full":
         return _check("media.behavior", "runtime.media", "skipped", "quick/default mode 未執行 FFmpeg/FFprobe behavior probe", evidence={"probe": "skipped"})
@@ -709,7 +858,7 @@ def _media_fixture_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
     ffprobe = _resolve_executable(cfg.get("ffprobe_path"))
     if not ffmpeg or not ffprobe:
         return _check("media.behavior", "runtime.media", "blocked", "FFmpeg/FFprobe 不可用，無法執行 fixture probe", evidence={"ffmpeg": bool(ffmpeg), "ffprobe": bool(ffprobe)}, remediation="先修正 FFmpeg/FFprobe dependency。")
-    evidence: dict[str, Any] = {"ffmpeg": True, "ffprobe": True, "unicode_path": False, "unicode_verified": False, "codec_h264": False, "codec_aac": False, "long_path_threshold": _WINDOWS_LONG_PATH_THRESHOLD, "long_path_length": None, "max_component_length": None, "long_path_attempted": False, "long_path_verified": "not_verified", "long_path_status": "not_verified", "fixture_cleaned_up": False}
+    evidence: dict[str, Any] = {"ffmpeg": True, "ffprobe": True, "unicode_path": False, "unicode_verified": False, "codec_h264": False, "codec_aac": False, "long_path_threshold": _WINDOWS_LONG_PATH_THRESHOLD, "long_path_length": None, "max_component_length": None, "long_path_attempted": False, "long_path_verified": "not_verified", "long_path_status": "not_verified", "long_path_mkdir": "not_attempted", "long_path_copy": "not_attempted", "long_path_read": "not_attempted", "long_path_cleanup_attempted": False, "long_path_cleanup_verified": "not_verified", "fixture_cleaned_up": False, "fixture_cleanup_attempted": False, "fixture_cleanup_verified": False}
     fixture_root: Path | None = None
     try:
         with tempfile.TemporaryDirectory(prefix="video-vault-doctor-media-") as raw:
@@ -747,23 +896,36 @@ def _media_fixture_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
                         evidence["long_path_status"] = "blocked"
                     else:
                         try:
-                            long_dir.mkdir(parents=True)
-                            evidence["long_path_mkdir"] = long_dir.is_dir()
-                            shutil.copyfile(output, long_output)
-                            evidence["long_path_copy"] = long_output.is_file()
-                            evidence["long_path_read"] = long_output.read_bytes() == output.read_bytes()
+                            Path(_windows_extended_path(long_dir)).mkdir(parents=True)
+                            evidence["long_path_mkdir"] = _extended_path_exists(long_dir)
+                            shutil.copyfile(_windows_extended_path(output), _windows_extended_path(long_output))
+                            evidence["long_path_copy"] = _extended_path_exists(long_output)
+                            with open(_windows_extended_path(long_output), "rb") as copied, open(_windows_extended_path(output), "rb") as source:
+                                evidence["long_path_read"] = copied.read() == source.read()
                             evidence["long_path_verified"] = bool(evidence["long_path_mkdir"] and evidence["long_path_copy"] and evidence["long_path_read"])
                             evidence["long_path_status"] = "pass" if evidence["long_path_verified"] else "blocked"
                         except OSError as exc:
                             evidence["long_path_error_code"] = type(exc).__name__
                             evidence["long_path_status"] = "blocked"
+                    evidence["long_path_cleanup_attempted"] = True
+                    try:
+                        if _extended_path_exists(long_dir):
+                            shutil.rmtree(_windows_extended_path(long_dir))
+                        evidence["long_path_cleanup_verified"] = not _extended_path_exists(long_dir)
+                    except OSError as exc:
+                        evidence["long_path_cleanup_error_code"] = type(exc).__name__
+                        evidence["long_path_cleanup_verified"] = False
                 else:
                     evidence["long_path_status"] = "skipped"
+                    evidence["long_path_cleanup_verified"] = "not_applicable"
+            evidence["fixture_cleanup_attempted"] = True
         evidence["fixture_cleaned_up"] = fixture_root is not None and not fixture_root.exists()
+        evidence["fixture_cleanup_verified"] = bool(evidence["fixture_cleaned_up"])
         codec_ok = bool(evidence["unicode_verified"])
-        long_ok = evidence["long_path_status"] in {"pass", "skipped"}
-        status = "blocked" if not codec_ok else "warning" if not long_ok or not evidence["fixture_cleaned_up"] else "pass"
-        summary = "isolated H.264/AAC Unicode-path probe passed" if status == "pass" and evidence["long_path_status"] == "pass" else "isolated H.264/AAC probe passed; Windows long-path not applicable on this OS" if status == "pass" else "H.264/AAC probe passed but Windows long-path or cleanup coverage is incomplete" if status == "warning" else "H.264/AAC Unicode-path probe failed"
+        long_ok = evidence["long_path_status"] in {"pass", "skipped"} and evidence["long_path_cleanup_verified"] in {True, "not_applicable"}
+        cleanup_ok = bool(evidence["fixture_cleaned_up"]) and bool(evidence["fixture_cleanup_verified"])
+        status = "blocked" if not codec_ok or not long_ok or not cleanup_ok else "pass"
+        summary = "isolated H.264/AAC Unicode-path and Windows long-path probe passed" if status == "pass" and evidence["long_path_status"] == "pass" else "isolated H.264/AAC probe passed; Windows long-path not applicable on this OS" if status == "pass" else "isolated media probe failed or fixture cleanup was incomplete"
         return _check("media.behavior", "runtime.media", status, summary, evidence=evidence, remediation=None if status == "pass" else "確認 FFmpeg codec、Windows long-path policy 與 temporary fixture cleanup。")
     except (OSError, subprocess.TimeoutExpired) as exc:
         return _check("media.behavior", "runtime.media", "blocked", "media fixture probe failed", evidence={"error_code": type(exc).__name__}, remediation="確認 FFmpeg/FFprobe timeout、codec 與暫存權限。")
