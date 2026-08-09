@@ -1040,9 +1040,12 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     project_id = int(data.get("project_id", 0))
                     result = apply_story_generation_to_storyboard(cfg, db, project_id, str(data.get("story_generation_uuid") or ""), base_revision=_base_revision(data))
                     self._json({"ok": True, **result})
+                except StoryGenerationError as exc:
+                    code = "stale_story_generation" if "input_hash 已過期" in str(exc) else "story_apply_failed"
+                    self._json({"ok": False, "code": code, "error": str(exc)})
                 except ProjectRevisionConflict:
                     raise
-                except (OSError, TypeError, ValueError, StoryGenerationError) as exc:
+                except (OSError, TypeError, ValueError) as exc:
                     self._json({"ok": False, "code": "story_apply_failed", "error": str(exc)})
             elif path == "/api/project/story/calibration":
                 try:

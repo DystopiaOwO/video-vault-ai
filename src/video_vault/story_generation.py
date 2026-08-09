@@ -279,6 +279,15 @@ def project_story_detail(cfg: Mapping[str, Any], db: Path, project_id: int) -> d
         current_input_hash = str(build_story_input_snapshot(cfg, db, project_id).get("input_hash") or "")
     except (OSError, TypeError, ValueError):
         current_input_hash = ""
+    current_is_stale = bool(current and current_input_hash and current.get("input_hash") != current_input_hash)
+    generation_archived_after_apply = bool(current_is_stale and current and current.get("applied_at"))
+    current_generation_state = (
+        "generation_archived_after_apply"
+        if generation_archived_after_apply
+        else "stale_before_apply"
+        if current_is_stale
+        else "current"
+    )
     return {
         "settings": settings,
         "creator_profile": creator,
@@ -288,7 +297,9 @@ def project_story_detail(cfg: Mapping[str, Any], db: Path, project_id: int) -> d
         "current_story_generation_uuid": current_uuid,
         "last_successful_story_generation_uuid": str(row["last_successful_story_generation_uuid"] or ""),
         "current_input_hash": current_input_hash,
-        "current_generation_is_stale": bool(current and current_input_hash and current.get("input_hash") != current_input_hash),
+        "current_generation_is_stale": current_is_stale,
+        "current_generation_state": current_generation_state,
+        "generation_archived_after_apply": generation_archived_after_apply,
         "calibration": calibration_for_profile(cfg, db, str(settings.get("profile_id") or "general_diary")),
     }
 
@@ -1109,6 +1120,21 @@ def apply_story_generation_to_storyboard(
 ) -> dict[str, Any]:
     generation = get_story_generation(db, generation_uuid, include_internal=True)
     _assert_generation_project(generation, project_id)
+    if generation.get("applied_at"):
+        existing = load_storyboard(dict(cfg), int(project_id))
+        if existing is None:
+            raise ValueError("尚未建立 storyboard，請先到分鏡審核建立分鏡後再套用故事")
+        return {
+            "generation": get_story_generation(db, generation_uuid, include_internal=False),
+            "storyboard": existing,
+            "render_changed": False,
+            "approval_invalidated": False,
+            "apply_succeeded": True,
+            "apply_state": "apply_succeeded",
+            "generation_state": "generation_archived_after_apply",
+            "idempotent": True,
+            "project_revision": current_revision(db, int(project_id)),
+        }
     if str(generation.get("status")) != "succeeded":
         raise StoryGenerationError("只有成功且已驗證的故事 generation 可以套用")
     current_snapshot = build_story_input_snapshot(cfg, db, int(project_id))
@@ -1140,7 +1166,23 @@ def apply_story_generation_to_storyboard(
                     (previous_project["status"], previous_project["project_revision"], previous_project["updated_at"], int(project_id)),
                 )
         raise
-    return {"generation": generation, "storyboard": result["state"], "render_changed": result["render_changed"], "approval_invalidated": result["approval_invalidated"]}
+    applied_revision = current_revision(db, int(project_id))
+    _update_generation(
+        db,
+        generation_uuid,
+        applied_to_storyboard_revision=applied_revision,
+        applied_at=_now(),
+    )
+    return {
+        "generation": get_story_generation(db, generation_uuid, include_internal=False),
+        "storyboard": result["state"],
+        "render_changed": result["render_changed"],
+        "approval_invalidated": result["approval_invalidated"],
+        "apply_succeeded": True,
+        "apply_state": "apply_succeeded",
+        "generation_state": "generation_archived_after_apply",
+        "project_revision": applied_revision,
+    }
 
 
 __all__ = [

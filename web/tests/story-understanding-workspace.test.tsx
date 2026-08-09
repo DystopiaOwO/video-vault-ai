@@ -158,7 +158,7 @@ describe("StoryUnderstandingWorkspace", () => {
   it("shows stale, suppression, and provider audit evidence", () => {
     renderWorkspace({ story: { ...detail().story!, current_generation_is_stale: true } });
 
-    expect(screen.getByRole("alert").textContent).toContain("Apply 會 fail closed");
+    expect(screen.getByRole("alert").textContent).toContain("Apply 前已過期");
     expect(screen.getByLabelText("故事 audit").textContent).toContain("raw provider calls：2");
     expect(screen.getByLabelText("故事 audit").textContent).toContain("corrective retry：1");
     expect(screen.getByLabelText("duplicate suppression evidence").textContent).toContain("segment-duplicate → representative segment-a");
@@ -181,6 +181,47 @@ describe("StoryUnderstandingWorkspace", () => {
     expect(setMessage).not.toHaveBeenLastCalledWith(expect.stringContaining("套用分鏡失敗"));
     expect(setMessage).toHaveBeenLastCalledWith(expect.stringContaining("請重新整理"));
     expect(refreshProject).toHaveBeenCalledWith({ forceFresh: true, throwOnError: true });
+  });
+
+  it("keeps authoritative Apply success when refresh returns the archived stale generation", async () => {
+    const apply = vi.spyOn(api, "applyStory").mockResolvedValue({ ok: true, approval_invalidated: true });
+    const refreshProject = vi.fn(async () => []);
+    const setMessage = vi.fn();
+    const mutationControls = createProjectMutationControls(new ProjectMutationCoordinator());
+    const view = render(<StoryUnderstandingWorkspace detail={detail()} setMessage={setMessage} refreshProject={refreshProject} mutationControls={mutationControls} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "套用到既有分鏡" }));
+    await waitFor(() => expect(apply).toHaveBeenCalledWith(1, "gen-1", 7));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("已成功套用"));
+
+    view.rerender(<StoryUnderstandingWorkspace detail={detail({ story: { ...detail().story!, current_generation_is_stale: true, current_generation_state: "generation_archived_after_apply", generation_archived_after_apply: true } })} setMessage={setMessage} refreshProject={refreshProject} mutationControls={mutationControls} />);
+
+    expect(screen.getByRole("status").textContent).toContain("已成功套用並歷史化");
+    expect(screen.queryByText(/Apply 前已過期/)).toBeNull();
+    expect((screen.getByRole("button", { name: "已套用；generation 已歷史化" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("does not submit Apply twice on a double click", async () => {
+    let resolveApply: ((value: { ok: true; approval_invalidated: boolean }) => void) | undefined;
+    const apply = vi.spyOn(api, "applyStory").mockImplementation(() => new Promise((resolve) => { resolveApply = resolve; }));
+    const refreshProject = vi.fn(async () => []);
+    renderWorkspace(detail(), refreshProject);
+
+    fireEvent.click(screen.getByRole("button", { name: "套用到既有分鏡" }));
+    fireEvent.click(screen.getByRole("button", { name: "套用中…" }));
+    expect(apply).toHaveBeenCalledTimes(1);
+
+    resolveApply?.({ ok: true, approval_invalidated: true });
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("已成功套用"));
+  });
+
+  it("keeps stale-before-Apply fail-closed and does not submit", () => {
+    const apply = vi.spyOn(api, "applyStory");
+    renderWorkspace({ story: { ...detail().story!, current_generation_is_stale: true, current_generation_state: "stale_before_apply" } });
+
+    expect(screen.getByRole("alert").textContent).toContain("Apply 前已過期");
+    expect((screen.getByRole("button", { name: "不可套用：generation 已過期" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(apply).not.toHaveBeenCalled();
   });
 
   it("marks story lock dirty and preserves it across polling until review save", async () => {

@@ -23,6 +23,7 @@ from video_vault.story_generation import (
     generate_project_story,
     get_story_generation,
     normalize_story_output,
+    project_story_detail,
     recover_interrupted_story_generations,
     update_story_generation_review,
     validate_story_output,
@@ -437,6 +438,57 @@ def test_story_apply_is_explicit_and_preserves_locked_segment(tmp_path: Path):
     assert result["storyboard"]["segments"][locked_id]["notes"] == "人工固定"
 
 
+def test_apply_marks_generation_archived_after_success_and_duplicate_is_idempotent(tmp_path: Path):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    generation = generate_project_story(cfg, db, project_id)
+    before_revision = current_revision(db, project_id)
+    reviewed_chapters = deepcopy(generation["normalized_response"]["chapters"])
+    reviewed_chapters[0]["title"] = "人工套用後章節"
+    update_story_generation_review(
+        db,
+        generation["story_generation_uuid"],
+        {"chapters": reviewed_chapters},
+        project_id=project_id,
+        base_revision=before_revision,
+    )
+
+    result = apply_story_generation_to_storyboard(
+        cfg,
+        db,
+        project_id,
+        generation["story_generation_uuid"],
+        base_revision=before_revision,
+    )
+
+    assert result["apply_succeeded"] is True
+    assert result["apply_state"] == "apply_succeeded"
+    assert result["generation_state"] == "generation_archived_after_apply"
+    assert result.get("idempotent") is not True
+    assert result["generation"]["applied_at"]
+    after_revision = current_revision(db, project_id)
+    storyboard_path = project_dir(cfg, project_id) / "storyboard.json"
+    storyboard_bytes = storyboard_path.read_bytes()
+
+    duplicate = apply_story_generation_to_storyboard(
+        cfg,
+        db,
+        project_id,
+        generation["story_generation_uuid"],
+        base_revision=before_revision,
+    )
+
+    assert duplicate["apply_succeeded"] is True
+    assert duplicate["idempotent"] is True
+    assert duplicate["project_revision"] == after_revision
+    assert current_revision(db, project_id) == after_revision
+    assert storyboard_path.read_bytes() == storyboard_bytes
+
+    detail = project_story_detail(cfg, db, project_id)
+    assert detail["current_generation_is_stale"] is True
+    assert detail["current_generation_state"] == "generation_archived_after_apply"
+    assert detail["generation_archived_after_apply"] is True
+
+
 def test_story_review_and_apply_reject_generation_from_another_project(tmp_path: Path):
     cfg, db, project_id, other_id = _fixture(tmp_path, second_project=True)
     generation = generate_project_story(cfg, db, project_id)
@@ -497,6 +549,9 @@ def test_apply_rejects_stale_snapshot_and_preserves_storyboard_bytes(tmp_path: P
     with pytest.raises(StoryGenerationError, match="input_hash 已過期"):
         apply_story_generation_to_storyboard(cfg, db, project_id, generation["story_generation_uuid"])
     assert storyboard_file.read_bytes() == before
+    detail = project_story_detail(cfg, db, project_id)
+    assert detail["current_generation_state"] == "stale_before_apply"
+    assert detail["generation_archived_after_apply"] is False
 
 
 def test_apply_failure_restores_storyboard_review_plan_and_project_row(tmp_path: Path, monkeypatch):
