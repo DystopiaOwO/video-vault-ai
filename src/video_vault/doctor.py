@@ -14,6 +14,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import random
 import re
 import shutil
 import socket
@@ -42,9 +43,11 @@ _WINDOWS_LONG_PATH_COMPONENT_LIMIT = 180
 _FALSE_VALUES = frozenset({"", "0", "false", "no", "off"})
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _DOCTOR_PROBE_IMAGES = {
-    "red": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAF0lEQVR4nGP4z8BAEiJN9aiGUQ1DSgMAkPn/Afnh+ngAAAAASUVORK5CYII=",
-    "green": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFUlEQVR4nGNg+M9AGhrVMKph+GoAAJHq/wEkpOWMAAAAAElFTkSuQmCC",
-    "blue": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFUlEQVR4nGNgYPhPIhrVMKph2GoAAJLb/wFh5Z4RAAAAAElFTkSuQmCC",
+    "red": "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC",
+    "green": "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLu58QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ24Pbjs8OLsrFddAAAAAElFTkSuQmCC",
+    "blue": "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdNvJ8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ2oPcf88OIhvJ6vAAAAAElFTkSuQmCC",
+    "yellow": "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAdklEQVR4nO3PQQkAMAzAwPo33Yno4xgEIuAyu/N1XtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWjBsQcyl+HSnr9raQAAAABJRU5ErkJggg==",
+    "purple": "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAdklEQVR4nO3PQQkAMAzAwPo33Yno4xgEIuAyO/t1wwUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWHHtBp+HSthEAJgAAAABJRU5ErkJggg==",
 }
 _STORY_RESERVED_OUTPUT_TOKENS = 2048
 
@@ -496,12 +499,17 @@ def _parse_probe_json(content: object) -> Mapping[str, Any] | None:
     return parsed if isinstance(parsed, Mapping) else None
 
 
+def _select_probe_colors() -> list[str]:
+    return random.SystemRandom().sample(list(_DOCTOR_PROBE_IMAGES), 3)
+
+
 def _local_multi_image_behavior_probe(base_url: str, model_name: str, *, endpoint_scope: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Prove ordered red/green/blue image understanding at a validated local endpoint."""
+    """Prove ordered runtime color understanding at a validated local endpoint."""
     scope = dict(endpoint_scope or _validate_local_endpoint_scope(base_url))
+    challenge_order = _select_probe_colors()
     images = [
         {"label": label, "data_url": f"data:image/png;base64,{_DOCTOR_PROBE_IMAGES[label]}"}
-        for label in ("red", "green", "blue")
+        for label in challenge_order
     ]
     request_body = {
         "model": str(model_name),
@@ -509,7 +517,7 @@ def _local_multi_image_behavior_probe(base_url: str, model_name: str, *, endpoin
         "max_tokens": 64,
         "messages": [{
             "role": "user",
-            "content": [{"type": "text", "text": 'Inspect all three images. Return exactly JSON: {"image_count":3,"order":["red","green","blue"]}. The order is the input order. Do not explain.'}]
+            "content": [{"type": "text", "text": "Identify the dominant color of each of the three images in input order. Use one simple English color name per image, not hex codes. Return only a JSON object with an image_count integer and an order array. Do not explain."}]
             + [{"type": "image_url", "image_url": {"url": image["data_url"]}} for image in images],
         }],
     }
@@ -518,7 +526,8 @@ def _local_multi_image_behavior_probe(base_url: str, model_name: str, *, endpoin
         "endpoint": "validated_loopback_endpoint_only",
         "image_count": 3,
         "expected_image_labels": [image["label"] for image in images],
-        "expected_response": {"image_count": 3, "order": ["red", "green", "blue"]},
+        "challenge_selection": "runtime_random_three_of_five",
+        "expected_response": {"image_count": 3, "order": challenge_order},
         "validated_network_scope": scope.get("validated_network_scope", "blocked"),
         "resolved_addresses": scope.get("resolved_addresses", []),
         "network_scope_policy": scope.get("network_scope_policy", "loopback_only"),

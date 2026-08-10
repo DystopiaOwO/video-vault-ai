@@ -307,8 +307,17 @@ def test_provider_matrix_model_missing_capability_missing_and_story_contract(tmp
     assert story["evidence"]["context_metadata_source"] == "unknown"
 
 
+def test_multi_image_probe_selects_three_unique_colors_from_five():
+    selected = doctor._select_probe_colors()
+    assert len(selected) == 3
+    assert len(set(selected)) == 3
+    assert set(selected) <= set(doctor._DOCTOR_PROBE_IMAGES)
+
+
 def test_local_multi_image_behavior_probe_verifies_missing_metadata_without_cloud(monkeypatch):
     calls = []
+    assert len(doctor._DOCTOR_PROBE_IMAGES) >= 5
+    monkeypatch.setattr(doctor, "_select_probe_colors", lambda: ["red", "green", "blue"])
 
     def local_urlopen(request, **kwargs):
         calls.append(request)
@@ -333,9 +342,34 @@ def test_local_multi_image_behavior_probe_verifies_missing_metadata_without_clou
     payload = json.loads(calls[1].data.decode("utf-8"))
     image_parts = payload["messages"][0]["content"][1:]
     assert len({part["image_url"]["url"] for part in image_parts}) == 3
+    prompt = payload["messages"][0]["content"][0]["text"].lower()
+    assert all(color not in prompt for color in ("red", "green", "blue", "yellow", "purple"))
+    assert '"red"' not in prompt
+
+
+def test_local_multi_image_fixed_text_only_answer_fails_runtime_challenge(monkeypatch):
+    calls = []
+    monkeypatch.setattr(doctor, "_select_probe_colors", lambda: ["yellow", "purple", "blue"])
+
+    def local_urlopen(request, **kwargs):
+        calls.append(request)
+        url = str(getattr(request, "full_url", request))
+        if url.endswith("/models"):
+            return _JsonResponse({"data": [{"id": "vision-model"}]})
+        return _JsonResponse({"choices": [{"message": {"content": '{"image_count":3,"order":["red","green","blue"]}'}}]})
+
+    monkeypatch.setattr(doctor, "urlopen", local_urlopen)
+    cfg = {"ai": {"provider": "local", "local": {"base_url": "http://127.0.0.1:1234/v1", "model": "vision-model"}}}
+    result = doctor._provider_capability_check(cfg, "full")
+    behavior = result["evidence"]["behavior_capability"]
+    assert result["status"] == "blocked"
+    assert behavior["error_code"] == "image_semantics_mismatch"
+    assert behavior["expected_response"]["order"] == ["yellow", "purple", "blue"]
+    assert len(calls) == 2
 
 
 def test_local_multi_image_behavior_probe_generic_json_is_blocked(monkeypatch):
+    monkeypatch.setattr(doctor, "_select_probe_colors", lambda: ["yellow", "purple", "blue"])
     monkeypatch.setattr(doctor, "urlopen", lambda request, **kwargs: _JsonResponse(
         {"data": [{"id": "vision-model"}]} if str(getattr(request, "full_url", request)).endswith("/models") else {"choices": [{"message": {"content": '{"summary":"ok"}'}}]}
     ))
@@ -343,6 +377,29 @@ def test_local_multi_image_behavior_probe_generic_json_is_blocked(monkeypatch):
     result = doctor._provider_capability_check(cfg, "full")
     assert result["status"] == "blocked"
     assert result["evidence"]["behavior_capability"]["status"] == "blocked"
+    assert result["evidence"]["behavior_capability"]["error_code"] == "image_semantics_mismatch"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        '{"image_count":2,"order":["yellow","purple"]}',
+        '{"image_count":3,"order":["purple","yellow","blue"]}',
+    ],
+)
+def test_local_multi_image_wrong_count_or_order_is_blocked(monkeypatch, response):
+    monkeypatch.setattr(doctor, "_select_probe_colors", lambda: ["yellow", "purple", "blue"])
+
+    def local_urlopen(request, **kwargs):
+        url = str(getattr(request, "full_url", request))
+        if url.endswith("/models"):
+            return _JsonResponse({"data": [{"id": "vision-model"}]})
+        return _JsonResponse({"choices": [{"message": {"content": response}}]})
+
+    monkeypatch.setattr(doctor, "urlopen", local_urlopen)
+    cfg = {"ai": {"provider": "local", "local": {"base_url": "http://127.0.0.1:1234/v1", "model": "vision-model"}}}
+    result = doctor._provider_capability_check(cfg, "full")
+    assert result["status"] == "blocked"
     assert result["evidence"]["behavior_capability"]["error_code"] == "image_semantics_mismatch"
 
 
