@@ -268,6 +268,16 @@ def test_media_probe_reports_encode_failure_and_cleans_fixture(monkeypatch):
     assert result["evidence"]["fixture_cleaned_up"] is True
 
 
+def test_media_probe_cleanup_failure_is_blocked_not_pass(monkeypatch):
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg/FFprobe unavailable on this host")
+    monkeypatch.setattr(doctor.shutil, "rmtree", lambda *_args, **_kwargs: None)
+    result = doctor._media_fixture_check({"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe"}, "full")
+    assert result["status"] == "blocked"
+    assert result["evidence"]["fixture_cleanup_attempted"] is True
+    assert result["evidence"]["fixture_cleanup_verified"] is False
+
+
 class _JsonResponse:
     status = 200
 
@@ -295,6 +305,227 @@ def test_provider_matrix_model_missing_capability_missing_and_story_contract(tmp
     assert story["status"] == "blocked"
     assert story["evidence"]["context_capacity"] is None
     assert story["evidence"]["context_metadata_source"] == "unknown"
+
+
+def test_multi_image_probe_selects_three_unique_colors_from_five():
+    selected = doctor._select_probe_colors()
+    assert len(selected) == 3
+    assert len(set(selected)) == 3
+    assert set(selected) <= set(doctor._DOCTOR_PROBE_IMAGES)
+
+
+def test_multi_image_embedded_png_dominant_colors_match_labels():
+    import base64
+    import struct
+    import zlib
+
+    expected_rgb = {
+        "red": (255, 0, 0),
+        "green": (0, 255, 0),
+        "blue": (0, 0, 255),
+        "yellow": (255, 255, 0),
+        "purple": (128, 0, 128),
+    }
+
+    for label, encoded in doctor._DOCTOR_PROBE_IMAGES.items():
+        png = base64.b64decode(encoded, validate=True)
+        assert png.startswith(b"\x89PNG\r\n\x1a\n")
+
+        offset = 8
+        width = height = bit_depth = color_type = None
+        compressed = []
+        while offset < len(png):
+            length = struct.unpack(">I", png[offset : offset + 4])[0]
+            kind = png[offset + 4 : offset + 8]
+            chunk = png[offset + 8 : offset + 8 + length]
+            offset += 12 + length
+            if kind == b"IHDR":
+                width, height, bit_depth, color_type, _, _, _ = struct.unpack(">IIBBBBB", chunk)
+            elif kind == b"IDAT":
+                compressed.append(chunk)
+            elif kind == b"IEND":
+                break
+
+        assert (width, height, bit_depth, color_type) == (64, 64, 8, 2)
+        raw = zlib.decompress(b"".join(compressed))
+        stride = 1 + width * 3
+        pixels = []
+        for row in range(height):
+            row_data = raw[row * stride : (row + 1) * stride]
+            assert row_data[0] == 0
+            pixels.extend(tuple(row_data[index : index + 3]) for index in range(1, stride, 3))
+
+        assert set(pixels) == {expected_rgb[label]}
+
+
+def test_local_multi_image_behavior_probe_verifies_missing_metadata_without_cloud(monkeypatch):
+    calls = []
+    assert len(doctor._DOCTOR_PROBE_IMAGES) >= 5
+    monkeypatch.setattr(doctor, "_select_probe_colors", lambda: ["red", "green", "blue"])
+
+    def local_urlopen(request, **kwargs):
+        calls.append(request)
+        url = str(getattr(request, "full_url", request))
+        if url.endswith("/models"):
+            return _JsonResponse({"data": [{"id": "vision-model"}]})
+        return _JsonResponse({"choices": [{"message": {"content": '{"image_count":3,"order":["red","green","blue"]}'}}]})
+
+    monkeypatch.setattr(doctor, "urlopen", local_urlopen)
+    cfg = {"ai": {"provider": "local", "local": {"base_url": "http://127.0.0.1:1234/v1", "model": "vision-model"}}}
+    result = doctor._provider_capability_check(cfg, "full")
+
+    assert result["status"] == "pass"
+    assert result["evidence"]["metadata_capability"]["status"] == "missing"
+    assert result["evidence"]["behavior_capability"]["status"] == "pass"
+    assert result["evidence"]["capability_source"] == "verified_by_behavior"
+    assert result["evidence"]["behavior_capability"]["cloud_fallback"] is False
+    assert result["evidence"]["behavior_capability"]["semantic_validation"] == "image_count_and_order_match"
+    assert result["evidence"]["behavior_capability"]["validated_network_scope"] == "loopback"
+    assert len(calls) == 2
+    assert str(calls[1].full_url).endswith("/chat/completions")
+    payload = json.loads(calls[1].data.decode("utf-8"))
+    image_parts = payload["messages"][0]["content"][1:]
+    assert len({part["image_url"]["url"] for part in image_parts}) == 3
+    prompt = payload["messages"][0]["content"][0]["text"].lower()
+    assert all(color not in prompt for color in ("red", "green", "blue", "yellow", "purple"))
+    assert '"red"' not in prompt
+
+
+def test_local_multi_image_fixed_text_only_answer_fails_runtime_challenge(monkeypatch):
+    calls = []
+    monkeypatch.setattr(doctor, "_select_probe_colors", lambda: ["yellow", "purple", "blue"])
+
+    def local_urlopen(request, **kwargs):
+        calls.append(request)
+        url = str(getattr(request, "full_url", request))
+        if url.endswith("/models"):
+            return _JsonResponse({"data": [{"id": "vision-model"}]})
+        return _JsonResponse({"choices": [{"message": {"content": '{"image_count":3,"order":["red","green","blue"]}'}}]})
+
+    monkeypatch.setattr(doctor, "urlopen", local_urlopen)
+    cfg = {"ai": {"provider": "local", "local": {"base_url": "http://127.0.0.1:1234/v1", "model": "vision-model"}}}
+    result = doctor._provider_capability_check(cfg, "full")
+    behavior = result["evidence"]["behavior_capability"]
+    assert result["status"] == "blocked"
+    assert behavior["error_code"] == "image_semantics_mismatch"
+    assert behavior["expected_response"]["order"] == ["yellow", "purple", "blue"]
+    assert len(calls) == 2
+
+
+def test_local_multi_image_behavior_probe_generic_json_is_blocked(monkeypatch):
+    monkeypatch.setattr(doctor, "_select_probe_colors", lambda: ["yellow", "purple", "blue"])
+    monkeypatch.setattr(doctor, "urlopen", lambda request, **kwargs: _JsonResponse(
+        {"data": [{"id": "vision-model"}]} if str(getattr(request, "full_url", request)).endswith("/models") else {"choices": [{"message": {"content": '{"summary":"ok"}'}}]}
+    ))
+    cfg = {"ai": {"provider": "local", "local": {"base_url": "http://127.0.0.1:1234/v1", "model": "vision-model"}}}
+    result = doctor._provider_capability_check(cfg, "full")
+    assert result["status"] == "blocked"
+    assert result["evidence"]["behavior_capability"]["status"] == "blocked"
+    assert result["evidence"]["behavior_capability"]["error_code"] == "image_semantics_mismatch"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        '{"image_count":2,"order":["yellow","purple"]}',
+        '{"image_count":3,"order":["purple","yellow","blue"]}',
+    ],
+)
+def test_local_multi_image_wrong_count_or_order_is_blocked(monkeypatch, response):
+    monkeypatch.setattr(doctor, "_select_probe_colors", lambda: ["yellow", "purple", "blue"])
+
+    def local_urlopen(request, **kwargs):
+        url = str(getattr(request, "full_url", request))
+        if url.endswith("/models"):
+            return _JsonResponse({"data": [{"id": "vision-model"}]})
+        return _JsonResponse({"choices": [{"message": {"content": response}}]})
+
+    monkeypatch.setattr(doctor, "urlopen", local_urlopen)
+    cfg = {"ai": {"provider": "local", "local": {"base_url": "http://127.0.0.1:1234/v1", "model": "vision-model"}}}
+    result = doctor._provider_capability_check(cfg, "full")
+    assert result["status"] == "blocked"
+    assert result["evidence"]["behavior_capability"]["error_code"] == "image_semantics_mismatch"
+
+
+def test_local_multi_image_public_endpoint_blocks_before_generation_post(monkeypatch):
+    calls = []
+    monkeypatch.setattr(doctor, "urlopen", lambda request, **kwargs: calls.append(request))
+    cfg = {"ai": {"provider": "local", "local": {"base_url": "https://example.com/v1", "model": "vision-model"}}}
+    result = doctor._provider_capability_check(cfg, "full")
+    behavior = result["evidence"]["behavior_capability"]
+    assert result["status"] == "blocked"
+    assert behavior["status"] == "blocked"
+    assert behavior["error_code"] == "host_not_loopback_allowlist"
+    assert behavior["validated_network_scope"] == "blocked"
+    assert behavior["generation_post_calls"] == 0
+    assert calls == []
+
+
+def test_local_multi_image_localhost_requires_all_dns_addresses_loopback(monkeypatch):
+    calls = []
+    monkeypatch.setattr(doctor.socket, "getaddrinfo", lambda *args, **kwargs: [
+        (doctor.socket.AF_INET, doctor.socket.SOCK_STREAM, 6, "", ("127.0.0.1", 1234)),
+        (doctor.socket.AF_INET, doctor.socket.SOCK_STREAM, 6, "", ("192.0.2.1", 1234)),
+    ])
+    monkeypatch.setattr(doctor, "urlopen", lambda request, **kwargs: calls.append(request))
+    cfg = {"ai": {"provider": "local", "local": {"base_url": "http://localhost:1234/v1", "model": "vision-model"}}}
+    result = doctor._provider_capability_check(cfg, "full")
+    behavior = result["evidence"]["behavior_capability"]
+    assert result["status"] == "blocked"
+    assert behavior["error_code"] == "dns_resolved_non_loopback"
+    assert behavior["generation_post_calls"] == 0
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [("endpoint", "endpoint_unavailable"), ("model", "model_incapable"), ("malformed", "malformed_response")],
+)
+def test_local_multi_image_behavior_probe_failure_is_classified(monkeypatch, failure, expected):
+    def local_urlopen(request, **kwargs):
+        url = str(getattr(request, "full_url", request))
+        if url.endswith("/models"):
+            if failure == "endpoint":
+                raise doctor.URLError("offline")
+            return _JsonResponse({"data": [{"id": "vision-model"}]})
+        if failure == "model":
+            raise doctor.HTTPError(url, 400, "images unsupported", {}, None)
+        return _JsonResponse({"not": "a chat completion"})
+
+    monkeypatch.setattr(doctor, "urlopen", local_urlopen)
+    cfg = {"ai": {"provider": "local", "local": {"base_url": "http://127.0.0.1:1234/v1", "model": "vision-model"}}}
+    result = doctor._provider_capability_check(cfg, "full")
+
+    assert result["status"] == "blocked"
+    assert result["evidence"]["behavior_capability"]["status"] == expected
+
+
+def test_story_doctor_reports_known_insufficient_and_unknown_context(monkeypatch):
+    def local_urlopen(request, **kwargs):
+        return _JsonResponse({"data": [{"id": "story-model"}]})
+
+    monkeypatch.setattr(doctor, "urlopen", local_urlopen)
+    base = {"provider": "local_text", "base_url": "http://127.0.0.1:1234/v1", "model": "story-model"}
+    known = doctor._story_provider_check({"story": {**base, "context_length": 32768, "context_source": "test.model_metadata"}}, "full")
+    insufficient = doctor._story_provider_check({"story": {**base, "context_length": 8192, "estimated_input_tokens": 26000}}, "full")
+    unknown = doctor._story_provider_check({"story": base}, "full")
+
+    assert known["status"] == "pass"
+    assert known["evidence"]["model"] == "story-model"
+    assert known["evidence"]["context_capacity_status"] == "known"
+    assert known["evidence"]["context_capacity_tokens"] == 32768
+    assert known["evidence"]["context_metadata_source"] == "test.model_metadata"
+    assert insufficient["status"] == "blocked"
+    assert insufficient["evidence"]["context_capacity_status"] == "insufficient"
+    assert "fail closed" in insufficient["evidence"]["generation_preflight"]
+    assert unknown["status"] == "warning"
+    assert unknown["evidence"]["context_capacity_status"] == "unknown"
+
+    monkeypatch.setattr(doctor, "urlopen", lambda *args, **kwargs: _JsonResponse({"data": [{"id": "story-model", "context_length": 65536}]}))
+    endpoint_known = doctor._story_provider_check({"story": base}, "full")
+    assert endpoint_known["status"] == "pass"
+    assert endpoint_known["evidence"]["context_capacity_tokens"] == 65536
+    assert endpoint_known["evidence"]["context_metadata_source"] == "local_endpoint.model_metadata"
 
 
 def test_cloud_contract_never_calls_network_and_reports_key_presence(monkeypatch):
