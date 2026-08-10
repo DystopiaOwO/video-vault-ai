@@ -314,6 +314,50 @@ def test_multi_image_probe_selects_three_unique_colors_from_five():
     assert set(selected) <= set(doctor._DOCTOR_PROBE_IMAGES)
 
 
+def test_multi_image_embedded_png_dominant_colors_match_labels():
+    import base64
+    import struct
+    import zlib
+
+    expected_rgb = {
+        "red": (255, 0, 0),
+        "green": (0, 255, 0),
+        "blue": (0, 0, 255),
+        "yellow": (255, 255, 0),
+        "purple": (128, 0, 128),
+    }
+
+    for label, encoded in doctor._DOCTOR_PROBE_IMAGES.items():
+        png = base64.b64decode(encoded, validate=True)
+        assert png.startswith(b"\x89PNG\r\n\x1a\n")
+
+        offset = 8
+        width = height = bit_depth = color_type = None
+        compressed = []
+        while offset < len(png):
+            length = struct.unpack(">I", png[offset : offset + 4])[0]
+            kind = png[offset + 4 : offset + 8]
+            chunk = png[offset + 8 : offset + 8 + length]
+            offset += 12 + length
+            if kind == b"IHDR":
+                width, height, bit_depth, color_type, _, _, _ = struct.unpack(">IIBBBBB", chunk)
+            elif kind == b"IDAT":
+                compressed.append(chunk)
+            elif kind == b"IEND":
+                break
+
+        assert (width, height, bit_depth, color_type) == (64, 64, 8, 2)
+        raw = zlib.decompress(b"".join(compressed))
+        stride = 1 + width * 3
+        pixels = []
+        for row in range(height):
+            row_data = raw[row * stride : (row + 1) * stride]
+            assert row_data[0] == 0
+            pixels.extend(tuple(row_data[index : index + 3]) for index in range(1, stride, 3))
+
+        assert set(pixels) == {expected_rgb[label]}
+
+
 def test_local_multi_image_behavior_probe_verifies_missing_metadata_without_cloud(monkeypatch):
     calls = []
     assert len(doctor._DOCTOR_PROBE_IMAGES) >= 5
