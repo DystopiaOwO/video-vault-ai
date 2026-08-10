@@ -315,7 +315,7 @@ def test_local_multi_image_behavior_probe_verifies_missing_metadata_without_clou
         url = str(getattr(request, "full_url", request))
         if url.endswith("/models"):
             return _JsonResponse({"data": [{"id": "vision-model"}]})
-        return _JsonResponse({"choices": [{"message": {"content": '{"summary":"ok"}'}}]})
+        return _JsonResponse({"choices": [{"message": {"content": '{"image_count":3,"order":["red","green","blue"]}'}}]})
 
     monkeypatch.setattr(doctor, "urlopen", local_urlopen)
     cfg = {"ai": {"provider": "local", "local": {"base_url": "http://127.0.0.1:1234/v1", "model": "vision-model"}}}
@@ -326,8 +326,54 @@ def test_local_multi_image_behavior_probe_verifies_missing_metadata_without_clou
     assert result["evidence"]["behavior_capability"]["status"] == "pass"
     assert result["evidence"]["capability_source"] == "verified_by_behavior"
     assert result["evidence"]["behavior_capability"]["cloud_fallback"] is False
+    assert result["evidence"]["behavior_capability"]["semantic_validation"] == "image_count_and_order_match"
+    assert result["evidence"]["behavior_capability"]["validated_network_scope"] == "loopback"
     assert len(calls) == 2
     assert str(calls[1].full_url).endswith("/chat/completions")
+    payload = json.loads(calls[1].data.decode("utf-8"))
+    image_parts = payload["messages"][0]["content"][1:]
+    assert len({part["image_url"]["url"] for part in image_parts}) == 3
+
+
+def test_local_multi_image_behavior_probe_generic_json_is_blocked(monkeypatch):
+    monkeypatch.setattr(doctor, "urlopen", lambda request, **kwargs: _JsonResponse(
+        {"data": [{"id": "vision-model"}]} if str(getattr(request, "full_url", request)).endswith("/models") else {"choices": [{"message": {"content": '{"summary":"ok"}'}}]}
+    ))
+    cfg = {"ai": {"provider": "local", "local": {"base_url": "http://127.0.0.1:1234/v1", "model": "vision-model"}}}
+    result = doctor._provider_capability_check(cfg, "full")
+    assert result["status"] == "blocked"
+    assert result["evidence"]["behavior_capability"]["status"] == "blocked"
+    assert result["evidence"]["behavior_capability"]["error_code"] == "image_semantics_mismatch"
+
+
+def test_local_multi_image_public_endpoint_blocks_before_generation_post(monkeypatch):
+    calls = []
+    monkeypatch.setattr(doctor, "urlopen", lambda request, **kwargs: calls.append(request))
+    cfg = {"ai": {"provider": "local", "local": {"base_url": "https://example.com/v1", "model": "vision-model"}}}
+    result = doctor._provider_capability_check(cfg, "full")
+    behavior = result["evidence"]["behavior_capability"]
+    assert result["status"] == "blocked"
+    assert behavior["status"] == "blocked"
+    assert behavior["error_code"] == "host_not_loopback_allowlist"
+    assert behavior["validated_network_scope"] == "blocked"
+    assert behavior["generation_post_calls"] == 0
+    assert calls == []
+
+
+def test_local_multi_image_localhost_requires_all_dns_addresses_loopback(monkeypatch):
+    calls = []
+    monkeypatch.setattr(doctor.socket, "getaddrinfo", lambda *args, **kwargs: [
+        (doctor.socket.AF_INET, doctor.socket.SOCK_STREAM, 6, "", ("127.0.0.1", 1234)),
+        (doctor.socket.AF_INET, doctor.socket.SOCK_STREAM, 6, "", ("192.0.2.1", 1234)),
+    ])
+    monkeypatch.setattr(doctor, "urlopen", lambda request, **kwargs: calls.append(request))
+    cfg = {"ai": {"provider": "local", "local": {"base_url": "http://localhost:1234/v1", "model": "vision-model"}}}
+    result = doctor._provider_capability_check(cfg, "full")
+    behavior = result["evidence"]["behavior_capability"]
+    assert result["status"] == "blocked"
+    assert behavior["error_code"] == "dns_resolved_non_loopback"
+    assert behavior["generation_post_calls"] == 0
+    assert calls == []
 
 
 @pytest.mark.parametrize(

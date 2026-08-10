@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import closing
 from datetime import datetime, timezone
 import gc
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -40,7 +41,11 @@ _WINDOWS_LONG_PATH_THRESHOLD = 260
 _WINDOWS_LONG_PATH_COMPONENT_LIMIT = 180
 _FALSE_VALUES = frozenset({"", "0", "false", "no", "off"})
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-_DOCTOR_PROBE_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+_DOCTOR_PROBE_IMAGES = {
+    "red": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAF0lEQVR4nGP4z8BAEiJN9aiGUQ1DSgMAkPn/Afnh+ngAAAAASUVORK5CYII=",
+    "green": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFUlEQVR4nGNg+M9AGhrVMKph+GoAAJHq/wEkpOWMAAAAAElFTkSuQmCC",
+    "blue": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFUlEQVR4nGNgYPhPIhrVMKph2GoAAJLb/wFh5Z4RAAAAAElFTkSuQmCC",
+}
 _STORY_RESERVED_OUTPUT_TOKENS = 2048
 
 
@@ -376,8 +381,11 @@ def _provider_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
             return _check("provider.active", "provider", "blocked", "local provider endpoint 設定無效", evidence={"provider": "local", "endpoint_valid": False}, remediation="設定可用的 OpenAI-compatible local endpoint。")
         if mode != "full":
             return _check("provider.active", "provider", "skipped", "quick/default mode 未連線 local provider", evidence={"provider": "local", "connectivity_probe": "skipped"}, remediation="使用 --full 執行 local endpoint connectivity probe。")
+        scope = _validate_local_endpoint_scope(base_url)
+        if scope.get("status") != "pass":
+            return _check("provider.active", "provider", "blocked", "local provider endpoint 不符合 loopback-only network policy", evidence={"provider": "local", **scope}, remediation="只允許解析至 loopback 的 127.0.0.1、::1 或 localhost endpoint。")
         try:
-            with urlopen(base_url + "/models", timeout=2) as response:
+            with urlopen(str(scope["validated_endpoint"]) + "/models", timeout=2) as response:
                 ok = 200 <= int(response.status) < 300
         except (OSError, URLError, ValueError):
             ok = False
@@ -402,40 +410,136 @@ def _local_models(base_url: str) -> tuple[bool, list[dict[str, Any]]]:
         return False, []
 
 
-def _local_multi_image_behavior_probe(base_url: str, model_name: str) -> dict[str, Any]:
-    """Probe only the configured local endpoint without starting/loading anything."""
-    image = f"data:image/png;base64,{_DOCTOR_PROBE_PNG}"
+def _validate_local_endpoint_scope(base_url: str) -> dict[str, Any]:
+    """Validate and pin a local endpoint to a loopback address before any request."""
+
+    evidence: dict[str, Any] = {
+        "network_scope_policy": "loopback_only",
+        "configured_endpoint": str(base_url),
+        "validated_network_scope": "blocked",
+        "resolved_addresses": [],
+        "dns_validation": "not_attempted",
+    }
+    parsed = urlparse(str(base_url).rstrip("/"))
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if parsed.scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+        return {**evidence, "status": "blocked", "error_code": "invalid_local_endpoint"}
+
+    resolved: list[str] = []
+    if host == "localhost":
+        try:
+            infos = socket.getaddrinfo(host, port or 80, type=socket.SOCK_STREAM)
+            for info in infos:
+                address = str(info[4][0]).split("%", 1)[0]
+                if address not in resolved:
+                    resolved.append(address)
+            evidence["dns_validation"] = "all_addresses_checked"
+        except (OSError, socket.gaierror):
+            return {**evidence, "status": "blocked", "error_code": "loopback_hostname_unresolved", "dns_validation": "failed"}
+    else:
+        try:
+            parsed_ip = ipaddress.ip_address(host.split("%", 1)[0])
+        except ValueError:
+            return {**evidence, "status": "blocked", "error_code": "host_not_loopback_allowlist", "dns_validation": "not_applicable"}
+        resolved = [str(parsed_ip)]
+        evidence["dns_validation"] = "ip_literal"
+
+    evidence["resolved_addresses"] = resolved
+    try:
+        addresses = [ipaddress.ip_address(address) for address in resolved]
+    except ValueError:
+        return {**evidence, "status": "blocked", "error_code": "dns_address_invalid"}
+    if not addresses or not all(address.is_loopback for address in addresses):
+        return {**evidence, "status": "blocked", "error_code": "dns_resolved_non_loopback"}
+
+    selected = next((address for address in addresses if address.version == 4), addresses[0])
+    selected_host = str(selected)
+    netloc = f"[{selected_host}]" if selected.version == 6 else selected_host
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    validated_endpoint = parsed._replace(netloc=netloc).geturl().rstrip("/")
+    return {
+        **evidence,
+        "status": "pass",
+        "validated_network_scope": "loopback",
+        "validated_endpoint": validated_endpoint,
+        "selected_loopback_address": selected_host,
+    }
+
+
+def _response_text_content(content: object) -> str | None:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts = [str(item.get("text")) for item in content if isinstance(item, Mapping) and isinstance(item.get("text"), str)]
+        return "".join(text_parts) if text_parts else None
+    return None
+
+
+def _parse_probe_json(content: object) -> Mapping[str, Any] | None:
+    text = _response_text_content(content)
+    if not text:
+        return None
+    normalized = text.strip()
+    if normalized.startswith("```") and normalized.endswith("```"):
+        normalized = normalized[3:-3].strip()
+        if normalized.lower().startswith("json"):
+            normalized = normalized[4:].lstrip()
+    try:
+        parsed = json.loads(normalized)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, Mapping) else None
+
+
+def _local_multi_image_behavior_probe(base_url: str, model_name: str, *, endpoint_scope: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Prove ordered red/green/blue image understanding at a validated local endpoint."""
+    scope = dict(endpoint_scope or _validate_local_endpoint_scope(base_url))
+    images = [
+        {"label": label, "data_url": f"data:image/png;base64,{_DOCTOR_PROBE_IMAGES[label]}"}
+        for label in ("red", "green", "blue")
+    ]
     request_body = {
         "model": str(model_name),
         "temperature": 0,
         "max_tokens": 64,
         "messages": [{
             "role": "user",
-            "content": [
-                {"type": "text", "text": "Return a short JSON object with key summary. Do not explain."},
-                {"type": "image_url", "image_url": {"url": image}},
-                {"type": "image_url", "image_url": {"url": image}},
-                {"type": "image_url", "image_url": {"url": image}},
-            ],
+            "content": [{"type": "text", "text": 'Inspect all three images. Return exactly JSON: {"image_count":3,"order":["red","green","blue"]}. The order is the input order. Do not explain.'}]
+            + [{"type": "image_url", "image_url": {"url": image["data_url"]}} for image in images],
         }],
     }
     evidence: dict[str, Any] = {
         "probe": "local_multi_image_behavior",
-        "endpoint": "local_configured_endpoint_only",
+        "endpoint": "validated_loopback_endpoint_only",
         "image_count": 3,
-        "network_scope": "loopback_or_configured_local_endpoint",
+        "expected_image_labels": [image["label"] for image in images],
+        "expected_response": {"image_count": 3, "order": ["red", "green", "blue"]},
+        "validated_network_scope": scope.get("validated_network_scope", "blocked"),
+        "resolved_addresses": scope.get("resolved_addresses", []),
+        "network_scope_policy": scope.get("network_scope_policy", "loopback_only"),
         "cloud_fallback": False,
         "paid_call": False,
         "config_mutated": False,
         "model_download": False,
+        "generation_post_attempted": False,
+        "generation_post_calls": 0,
     }
+    if scope.get("status") != "pass":
+        return {**evidence, "status": "blocked", "error_code": scope.get("error_code", "local_endpoint_scope_blocked"), "scope_validation": scope}
     request = Request(
-        str(base_url).rstrip("/") + "/chat/completions",
+        str(scope["validated_endpoint"]).rstrip("/") + "/chat/completions",
         data=json.dumps(request_body).encode("utf-8"),
         headers={"content-type": "application/json", "accept": "application/json"},
         method="POST",
     )
     try:
+        evidence["generation_post_attempted"] = True
+        evidence["generation_post_calls"] = 1
         with urlopen(request, timeout=30) as response:
             status = int(getattr(response, "status", 200))
             raw = response.read().decode("utf-8", errors="replace")
@@ -445,9 +549,14 @@ def _local_multi_image_behavior_probe(base_url: str, model_name: str) -> dict[st
         payload = json.loads(raw)
         choices = payload.get("choices") if isinstance(payload, Mapping) else None
         content = choices[0].get("message", {}).get("content") if isinstance(choices, list) and choices and isinstance(choices[0], Mapping) else None
-        if not content or not isinstance(content, (str, list, Mapping)):
+        parsed = _parse_probe_json(content)
+        expected = evidence["expected_response"]
+        if parsed is None:
             return {**evidence, "status": "malformed_response", "error_code": "missing_chat_completion_content"}
-        return {**evidence, "status": "pass", "capability": "verified_by_behavior", "response_shape": "chat_completion"}
+        semantic_valid = parsed.get("image_count") == expected["image_count"] and parsed.get("order") == expected["order"]
+        if not semantic_valid:
+            return {**evidence, "status": "blocked", "error_code": "image_semantics_mismatch", "parsed_response": dict(parsed)}
+        return {**evidence, "status": "pass", "capability": "verified_by_behavior", "response_shape": "chat_completion", "parsed_response": dict(parsed), "semantic_validation": "image_count_and_order_match"}
     except HTTPError as exc:
         evidence.update({"http_status": int(exc.code), "error_code": "http_error"})
         if int(exc.code) in {400, 405, 415, 422}:
@@ -478,7 +587,10 @@ def _provider_model_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
         return _check("provider.model", "provider", "blocked", "local endpoint/model contract 缺失", evidence={"provider": "local", "endpoint_configured": bool(base_url), "model_configured": bool(model)}, remediation="設定 local provider endpoint 與 model。")
     if mode != "full":
         return _check("provider.model", "provider", "skipped", "default/quick 未查詢 local model existence", evidence={"provider": "local", "model_configured": True, "model_exists": "unverified", "probe": "skipped"}, remediation="使用 --full 查詢 local /models。")
-    reachable, models = _local_models(base_url)
+    scope = _validate_local_endpoint_scope(base_url)
+    if scope.get("status") != "pass":
+        return _check("provider.model", "provider", "blocked", "local endpoint 不符合 loopback-only network policy", evidence={"provider": "local", "model_configured": True, **scope}, remediation="只允許解析至 loopback 的 127.0.0.1、::1 或 localhost endpoint。")
+    reachable, models = _local_models(str(scope["validated_endpoint"]))
     names = {str(item.get("id") or item.get("name") or "") for item in models}
     exists = model in names
     return _check("provider.model", "provider", "pass" if reachable and exists else "blocked", "local configured model 存在" if reachable and exists else "local endpoint/model 不可用", evidence={"provider": "local", "connectivity": reachable, "model_exists": exists, "model_configured": True, "model_count": len(models)}, remediation=None if reachable and exists else "啟動 local endpoint 並確認設定 model 與 /models 一致。")
@@ -500,7 +612,12 @@ def _provider_capability_check(cfg: Mapping[str, Any], mode: str) -> dict[str, A
     local = dict(ai.get("local") or {})
     base_url = str(local.get("base_url") or local.get("lmstudio_url") or "").rstrip("/")
     model_name = str(local.get("model") or "")
-    reachable, models = _local_models(base_url)
+    scope = _validate_local_endpoint_scope(base_url)
+    if scope.get("status") != "pass":
+        behavior = _local_multi_image_behavior_probe(base_url, model_name, endpoint_scope=scope)
+        evidence = {"provider": "local", "model_exists": False, "required": required, "verified": [], "missing": sorted(set(required) - supported), "metadata_capability": {"status": "not_checked", "source": "network_scope_blocked"}, "behavior_capability": behavior, "capability_source": "unverified"}
+        return _check("provider.capabilities", "provider", "blocked", "local multi-image behavior probe blocked by network scope", evidence=evidence, remediation="只允許解析至 loopback 的 127.0.0.1、::1 或 localhost endpoint。")
+    reachable, models = _local_models(str(scope["validated_endpoint"]))
     model = next((item for item in models if str(item.get("id") or item.get("name") or "") == model_name), None)
     raw_caps = (model or {}).get("capabilities") if isinstance(model, Mapping) else None
     if isinstance(raw_caps, Mapping):
@@ -521,7 +638,7 @@ def _provider_capability_check(cfg: Mapping[str, Any], mode: str) -> dict[str, A
     elif model is None:
         behavior = {"status": "model_incapable", "probe": "not_run", "reason": "configured_model_missing"}
     else:
-        behavior = _local_multi_image_behavior_probe(base_url, model_name)
+        behavior = _local_multi_image_behavior_probe(base_url, model_name, endpoint_scope=scope)
     evidence = {
         "provider": "local",
         "model_exists": model is not None,
@@ -576,7 +693,10 @@ def _story_provider_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
         return _check("provider.story", "provider", "blocked", "Story Provider endpoint/model contract 缺失", evidence={"provider": provider, "model": model, "endpoint_configured": bool(base_url), "model_configured": bool(model), **context_evidence}, remediation="設定 story.base_url 與 story.model。")
     if mode != "full":
         return _check("provider.story", "provider", "skipped", "default/quick 未查詢 Story Provider model existence", evidence={"provider": provider, "model": model, "model_configured": True, "model_exists": "unverified", "probe": "skipped", **context_evidence}, remediation="使用 --full 查詢 Story Provider /models。")
-    reachable, models = _local_models(base_url)
+    scope = _validate_local_endpoint_scope(base_url)
+    if scope.get("status") != "pass":
+        return _check("provider.story", "provider", "blocked", "Story Provider endpoint 不符合 loopback-only network policy", evidence={"provider": provider, "model": model, **scope, **context_evidence}, remediation="只允許解析至 loopback 的 127.0.0.1、::1 或 localhost endpoint。")
+    reachable, models = _local_models(str(scope["validated_endpoint"]))
     model_record = next((item for item in models if str(item.get("id") or item.get("name") or "") == model), None)
     exists = model_record is not None
     if context_length is None and model_record is not None:
