@@ -283,12 +283,18 @@ def test_visual_dedupe_preserves_boundaries_and_merges_reasons(tmp_path, monkeyp
         {"timestamp_seconds": 5, "reasons": ["baseline", "motion"], "activity_score": 0.1},
         {"timestamp_seconds": 10, "reasons": ["boundary"], "activity_score": 0},
     ]
-    kept_paths, kept_samples, audit = dedupe_visual_samples(
+    kept_paths, kept_samples, audit, discarded = dedupe_visual_samples(
         paths, samples, _cfg(), resolved_sampling_policy(_cfg())
     )
     assert kept_paths == [paths[0], paths[2]]
     assert {"baseline", "motion"}.issubset(set(kept_samples[0]["reasons"]))
-    assert audit == {"status": "applied", "removed": 1}
+    assert audit["status"] == "applied"
+    assert audit["removed"] == 1
+    assert audit["decision_contract"] == "visual-dedupe-decisions-v1"
+    assert audit["decisions"][0]["dedupe_decision"] == "discarded_visual_duplicate"
+    assert audit["decisions"][0]["rescue_outcome"] == "not_selected"
+    assert discarded[0]["path"] == paths[1]
+    assert paths[1].is_file(), "orchestrator owns deletion until rescue selection completes"
 
 
 def test_provider_model_comes_from_active_provider_branch():

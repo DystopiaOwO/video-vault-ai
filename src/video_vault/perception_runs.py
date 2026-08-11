@@ -427,11 +427,14 @@ def build_frame_manifest(
 ) -> list[dict]:
     interval = float(cfg["frame_interval_seconds"])
     result = []
-    for index, path in enumerate(sorted(paths)):
+    records = (
+        sorted(zip(paths, samples, strict=True), key=lambda item: str(item[0]))
+        if samples is not None
+        else [(path, {}) for path in sorted(paths)]
+    )
+    for index, (path, sample) in enumerate(records):
         stat = path.stat()
-        sample = samples[index] if samples is not None else {}
-        result.append(
-            {
+        row = {
                 "frame_path": str(path.resolve()),
                 "timestamp_seconds": round(
                     float(sample.get("timestamp_seconds", index * interval)), 6
@@ -445,7 +448,9 @@ def build_frame_manifest(
                 "size": int(stat.st_size),
                 "mtime_ns": int(stat.st_mtime_ns),
             }
-        )
+        if isinstance(sample.get("rescue_provenance"), dict):
+            row["sampling_provenance"] = dict(sample["rescue_provenance"])
+        result.append(row)
     return result
 
 
