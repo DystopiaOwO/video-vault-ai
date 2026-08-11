@@ -275,14 +275,22 @@ def _cluster_span(cluster: list[dict]) -> float:
     return float(cluster[-1]["timestamp_seconds"]) - float(cluster[0]["timestamp_seconds"])
 
 
-def _merge_allowed(left: list[dict], right: list[dict], right_reasons: list[str], max_frames: int) -> bool:
+def _merge_allowed(
+    left: list[dict],
+    right: list[dict],
+    right_reasons: list[str],
+    min_frames: int,
+    max_frames: int,
+) -> bool:
     protected = {"scene_boundary", "large_temporal_gap", "maximum_temporal_span"}
     combined = left + right
+    partition = _partition_lengths(len(combined), min_frames, max_frames)
     return (
         bool(left and right)
         and not protected.intersection(right_reasons)
-        and len(combined) <= max_frames
         and _cluster_span(combined) <= MAX_WINDOW_SPAN_SECONDS
+        and sum(partition) == len(combined)
+        and all(min_frames <= length <= max_frames for length in partition)
     )
 
 
@@ -302,7 +310,7 @@ def _coalesce_short_clusters(
             continue
         if index > 0:
             left, left_reasons = pending[index - 1]
-            if _merge_allowed(left, cluster, reasons, max_frames):
+            if _merge_allowed(left, cluster, reasons, min_frames, max_frames):
                 pending[index - 1] = (
                     left + cluster,
                     sorted(set(left_reasons + reasons + ["merged_short_fragment"])),
@@ -312,7 +320,7 @@ def _coalesce_short_clusters(
                 continue
         if index + 1 < len(pending):
             right, right_reasons = pending[index + 1]
-            if _merge_allowed(cluster, right, right_reasons, max_frames):
+            if _merge_allowed(cluster, right, right_reasons, min_frames, max_frames):
                 pending[index] = (
                     cluster + right,
                     sorted(set(reasons + right_reasons + ["merged_short_fragment"])),
@@ -491,7 +499,7 @@ def provider_capability(provider: Any, cfg: Mapping[str, Any] | None = None) -> 
     provider_cfg = ((cfg.get("ai") or {}).get(name) or {})
     capability = provider_cfg.get("multi_frame_capability")
     registry_resolution: Mapping[str, Any] | None = None
-    if not isinstance(capability, Mapping) and name == "local":
+    if name == "local":
         base_url = str(
             getattr(provider, "base_url", "")
             or provider_cfg.get("base_url")
@@ -499,17 +507,31 @@ def provider_capability(provider: Any, cfg: Mapping[str, Any] | None = None) -> 
             or ""
         ).rstrip("/")
         model = str(getattr(provider, "model", "") or provider_cfg.get("model") or "")
-        registry_resolution = resolve_verified_probe_capability(
-            cfg,
-            provider=name,
-            model=model,
-            base_url=base_url,
-            provider_contract_version=MULTI_FRAME_CONTRACT_VERSION,
-            prompt_contract_version=MULTI_FRAME_PROMPT_VERSION,
-            capability_schema_version=MULTI_FRAME_SCHEMA_VERSION,
-        )
-        if registry_resolution.get("status") == "pass":
-            capability = registry_resolution.get("capability")
+        if base_url and model:
+            registry_resolution = resolve_verified_probe_capability(
+                cfg,
+                provider=name,
+                model=model,
+                base_url=base_url,
+                provider_contract_version=MULTI_FRAME_CONTRACT_VERSION,
+                prompt_contract_version=MULTI_FRAME_PROMPT_VERSION,
+                capability_schema_version=MULTI_FRAME_SCHEMA_VERSION,
+            )
+            if registry_resolution.get("status") == "pass":
+                capability = registry_resolution.get("capability")
+            elif registry_resolution.get("status") == "blocked":
+                return {
+                    "supports_multi_image": False,
+                    "maximum_images": 0,
+                    "supported_image_formats": [],
+                    "provider_contract_version": MULTI_FRAME_CONTRACT_VERSION,
+                    "prompt_contract_version": MULTI_FRAME_PROMPT_VERSION,
+                    "schema_version": MULTI_FRAME_SCHEMA_VERSION,
+                    "capability_source": "verified_probe_blocked",
+                    "registry_status": "blocked",
+                    "registry_reason": str(registry_resolution.get("reason") or "verified_probe_record_invalid"),
+                    "binding_fingerprint": str(registry_resolution.get("binding_fingerprint") or ""),
+                }
     if not isinstance(capability, Mapping):
         return {
             "supports_multi_image": False,

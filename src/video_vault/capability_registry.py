@@ -282,22 +282,39 @@ def resolve_verified_probe_capability(
         return {"status": "blocked", "reason": "verified_probe_record_not_object"}
     fingerprint_payload = {key: value for key, value in record.items() if key != "verification_fingerprint"}
     expected_record_fingerprint = _canonical_hash(fingerprint_payload)
-    checks = {
+    integrity_checks = {
         "registry_contract": record.get("registry_contract") == CAPABILITY_REGISTRY_CONTRACT,
         "registry_schema_version": record.get("registry_schema_version") == CAPABILITY_REGISTRY_SCHEMA_VERSION,
         "binding": record.get("binding") == binding,
         "verification_fingerprint": record.get("verification_fingerprint") == expected_record_fingerprint,
+        "verified_at": bool(str(record.get("verified_at") or "")),
+    }
+    if not all(integrity_checks.values()):
+        return {
+            "status": "blocked",
+            "reason": "verified_probe_record_invalid",
+            "checks": integrity_checks,
+            "binding_fingerprint": binding["binding_fingerprint"],
+        }
+    if record.get("verification_source") == "probe_failed" and record.get("multi_image_verified") is False:
+        return {
+            "status": "blocked",
+            "reason": "verified_probe_failed",
+            "probe": dict(record.get("probe") or {}),
+            "binding_fingerprint": binding["binding_fingerprint"],
+            "verification_fingerprint": str(record.get("verification_fingerprint") or ""),
+        }
+    capability_checks = {
         "verification_source": record.get("verification_source") == "verified_probe",
         "multi_image_verified": record.get("multi_image_verified") is True,
         "maximum_images": isinstance(record.get("maximum_images"), int) and int(record.get("maximum_images") or 0) >= 3,
         "supported_image_formats": "jpeg" in [str(item).lower() for item in record.get("supported_image_formats") or []],
-        "verified_at": bool(str(record.get("verified_at") or "")),
     }
-    if not all(checks.values()):
+    if not all(capability_checks.values()):
         return {
             "status": "blocked",
             "reason": "verified_probe_record_invalid",
-            "checks": checks,
+            "checks": {**integrity_checks, **capability_checks},
             "binding_fingerprint": binding["binding_fingerprint"],
         }
     return {

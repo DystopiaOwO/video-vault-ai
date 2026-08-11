@@ -8,7 +8,11 @@ import pytest
 
 import video_vault.cli as cli
 import video_vault.doctor as doctor
-from video_vault.analyzer.multi_frame import provider_capability
+from video_vault.analyzer.multi_frame import (
+    MULTI_FRAME_CONTRACT_VERSION,
+    MULTI_FRAME_PROMPT_VERSION,
+    provider_capability,
+)
 
 
 def _config(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
@@ -425,8 +429,29 @@ def test_local_multi_image_behavior_probe_verifies_missing_metadata_without_clou
 
 
 def test_failed_probe_invalidates_same_binding_registry_record(tmp_path, monkeypatch):
-    cfg = {"library_root": str(tmp_path), "ai": {"provider": "local", "local": {"base_url": "http://127.0.0.1:1234/v1", "model": "vision-model"}}}
+    cfg = {"library_root": str(tmp_path), "ai": {"provider": "local", "local": {
+        "base_url": "http://127.0.0.1:1234/v1",
+        "model": "vision-model",
+        "multi_frame_capability": {
+            "supports_multi_image": True,
+            "maximum_images": 3,
+            "supported_image_formats": ["jpeg"],
+            "provider_contract_version": MULTI_FRAME_CONTRACT_VERSION,
+            "prompt_contract_version": MULTI_FRAME_PROMPT_VERSION,
+            "schema_version": 1,
+            "capability_source": "explicit_config",
+        },
+    }}}
     monkeypatch.setattr(doctor, "_select_probe_colors", lambda: ["red", "green", "blue"])
+
+    class Local:
+        provider = "local"
+        model = "vision-model"
+        base_url = "http://127.0.0.1:1234/v1"
+
+    declared = provider_capability(Local(), cfg)
+    assert declared["supports_multi_image"] is True
+    assert declared["capability_source"] == "explicit_config"
 
     def passing(request, **kwargs):
         if str(getattr(request, "full_url", request)).endswith("/models"):
@@ -435,11 +460,6 @@ def test_failed_probe_invalidates_same_binding_registry_record(tmp_path, monkeyp
 
     monkeypatch.setattr(doctor, "urlopen", passing)
     assert doctor._provider_capability_check(cfg, "full")["status"] == "pass"
-
-    class Local:
-        provider = "local"
-        model = "vision-model"
-        base_url = "http://127.0.0.1:1234/v1"
 
     assert provider_capability(Local(), cfg)["supports_multi_image"] is True
 
@@ -454,7 +474,7 @@ def test_failed_probe_invalidates_same_binding_registry_record(tmp_path, monkeyp
     assert blocked["evidence"]["runtime_capability_record"]["verification_source"] == "probe_failed"
     resolved = provider_capability(Local(), cfg)
     assert resolved["supports_multi_image"] is False
-    assert resolved["registry_reason"] == "verified_probe_record_invalid"
+    assert resolved["registry_reason"] == "verified_probe_failed"
 
 
 def test_local_multi_image_fixed_text_only_answer_fails_runtime_challenge(monkeypatch):

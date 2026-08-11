@@ -99,6 +99,62 @@ def test_short_sampling_boundary_fragment_merges_when_policy_safe(tmp_path):
     assert "merged_short_fragment" in plan["mandatory_windows"][0]["window_policy"]["split_reasons"]
 
 
+@pytest.mark.parametrize("left_count", [4, 5])
+def test_soft_boundary_cluster_repartitions_without_fragment(tmp_path, left_count):
+    frames = _manifest(tmp_path, 6)
+    frames[left_count]["sample_reasons"] = ["boundary"]
+
+    first = plan_frame_windows(frames, 20, min_frames=3, max_frames=3)
+    second = plan_frame_windows(frames, 20, min_frames=3, max_frames=3)
+
+    assert [len(window["frames"]) for window in first["mandatory_windows"]] == [3, 3]
+    assert first["non_mandatory_fragments"] == []
+    assert [window["window_uuid"] for window in first["mandatory_windows"]] == [
+        window["window_uuid"] for window in second["mandatory_windows"]
+    ]
+    planned_fingerprints = [
+        frame["fingerprint"]
+        for window in first["mandatory_windows"]
+        for frame in window["frames"]
+    ]
+    input_fingerprints = [multi_frame.frame_fingerprint(Path(row["frame_path"])) for row in frames]
+    assert sorted(planned_fingerprints) == sorted(input_fingerprints)
+    assert len(planned_fingerprints) == len(set(planned_fingerprints)) == len(frames)
+
+
+@pytest.mark.parametrize("boundary_kind", ["scene", "large_gap"])
+def test_short_cluster_does_not_cross_hard_boundary_or_large_gap(tmp_path, boundary_kind):
+    frames = _manifest(tmp_path, 4)
+    if boundary_kind == "scene":
+        frames[2]["sample_reasons"] = ["scene"]
+    else:
+        frames[2]["timestamp_seconds"] = 30
+        frames[3]["timestamp_seconds"] = 32
+
+    plan = plan_frame_windows(frames, 40, min_frames=3, max_frames=3)
+
+    assert plan["mandatory_windows"] == []
+    assert [len(fragment["frames"]) for fragment in plan["non_mandatory_fragments"]] == [2, 2]
+    reasons = {
+        reason
+        for fragment in plan["non_mandatory_fragments"]
+        for reason in fragment["window_policy"]["split_reasons"]
+    }
+    assert ("scene_boundary" if boundary_kind == "scene" else "large_temporal_gap") in reasons
+    covered_fingerprints = [
+        frame["fingerprint"]
+        for window in plan["mandatory_windows"]
+        for frame in window["frames"]
+    ] + [
+        frame["fingerprint"]
+        for fragment in plan["non_mandatory_fragments"]
+        for frame in fragment["frames"]
+    ]
+    input_fingerprints = [multi_frame.frame_fingerprint(Path(row["frame_path"])) for row in frames]
+    assert sorted(covered_fingerprints) == sorted(input_fingerprints)
+    assert len(covered_fingerprints) == len(set(covered_fingerprints)) == len(frames)
+
+
 def test_short_hard_scene_fragment_remains_explicitly_uncovered(tmp_path):
     frames = _manifest(tmp_path, 5)
     frames[3]["sample_reasons"] = ["scene"]
@@ -211,6 +267,77 @@ def test_verified_probe_registry_enables_formal_multi_image_without_metadata(tmp
         capability_schema_version=multi_frame.MULTI_FRAME_SCHEMA_VERSION,
     )
     assert changed_contract["status"] == "missing"
+
+
+def test_same_binding_failed_probe_overrides_explicit_config_and_blocks_calls(tmp_path, monkeypatch):
+    explicit = {
+        "supports_multi_image": True,
+        "maximum_images": 3,
+        "supported_image_formats": ["jpeg"],
+        "provider_contract_version": multi_frame.MULTI_FRAME_CONTRACT_VERSION,
+        "prompt_contract_version": multi_frame.MULTI_FRAME_PROMPT_VERSION,
+        "schema_version": multi_frame.MULTI_FRAME_SCHEMA_VERSION,
+        "capability_source": "explicit_config",
+    }
+    cfg = {
+        "library_root": str(tmp_path),
+        "ffmpeg_path": "missing-ffmpeg",
+        "ai": {"provider": "local", "local": {
+            "base_url": "http://127.0.0.1:1234/v1",
+            "model": "vision-model",
+            "multi_frame_capability": explicit,
+        }},
+    }
+
+    class Local:
+        provider = "local"
+        model = "vision-model"
+        base_url = "http://127.0.0.1:1234/v1"
+
+        def __init__(self):
+            self.calls = 0
+
+        def analyze_window(self, *_args, **_kwargs):
+            self.calls += 1
+            raise AssertionError("failed probe must block before generation")
+
+    provider = Local()
+    initial = provider_capability(provider, cfg)
+    assert initial["supports_multi_image"] is True
+    assert initial["capability_source"] == "explicit_config"
+
+    scope = validate_local_endpoint_scope(provider.base_url)
+    persisted = persist_probe_capability(
+        cfg,
+        provider="local",
+        model=provider.model,
+        endpoint_scope=scope,
+        verified=False,
+        maximum_images=0,
+        supported_image_formats=[],
+        provider_contract_version=multi_frame.MULTI_FRAME_CONTRACT_VERSION,
+        prompt_contract_version=multi_frame.MULTI_FRAME_PROMPT_VERSION,
+        capability_schema_version=multi_frame.MULTI_FRAME_SCHEMA_VERSION,
+        probe_evidence={"status": "blocked", "semantic_validation": "wrong_order"},
+    )
+    assert persisted["status"] == "persisted"
+    assert persisted["verification_source"] == "probe_failed"
+
+    blocked = provider_capability(provider, cfg)
+    assert blocked["supports_multi_image"] is False
+    assert blocked["capability_source"] == "verified_probe_blocked"
+    assert blocked["registry_reason"] == "verified_probe_failed"
+
+    monkeypatch.setattr(vision_pipeline, "provider_from_config", lambda _cfg: provider)
+    with pytest.raises(MultiFrameUnsupported, match="does not have verified multi-image capability"):
+        vision_pipeline.analyze_frame_windows(
+            {"duration_seconds": 10, "filename": "clip.mp4", "category": "coffee"},
+            cfg,
+            _manifest(tmp_path, 3),
+            duration_seconds=10,
+            evidence_root=tmp_path / "evidence",
+        )
+    assert provider.calls == 0
 
 
 def test_local_capability_requires_jpeg_for_current_request_contract():
