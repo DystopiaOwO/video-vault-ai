@@ -646,6 +646,9 @@ async function json<T>(url: string, init?: RequestInit): Promise<T> {
     const token = await getCsrfToken();
     const headers = new Headers(init?.headers);
     headers.set("x-video-vault-csrf", token);
+    if (init?.body instanceof FormData && !init.body.has("csrf_token")) {
+      init.body.append("csrf_token", token);
+    }
     request = { ...init, headers };
   }
   const res = await fetch(url, request);

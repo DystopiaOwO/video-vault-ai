@@ -12,13 +12,14 @@ from .multi_frame import (
     MIN_WINDOW_FRAMES,
     MultiFrameUnsupported,
     MultiFrameValidationError,
-    build_frame_windows,
     model_provenance,
     normalize_window_result,
     atomic_write_json,
+    plan_frame_windows,
     provider_capability,
     validate_window,
     window_cache_key,
+    write_non_mandatory_evidence,
     write_window_evidence,
 )
 from .mock_provider import MockProvider
@@ -128,6 +129,7 @@ def analyze_frame_windows(
     duration_seconds: float | None = None,
     evidence_root: Path | None = None,
     windows: list[dict] | None = None,
+    non_mandatory_fragments: list[dict] | None = None,
 ) -> dict:
     """Analyze explicit 3-5 frame windows through a provider contract.
 
@@ -141,12 +143,20 @@ def analyze_frame_windows(
     duration = float(video.get("duration_seconds") or 0) if duration_seconds is None else float(duration_seconds)
     capability = provider_capability(provider, cfg)
     max_images = int(capability.get("maximum_images") or 0)
-    planned_windows = windows or build_frame_windows(
-        frame_manifest,
-        duration,
-        max_frames=max_images if max_images >= MIN_WINDOW_FRAMES else MAX_WINDOW_FRAMES,
-    )
+    if windows is None:
+        plan = plan_frame_windows(
+            frame_manifest,
+            duration,
+            max_frames=max_images if max_images >= MIN_WINDOW_FRAMES else MAX_WINDOW_FRAMES,
+        )
+        planned_windows = list(plan["mandatory_windows"])
+        uncovered_fragments = list(plan["non_mandatory_fragments"])
+    else:
+        planned_windows = list(windows)
+        uncovered_fragments = list(non_mandatory_fragments or [])
     evidence_root = evidence_root or (Path(cfg["library_root"]) / "05_index" / "multi_frame_evidence")
+    non_mandatory_evidence_path = write_non_mandatory_evidence(uncovered_fragments, evidence_root)
+    non_mandatory_fragment_uuids = [str(item.get("fragment_uuid") or "") for item in uncovered_fragments]
     validation_reports: list[dict] = []
     eligible: list[dict] = []
     invalid_windows: list[dict] = []
@@ -173,6 +183,10 @@ def analyze_frame_windows(
             for reason in (window.get("validation") or {}).get("needs_review_reasons") or []:
                 if reason not in reasons:
                     reasons.append(str(reason))
+        for fragment in uncovered_fragments:
+            reason = str(fragment.get("reason") or "")
+            if reason and reason not in reasons:
+                reasons.append(reason)
         if not reasons:
             reasons.append("missing_mandatory_window_results")
         if not bool(capability.get("supports_multi_image")):
@@ -186,6 +200,7 @@ def analyze_frame_windows(
             "frames": [],
             "segments": [],
             "window_manifest": planned_windows,
+            "non_mandatory_evidence": uncovered_fragments,
             "window_results": [],
             "window_validation": {
                 "status": "blocked",
@@ -207,6 +222,8 @@ def analyze_frame_windows(
                 "capability": capability,
                 "mandatory_window_uuids": planned_window_uuids,
                 "covered_window_uuids": [],
+                "non_mandatory_fragment_uuids": non_mandatory_fragment_uuids,
+                "non_mandatory_evidence_path": non_mandatory_evidence_path,
                 "status": "blocked",
                 "failure_reasons": reasons,
             },
@@ -369,6 +386,7 @@ def analyze_frame_windows(
         "frames": analyzed_frames,
         "segments": segments,
         "window_manifest": planned_windows,
+        "non_mandatory_evidence": uncovered_fragments,
         "window_results": window_results,
         "window_validation": {
             "status": overall_status,
@@ -390,6 +408,8 @@ def analyze_frame_windows(
             "capability": capability,
             "mandatory_window_uuids": [str(item.get("window_uuid") or "") for item in planned_windows],
             "covered_window_uuids": [str(item.get("window_uuid") or "") for item in window_results],
+            "non_mandatory_fragment_uuids": non_mandatory_fragment_uuids,
+            "non_mandatory_evidence_path": non_mandatory_evidence_path,
             "status": overall_status,
         },
         "cache_hits": cache_hits,

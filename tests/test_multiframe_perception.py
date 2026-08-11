@@ -12,11 +12,19 @@ from video_vault.analyzer.multi_frame import (
     multi_frame_publish_errors,
     normalize_window_result,
     parse_window_response,
+    plan_frame_windows,
     provider_capability,
+    validate_window,
     window_cache_key,
     write_window_evidence,
 )
 from video_vault.analyzer import vision_pipeline
+from video_vault.analyzer.local_provider import LocalProvider
+from video_vault.capability_registry import (
+    persist_probe_capability,
+    resolve_verified_probe_capability,
+    validate_local_endpoint_scope,
+)
 from video_vault.config import load_config
 from video_vault.database import connect, init_db, project_videos, upsert_video
 from video_vault.project import create_project
@@ -70,6 +78,40 @@ def test_scene_boundary_and_large_gap_never_share_a_window(tmp_path):
     assert any("scene_boundary" in window["window_policy"]["split_reasons"] for window in windows[1:])
 
 
+@pytest.mark.parametrize("count", [1, 2])
+def test_short_scene_fragment_is_non_mandatory_evidence(tmp_path, count):
+    plan = plan_frame_windows(_manifest(tmp_path, count), 20)
+    assert plan["mandatory_windows"] == []
+    assert len(plan["non_mandatory_fragments"]) == 1
+    fragment = plan["non_mandatory_fragments"][0]
+    assert fragment["mandatory"] is False
+    assert fragment["reason"] == "insufficient_scene_samples"
+    assert len(fragment["frames"]) == count
+    assert fragment["validation"]["model_result_required"] is False
+
+
+def test_short_sampling_boundary_fragment_merges_when_policy_safe(tmp_path):
+    frames = _manifest(tmp_path, 5)
+    frames[3]["sample_reasons"] = ["boundary"]
+    plan = plan_frame_windows(frames, 20)
+    assert plan["non_mandatory_fragments"] == []
+    assert [len(window["frames"]) for window in plan["mandatory_windows"]] == [5]
+    assert "merged_short_fragment" in plan["mandatory_windows"][0]["window_policy"]["split_reasons"]
+
+
+def test_short_hard_scene_fragment_remains_explicitly_uncovered(tmp_path):
+    frames = _manifest(tmp_path, 5)
+    frames[3]["sample_reasons"] = ["scene"]
+    first = plan_frame_windows(frames, 20)
+    second = plan_frame_windows(frames, 20)
+    assert [len(window["frames"]) for window in first["mandatory_windows"]] == [3]
+    assert [len(item["frames"]) for item in first["non_mandatory_fragments"]] == [2]
+    assert first["non_mandatory_fragments"][0]["reason"] == "insufficient_scene_samples"
+    assert [window["window_uuid"] for window in first["mandatory_windows"]] == [window["window_uuid"] for window in second["mandatory_windows"]]
+    assert [item["fragment_uuid"] for item in first["non_mandatory_fragments"]] == [item["fragment_uuid"] for item in second["non_mandatory_fragments"]]
+    assert all(validate_window(window)["status"] == "pass" for window in first["mandatory_windows"])
+
+
 def test_local_capability_requires_explicit_valid_contract():
     class Local:
         provider = "local"
@@ -86,6 +128,89 @@ def test_local_capability_requires_explicit_valid_contract():
     }}}})
     assert capability["supports_multi_image"] is True
     assert capability["maximum_images"] == 4
+    assert LocalProvider.supports_multi_frame is False
+
+
+def test_verified_probe_registry_enables_formal_multi_image_without_metadata(tmp_path, monkeypatch):
+    cfg = {
+        "library_root": str(tmp_path),
+        "ffmpeg_path": "missing-ffmpeg",
+        "ai": {"provider": "local", "local": {
+            "base_url": "http://127.0.0.1:1234/v1",
+            "model": "vision-model",
+        }},
+    }
+    scope = validate_local_endpoint_scope("http://127.0.0.1:1234/v1")
+    persisted = persist_probe_capability(
+        cfg,
+        provider="local",
+        model="vision-model",
+        endpoint_scope=scope,
+        verified=True,
+        maximum_images=3,
+        supported_image_formats=["jpeg"],
+        provider_contract_version=multi_frame.MULTI_FRAME_CONTRACT_VERSION,
+        prompt_contract_version=multi_frame.MULTI_FRAME_PROMPT_VERSION,
+        capability_schema_version=multi_frame.MULTI_FRAME_SCHEMA_VERSION,
+        probe_evidence={
+            "status": "pass",
+            "semantic_validation": "image_count_and_order_match",
+            "image_count": 3,
+            "validated_network_scope": "loopback",
+            "request_reasoning_control": "per_request",
+        },
+    )
+    assert persisted["status"] == "persisted"
+
+    class VerifiedLocal:
+        provider = "local"
+        model = "vision-model"
+        base_url = "http://127.0.0.1:1234/v1"
+        multi_frame_prompt_version = multi_frame.MULTI_FRAME_PROMPT_VERSION
+
+        def __init__(self):
+            self.calls = 0
+
+        def analyze_window(self, _paths, timestamps, _video):
+            self.calls += 1
+            return ({
+                "summary": "咖啡沖煮畫面",
+                "action": "倒水沖煮",
+                "start_seconds": timestamps[0],
+                "end_seconds": timestamps[-1],
+                "shot_role": "過程",
+                "technical_quality": {"score": 0.9, "issues": []},
+                "duplicate_group": "",
+                "natural_audio_recommendation": "keep",
+                "confidence": 0.9,
+                "tags": ["coffee"],
+            }, {"choices": [{"message": {"content": "{}"}}]})
+
+    provider = VerifiedLocal()
+    monkeypatch.setattr(vision_pipeline, "provider_from_config", lambda _cfg: provider)
+    monkeypatch.setattr(multi_frame, "_write_contact_sheet", lambda _paths, output, _ffmpeg: (output.write_bytes(b"sheet"), "")[1])
+    result = vision_pipeline.analyze_frame_windows(
+        {"duration_seconds": 10, "filename": "clip.mp4", "category": "coffee"},
+        cfg,
+        _manifest(tmp_path, 3),
+        duration_seconds=10,
+        evidence_root=tmp_path / "evidence",
+    )
+    assert provider.calls == 1
+    assert result["vision_calls"] == 1
+    assert result["multi_frame_contract"]["capability"]["capability_source"] == "verified_probe"
+    assert multi_frame_publish_errors(result) == []
+
+    changed_contract = resolve_verified_probe_capability(
+        cfg,
+        provider="local",
+        model="vision-model",
+        base_url="http://127.0.0.1:1234/v1",
+        provider_contract_version="changed-contract",
+        prompt_contract_version=multi_frame.MULTI_FRAME_PROMPT_VERSION,
+        capability_schema_version=multi_frame.MULTI_FRAME_SCHEMA_VERSION,
+    )
+    assert changed_contract["status"] == "missing"
 
 
 def test_local_capability_requires_jpeg_for_current_request_contract():
@@ -117,6 +242,14 @@ def test_partition_respects_provider_maximum_images():
     assert max(_partition_lengths(7, min_frames=3, max_frames=3)) <= 3
 
 
+def test_provider_exact_three_limit_records_partition_remainder(tmp_path):
+    plan = plan_frame_windows(_manifest(tmp_path, 7), 20, min_frames=3, max_frames=3)
+    assert [len(window["frames"]) for window in plan["mandatory_windows"]] == [3, 3]
+    assert [len(fragment["frames"]) for fragment in plan["non_mandatory_fragments"]] == [1]
+    assert "provider_partition_remainder" in plan["non_mandatory_fragments"][0]["window_policy"]["split_reasons"]
+    assert all(validate_window(window, min_frames=3, max_frames=3)["status"] == "pass" for window in plan["mandatory_windows"])
+
+
 def test_insufficient_evidence_blocks_without_single_frame_fallback(tmp_path):
     result = vision_pipeline.analyze_frame_windows(
         {"duration_seconds": 10, "filename": "short.mp4", "category": "coffee"},
@@ -133,7 +266,8 @@ def test_insufficient_evidence_blocks_without_single_frame_fallback(tmp_path):
     assert result["segments"] == []
     assert result["vision_calls"] == 0
     assert result["window_validation"]["status"] == "blocked"
-    assert "insufficient_evidence_frames" in result["window_validation"]["needs_review_reasons"]
+    assert "insufficient_scene_samples" in result["window_validation"]["needs_review_reasons"]
+    assert result["non_mandatory_evidence"][0]["mandatory"] is False
     assert result["multi_frame_contract"]["status"] == "blocked"
     errors = multi_frame_publish_errors(result)
     assert "multi_frame_contract_not_pass" in errors
@@ -145,10 +279,11 @@ def test_mixed_pass_and_insufficient_windows_fail_closed(tmp_path):
     skipped_root = tmp_path / "skipped"
     pass_root.mkdir()
     skipped_root.mkdir()
-    planned = [
-        build_frame_windows(_manifest(pass_root, 4), 20)[0],
-        build_frame_windows(_manifest(skipped_root, 2), 20)[0],
-    ]
+    valid = build_frame_windows(_manifest(pass_root, 4), 20)[0]
+    invalid = build_frame_windows(_manifest(skipped_root, 4), 20)[0]
+    invalid["frames"] = invalid["frames"][:2]
+    invalid["validation"] = validate_window(invalid)
+    planned = [valid, invalid]
     result = vision_pipeline.analyze_frame_windows(
         {"duration_seconds": 20, "filename": "mixed.mp4", "category": "travel"},
         {
@@ -517,6 +652,6 @@ def test_project_perception_fails_closed_on_insufficient_evidence(tmp_path, monk
     assert json.loads(dict(run_row)["window_results_json"]) == []
     validation = json.loads(dict(run_row)["window_validation_json"])
     assert validation["status"] == "blocked"
-    assert "insufficient_evidence_frames" in validation["needs_review_reasons"]
+    assert "insufficient_scene_samples" in validation["needs_review_reasons"]
     assert segment_count == 0
     assert dict(project_video)["analysis_status"] == "failed"

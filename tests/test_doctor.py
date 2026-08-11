@@ -8,6 +8,7 @@ import pytest
 
 import video_vault.cli as cli
 import video_vault.doctor as doctor
+from video_vault.analyzer.multi_frame import provider_capability
 
 
 def _config(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
@@ -358,7 +359,7 @@ def test_multi_image_embedded_png_dominant_colors_match_labels():
         assert set(pixels) == {expected_rgb[label]}
 
 
-def test_local_multi_image_behavior_probe_verifies_missing_metadata_without_cloud(monkeypatch):
+def test_local_multi_image_behavior_probe_verifies_missing_metadata_without_cloud(tmp_path, monkeypatch):
     calls = []
     assert len(doctor._DOCTOR_PROBE_IMAGES) >= 5
     monkeypatch.setattr(doctor, "_select_probe_colors", lambda: ["red", "green", "blue"])
@@ -371,24 +372,89 @@ def test_local_multi_image_behavior_probe_verifies_missing_metadata_without_clou
         return _JsonResponse({"choices": [{"message": {"content": '{"image_count":3,"order":["red","green","blue"]}'}}]})
 
     monkeypatch.setattr(doctor, "urlopen", local_urlopen)
-    cfg = {"ai": {"provider": "local", "local": {"base_url": "http://127.0.0.1:1234/v1", "model": "vision-model"}}}
+    cfg = {"library_root": str(tmp_path), "ai": {"provider": "local", "local": {"base_url": "http://127.0.0.1:1234/v1", "model": "vision-model"}}}
     result = doctor._provider_capability_check(cfg, "full")
 
     assert result["status"] == "pass"
     assert result["evidence"]["metadata_capability"]["status"] == "missing"
     assert result["evidence"]["behavior_capability"]["status"] == "pass"
-    assert result["evidence"]["capability_source"] == "verified_by_behavior"
+    assert result["evidence"]["capability_source"] == "verified_probe"
+    assert result["evidence"]["runtime_capability_record"]["status"] == "persisted"
     assert result["evidence"]["behavior_capability"]["cloud_fallback"] is False
     assert result["evidence"]["behavior_capability"]["semantic_validation"] == "image_count_and_order_match"
     assert result["evidence"]["behavior_capability"]["validated_network_scope"] == "loopback"
     assert len(calls) == 2
     assert str(calls[1].full_url).endswith("/chat/completions")
     payload = json.loads(calls[1].data.decode("utf-8"))
+    assert payload["max_tokens"] == 256
+    assert payload["reasoning_effort"] == "none"
     image_parts = payload["messages"][0]["content"][1:]
     assert len({part["image_url"]["url"] for part in image_parts}) == 3
+    assert all(part["image_url"]["url"].startswith("data:image/jpeg;base64,") for part in image_parts)
     prompt = payload["messages"][0]["content"][0]["text"].lower()
     assert all(color not in prompt for color in ("red", "green", "blue", "yellow", "purple"))
     assert '"red"' not in prompt
+    behavior = result["evidence"]["behavior_capability"]
+    assert behavior["request_output_limit"] == 256
+    assert behavior["request_reasoning_effort"] == "none"
+    assert behavior["request_reasoning_control"] == "per_request"
+    assert behavior["response_content_chars"] > 0
+    assert behavior["response_reasoning_content_chars"] == 0
+
+    class Local:
+        provider = "local"
+        model = "vision-model"
+        base_url = "http://127.0.0.1:1234/v1"
+
+    capability = provider_capability(Local(), cfg)
+    assert capability["supports_multi_image"] is True
+    assert capability["capability_source"] == "verified_probe"
+    assert capability["maximum_images"] == 3
+    assert capability["supported_image_formats"] == ["jpeg"]
+    assert capability["binding_fingerprint"]
+    assert capability["verification_fingerprint"]
+
+    class OtherModel(Local):
+        model = "other-model"
+
+    class OtherEndpoint(Local):
+        base_url = "http://127.0.0.1:2234/v1"
+
+    assert provider_capability(OtherModel(), cfg)["supports_multi_image"] is False
+    assert provider_capability(OtherEndpoint(), cfg)["supports_multi_image"] is False
+
+
+def test_failed_probe_invalidates_same_binding_registry_record(tmp_path, monkeypatch):
+    cfg = {"library_root": str(tmp_path), "ai": {"provider": "local", "local": {"base_url": "http://127.0.0.1:1234/v1", "model": "vision-model"}}}
+    monkeypatch.setattr(doctor, "_select_probe_colors", lambda: ["red", "green", "blue"])
+
+    def passing(request, **kwargs):
+        if str(getattr(request, "full_url", request)).endswith("/models"):
+            return _JsonResponse({"data": [{"id": "vision-model"}]})
+        return _JsonResponse({"choices": [{"message": {"content": '{"image_count":3,"order":["red","green","blue"]}'}}]})
+
+    monkeypatch.setattr(doctor, "urlopen", passing)
+    assert doctor._provider_capability_check(cfg, "full")["status"] == "pass"
+
+    class Local:
+        provider = "local"
+        model = "vision-model"
+        base_url = "http://127.0.0.1:1234/v1"
+
+    assert provider_capability(Local(), cfg)["supports_multi_image"] is True
+
+    def failing(request, **kwargs):
+        if str(getattr(request, "full_url", request)).endswith("/models"):
+            return _JsonResponse({"data": [{"id": "vision-model"}]})
+        return _JsonResponse({"choices": [{"message": {"content": '{"image_count":1,"order":["red"]}'}}]})
+
+    monkeypatch.setattr(doctor, "urlopen", failing)
+    blocked = doctor._provider_capability_check(cfg, "full")
+    assert blocked["status"] == "blocked"
+    assert blocked["evidence"]["runtime_capability_record"]["verification_source"] == "probe_failed"
+    resolved = provider_capability(Local(), cfg)
+    assert resolved["supports_multi_image"] is False
+    assert resolved["registry_reason"] == "verified_probe_record_invalid"
 
 
 def test_local_multi_image_fixed_text_only_answer_fails_runtime_challenge(monkeypatch):
@@ -422,6 +488,24 @@ def test_local_multi_image_behavior_probe_generic_json_is_blocked(monkeypatch):
     assert result["status"] == "blocked"
     assert result["evidence"]["behavior_capability"]["status"] == "blocked"
     assert result["evidence"]["behavior_capability"]["error_code"] == "image_semantics_mismatch"
+
+
+def test_local_multi_image_reasoning_only_response_is_blocked(monkeypatch):
+    monkeypatch.setattr(doctor, "_select_probe_colors", lambda: ["yellow", "purple", "blue"])
+    monkeypatch.setattr(doctor, "urlopen", lambda request, **kwargs: _JsonResponse(
+        {"data": [{"id": "vision-model"}]} if str(getattr(request, "full_url", request)).endswith("/models") else {
+            "choices": [{"finish_reason": "length", "message": {"content": "", "reasoning_content": "thinking"}}]
+        }
+    ))
+    cfg = {"ai": {"provider": "local", "local": {"base_url": "http://127.0.0.1:1234/v1", "model": "vision-model"}}}
+    result = doctor._provider_capability_check(cfg, "full")
+    behavior = result["evidence"]["behavior_capability"]
+    assert result["status"] == "blocked"
+    assert behavior["status"] == "malformed_response"
+    assert behavior["error_code"] == "reasoning_only_response"
+    assert behavior["response_finish_reason"] == "length"
+    assert behavior["response_content_chars"] == 0
+    assert behavior["response_reasoning_content_chars"] == len("thinking")
 
 
 @pytest.mark.parametrize(

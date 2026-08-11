@@ -22,6 +22,7 @@ DEFAULT_CONFIG = {
         "max_frames_per_clip": 180,
         "max_frames_per_minute": 30,
         "visual_dedupe_threshold": 0.985,
+        "hardware_decode": "software",
     },
     "perception": {
         "multi_frame": {
