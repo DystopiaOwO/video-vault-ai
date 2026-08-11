@@ -7,8 +7,8 @@ from .audio_perception import AudioPerceptionError, analyze_audio_file
 from .config import parse_bool
 from .analyzer.multi_frame import (
     MultiFrameValidationError,
-    build_frame_windows,
     multi_frame_publish_errors,
+    plan_frame_windows,
     provider_capability,
     update_window_evidence_segment_uuid,
 )
@@ -156,11 +156,13 @@ def run_project_perception(
         max_images = 0
         if multi_frame_enabled:
             max_images = int(provider_capability(provider_from_config(cfg), cfg).get("maximum_images") or 0)
-        windows = build_frame_windows(
+        window_plan = plan_frame_windows(
             manifest,
             float(video.get("duration_seconds") or 0),
             max_frames=max_images if multi_frame_enabled and max_images >= 3 else 5,
         )
+        windows = list(window_plan["mandatory_windows"])
+        non_mandatory_fragments = list(window_plan["non_mandatory_fragments"])
         set_run_window_manifest(db, run_uuid, windows)
         sampling["estimated_vision_calls"] = len(windows) if len(manifest) >= 3 else len(manifest)
         set_run_sampling_manifest(db, run_uuid, sampling)
@@ -178,6 +180,7 @@ def run_project_perception(
                 duration_seconds=float(video.get("duration_seconds") or 0),
                 evidence_root=staging / "evidence",
                 windows=windows,
+                non_mandatory_fragments=non_mandatory_fragments,
             )
         else:
             result = analyze_frame_manifest(
@@ -188,6 +191,7 @@ def run_project_perception(
                 should_cancel=should_cancel,
             )
             result.setdefault("window_manifest", windows)
+            result.setdefault("non_mandatory_evidence", non_mandatory_fragments)
             result.setdefault("window_results", [])
             result.setdefault("window_validation", {"status": "skipped", "reason": "legacy config"})
         if multi_frame_enabled:

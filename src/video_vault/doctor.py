@@ -1,8 +1,9 @@
-"""Read-only, auditable local environment health checks.
+"""Auditable local environment health checks.
 
 The doctor is deliberately separate from repair workflows.  It never installs
-packages, edits configuration, downloads models, or writes production library
-data.  ``full`` mode may create and remove a temporary fixture only.
+packages, edits configuration, downloads models, or writes project/media data.
+``full`` mode may create temporary fixtures and persist a model-bound runtime
+capability record under ``05_index`` after a successful behavior probe.
 """
 
 from __future__ import annotations
@@ -29,6 +30,15 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from .analyzer.multi_frame import (
+    MULTI_FRAME_CONTRACT_VERSION,
+    MULTI_FRAME_PROMPT_VERSION,
+    MULTI_FRAME_SCHEMA_VERSION,
+)
+from .capability_registry import (
+    persist_probe_capability,
+    validate_local_endpoint_scope,
+)
 from .config import DEFAULT_CONFIG, load_config
 from .paths import db_path
 
@@ -49,7 +59,16 @@ _DOCTOR_PROBE_IMAGES = {
     "yellow": "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAdklEQVR4nO3PQQkAMAzAwPo33Yno4xgEIuAyu/N1XtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWjBsQcyl+HSnr9raQAAAABJRU5ErkJggg==",
     "purple": "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAdklEQVR4nO3PQQkAMAzAwEqv9Ino4xgEIuAyO/t1wwUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWHHvPigDxMpG8LwAAAABJRU5ErkJggg==",
 }
+_DOCTOR_PROBE_JPEG_IMAGES = {
+    "red": "/9j//gAPTGF2YzYzLjEuMTAwAP/bAEMACAQEBAQEBQUFBQUFBgYGBgYGBgYGBgYGBgcHBwgICAcHBwYGBwcICAgICQkJCAgICAkJCgoKDAwLCw4ODhERFP/EAE0AAQEAAAAAAAAAAAAAAAAAAAAGAQEBAQAAAAAAAAAAAAAAAAAABgcQAQAAAAAAAAAAAAAAAAAAAAARAQAAAAAAAAAAAAAAAAAAAAD/wAARCABAAEADARIAAhIAAxIA/9oADAMBAAIRAxEAPwCLEmN/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH/2Q==",
+    "green": "/9j//gAPTGF2YzYzLjEuMTAwAP/bAEMACAQEBAQEBQUFBQUFBgYGBgYGBgYGBgYGBgcHBwgICAcHBwYGBwcICAgICQkJCAgICAkJCgoKDAwLCw4ODhERFP/EAEwAAQEAAAAAAAAAAAAAAAAAAAAFAQEBAAAAAAAAAAAAAAAAAAAABxABAAAAAAAAAAAAAAAAAAAAABEBAAAAAAAAAAAAAAAAAAAAAP/AABEIAEAAQAMBEgACEgADEgD/2gAMAwEAAhEDEQA/AKwlQigAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//Z",
+    "blue": "/9j//gAPTGF2YzYzLjEuMTAwAP/bAEMACAQEBAQEBQUFBQUFBgYGBgYGBgYGBgYGBgcHBwgICAcHBwYGBwcICAgICQkJCAgICAkJCgoKDAwLCw4ODhERFP/EAE0AAQEAAAAAAAAAAAAAAAAAAAAHAQEBAQAAAAAAAAAAAAAAAAAABQcQAQAAAAAAAAAAAAAAAAAAAAARAQAAAAAAAAAAAAAAAAAAAAD/wAARCABAAEADARIAAhIAAxIA/9oADAMBAAIRAxEAPwCODfxKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH/2Q==",
+    "yellow": "/9j//gAPTGF2YzYzLjEuMTAwAP/bAEMACAQEBAQEBQUFBQUFBgYGBgYGBgYGBgYGBgcHBwgICAcHBwYGBwcICAgICQkJCAgICAkJCgoKDAwLCw4ODhERFP/EAE0AAQEAAAAAAAAAAAAAAAAAAAAHAQEBAQAAAAAAAAAAAAAAAAAABQgQAQAAAAAAAAAAAAAAAAAAAAARAQAAAAAAAAAAAAAAAAAAAAD/wAARCABAAEADARIAAhIAAxIA/9oADAMBAAIRAxEAPwCxDP4qAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/2Q==",
+    "purple": "/9j//gAPTGF2YzYzLjEuMTAwAP/bAEMACAQEBAQEBQUFBQUFBgYGBgYGBgYGBgYGBgcHBwgICAcHBwYGBwcICAgICQkJCAgICAkJCgoKDAwLCw4ODhERFP/EAEwAAQEAAAAAAAAAAAAAAAAAAAAHAQEBAAAAAAAAAAAAAAAAAAAABhABAAAAAAAAAAAAAAAAAAAAABEBAAAAAAAAAAAAAAAAAAAAAP/AABEIAEAAQAMBEgACEgADEgD/2gAMAwEAAhEDEQA/AJoKoWoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//Z",
+}
 _STORY_RESERVED_OUTPUT_TOKENS = 2048
+_DOCTOR_PROBE_MAX_OUTPUT_TOKENS = 256
+_DOCTOR_PROBE_REASONING_EFFORT = "none"
 
 
 def _optional_bool(value: object, *, default: bool = False) -> tuple[bool, str | None]:
@@ -414,64 +433,9 @@ def _local_models(base_url: str) -> tuple[bool, list[dict[str, Any]]]:
 
 
 def _validate_local_endpoint_scope(base_url: str) -> dict[str, Any]:
-    """Validate and pin a local endpoint to a loopback address before any request."""
+    """Compatibility wrapper for the shared Doctor/Perception scope policy."""
 
-    evidence: dict[str, Any] = {
-        "network_scope_policy": "loopback_only",
-        "configured_endpoint": str(base_url),
-        "validated_network_scope": "blocked",
-        "resolved_addresses": [],
-        "dns_validation": "not_attempted",
-    }
-    parsed = urlparse(str(base_url).rstrip("/"))
-    try:
-        port = parsed.port
-    except ValueError:
-        port = None
-    host = (parsed.hostname or "").strip().lower().rstrip(".")
-    if parsed.scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
-        return {**evidence, "status": "blocked", "error_code": "invalid_local_endpoint"}
-
-    resolved: list[str] = []
-    if host == "localhost":
-        try:
-            infos = socket.getaddrinfo(host, port or 80, type=socket.SOCK_STREAM)
-            for info in infos:
-                address = str(info[4][0]).split("%", 1)[0]
-                if address not in resolved:
-                    resolved.append(address)
-            evidence["dns_validation"] = "all_addresses_checked"
-        except (OSError, socket.gaierror):
-            return {**evidence, "status": "blocked", "error_code": "loopback_hostname_unresolved", "dns_validation": "failed"}
-    else:
-        try:
-            parsed_ip = ipaddress.ip_address(host.split("%", 1)[0])
-        except ValueError:
-            return {**evidence, "status": "blocked", "error_code": "host_not_loopback_allowlist", "dns_validation": "not_applicable"}
-        resolved = [str(parsed_ip)]
-        evidence["dns_validation"] = "ip_literal"
-
-    evidence["resolved_addresses"] = resolved
-    try:
-        addresses = [ipaddress.ip_address(address) for address in resolved]
-    except ValueError:
-        return {**evidence, "status": "blocked", "error_code": "dns_address_invalid"}
-    if not addresses or not all(address.is_loopback for address in addresses):
-        return {**evidence, "status": "blocked", "error_code": "dns_resolved_non_loopback"}
-
-    selected = next((address for address in addresses if address.version == 4), addresses[0])
-    selected_host = str(selected)
-    netloc = f"[{selected_host}]" if selected.version == 6 else selected_host
-    if port is not None:
-        netloc = f"{netloc}:{port}"
-    validated_endpoint = parsed._replace(netloc=netloc).geturl().rstrip("/")
-    return {
-        **evidence,
-        "status": "pass",
-        "validated_network_scope": "loopback",
-        "validated_endpoint": validated_endpoint,
-        "selected_loopback_address": selected_host,
-    }
+    return validate_local_endpoint_scope(base_url)
 
 
 def _response_text_content(content: object) -> str | None:
@@ -504,17 +468,18 @@ def _select_probe_colors() -> list[str]:
 
 
 def _local_multi_image_behavior_probe(base_url: str, model_name: str, *, endpoint_scope: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Prove ordered runtime color understanding at a validated local endpoint."""
+    """Prove ordered JPEG understanding at a validated local endpoint."""
     scope = dict(endpoint_scope or _validate_local_endpoint_scope(base_url))
     challenge_order = _select_probe_colors()
     images = [
-        {"label": label, "data_url": f"data:image/png;base64,{_DOCTOR_PROBE_IMAGES[label]}"}
+        {"label": label, "data_url": f"data:image/jpeg;base64,{_DOCTOR_PROBE_JPEG_IMAGES[label]}"}
         for label in challenge_order
     ]
     request_body = {
         "model": str(model_name),
         "temperature": 0,
-        "max_tokens": 64,
+        "max_tokens": _DOCTOR_PROBE_MAX_OUTPUT_TOKENS,
+        "reasoning_effort": _DOCTOR_PROBE_REASONING_EFFORT,
         "messages": [{
             "role": "user",
             "content": [{"type": "text", "text": "Identify the dominant color of each of the three images in input order. Use one simple English color name per image, not hex codes. Return only a JSON object with an image_count integer and an order array. Do not explain."}]
@@ -537,6 +502,10 @@ def _local_multi_image_behavior_probe(base_url: str, model_name: str, *, endpoin
         "model_download": False,
         "generation_post_attempted": False,
         "generation_post_calls": 0,
+        "verified_image_format": "jpeg",
+        "request_output_limit": _DOCTOR_PROBE_MAX_OUTPUT_TOKENS,
+        "request_reasoning_effort": _DOCTOR_PROBE_REASONING_EFFORT,
+        "request_reasoning_control": "per_request",
     }
     if scope.get("status") != "pass":
         return {**evidence, "status": "blocked", "error_code": scope.get("error_code", "local_endpoint_scope_blocked"), "scope_validation": scope}
@@ -557,11 +526,20 @@ def _local_multi_image_behavior_probe(base_url: str, model_name: str, *, endpoin
             return {**evidence, "status": "endpoint_unavailable", "error_code": "http_non_success"}
         payload = json.loads(raw)
         choices = payload.get("choices") if isinstance(payload, Mapping) else None
-        content = choices[0].get("message", {}).get("content") if isinstance(choices, list) and choices and isinstance(choices[0], Mapping) else None
+        choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], Mapping) else {}
+        message = choice.get("message") if isinstance(choice.get("message"), Mapping) else {}
+        content = message.get("content")
+        reasoning_content = message.get("reasoning_content")
+        evidence.update({
+            "response_finish_reason": choice.get("finish_reason"),
+            "response_content_chars": len(content) if isinstance(content, str) else 0,
+            "response_reasoning_content_chars": len(reasoning_content) if isinstance(reasoning_content, str) else 0,
+        })
         parsed = _parse_probe_json(content)
         expected = evidence["expected_response"]
         if parsed is None:
-            return {**evidence, "status": "malformed_response", "error_code": "missing_chat_completion_content"}
+            error_code = "reasoning_only_response" if isinstance(reasoning_content, str) and reasoning_content.strip() else "missing_chat_completion_content"
+            return {**evidence, "status": "malformed_response", "error_code": error_code}
         semantic_valid = parsed.get("image_count") == expected["image_count"] and parsed.get("order") == expected["order"]
         if not semantic_valid:
             return {**evidence, "status": "blocked", "error_code": "image_semantics_mismatch", "parsed_response": dict(parsed)}
@@ -648,6 +626,20 @@ def _provider_capability_check(cfg: Mapping[str, Any], mode: str) -> dict[str, A
         behavior = {"status": "model_incapable", "probe": "not_run", "reason": "configured_model_missing"}
     else:
         behavior = _local_multi_image_behavior_probe(base_url, model_name, endpoint_scope=scope)
+    registry_record = persist_probe_capability(
+        cfg,
+        provider="local",
+        model=model_name,
+        endpoint_scope=scope,
+        verified=behavior.get("status") == "pass",
+        maximum_images=int(behavior.get("image_count") or 3),
+        supported_image_formats=[str(behavior.get("verified_image_format") or "jpeg")],
+        provider_contract_version=MULTI_FRAME_CONTRACT_VERSION,
+        prompt_contract_version=MULTI_FRAME_PROMPT_VERSION,
+        capability_schema_version=MULTI_FRAME_SCHEMA_VERSION,
+        probe_evidence=behavior,
+    )
+    registry_usable = behavior.get("status") == "pass" and registry_record.get("status") == "persisted"
     evidence = {
         "provider": "local",
         "model_exists": model is not None,
@@ -656,12 +648,16 @@ def _provider_capability_check(cfg: Mapping[str, Any], mode: str) -> dict[str, A
         "missing": missing,
         "metadata_capability": metadata_capability,
         "behavior_capability": behavior,
-        "capability_source": "verified_by_behavior" if behavior.get("status") == "pass" and missing else "provider_metadata+verified_by_behavior" if behavior.get("status") == "pass" else "provider_metadata" if not missing else "unverified",
+        "runtime_capability_record": registry_record,
+        "capability_source": "verified_probe" if registry_usable else "provider_metadata" if not missing else "unverified",
     }
-    if behavior.get("status") == "pass":
+    if registry_usable:
         explicit_false = isinstance(raw_caps, Mapping) and raw_caps.get("multi_image") is False
         status = "warning" if explicit_false else "pass"
-        summary = "local multi-image behavior probe 通過；metadata 未宣告，已 verified_by_behavior" if missing else "local multi-image metadata/behavior probe 通過"
+        summary = "local multi-image behavior probe 通過；已持久化 verified_probe contract" if missing else "local multi-image metadata/behavior probe 與 verified_probe contract 通過"
+    elif behavior.get("status") == "pass":
+        status = "blocked"
+        summary = f"local multi-image behavior probe 通過，但 runtime capability registry {registry_record.get('reason') or 'persistence_failed'}"
     else:
         status = "blocked"
         summary = f"local multi-image behavior probe {behavior.get('status') or 'failed'}"

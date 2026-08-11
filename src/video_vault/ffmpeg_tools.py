@@ -4,6 +4,8 @@ from pathlib import Path
 import json
 import subprocess
 
+from .media_decode import perception_decode_args
+
 
 def probe(path: Path, cfg: dict) -> dict:
     cmd = [
@@ -58,6 +60,7 @@ def extract_frames(
             "-loglevel",
             "error",
             "-y",
+            *perception_decode_args(cfg),
             "-ss",
             _timestamp_arg(timestamp),
             "-i",

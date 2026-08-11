@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 from typing import Any, Mapping
 
+from ..capability_registry import resolve_verified_probe_capability
 from .frame_analysis import PROMPT_VERSION, TAGS
 
 
@@ -26,7 +27,7 @@ MULTI_FRAME_PROMPT_VERSION = f"{PROMPT_VERSION}:multiframe-v1"
 MIN_WINDOW_FRAMES = 3
 MAX_WINDOW_FRAMES = 5
 WINDOW_POLICY_NAME = "scene-aware-window"
-WINDOW_POLICY_VERSION = 1
+WINDOW_POLICY_VERSION = 2
 MAX_WINDOW_SPAN_SECONDS = 12.0
 SUPPORTED_IMAGE_FORMATS = ("jpeg", "png", "webp")
 CAPABILITY_SOURCES = {"explicit_config", "provider_metadata", "verified_probe", "built_in_mock"}
@@ -84,6 +85,31 @@ def multi_frame_publish_errors(result: Mapping[str, Any]) -> list[str]:
         errors.append("mandatory_window_manifest_has_missing_uuid")
     if len(set(planned_uuids)) != len(planned_uuids):
         errors.append("mandatory_window_manifest_has_duplicate_uuid")
+
+    fragments = result.get("non_mandatory_evidence", [])
+    if not isinstance(fragments, list):
+        errors.append("non_mandatory_evidence_not_list")
+        fragments = []
+    fragment_uuids: list[str] = []
+    for index, fragment in enumerate(fragments):
+        if not isinstance(fragment, Mapping):
+            errors.append(f"non_mandatory_fragment_{index}_not_object")
+            continue
+        fragment_uuid = str(fragment.get("fragment_uuid") or "")
+        fragment_uuids.append(fragment_uuid)
+        if not fragment_uuid:
+            errors.append(f"non_mandatory_fragment_{index}_missing_uuid")
+        if fragment.get("mandatory") is not False:
+            errors.append(f"non_mandatory_fragment_{index}_marked_mandatory")
+        if str(fragment.get("reason") or "") != "insufficient_scene_samples":
+            errors.append(f"non_mandatory_fragment_{index}_reason_invalid")
+        frames = fragment.get("frames")
+        if not isinstance(frames, list) or not (0 < len(frames) < MIN_WINDOW_FRAMES):
+            errors.append(f"non_mandatory_fragment_{index}_frame_count_invalid")
+    if len(set(fragment_uuids)) != len(fragment_uuids):
+        errors.append("non_mandatory_fragment_duplicate_uuid")
+    if set(fragment_uuids).intersection(planned_uuids):
+        errors.append("non_mandatory_fragment_overlaps_mandatory_uuid")
 
     validation = result.get("window_validation")
     checks = validation.get("checks") if isinstance(validation, Mapping) else None
@@ -157,6 +183,9 @@ def multi_frame_publish_errors(result: Mapping[str, Any]) -> list[str]:
         errors.append("published_segment_has_duplicate_uuid")
     if set(segment_uuids) != set(result_uuids):
         errors.append("published_segment_coverage_mismatch")
+    contract_fragment_uuids = contract.get("non_mandatory_fragment_uuids") if isinstance(contract, Mapping) else None
+    if contract_fragment_uuids is not None and set(str(item) for item in contract_fragment_uuids) != set(fragment_uuids):
+        errors.append("non_mandatory_fragment_contract_mismatch")
     return errors
 
 
@@ -173,26 +202,30 @@ def _partition_lengths(
     min_frames: int = MIN_WINDOW_FRAMES,
     max_frames: int = MAX_WINDOW_FRAMES,
 ) -> list[int]:
-    if count <= 0:
+    if count < min_frames:
         return []
-    lengths: list[int] = []
-    remaining = count
-    while remaining:
-        if remaining <= max_frames:
-            lengths.append(remaining)
-            break
-        size = max_frames
-        remainder = remaining - size
-        if 0 < remainder < min_frames:
-            # Split the final group evenly so no provider window exceeds its
-            # declared maximum, while keeping the historical 5+3+3 shape.
-            groups = (remaining + max_frames - 1) // max_frames
-            base, extra = divmod(remaining, groups)
-            lengths.extend([base + 1] * extra + [base] * (groups - extra))
-            break
-        lengths.append(size)
-        remaining -= size
-    return lengths
+    # Some provider limits cannot represent every count (for example, four
+    # frames with an exact three-image limit). Return the largest legal prefix;
+    # the planner records the remainder as non-mandatory evidence.
+    for covered in range(count, min_frames - 1, -1):
+        lengths: list[int] = []
+        remaining = covered
+        while remaining:
+            if min_frames <= remaining <= max_frames:
+                lengths.append(remaining)
+                break
+            size = max_frames
+            remainder = remaining - size
+            if 0 < remainder < min_frames:
+                groups = (remaining + max_frames - 1) // max_frames
+                base, extra = divmod(remaining, groups)
+                lengths.extend([base + 1] * extra + [base] * (groups - extra))
+                break
+            lengths.append(size)
+            remaining -= size
+        if sum(lengths) == covered and all(min_frames <= length <= max_frames for length in lengths):
+            return lengths
+    return []
 
 
 def _candidate_clusters(ordered: list[dict]) -> list[tuple[list[dict], list[str]]]:
@@ -209,13 +242,18 @@ def _candidate_clusters(ordered: list[dict]) -> list[tuple[list[dict], list[str]
         gap = float(item["timestamp_seconds"]) - float(previous["timestamp_seconds"])
         current_reasons = set(item.get("sample_reasons") or [])
         previous_reasons = set(previous.get("sample_reasons") or [])
-        boundary = bool(
-            current_reasons & {"scene", "hard_cut", "cut", "boundary", "scene_change"}
+        hard_boundary = bool(
+            current_reasons & {"scene", "hard_cut", "cut", "scene_change"}
             or previous_reasons & {"hard_cut", "cut", "scene_change"}
         )
         split_reason = ""
-        if boundary:
+        if hard_boundary:
             split_reason = "scene_boundary"
+        elif "boundary" in current_reasons:
+            # Sampling marks clip endpoints as ``boundary``. Keep the marker
+            # visible to the planner, but allow a short endpoint fragment to
+            # merge when count/span constraints prove the merge is safe.
+            split_reason = "sampling_boundary"
         elif gap > MAX_WINDOW_SPAN_SECONDS:
             split_reason = "large_temporal_gap"
         elif float(item["timestamp_seconds"]) - float(current[0]["timestamp_seconds"]) > MAX_WINDOW_SPAN_SECONDS:
@@ -231,14 +269,137 @@ def _candidate_clusters(ordered: list[dict]) -> list[tuple[list[dict], list[str]
     return clusters
 
 
-def build_frame_windows(
+def _cluster_span(cluster: list[dict]) -> float:
+    if not cluster:
+        return 0.0
+    return float(cluster[-1]["timestamp_seconds"]) - float(cluster[0]["timestamp_seconds"])
+
+
+def _merge_allowed(
+    left: list[dict],
+    right: list[dict],
+    right_reasons: list[str],
+    min_frames: int,
+    max_frames: int,
+) -> bool:
+    protected = {"scene_boundary", "large_temporal_gap", "maximum_temporal_span"}
+    combined = left + right
+    partition = _partition_lengths(len(combined), min_frames, max_frames)
+    fully_partitionable = sum(partition) == len(combined) and all(
+        min_frames <= length <= max_frames for length in partition
+    )
+    return (
+        bool(left and right)
+        and not protected.intersection(right_reasons)
+        and _cluster_span(combined) <= MAX_WINDOW_SPAN_SECONDS
+        and (fully_partitionable or len(combined) < min_frames)
+    )
+
+
+def _coalesce_short_clusters(
+    clusters: list[tuple[list[dict], list[str]]],
+    min_frames: int,
+    max_frames: int,
+) -> list[tuple[list[dict], list[str]]]:
+    """Merge only short fragments whose separating policy marker is soft."""
+
+    pending = [(list(cluster), list(reasons)) for cluster, reasons in clusters]
+    index = 0
+    while index < len(pending):
+        cluster, reasons = pending[index]
+        if len(cluster) >= min_frames:
+            index += 1
+            continue
+        if index > 0:
+            left, left_reasons = pending[index - 1]
+            if _merge_allowed(left, cluster, reasons, min_frames, max_frames):
+                pending[index - 1] = (
+                    left + cluster,
+                    sorted(set(left_reasons + reasons + ["merged_short_fragment"])),
+                )
+                pending.pop(index)
+                index = max(0, index - 1)
+                continue
+        if index + 1 < len(pending):
+            right, right_reasons = pending[index + 1]
+            if _merge_allowed(cluster, right, right_reasons, min_frames, max_frames):
+                pending[index] = (
+                    cluster + right,
+                    sorted(set(reasons + right_reasons + ["merged_short_fragment"])),
+                )
+                pending.pop(index + 1)
+                continue
+        index += 1
+    return pending
+
+
+def _identity_digest(entries: list[dict], split_reasons: list[str], *, kind: str) -> str:
+    identity_payload: list[dict[str, Any]] = [
+        {
+            "timestamp_seconds": item["timestamp_seconds"],
+            "fingerprint": item["fingerprint"],
+            "sample_reasons": item["sample_reasons"],
+        }
+        for item in entries
+    ]
+    identity_payload.append({
+        "kind": kind,
+        "policy": WINDOW_POLICY_NAME,
+        "version": WINDOW_POLICY_VERSION,
+        "split_reasons": split_reasons,
+    })
+    return hashlib.sha256(
+        json.dumps(identity_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _public_frames(entries: list[dict]) -> list[dict]:
+    return [
+        {
+            "frame_index": index,
+            "frame_path": item.get("frame_path", ""),
+            "timestamp_seconds": item["timestamp_seconds"],
+            "sample_reasons": item["sample_reasons"],
+            "fingerprint": item["fingerprint"],
+        }
+        for index, item in enumerate(entries)
+    ]
+
+
+def _non_mandatory_fragment(entries: list[dict], split_reasons: list[str], duration_seconds: float) -> dict:
+    reasons = sorted(set(split_reasons + ["insufficient_scene_samples"]))
+    digest = _identity_digest(entries, reasons, kind="non_mandatory_fragment")
+    return {
+        "schema_version": MULTI_FRAME_SCHEMA_VERSION,
+        "fragment_uuid": f"fragment_{digest[:24]}",
+        "mandatory": False,
+        "reason": "insufficient_scene_samples",
+        "window_policy": {
+            "name": WINDOW_POLICY_NAME,
+            "version": WINDOW_POLICY_VERSION,
+            "split_reasons": reasons,
+        },
+        "frames": _public_frames(entries),
+        "start_seconds": entries[0]["timestamp_seconds"] if entries else 0.0,
+        "end_seconds": entries[-1]["timestamp_seconds"] if entries else 0.0,
+        "duration_seconds": round(max(0.0, float(duration_seconds or 0)), 6),
+        "validation": {
+            "status": "uncovered",
+            "mandatory": False,
+            "model_result_required": False,
+            "needs_review_reasons": ["insufficient_scene_samples"],
+        },
+    }
+
+
+def plan_frame_windows(
     frame_manifest: list[dict],
     duration_seconds: float,
     *,
     min_frames: int = MIN_WINDOW_FRAMES,
     max_frames: int = MAX_WINDOW_FRAMES,
-) -> list[dict]:
-    """Build deterministic scene-aware 3-5 frame windows from a manifest."""
+) -> dict[str, Any]:
+    """Plan valid mandatory windows and explicit non-mandatory fragments."""
 
     if min_frames != MIN_WINDOW_FRAMES or max_frames != MAX_WINDOW_FRAMES:
         if not 2 <= min_frames <= max_frames <= 8:
@@ -258,51 +419,68 @@ def build_frame_windows(
         item["fingerprint"] = fingerprint
 
     windows: list[dict] = []
+    fragments: list[dict] = []
     ordinal = 0
-    for cluster, cluster_reasons in _candidate_clusters(ordered):
-        lengths = _partition_lengths(len(cluster), min_frames, max_frames) if len(cluster) >= min_frames else [len(cluster)]
+    clusters = _coalesce_short_clusters(_candidate_clusters(ordered), min_frames, max_frames)
+    for cluster, cluster_reasons in clusters:
+        if len(cluster) < min_frames:
+            fragments.append(_non_mandatory_fragment(cluster, cluster_reasons, duration_seconds))
+            continue
+        lengths = _partition_lengths(len(cluster), min_frames, max_frames)
         cursor = 0
         for length in lengths:
             entries = cluster[cursor : cursor + length]
             cursor += length
             ordinal += 1
             split_reasons = list(cluster_reasons)
-            if len(entries) < min_frames:
-                split_reasons.append("insufficient_evidence_frames")
-            identity_payload = [
-                {
-                    "timestamp_seconds": item["timestamp_seconds"],
-                    "fingerprint": item["fingerprint"],
-                    "sample_reasons": item["sample_reasons"],
-                }
-                for item in entries
-            ]
-            identity_payload.append({"policy": WINDOW_POLICY_NAME, "version": WINDOW_POLICY_VERSION, "split_reasons": split_reasons})
-            digest = hashlib.sha256(
-                json.dumps(identity_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            ).hexdigest()
+            digest = _identity_digest(entries, split_reasons, kind="mandatory_window")
             window = {
                 "schema_version": MULTI_FRAME_SCHEMA_VERSION,
                 "window_policy": {"name": WINDOW_POLICY_NAME, "version": WINDOW_POLICY_VERSION, "split_reasons": split_reasons},
                 "window_uuid": f"window_{digest[:24]}",
                 "ordinal": ordinal,
-                "frames": [
-                    {
-                        "frame_index": index,
-                        "frame_path": item.get("frame_path", ""),
-                        "timestamp_seconds": item["timestamp_seconds"],
-                        "sample_reasons": item["sample_reasons"],
-                        "fingerprint": item["fingerprint"],
-                    }
-                    for index, item in enumerate(entries)
-                ],
+                "mandatory": True,
+                "frames": _public_frames(entries),
                 "start_seconds": entries[0]["timestamp_seconds"] if entries else 0.0,
                 "end_seconds": entries[-1]["timestamp_seconds"] if entries else 0.0,
                 "duration_seconds": round(max(0.0, float(duration_seconds or 0)), 6),
             }
             window["validation"] = validate_window(window, min_frames=min_frames, max_frames=max_frames)
             windows.append(window)
-    return windows
+        if cursor < len(cluster):
+            fragments.append(_non_mandatory_fragment(
+                cluster[cursor:],
+                cluster_reasons + ["provider_partition_remainder"],
+                duration_seconds,
+            ))
+    return {
+        "mandatory_windows": windows,
+        "non_mandatory_fragments": fragments,
+        "planning_summary": {
+            "mandatory_window_count": len(windows),
+            "non_mandatory_fragment_count": len(fragments),
+            "non_mandatory_frame_count": sum(len(item.get("frames") or []) for item in fragments),
+            "policy_name": WINDOW_POLICY_NAME,
+            "policy_version": WINDOW_POLICY_VERSION,
+        },
+    }
+
+
+def build_frame_windows(
+    frame_manifest: list[dict],
+    duration_seconds: float,
+    *,
+    min_frames: int = MIN_WINDOW_FRAMES,
+    max_frames: int = MAX_WINDOW_FRAMES,
+) -> list[dict]:
+    """Compatibility wrapper returning only true mandatory model windows."""
+
+    return list(plan_frame_windows(
+        frame_manifest,
+        duration_seconds,
+        min_frames=min_frames,
+        max_frames=max_frames,
+    )["mandatory_windows"])
 
 
 def provider_capability(provider: Any, cfg: Mapping[str, Any] | None = None) -> dict:
@@ -322,6 +500,40 @@ def provider_capability(provider: Any, cfg: Mapping[str, Any] | None = None) -> 
     cfg = cfg or {}
     provider_cfg = ((cfg.get("ai") or {}).get(name) or {})
     capability = provider_cfg.get("multi_frame_capability")
+    registry_resolution: Mapping[str, Any] | None = None
+    if name == "local":
+        base_url = str(
+            getattr(provider, "base_url", "")
+            or provider_cfg.get("base_url")
+            or provider_cfg.get("lmstudio_url")
+            or ""
+        ).rstrip("/")
+        model = str(getattr(provider, "model", "") or provider_cfg.get("model") or "")
+        if base_url and model:
+            registry_resolution = resolve_verified_probe_capability(
+                cfg,
+                provider=name,
+                model=model,
+                base_url=base_url,
+                provider_contract_version=MULTI_FRAME_CONTRACT_VERSION,
+                prompt_contract_version=MULTI_FRAME_PROMPT_VERSION,
+                capability_schema_version=MULTI_FRAME_SCHEMA_VERSION,
+            )
+            if registry_resolution.get("status") == "pass":
+                capability = registry_resolution.get("capability")
+            elif registry_resolution.get("status") == "blocked":
+                return {
+                    "supports_multi_image": False,
+                    "maximum_images": 0,
+                    "supported_image_formats": [],
+                    "provider_contract_version": MULTI_FRAME_CONTRACT_VERSION,
+                    "prompt_contract_version": MULTI_FRAME_PROMPT_VERSION,
+                    "schema_version": MULTI_FRAME_SCHEMA_VERSION,
+                    "capability_source": "verified_probe_blocked",
+                    "registry_status": "blocked",
+                    "registry_reason": str(registry_resolution.get("reason") or "verified_probe_record_invalid"),
+                    "binding_fingerprint": str(registry_resolution.get("binding_fingerprint") or ""),
+                }
     if not isinstance(capability, Mapping):
         return {
             "supports_multi_image": False,
@@ -331,6 +543,8 @@ def provider_capability(provider: Any, cfg: Mapping[str, Any] | None = None) -> 
             "prompt_contract_version": "",
             "schema_version": 0,
             "capability_source": "missing",
+            "registry_status": str((registry_resolution or {}).get("status") or "not_checked"),
+            "registry_reason": str((registry_resolution or {}).get("reason") or ""),
         }
     source = str(capability.get("capability_source") or "explicit_config")
     supported = [str(item).lower() for item in capability.get("supported_image_formats") or []]
@@ -357,7 +571,7 @@ def provider_capability(provider: Any, cfg: Mapping[str, Any] | None = None) -> 
             "schema_version": 0,
             "capability_source": "invalid",
         }
-    return {
+    resolved = {
         "supports_multi_image": bool(capability["supports_multi_image"]),
         "maximum_images": int(maximum),
         "supported_image_formats": supported,
@@ -366,6 +580,17 @@ def provider_capability(provider: Any, cfg: Mapping[str, Any] | None = None) -> 
         "schema_version": MULTI_FRAME_SCHEMA_VERSION,
         "capability_source": source,
     }
+    if source == "verified_probe":
+        for key in (
+            "verification_source",
+            "verified_at",
+            "binding_fingerprint",
+            "verification_fingerprint",
+            "endpoint_identity",
+            "registry_contract",
+        ):
+            resolved[key] = capability.get(key)
+    return resolved
 
 
 def validate_window(window: Mapping[str, Any], *, min_frames: int = MIN_WINDOW_FRAMES, max_frames: int = MAX_WINDOW_FRAMES) -> dict:
@@ -556,6 +781,26 @@ def _write_contact_sheet(frame_paths: list[Path], output: Path, ffmpeg_path: str
     if completed.returncode != 0 or not output.is_file():
         return (completed.stderr or "contact sheet generation failed").strip()[:500]
     return ""
+
+
+def write_non_mandatory_evidence(fragments: list[dict], evidence_root: Path) -> str:
+    """Persist uncovered fragments without presenting them as model results."""
+
+    public_fragments = []
+    for fragment in fragments:
+        public = {key: value for key, value in fragment.items() if key != "frames"}
+        public["frames"] = [
+            {key: value for key, value in frame.items() if key != "frame_path"}
+            for frame in fragment.get("frames") or []
+        ]
+        public_fragments.append(public)
+    path = evidence_root / "non_mandatory_fragments.json"
+    atomic_write_json(path, {
+        "schema_version": MULTI_FRAME_SCHEMA_VERSION,
+        "window_policy": {"name": WINDOW_POLICY_NAME, "version": WINDOW_POLICY_VERSION},
+        "fragments": public_fragments,
+    })
+    return str(path)
 
 
 def write_window_evidence(

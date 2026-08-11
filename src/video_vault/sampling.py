@@ -8,6 +8,8 @@ import math
 import re
 import subprocess
 
+from .media_decode import MediaDecodeConfigError, perception_decode_args, perception_decode_contract
+
 
 SAMPLING_POLICY_NAME = "adaptive-balanced"
 SAMPLING_POLICY_VERSION = 1
@@ -119,6 +121,10 @@ def build_sampling_plan(
     override: dict | None = None,
 ) -> dict:
     policy = resolved_sampling_policy(cfg, override)
+    try:
+        decode_contract = perception_decode_contract(cfg)
+    except MediaDecodeConfigError as exc:
+        raise SamplingError(str(exc)) from exc
     duration = max(0.0, float(duration_seconds or 0))
     if policy["mode"] == "fixed":
         candidates = [
@@ -128,7 +134,9 @@ def build_sampling_plan(
             )
         ]
         samples = _apply_cap(candidates, _sampling_cap(duration, policy))
-        return _plan_payload(policy, duration, samples, {"baseline": len(candidates), "scene": 0, "motion": 0, "boundary": 0})
+        plan = _plan_payload(policy, duration, samples, {"baseline": len(candidates), "scene": 0, "motion": 0, "boundary": 0})
+        plan["decode"] = decode_contract
+        return plan
 
     candidates: list[dict] = []
     counts = {"baseline": 0, "scene": 0, "motion": 0, "boundary": 0}
@@ -153,7 +161,9 @@ def build_sampling_plan(
 
     samples = _temporal_dedupe(candidates, float(policy["min_interval_seconds"]))
     samples = _apply_cap(samples, _sampling_cap(duration, policy))
-    return _plan_payload(policy, duration, samples, counts)
+    plan = _plan_payload(policy, duration, samples, counts)
+    plan["decode"] = decode_contract
+    return plan
 
 
 def dedupe_visual_samples(
@@ -231,6 +241,7 @@ def _scan_activity(video: Path, cfg: dict, policy: dict) -> list[tuple[float, fl
         "-hide_banner",
         "-loglevel",
         "info",
+        *perception_decode_args(cfg),
         "-i",
         str(video),
         "-an",

@@ -236,6 +236,38 @@ def test_prescan_failure_is_explicit(monkeypatch):
         build_sampling_plan(Path("broken.mp4"), 5, _cfg())
 
 
+def test_cuda_prescan_is_explicit_and_audited(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=0,
+            stderr=_metadata_output([(0, 0), (0.5, 0)]),
+            stdout="",
+        )
+
+    monkeypatch.setattr(sampling.subprocess, "run", fake_run)
+    cfg = _cfg(hardware_decode="cuda")
+    plan = build_sampling_plan(Path("cuda.mp4"), 1, cfg)
+
+    assert calls[0][calls[0].index("-hwaccel") + 1] == "cuda"
+    assert calls[0].index("-hwaccel") < calls[0].index("-i")
+    assert plan["decode"] == {
+        "requested": "cuda",
+        "implementation": "cuda_nvdec",
+        "ffmpeg_input_args": ["-hwaccel", "cuda"],
+        "fallback": False,
+    }
+
+
+def test_unknown_hardware_decode_fails_closed_before_ffmpeg(monkeypatch):
+    monkeypatch.setattr(sampling.subprocess, "run", lambda *args, **kwargs: pytest.fail("must not run"))
+
+    with pytest.raises(SamplingError, match="unsupported sampling hardware_decode"):
+        build_sampling_plan(Path("unknown.mp4"), 1, _cfg(hardware_decode="magic"))
+
+
 def test_visual_dedupe_preserves_boundaries_and_merges_reasons(tmp_path, monkeypatch):
     paths = [tmp_path / f"frame_{index:05d}.jpg" for index in range(3)]
     for path in paths:

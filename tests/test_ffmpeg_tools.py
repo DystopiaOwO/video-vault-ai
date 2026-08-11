@@ -38,3 +38,28 @@ def test_extract_frames_accepts_explicit_adaptive_timestamps(tmp_path, monkeypat
         [0, 1.25, 4.75],
     )
     assert [cmd[cmd.index("-ss") + 1] for cmd in calls] == ["0", "1.25", "4.75"]
+
+
+def test_extract_frames_uses_explicit_cuda_decode_before_seek_and_input(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, check):
+        calls.append(cmd)
+        Path(cmd[-1]).write_bytes(b"jpeg")
+
+    monkeypatch.setattr("video_vault.ffmpeg_tools.subprocess.run", fake_run)
+    extract_frames(
+        Path("clip.mp4"),
+        tmp_path,
+        {
+            "ffmpeg_path": "ffmpeg",
+            "frame_interval_seconds": 5,
+            "frame_height": 720,
+            "sampling": {"hardware_decode": "cuda"},
+        },
+        [4.5],
+    )
+
+    command = calls[0]
+    assert command[command.index("-hwaccel") + 1] == "cuda"
+    assert command.index("-hwaccel") < command.index("-ss") < command.index("-i")
