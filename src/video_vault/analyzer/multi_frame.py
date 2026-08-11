@@ -285,12 +285,14 @@ def _merge_allowed(
     protected = {"scene_boundary", "large_temporal_gap", "maximum_temporal_span"}
     combined = left + right
     partition = _partition_lengths(len(combined), min_frames, max_frames)
+    fully_partitionable = sum(partition) == len(combined) and all(
+        min_frames <= length <= max_frames for length in partition
+    )
     return (
         bool(left and right)
         and not protected.intersection(right_reasons)
         and _cluster_span(combined) <= MAX_WINDOW_SPAN_SECONDS
-        and sum(partition) == len(combined)
-        and all(min_frames <= length <= max_frames for length in partition)
+        and (fully_partitionable or len(combined) < min_frames)
     )
 
 

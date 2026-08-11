@@ -122,6 +122,17 @@ def test_soft_boundary_cluster_repartitions_without_fragment(tmp_path, left_coun
     assert len(planned_fingerprints) == len(set(planned_fingerprints)) == len(frames)
 
 
+def test_soft_boundary_unpartitionable_frames_coalesce_as_one_fragment(tmp_path):
+    frames = _manifest(tmp_path, 2)
+    frames[1]["sample_reasons"] = ["boundary"]
+
+    plan = plan_frame_windows(frames, 10, min_frames=3, max_frames=3)
+
+    assert plan["mandatory_windows"] == []
+    assert [len(fragment["frames"]) for fragment in plan["non_mandatory_fragments"]] == [2]
+    assert "merged_short_fragment" in plan["non_mandatory_fragments"][0]["window_policy"]["split_reasons"]
+
+
 @pytest.mark.parametrize("boundary_kind", ["scene", "large_gap"])
 def test_short_cluster_does_not_cross_hard_boundary_or_large_gap(tmp_path, boundary_kind):
     frames = _manifest(tmp_path, 4)
