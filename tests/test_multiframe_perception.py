@@ -14,6 +14,7 @@ from video_vault.analyzer.multi_frame import (
     parse_window_response,
     plan_frame_windows,
     provider_capability,
+    select_evidence_sufficiency_rescue,
     validate_window,
     window_cache_key,
     write_window_evidence,
@@ -177,6 +178,113 @@ def test_short_hard_scene_fragment_remains_explicitly_uncovered(tmp_path):
     assert [window["window_uuid"] for window in first["mandatory_windows"]] == [window["window_uuid"] for window in second["mandatory_windows"]]
     assert [item["fragment_uuid"] for item in first["non_mandatory_fragments"]] == [item["fragment_uuid"] for item in second["non_mandatory_fragments"]]
     assert all(validate_window(window)["status"] == "pass" for window in first["mandatory_windows"])
+
+
+def _discarded_candidate(tmp_path: Path, index: int, timestamp: float, payload: bytes | None = None) -> dict:
+    path = tmp_path / f"discarded_{index:02}.jpg"
+    path.write_bytes(payload or f"discarded-{index}".encode())
+    return {
+        "path": path,
+        "sample": {"timestamp_seconds": timestamp, "reasons": ["baseline"], "activity_score": 0},
+        "fingerprint": multi_frame.frame_fingerprint(path),
+        "decision": {
+            "candidate_index": index,
+            "dedupe_decision": "discarded_visual_duplicate",
+            "duplicate_of_candidate_index": 0,
+            "duplicate_of_timestamp_seconds": 0,
+            "similarity": 0.999,
+            "rescue_outcome": "not_selected",
+        },
+    }
+
+
+def test_sparse_dedupe_rescue_selects_minimum_legal_real_frame_deterministically(tmp_path):
+    retained = _manifest(tmp_path, 2)
+    retained[1]["timestamp_seconds"] = 5
+    discarded = [
+        _discarded_candidate(tmp_path, 2, 10),
+        _discarded_candidate(tmp_path, 3, 11),
+        _discarded_candidate(tmp_path, 4, 40),
+    ]
+
+    first = select_evidence_sufficiency_rescue(retained, discarded, max_frames=5)
+    second = select_evidence_sufficiency_rescue(retained, discarded, max_frames=5)
+
+    assert first["audit"]["status"] == "applied"
+    assert first["audit"]["rescued_count"] == 1
+    assert first["selected"][0]["sample"]["timestamp_seconds"] == 10
+    assert first["audit"]["selected"] == second["audit"]["selected"]
+    rescued_manifest = retained + [{
+        "frame_path": str(first["selected"][0]["path"]),
+        "timestamp_seconds": first["selected"][0]["sample"]["timestamp_seconds"],
+        "sample_reasons": ["baseline", "evidence_sufficiency_rescue"],
+    }]
+    first_plan = plan_frame_windows(rescued_manifest, 60)
+    second_plan = plan_frame_windows(rescued_manifest, 60)
+    assert [len(window["frames"]) for window in first_plan["mandatory_windows"]] == [3]
+    assert [window["window_uuid"] for window in first_plan["mandatory_windows"]] == [
+        window["window_uuid"] for window in second_plan["mandatory_windows"]
+    ]
+
+
+def test_existing_legal_window_never_rescues(tmp_path):
+    retained = _manifest(tmp_path, 3)
+    result = select_evidence_sufficiency_rescue(
+        retained, [_discarded_candidate(tmp_path, 3, 7)], max_frames=5
+    )
+    assert result["selected"] == []
+    assert result["audit"]["status"] == "not_needed"
+
+
+@pytest.mark.parametrize("blocked_by", ["scene", "large_gap", "maximum_span"])
+def test_rescue_never_crosses_hard_scene_large_gap_or_maximum_span(tmp_path, blocked_by):
+    retained = _manifest(tmp_path, 2)
+    retained[0]["timestamp_seconds"] = 0
+    retained[1]["timestamp_seconds"] = 5
+    if blocked_by == "scene":
+        retained[1]["sample_reasons"] = ["scene"]
+        rescue_timestamp = 10
+    elif blocked_by == "large_gap":
+        rescue_timestamp = 30
+    else:
+        retained[1]["timestamp_seconds"] = 11
+        rescue_timestamp = 13
+    result = select_evidence_sufficiency_rescue(
+        retained, [_discarded_candidate(tmp_path, 2, rescue_timestamp)], max_frames=5
+    )
+    assert result["selected"] == []
+    assert result["audit"]["status"] == "unavailable"
+
+
+def test_rescue_rejects_duplicate_timestamp_and_fingerprint(tmp_path):
+    retained = _manifest(tmp_path, 2)
+    retained[1]["timestamp_seconds"] = 5
+    duplicate_timestamp = _discarded_candidate(tmp_path, 2, 5)
+    duplicate_fingerprint = _discarded_candidate(tmp_path, 3, 10)
+    duplicate_fingerprint["fingerprint"] = multi_frame.frame_fingerprint(Path(retained[0]["frame_path"]))
+    result = select_evidence_sufficiency_rescue(
+        retained, [duplicate_timestamp, duplicate_fingerprint], max_frames=5
+    )
+    assert result["selected"] == []
+    assert result["audit"]["eligible_discarded_count"] == 0
+
+
+def test_rescue_is_bounded_and_impossible_source_stays_unavailable(tmp_path):
+    retained = _manifest(tmp_path, 1)
+    discarded = [
+        _discarded_candidate(tmp_path, 1, 5),
+        _discarded_candidate(tmp_path, 2, 10),
+        _discarded_candidate(tmp_path, 3, 40),
+    ]
+    possible = select_evidence_sufficiency_rescue(retained, discarded, max_frames=5)
+    assert possible["audit"]["rescued_count"] == 2
+    assert possible["audit"]["rescued_count"] <= possible["audit"]["max_rescue_frames"]
+
+    impossible = select_evidence_sufficiency_rescue(
+        retained, [_discarded_candidate(tmp_path, 4, 40), _discarded_candidate(tmp_path, 5, 80)], max_frames=5
+    )
+    assert impossible["selected"] == []
+    assert impossible["audit"]["unavailable_reason"] == "no_legal_window_from_discarded_candidates"
 
 
 def test_local_capability_requires_explicit_valid_contract():
@@ -653,6 +761,77 @@ def test_project_perception_persists_multiframe_run_results(tmp_path, monkeypatc
     assert json.loads(normalized.read_text(encoding="utf-8"))["segment_uuid"] == run["window_results"][0]["segment_uuid"]
 
 
+def test_project_perception_rescues_discarded_real_candidate_before_formal_calls(tmp_path, monkeypatch):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    video_id = upsert_video(db, {
+        "original_path": str(source), "current_path": str(source), "filename": source.name,
+        "category": "coffee", "duration_seconds": 16, "status": "uploaded",
+    })
+    project_id = create_project(db, "rescue-evidence", [video_id], category="coffee")
+    cfg = {
+        "library_root": str(tmp_path), "frame_interval_seconds": 4, "frame_height": 720,
+        "ffmpeg_path": "missing-ffmpeg", "ffprobe_path": "missing-ffprobe",
+        "sampling": {"mode": "fixed", "baseline_interval_seconds": 4,
+                     "policy_name": "test", "policy_version": 1,
+                     "max_frames_per_clip": 20, "max_frames_per_minute": 60},
+        "ai": {"provider": "mock", "model": "mock-v1"},
+    }
+
+    def fake_extract(_source: Path, out_dir: Path, _cfg: dict) -> list[Path]:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        paths = []
+        for index in range(4):
+            path = out_dir / f"frame_{index:02}.jpg"
+            path.write_bytes(f"real-candidate-{index}".encode())
+            paths.append(path)
+        return paths
+
+    def fake_dedupe(paths, samples, _cfg, _policy):
+        decision = {
+            "candidate_index": 2,
+            "timestamp_seconds": float(samples[2]["timestamp_seconds"]),
+            "fingerprint": multi_frame.frame_fingerprint(paths[2]),
+            "dedupe_decision": "discarded_visual_duplicate",
+            "duplicate_of_candidate_index": 1,
+            "duplicate_of_timestamp_seconds": float(samples[1]["timestamp_seconds"]),
+            "similarity": 0.999,
+            "rescue_outcome": "not_selected",
+        }
+        return paths[:2], samples[:2], {
+            "status": "applied", "removed": 1,
+            "decision_contract": "visual-dedupe-decisions-v1", "decisions": [decision],
+        }, [{
+            "path": paths[2], "sample": dict(samples[2]),
+            "fingerprint": decision["fingerprint"], "decision": decision,
+        }]
+
+    monkeypatch.setattr(project_perception, "extract_frames", fake_extract)
+    monkeypatch.setattr(project_perception, "dedupe_visual_samples", fake_dedupe)
+    monkeypatch.setattr(project_perception, "rename_after_perception", lambda _cfg, _db, video: video)
+    monkeypatch.setattr(project_perception, "perceive_output", lambda *args, **kwargs: None)
+    monkeypatch.setattr(project_perception, "write_plan_files", lambda *args, **kwargs: None)
+    monkeypatch.setattr(project_perception, "build_project_plan", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        multi_frame, "_write_contact_sheet",
+        lambda _paths, output, _ffmpeg: (output.write_bytes(b"sheet"), "")[1],
+    )
+
+    result = run_project_perception(cfg, db, project_id, dict(project_videos(db, project_id)[0]))
+    sampling_manifest = result["run"]["sampling_manifest"]
+    rescue = sampling_manifest["evidence_sufficiency_rescue"]
+    assert rescue["status"] == "applied"
+    assert rescue["rescued_count"] == 1
+    assert sampling_manifest["actual_vision_calls"] == 1
+    assert sampling_manifest["visual_dedupe"]["decisions"][0]["rescue_outcome"] == "rescued"
+    assert "evidence_sufficiency_rescue" in sampling_manifest["samples"][2]["reasons"]
+    assert result["window_validation"]["status"] == "pass"
+    assert len(result["window_manifest"]) == len(result["window_results"]) == len(result["segments"]) == 1
+    assert result["window_manifest"][0]["frames"][2]["sampling_provenance"]["reason"] == "evidence_sufficiency_rescue"
+
+
 def test_loaded_yaml_false_uses_explicit_legacy_single_frame_contract(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     yaml_library_root = str(tmp_path).replace("\\", "/")
@@ -773,7 +952,7 @@ def test_project_perception_fails_closed_on_insufficient_evidence(tmp_path, monk
     monkeypatch.setattr(
         project_perception,
         "dedupe_visual_samples",
-        lambda paths, samples, _cfg, _policy: (paths[:2], samples[:2], {}),
+        lambda paths, samples, _cfg, _policy: (paths[:2], samples[:2], {}, []),
     )
     with pytest.raises(MultiFrameValidationError, match="evidence validation blocked"):
         run_project_perception(cfg, db, project_id, dict(project_videos(db, project_id)[0]))

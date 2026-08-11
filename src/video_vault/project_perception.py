@@ -10,6 +10,7 @@ from .analyzer.multi_frame import (
     multi_frame_publish_errors,
     plan_frame_windows,
     provider_capability,
+    select_evidence_sufficiency_rescue,
     update_window_evidence_segment_uuid,
 )
 from .analyzer.vision_pipeline import AnalysisCancelled, analyze_frame_manifest, analyze_frame_windows, provider_from_config
@@ -118,14 +119,63 @@ def run_project_perception(
             raise RuntimeError(
                 f"adaptive frame extraction count mismatch: expected {len(samples)}, got {len(frame_paths)}"
             )
-        frame_paths, samples, visual_dedupe = dedupe_visual_samples(
+        multi_frame_config = ((cfg.get("perception") or {}).get("multi_frame") or {})
+        multi_frame_enabled = (
+            parse_bool(multi_frame_config.get("enabled"), default=False)
+            if "enabled" in multi_frame_config
+            else "sampling" in cfg
+        )
+        max_images = 0
+        if multi_frame_enabled:
+            max_images = int(provider_capability(provider_from_config(cfg), cfg).get("maximum_images") or 0)
+
+        frame_paths, samples, visual_dedupe, discarded_candidates = dedupe_visual_samples(
             frame_paths,
             samples,
             cfg,
             sampling["policy"],
         )
+        rescue = {"selected": [], "audit": {
+            "status": "disabled",
+            "reason": "evidence_sufficiency_rescue",
+            "rescued_count": 0,
+            "selected": [],
+        }}
+        if multi_frame_enabled and discarded_candidates:
+            rescue = select_evidence_sufficiency_rescue(
+                build_frame_manifest(frame_paths, cfg, samples),
+                discarded_candidates,
+                max_frames=max_images if max_images >= 3 else 5,
+            )
+        selected_ids = {id(item) for item in rescue["selected"]}
+        for candidate in discarded_candidates:
+            decision = candidate.get("decision") or {}
+            if id(candidate) not in selected_ids:
+                Path(candidate["path"]).unlink(missing_ok=True)
+                continue
+            decision["rescue_outcome"] = "rescued"
+            sample = dict(candidate["sample"])
+            sample["reasons"] = sorted(set(sample.get("reasons") or []) | {"evidence_sufficiency_rescue"})
+            sample["rescue_provenance"] = {
+                "reason": "evidence_sufficiency_rescue",
+                "original_dedupe_decision": str(decision.get("dedupe_decision") or ""),
+                "candidate_index": int(decision.get("candidate_index") or 0),
+                "duplicate_of_candidate_index": int(decision.get("duplicate_of_candidate_index") or 0),
+                "duplicate_of_timestamp_seconds": float(decision.get("duplicate_of_timestamp_seconds") or 0),
+                "similarity": float(decision.get("similarity") or 0),
+                "fingerprint": str(candidate.get("fingerprint") or ""),
+            }
+            frame_paths.append(Path(candidate["path"]))
+            samples.append(sample)
+        ordered_pairs = sorted(
+            zip(frame_paths, samples, strict=True),
+            key=lambda pair: (float(pair[1].get("timestamp_seconds") or 0), str(pair[0])),
+        )
+        frame_paths = [pair[0] for pair in ordered_pairs]
+        samples = [pair[1] for pair in ordered_pairs]
         sampling["samples"] = samples
         sampling["visual_dedupe"] = visual_dedupe
+        sampling["evidence_sufficiency_rescue"] = rescue["audit"]
         sampling["estimated_vision_calls"] = len(samples)
         sampling["sample_reason_counts"] = _sample_reason_counts(samples)
         sampling["contract_hash"] = sampling_contract_hash(
@@ -147,15 +197,6 @@ def run_project_perception(
             raise RuntimeError("; ".join(errors))
         _raise_if_cancelled(should_cancel)
 
-        multi_frame_config = ((cfg.get("perception") or {}).get("multi_frame") or {})
-        multi_frame_enabled = (
-            parse_bool(multi_frame_config.get("enabled"), default=False)
-            if "enabled" in multi_frame_config
-            else "sampling" in cfg
-        )
-        max_images = 0
-        if multi_frame_enabled:
-            max_images = int(provider_capability(provider_from_config(cfg), cfg).get("maximum_images") or 0)
         window_plan = plan_frame_windows(
             manifest,
             float(video.get("duration_seconds") or 0),

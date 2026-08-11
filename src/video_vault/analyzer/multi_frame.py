@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -354,16 +355,135 @@ def _identity_digest(entries: list[dict], split_reasons: list[str], *, kind: str
 
 
 def _public_frames(entries: list[dict]) -> list[dict]:
-    return [
-        {
+    frames = []
+    for index, item in enumerate(entries):
+        frame = {
             "frame_index": index,
             "frame_path": item.get("frame_path", ""),
             "timestamp_seconds": item["timestamp_seconds"],
             "sample_reasons": item["sample_reasons"],
             "fingerprint": item["fingerprint"],
         }
-        for index, item in enumerate(entries)
-    ]
+        if isinstance(item.get("sampling_provenance"), Mapping):
+            frame["sampling_provenance"] = dict(item["sampling_provenance"])
+        frames.append(frame)
+    return frames
+
+
+def _normalized_planner_entries(frame_manifest: list[dict]) -> list[dict]:
+    ordered = sorted(
+        (dict(item) for item in frame_manifest),
+        key=lambda item: (float(item.get("timestamp_seconds") or 0), str(item.get("frame_path") or "")),
+    )
+    for item in ordered:
+        path = Path(str(item.get("frame_path") or ""))
+        fingerprint = str(item.get("fingerprint") or "")
+        if not fingerprint:
+            try:
+                fingerprint = frame_fingerprint(path) if path.is_file() else ""
+            except OSError:
+                fingerprint = ""
+        item["timestamp_seconds"] = round(float(item.get("timestamp_seconds") or 0), 6)
+        item["sample_reasons"] = sorted(str(reason) for reason in item.get("sample_reasons") or ["baseline"])
+        item["fingerprint"] = fingerprint
+    return ordered
+
+
+def _has_legal_mandatory_window(entries: list[dict], min_frames: int, max_frames: int) -> bool:
+    clusters = _coalesce_short_clusters(_candidate_clusters(entries), min_frames, max_frames)
+    return any(
+        len(cluster) >= min_frames and bool(_partition_lengths(len(cluster), min_frames, max_frames))
+        for cluster, _reasons in clusters
+    )
+
+
+def select_evidence_sufficiency_rescue(
+    retained_manifest: list[dict],
+    discarded_candidates: list[dict],
+    *,
+    min_frames: int = MIN_WINDOW_FRAMES,
+    max_frames: int = MAX_WINDOW_FRAMES,
+) -> dict[str, Any]:
+    """Select the smallest deterministic real-frame rescue that creates a legal window."""
+
+    retained = _normalized_planner_entries(retained_manifest)
+    audit: dict[str, Any] = {
+        "status": "not_needed",
+        "reason": "evidence_sufficiency_rescue",
+        "trigger": "zero_legal_mandatory_windows_after_visual_dedupe",
+        "selection_policy": "minimum_count_then_timestamp_fingerprint",
+        "max_rescue_frames": min_frames,
+        "eligible_discarded_count": 0,
+        "rescued_count": 0,
+        "selected": [],
+    }
+    if _has_legal_mandatory_window(retained, min_frames, max_frames):
+        return {"selected": [], "audit": audit}
+
+    seen_timestamps = {item["timestamp_seconds"] for item in retained}
+    seen_fingerprints = {item["fingerprint"] for item in retained if item["fingerprint"]}
+    eligible: list[tuple[dict, dict]] = []
+    for candidate in sorted(
+        discarded_candidates,
+        key=lambda item: (
+            round(float((item.get("sample") or {}).get("timestamp_seconds") or 0), 6),
+            str(item.get("fingerprint") or ""),
+            int((item.get("decision") or {}).get("candidate_index") or 0),
+        ),
+    ):
+        sample = dict(candidate.get("sample") or {})
+        timestamp = round(float(sample.get("timestamp_seconds") or 0), 6)
+        fingerprint = str(candidate.get("fingerprint") or "")
+        if timestamp in seen_timestamps or not fingerprint or fingerprint in seen_fingerprints:
+            continue
+        seen_timestamps.add(timestamp)
+        seen_fingerprints.add(fingerprint)
+        entry = {
+            "frame_path": str(candidate.get("path") or ""),
+            "timestamp_seconds": timestamp,
+            "sample_reasons": sorted(str(reason) for reason in sample.get("reasons") or ["baseline"]),
+            "fingerprint": fingerprint,
+        }
+        eligible.append((candidate, entry))
+
+    audit["eligible_discarded_count"] = len(eligible)
+    if not eligible:
+        audit["status"] = "unavailable"
+        audit["unavailable_reason"] = "no_unique_discarded_candidates"
+        return {"selected": [], "audit": audit}
+
+    for rescue_count in range(1, min(min_frames, len(eligible)) + 1):
+        # A legal all-rescue triple always has a legal consecutive triple in
+        # timestamp order. Avoid an unbounded cubic search at the sampling cap.
+        combinations = (
+            (tuple(eligible[index : index + rescue_count]) for index in range(len(eligible) - rescue_count + 1))
+            if rescue_count == min_frames
+            else itertools.combinations(eligible, rescue_count)
+        )
+        for combination in combinations:
+            combined = _normalized_planner_entries(
+                retained + [entry for _candidate, entry in combination]
+            )
+            if not _has_legal_mandatory_window(combined, min_frames, max_frames):
+                continue
+            selected = [candidate for candidate, _entry in combination]
+            audit["status"] = "applied"
+            audit["rescued_count"] = len(selected)
+            audit["selected"] = [
+                {
+                    "candidate_index": int((candidate.get("decision") or {}).get("candidate_index") or 0),
+                    "timestamp_seconds": round(
+                        float((candidate.get("sample") or {}).get("timestamp_seconds") or 0), 6
+                    ),
+                    "fingerprint": str(candidate.get("fingerprint") or ""),
+                }
+                for candidate in selected
+            ]
+            return {"selected": selected, "audit": audit}
+
+    audit["status"] = "unavailable"
+    audit["unavailable_reason"] = "no_legal_window_from_discarded_candidates"
+    return {"selected": [], "audit": audit}
 
 
 def _non_mandatory_fragment(entries: list[dict], split_reasons: list[str], duration_seconds: float) -> dict:
@@ -404,19 +524,7 @@ def plan_frame_windows(
     if min_frames != MIN_WINDOW_FRAMES or max_frames != MAX_WINDOW_FRAMES:
         if not 2 <= min_frames <= max_frames <= 8:
             raise ValueError("multi-frame window size must be between 2 and 8")
-    ordered = sorted(
-        (dict(item) for item in frame_manifest),
-        key=lambda item: (float(item.get("timestamp_seconds") or 0), str(item.get("frame_path") or "")),
-    )
-    for item in ordered:
-        path = Path(str(item.get("frame_path") or ""))
-        try:
-            fingerprint = frame_fingerprint(path) if path.is_file() else ""
-        except OSError:
-            fingerprint = ""
-        item["timestamp_seconds"] = round(float(item.get("timestamp_seconds") or 0), 6)
-        item["sample_reasons"] = sorted(str(reason) for reason in item.get("sample_reasons") or ["baseline"])
-        item["fingerprint"] = fingerprint
+    ordered = _normalized_planner_entries(frame_manifest)
 
     windows: list[dict] = []
     fragments: list[dict] = []

@@ -171,22 +171,38 @@ def dedupe_visual_samples(
     samples: list[dict],
     cfg: dict,
     policy: dict,
-) -> tuple[list[Path], list[dict], dict]:
+) -> tuple[list[Path], list[dict], dict, list[dict]]:
     threshold = float(policy.get("visual_dedupe_threshold") or 0)
     if threshold <= 0 or len(paths) < 2:
-        return paths, samples, {"status": "disabled", "removed": 0}
+        return paths, samples, {"status": "disabled", "removed": 0, "decisions": []}, []
     signatures: list[bytes] = []
     try:
         for path in paths:
             signatures.append(_visual_signature(path, cfg))
     except (OSError, subprocess.SubprocessError, SamplingError):
-        return paths, samples, {"status": "unavailable", "removed": 0}
+        return paths, samples, {"status": "unavailable", "removed": 0, "decisions": []}, []
+
+    fingerprints: list[str] = []
+    try:
+        for path in paths:
+            digest = sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            fingerprints.append(digest.hexdigest())
+    except OSError:
+        return paths, samples, {"status": "unavailable", "removed": 0, "decisions": []}, []
 
     kept_paths: list[Path] = []
     kept_samples: list[dict] = []
     kept_signatures: list[bytes] = []
+    kept_candidate_indices: list[int] = []
+    discarded: list[dict] = []
+    decisions: list[dict] = []
     removed = 0
-    for path, sample, signature in zip(paths, samples, signatures, strict=True):
+    for candidate_index, (path, sample, signature, fingerprint) in enumerate(
+        zip(paths, samples, signatures, fingerprints, strict=True)
+    ):
         reasons = set(sample.get("reasons") or [])
         # Scene guards are structural evidence: even a visually similar frame
         # immediately before a cut must remain paired with its after-cut frame.
@@ -202,16 +218,41 @@ def dedupe_visual_samples(
             kept_paths.append(path)
             kept_samples.append(dict(sample))
             kept_signatures.append(signature)
+            kept_candidate_indices.append(candidate_index)
             continue
         removed += 1
+        similarity = _signature_similarity(signature, kept_signatures[duplicate_index])
+        decision = {
+            "candidate_index": candidate_index,
+            "timestamp_seconds": round(float(sample.get("timestamp_seconds") or 0), 6),
+            "fingerprint": fingerprint,
+            "dedupe_decision": "discarded_visual_duplicate",
+            "duplicate_of_candidate_index": kept_candidate_indices[duplicate_index],
+            "duplicate_of_timestamp_seconds": round(
+                float(kept_samples[duplicate_index].get("timestamp_seconds") or 0), 6
+            ),
+            "similarity": round(float(similarity), 6),
+            "rescue_outcome": "not_selected",
+        }
+        decisions.append(decision)
+        discarded.append({
+            "path": path,
+            "sample": dict(sample),
+            "fingerprint": fingerprint,
+            "decision": decision,
+        })
         merged = set(kept_samples[duplicate_index].get("reasons") or [])
         merged.update(reasons)
         kept_samples[duplicate_index]["reasons"] = sorted(merged)
         kept_samples[duplicate_index]["visually_deduped_count"] = int(
             kept_samples[duplicate_index].get("visually_deduped_count") or 0
         ) + 1
-        path.unlink(missing_ok=True)
-    return kept_paths, kept_samples, {"status": "applied", "removed": removed}
+    return kept_paths, kept_samples, {
+        "status": "applied",
+        "removed": removed,
+        "decision_contract": "visual-dedupe-decisions-v1",
+        "decisions": decisions,
+    }, discarded
 
 
 def sampling_contract_hash(source: dict, policy: dict, samples: list[dict]) -> str:
