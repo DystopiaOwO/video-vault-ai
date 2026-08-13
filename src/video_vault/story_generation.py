@@ -24,6 +24,7 @@ from .story_context_budget import (
     context_budget_error_message,
     preflight_story_context,
 )
+from .lmstudio_runtime import resolve_lmstudio_runtime_context
 
 
 STORY_OUTPUT_SCHEMA_VERSION = 1
@@ -113,7 +114,23 @@ class StoryContextBudgetError(StoryGenerationError):
     def __init__(self, message: str, budget: Mapping[str, Any]):
         super().__init__(message)
         self.budget = dict(budget)
-        self.audit = {"context_budget": dict(budget), "error": message}
+        self.audit = {
+            "calls": 0,
+            "retries": 0,
+            "generation_post_calls": 0,
+            "request_budgets": [{"attempt": 1, "budget": dict(budget)}],
+            "context_budget": dict(budget),
+            "runtime_context": dict(budget.get("context_metadata") or {}),
+            "error": message,
+        }
+
+
+class StoryProviderHTTPError(StoryGenerationError):
+    """An HTTP failure with a safe, structured provider audit."""
+
+    def __init__(self, message: str, audit: Mapping[str, Any]):
+        super().__init__(message)
+        self.audit = dict(audit)
 
 
 class StoryProvider(Protocol):
@@ -141,6 +158,50 @@ def _context_length_or_none(value: Any) -> int | None:
 
 def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _provider_http_error(exc: urllib.error.HTTPError, *, provider: str, model: str) -> StoryProviderHTTPError:
+    try:
+        raw_body = exc.read().decode("utf-8", errors="replace")
+    except (AttributeError, OSError, ValueError):
+        raw_body = ""
+    payload: Mapping[str, Any] = {}
+    try:
+        parsed = json.loads(raw_body) if raw_body else {}
+        if isinstance(parsed, Mapping):
+            payload = parsed
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = {}
+    raw_error = payload.get("error")
+    error = raw_error if isinstance(raw_error, Mapping) else payload
+    provider_type = str(error.get("type") or error.get("code") or "")
+    provider_message = str(raw_error if isinstance(raw_error, str) else error.get("message") or "").strip()
+    classification_text = " ".join((provider_type, provider_message, raw_body[:1000])).lower()
+    overflow_markers = (
+        "exceed_context_size",
+        "context_length_exceeded",
+        "context window",
+        "context length",
+        "available context",
+        "n_ctx",
+        "too many tokens",
+    )
+    error_code = "provider_context_overflow" if any(marker in classification_text for marker in overflow_markers) else "provider_http_error"
+    status = int(exc.code)
+    audit = {
+        "error_code": error_code,
+        "http_status": status,
+        "provider": str(provider),
+        "model": str(model),
+        "provider_error_type": provider_type,
+        "provider_error_message": provider_message[:1000],
+        "provider_response_classified": True,
+    }
+    if error_code == "provider_context_overflow":
+        message = f"本地文字模型 context overflow（HTTP {status}）：{provider_message or provider_type or 'context capacity exceeded'}"
+    else:
+        message = f"本地文字模型 HTTP {status}：{provider_message or provider_type or exc.reason}"
+    return StoryProviderHTTPError(message, audit)
 
 
 def story_cache_key(snapshot: Mapping[str, Any], *, provider: str, model: str, prompt_version: str = STORY_PROMPT_VERSION, schema_version: int = STORY_OUTPUT_SCHEMA_VERSION, provider_contract_version: str = "story-text-v1") -> str:
@@ -449,6 +510,8 @@ class LocalTextStoryProvider:
         context_length: int | None = None,
         context_source: str = "unknown",
         reserved_output_tokens: int = DEFAULT_RESERVED_OUTPUT_TOKENS,
+        runtime_context_timeout_seconds: float = 5.0,
+        runtime_context_resolver: Any | None = None,
     ):
         self.base_url = str(base_url).rstrip("/")
         self.model = str(model)
@@ -456,13 +519,21 @@ class LocalTextStoryProvider:
         self.context_length = _context_length_or_none(context_length)
         self.context_source = str(context_source or "unknown")
         self.reserved_output_tokens = int(reserved_output_tokens or DEFAULT_RESERVED_OUTPUT_TOKENS)
+        self.runtime_context_timeout_seconds = float(runtime_context_timeout_seconds)
+        self.runtime_context_resolver = runtime_context_resolver or resolve_lmstudio_runtime_context
+        self.last_runtime_context: dict[str, Any] = {}
 
     def context_metadata(self) -> dict[str, Any]:
-        return {
-            "context_capacity_tokens": self.context_length,
-            "source": self.context_source,
-            "metadata_status": "verified" if self.context_length else "unknown",
-        }
+        metadata = self.runtime_context_resolver(
+            self.base_url,
+            self.model,
+            configured_context_length=self.context_length,
+            configured_context_source=self.context_source,
+            timeout_seconds=self.runtime_context_timeout_seconds,
+            urlopen_fn=urllib.request.urlopen,
+        )
+        self.last_runtime_context = dict(metadata) if isinstance(metadata, Mapping) else {}
+        return dict(self.last_runtime_context)
 
     def _strict_parse(self, content: Any) -> dict[str, Any]:
         try:
@@ -503,6 +574,8 @@ class LocalTextStoryProvider:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 raw = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise _provider_http_error(exc, provider=self.provider, model=self.model) from exc
         except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
             raise StoryGenerationError(f"本地文字模型不可用：{exc}") from exc
         content = (((raw.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
@@ -516,15 +589,6 @@ class LocalTextStoryProvider:
         return parsed, raw, (time.perf_counter() - started) * 1000
 
     def generate_story(self, snapshot: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-        budget = preflight_story_context(
-            snapshot,
-            self,
-            system_prompt=STORY_SYSTEM_PROMPT,
-            reserved_output_tokens=self.reserved_output_tokens,
-        )
-        if not budget["request_allowed"]:
-            error = StoryContextBudgetError(context_budget_error_message(budget), budget)
-            raise error
         system = STORY_SYSTEM_PROMPT
         base_messages = [{"role": "system", "content": system}, {"role": "user", "content": _canonical(snapshot)}]
         attempts: list[dict[str, Any]] = []
@@ -550,10 +614,12 @@ class LocalTextStoryProvider:
                 error = StoryContextBudgetError(context_budget_error_message(budget), budget)
                 error.audit = {
                     "calls": attempt,
+                    "generation_post_calls": attempt,
                     "retries": attempt,
                     "request_budgets": request_budgets,
                     "context_budget": budget,
                     "blocked_retry_budget": budget if attempt > 0 else None,
+                    "runtime_context": dict(budget.get("context_metadata") or {}),
                     "error": str(error),
                 }
                 raise error
@@ -571,6 +637,7 @@ class LocalTextStoryProvider:
                 attempts.append({"content": json.dumps(output, ensure_ascii=False, sort_keys=True), "error": ""})
                 audit = {
                     "calls": attempt + 1,
+                    "generation_post_calls": attempt + 1,
                     "retries": attempt,
                     "call_latencies_ms": latencies,
                     "total_latency_ms": round(sum(latencies), 3),
@@ -585,9 +652,25 @@ class LocalTextStoryProvider:
                 attempts.append({"content": str(getattr(exc, "raw_content", "")), "error": str(exc)})
                 if attempt == 1:
                     break
+            except StoryProviderHTTPError as exc:
+                latencies.append(round((time.perf_counter() - started) * 1000, 3))
+                exc.audit = {
+                    **dict(exc.audit),
+                    "calls": attempt + 1,
+                    "generation_post_calls": attempt + 1,
+                    "retries": attempt,
+                    "call_latencies_ms": latencies,
+                    "total_latency_ms": round(sum(latencies), 3),
+                    "strict_schema": True,
+                    "context_budget": budget,
+                    "request_budgets": request_budgets,
+                    "runtime_context": dict(budget.get("context_metadata") or {}),
+                }
+                raise
         error = last_error or StoryValidationError("本地文字模型 strict schema 驗證失敗")
         error.audit = {
             "calls": 2,
+            "generation_post_calls": 2,
             "retries": 1,
             "call_latencies_ms": latencies,
             "total_latency_ms": round(sum(latencies), 3),
@@ -632,6 +715,7 @@ def provider_from_config(cfg: Mapping[str, Any], provider_override: str | None =
             context_length=_context_length_or_none(context_length),
             context_source=str(context_source or "unknown"),
             reserved_output_tokens=int(story_cfg.get("max_output_tokens") or DEFAULT_RESERVED_OUTPUT_TOKENS),
+            runtime_context_timeout_seconds=float(story_cfg.get("runtime_context_timeout_seconds") or 5),
         )
     raise StoryGenerationError(f"不支援的文字故事 provider：{provider}")
 
@@ -970,6 +1054,18 @@ def generate_project_story(
                     "context_budget": dict(blocked_retry_budget),
                     "request_budgets": list(audit.get("request_budgets") or []),
                 }
+            elif audit.get("error_code"):
+                fields["validation_json"] = {
+                    "status": "failed",
+                    "context_budget": dict(audit.get("context_budget") or {}),
+                    "request_budgets": list(audit.get("request_budgets") or []),
+                    "provider_error": {
+                        "error_code": str(audit.get("error_code") or "provider_error"),
+                        "http_status": audit.get("http_status"),
+                        "provider_error_type": str(audit.get("provider_error_type") or ""),
+                        "provider_error_message": str(audit.get("provider_error_message") or ""),
+                    },
+                }
         _update_generation(db, generation_uuid, **fields)
         raise
 
@@ -1244,6 +1340,7 @@ __all__ = [
     "STORY_PROMPT_VERSION",
     "StoryGenerationError",
     "StoryContextBudgetError",
+    "StoryProviderHTTPError",
     "StoryValidationError",
     "apply_story_generation_to_storyboard",
     "generate_project_story",

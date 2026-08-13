@@ -50,13 +50,19 @@ def estimate_story_input_tokens(
     system_prompt: str = "",
     request_messages: Sequence[Mapping[str, Any]] | None = None,
     provider: Any | None = None,
+    provider_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, int | str]:
     """Estimate the exact request shape, preferring audited tokenizer metadata."""
 
     messages = list(request_messages or _default_messages(snapshot, system_prompt))
     messages_json = _canonical(messages)
     total_bytes = len(messages_json.encode("utf-8"))
-    metadata = provider_context_metadata(provider) if provider is not None else {}
+    if provider_metadata is not None:
+        metadata = dict(provider_metadata)
+    elif provider is not None:
+        metadata = provider_context_metadata(provider)
+    else:
+        metadata = {}
     audited_count = _audited_provider_token_count(provider, messages, metadata) if provider is not None else None
     if audited_count is not None:
         estimated, tokenizer_source = audited_count
@@ -96,11 +102,14 @@ def provider_context_metadata(provider: Any) -> dict[str, Any]:
     result = dict(metadata)
     result.setdefault("provider", str(getattr(provider, "provider", "") or ""))
     result.setdefault("model", str(getattr(provider, "model", "") or ""))
-    result["context_capacity_tokens"] = _positive_int(
+    capacity = _positive_int(
         result.get("context_capacity_tokens")
         or result.get("max_context_length")
         or result.get("context_length")
     )
+    if result.get("runtime_authority_required") is True and result.get("runtime_context_status") != "verified":
+        capacity = None
+    result["context_capacity_tokens"] = capacity
     result["source"] = str(result.get("source") or "unknown")
     return result
 
@@ -121,6 +130,7 @@ def preflight_story_context(
         system_prompt=system_prompt,
         request_messages=request_messages,
         provider=provider,
+        provider_metadata=metadata,
     )
     capacity = metadata.get("context_capacity_tokens")
     reserved = _positive_int(reserved_output_tokens) or DEFAULT_RESERVED_OUTPUT_TOKENS
@@ -140,8 +150,17 @@ def preflight_story_context(
         "token_estimator": {key: value for key, value in estimate.items()},
         "request_allowed": False,
         "status": "blocked",
-        "reason_code": "context_capacity_unknown",
-        "recommendation": "請提供可稽核的 model context metadata；否則請縮減 input 或換用已知 context 的模型。",
+        "reason_code": (
+            str(metadata.get("reason_code") or "runtime_context_unverified")
+            if metadata.get("runtime_authority_required") is True
+            else "context_capacity_unknown"
+        ),
+        "recommendation": (
+            "請先確認 exact local endpoint/model 已載入，並取得 fresh runtime context；"
+            "不會假設 configured context、JIT 載入、cloud 或付費 provider。"
+            if metadata.get("runtime_authority_required") is True
+            else "請提供可稽核的 model context metadata；否則請縮減 input 或換用已知 context 的模型。"
+        ),
     }
     if capacity is None:
         return budget
@@ -161,6 +180,15 @@ def context_budget_error_message(budget: Mapping[str, Any]) -> str:
     estimated = int(budget.get("estimated_input_tokens") or 0)
     capacity = budget.get("available_context_tokens")
     reason = str(budget.get("reason_code") or "context_budget_blocked")
+    if reason.startswith("runtime_"):
+        metadata = budget.get("context_metadata") if isinstance(budget.get("context_metadata"), Mapping) else {}
+        configured = metadata.get("configured_context_capacity_tokens")
+        return (
+            f"Story Provider runtime context unverified：estimated input {estimated} tokens，"
+            f"configured context {configured if configured is not None else 'unknown'} tokens，"
+            f"reason {reason}；已在 generation POST 前 blocked。"
+            "請確認 exact local endpoint/model loaded instance；不會假設 JIT context、切換 cloud 或付費 provider。"
+        )
     if reason == "context_capacity_unknown":
         return (
             f"Story Provider context capacity unknown：estimated input {estimated} tokens，"

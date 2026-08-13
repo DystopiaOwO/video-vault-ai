@@ -40,6 +40,7 @@ from .capability_registry import (
     validate_local_endpoint_scope,
 )
 from .config import DEFAULT_CONFIG, load_config
+from .lmstudio_runtime import resolve_lmstudio_runtime_context
 from .paths import db_path
 
 
@@ -669,76 +670,134 @@ def _story_provider_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
     provider = str(story.get("provider") or "mock").lower()
     model = str(story.get("model") or "")
     local = dict((cfg.get("ai") or {}).get("local") or {})
-    context_length = story.get("context_length") or story.get("max_context_length") or story.get("context_capacity_tokens")
-    context_source = story.get("context_source")
-    if context_length in (None, ""):
-        context_length = local.get("context_length") or local.get("max_context_length") or local.get("context_capacity_tokens")
-        context_source = context_source or ("config.ai.local.context_length" if context_length not in (None, "") else None)
+    configured_context = story.get("context_length") or story.get("max_context_length") or story.get("context_capacity_tokens")
+    configured_source = story.get("context_source")
+    if configured_context in (None, ""):
+        configured_context = local.get("context_length") or local.get("max_context_length") or local.get("context_capacity_tokens")
+        configured_source = configured_source or ("config.ai.local.context_length" if configured_context not in (None, "") else None)
     try:
-        context_length = int(context_length) if context_length not in (None, "") and int(context_length) > 0 else None
+        configured_context = int(configured_context) if configured_context not in (None, "") and int(configured_context) > 0 else None
     except (TypeError, ValueError):
-        context_length = None
-    if provider == "mock" and context_length is None:
-        context_length = 1_000_000
-        context_source = "built_in_mock_contract"
-    context_evidence = {
-        "context_capacity": context_length,
-        "context_capacity_tokens": context_length,
-        "context_metadata_source": str(context_source or ("built_in_mock_contract" if provider == "mock" else "unknown")),
-        "context_metadata_status": "verified" if context_length or provider == "mock" else "unknown",
-        "context_capacity_status": "known" if context_length else "unknown",
-        "generation_preflight": "story generation independently fail closed before request",
-    }
+        configured_context = None
+    configured_source = str(configured_source or ("config.story.context_length" if configured_context else "unknown"))
     if provider == "mock":
-        return _check("provider.story", "provider", "pass", "Story Provider mock contract 可用", evidence={"provider": "mock", "model": model or "mock", "model_exists": True, "network_request": False, **context_evidence})
+        return _check(
+            "provider.story",
+            "provider",
+            "pass",
+            "Story Provider mock contract 可用",
+            evidence={
+                "provider": "mock",
+                "model": model or "mock",
+                "model_exists": True,
+                "network_request": False,
+                "context_capacity": 1_000_000,
+                "context_capacity_tokens": 1_000_000,
+                "context_metadata_source": "built_in_mock_contract",
+                "context_metadata_status": "verified",
+                "context_capacity_status": "known",
+                "generation_preflight": "story generation independently fail closed before request",
+            },
+        )
     if provider not in {"local_text", "local"}:
-        return _check("provider.story", "provider", "blocked", "不支援的 Story Provider", evidence={"provider": provider, "model": model, "model_exists": False, **context_evidence}, remediation="改用 mock 或 local_text Story Provider。")
+        return _check(
+            "provider.story",
+            "provider",
+            "blocked",
+            "不支援的 Story Provider",
+            evidence={"provider": provider, "model": model, "model_exists": False},
+            remediation="改用 mock 或 local_text Story Provider。",
+        )
     base_url = str(story.get("base_url") or "").rstrip("/")
     if not base_url or not model:
-        return _check("provider.story", "provider", "blocked", "Story Provider endpoint/model contract 缺失", evidence={"provider": provider, "model": model, "endpoint_configured": bool(base_url), "model_configured": bool(model), **context_evidence}, remediation="設定 story.base_url 與 story.model。")
+        return _check(
+            "provider.story",
+            "provider",
+            "blocked",
+            "Story Provider endpoint/model contract 缺失",
+            evidence={"provider": provider, "model": model, "endpoint_configured": bool(base_url), "model_configured": bool(model)},
+            remediation="設定 story.base_url 與 story.model。",
+        )
     if mode != "full":
-        return _check("provider.story", "provider", "skipped", "default/quick 未查詢 Story Provider model existence", evidence={"provider": provider, "model": model, "model_configured": True, "model_exists": "unverified", "probe": "skipped", **context_evidence}, remediation="使用 --full 查詢 Story Provider /models。")
-    scope = _validate_local_endpoint_scope(base_url)
-    if scope.get("status") != "pass":
-        return _check("provider.story", "provider", "blocked", "Story Provider endpoint 不符合 loopback-only network policy", evidence={"provider": provider, "model": model, **scope, **context_evidence}, remediation="只允許解析至 loopback 的 127.0.0.1、::1 或 localhost endpoint。")
-    reachable, models = _local_models(str(scope["validated_endpoint"]))
-    model_record = next((item for item in models if str(item.get("id") or item.get("name") or "") == model), None)
-    exists = model_record is not None
-    if context_length is None and model_record is not None:
-        model_context = model_record.get("context_length") or model_record.get("max_context_length") or model_record.get("context_window") or model_record.get("context_capacity_tokens")
-        try:
-            context_length = int(model_context) if model_context not in (None, "") and int(model_context) > 0 else None
-        except (TypeError, ValueError):
-            context_length = None
-        if context_length:
-            context_source = "local_endpoint.model_metadata"
-            context_evidence.update({"context_capacity": context_length, "context_capacity_tokens": context_length, "context_metadata_source": context_source, "context_metadata_status": "verified"})
+        return _check(
+            "provider.story",
+            "provider",
+            "skipped",
+            "default/quick 未查詢 Story Provider loaded-instance runtime context",
+            evidence={
+                "provider": provider,
+                "model": model,
+                "model_configured": True,
+                "model_exists": "unverified",
+                "probe": "skipped",
+                "configured_context_capacity_tokens": configured_context,
+                "configured_context_source": configured_source,
+                "context_capacity_tokens": None,
+                "context_metadata_status": "runtime_unverified",
+                "context_capacity_status": "unknown",
+                "generation_preflight": "story generation independently requires fresh loaded-instance context before request",
+            },
+            remediation="使用 --full 查詢 exact loaded-instance runtime context。",
+        )
+
+    runtime = resolve_lmstudio_runtime_context(
+        base_url,
+        model,
+        configured_context_length=configured_context,
+        configured_context_source=configured_source,
+        timeout_seconds=float(story.get("runtime_context_timeout_seconds") or 5),
+        urlopen_fn=urlopen,
+    )
+    context_length = runtime.get("context_capacity_tokens")
     estimated_input = story.get("estimated_input_tokens") or story.get("input_token_estimate")
     try:
         estimated_input = int(estimated_input) if estimated_input not in (None, "") and int(estimated_input) > 0 else None
     except (TypeError, ValueError):
         estimated_input = None
-    context_evidence["reserved_output_tokens"] = _STORY_RESERVED_OUTPUT_TOKENS
-    context_evidence["estimated_input_tokens"] = estimated_input
-    if context_length is None:
-        context_evidence["context_capacity_status"] = "unknown"
+    if context_length is None or runtime.get("runtime_context_status") != "verified":
+        capacity_status = "unknown"
     elif context_length <= _STORY_RESERVED_OUTPUT_TOKENS or (estimated_input is not None and context_length < estimated_input + _STORY_RESERVED_OUTPUT_TOKENS):
-        context_evidence["context_capacity_status"] = "insufficient"
+        capacity_status = "insufficient"
     else:
-        context_evidence["context_capacity_status"] = "known"
-    if not reachable or not exists:
+        capacity_status = "known"
+    context_evidence = {
+        "context_capacity": context_length,
+        "context_capacity_tokens": context_length,
+        "context_metadata_source": str(runtime.get("source") or "lmstudio.runtime.unverified"),
+        "context_metadata_status": str(runtime.get("metadata_status") or "blocked"),
+        "context_capacity_status": capacity_status,
+        "configured_context_capacity_tokens": configured_context,
+        "configured_context_source": configured_source,
+        "reserved_output_tokens": _STORY_RESERVED_OUTPUT_TOKENS,
+        "estimated_input_tokens": estimated_input,
+        "generation_preflight": "story generation independently remains fail closed and re-queries the same loaded-instance authority before every request",
+        "runtime_context": runtime,
+    }
+    if runtime.get("runtime_context_status") != "verified":
         status = "blocked"
-        summary = "Story Provider model probe failed"
-    elif context_evidence["context_capacity_status"] == "insufficient":
+        summary = f"Story Provider runtime context 未驗證：{runtime.get('reason_code') or 'runtime_context_unverified'}"
+    elif capacity_status == "insufficient":
         status = "blocked"
-        summary = "Story Provider context capacity 明顯不足，generation preflight 將 blocked"
-    elif context_evidence["context_capacity_status"] == "unknown":
-        status = "warning"
-        summary = "Story Provider model 可用，但 context capacity unknown；generation preflight 仍會 fail closed"
+        summary = "Story Provider live loaded-instance context capacity 明顯不足，generation preflight 將 blocked"
     else:
         status = "pass"
-        summary = "Story Provider model/context contract 通過"
-    return _check("provider.story", "provider", status, summary, evidence={"provider": provider, "model": model, "connectivity": reachable, "model_exists": exists, "model_count": len(models), "network_scope": "local", **context_evidence}, remediation=None if status == "pass" else "提供可稽核 context metadata，或縮減 Story input / 改用足夠 context 的本地模型；不會自動切 cloud。")
+        summary = "Story Provider exact loaded-instance runtime context contract 通過"
+    return _check(
+        "provider.story",
+        "provider",
+        status,
+        summary,
+        evidence={
+            "provider": provider,
+            "model": model,
+            "connectivity": runtime.get("runtime_query_http_status") == 200,
+            "model_exists": runtime.get("model_exists", False),
+            "model_count": runtime.get("runtime_model_count", 0),
+            "network_scope": runtime.get("validated_network_scope", "blocked"),
+            **context_evidence,
+        },
+        remediation=None if status == "pass" else "確認 exact local model instance 已載入且 context 足夠；不會採用 stale config、JIT 假設或 cloud fallback。",
+    )
 
 
 def _cloud_config_check(cfg: Mapping[str, Any]) -> dict[str, Any]:

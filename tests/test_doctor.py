@@ -299,6 +299,23 @@ class _JsonResponse:
         return False
 
 
+def _story_runtime_models(model: str, context_length: int | None, *, loaded: bool = True):
+    instances = []
+    if loaded:
+        config = {} if context_length is None else {"context_length": context_length}
+        instances.append({"id": model, "config": config})
+    return {
+        "models": [
+            {
+                "type": "llm",
+                "key": model,
+                "loaded_instances": instances,
+                "max_context_length": 262144,
+            }
+        ]
+    }
+
+
 def test_provider_matrix_model_missing_capability_missing_and_story_contract(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(doctor, "urlopen", lambda *args, **kwargs: _JsonResponse({"data": [{"id": "other-model"}]}))
     cfg = {"ai": {"provider": "local", "local": {"base_url": "http://127.0.0.1:1234/v1", "model": "missing-model"}}, "story": {"provider": "local_text", "base_url": "http://127.0.0.1:1234/v1", "model": "missing-story-model"}}
@@ -309,7 +326,7 @@ def test_provider_matrix_model_missing_capability_missing_and_story_contract(tmp
     assert caps["status"] == "blocked"
     assert story["status"] == "blocked"
     assert story["evidence"]["context_capacity"] is None
-    assert story["evidence"]["context_metadata_source"] == "unknown"
+    assert story["evidence"]["context_metadata_source"] == "lmstudio.runtime.unverified"
 
 
 def test_multi_image_probe_selects_three_unique_colors_from_five():
@@ -605,31 +622,58 @@ def test_local_multi_image_behavior_probe_failure_is_classified(monkeypatch, fai
 
 
 def test_story_doctor_reports_known_insufficient_and_unknown_context(monkeypatch):
-    def local_urlopen(request, **kwargs):
-        return _JsonResponse({"data": [{"id": "story-model"}]})
-
-    monkeypatch.setattr(doctor, "urlopen", local_urlopen)
     base = {"provider": "local_text", "base_url": "http://127.0.0.1:1234/v1", "model": "story-model"}
-    known = doctor._story_provider_check({"story": {**base, "context_length": 32768, "context_source": "test.model_metadata"}}, "full")
-    insufficient = doctor._story_provider_check({"story": {**base, "context_length": 8192, "estimated_input_tokens": 26000}}, "full")
+
+    monkeypatch.setattr(doctor, "urlopen", lambda *_args, **_kwargs: _JsonResponse(_story_runtime_models("story-model", 32768)))
+    known = doctor._story_provider_check({"story": {**base, "context_length": 8192, "context_source": "stale.config"}}, "full")
+
+    monkeypatch.setattr(doctor, "urlopen", lambda *_args, **_kwargs: _JsonResponse(_story_runtime_models("story-model", 8192)))
+    insufficient = doctor._story_provider_check({"story": {**base, "context_length": 32768, "estimated_input_tokens": 26000}}, "full")
+
+    monkeypatch.setattr(doctor, "urlopen", lambda *_args, **_kwargs: _JsonResponse(_story_runtime_models("story-model", None, loaded=False)))
     unknown = doctor._story_provider_check({"story": base}, "full")
 
     assert known["status"] == "pass"
     assert known["evidence"]["model"] == "story-model"
     assert known["evidence"]["context_capacity_status"] == "known"
     assert known["evidence"]["context_capacity_tokens"] == 32768
-    assert known["evidence"]["context_metadata_source"] == "test.model_metadata"
+    assert known["evidence"]["context_metadata_source"] == "lmstudio.api_v1.loaded_instances.config.context_length"
+    assert known["evidence"]["configured_context_capacity_tokens"] == 8192
     assert insufficient["status"] == "blocked"
     assert insufficient["evidence"]["context_capacity_status"] == "insufficient"
+    assert insufficient["evidence"]["context_capacity_tokens"] == 8192
+    assert insufficient["evidence"]["configured_context_capacity_tokens"] == 32768
     assert "fail closed" in insufficient["evidence"]["generation_preflight"]
-    assert unknown["status"] == "warning"
+    assert unknown["status"] == "blocked"
     assert unknown["evidence"]["context_capacity_status"] == "unknown"
+    assert unknown["evidence"]["runtime_context"]["reason_code"] == "runtime_model_not_loaded"
 
-    monkeypatch.setattr(doctor, "urlopen", lambda *args, **kwargs: _JsonResponse({"data": [{"id": "story-model", "context_length": 65536}]}))
+    monkeypatch.setattr(doctor, "urlopen", lambda *_args, **_kwargs: _JsonResponse(_story_runtime_models("story-model", 65536)))
     endpoint_known = doctor._story_provider_check({"story": base}, "full")
     assert endpoint_known["status"] == "pass"
     assert endpoint_known["evidence"]["context_capacity_tokens"] == 65536
-    assert endpoint_known["evidence"]["context_metadata_source"] == "local_endpoint.model_metadata"
+    assert endpoint_known["evidence"]["context_metadata_source"] == "lmstudio.api_v1.loaded_instances.config.context_length"
+
+
+def test_story_doctor_public_endpoint_blocks_without_network(monkeypatch):
+    calls = []
+    monkeypatch.setattr(doctor, "urlopen", lambda *_args, **_kwargs: calls.append("network"))
+    result = doctor._story_provider_check(
+        {
+            "story": {
+                "provider": "local_text",
+                "base_url": "https://example.com/v1",
+                "model": "story-model",
+                "context_length": 32768,
+            }
+        },
+        "full",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["evidence"]["runtime_context"]["reason_code"] == "runtime_endpoint_scope_blocked"
+    assert result["evidence"]["context_capacity_tokens"] is None
+    assert calls == []
 
 
 def test_cloud_contract_never_calls_network_and_reports_key_presence(monkeypatch):
