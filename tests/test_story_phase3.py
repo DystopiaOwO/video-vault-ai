@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from io import BytesIO
 import json
 from pathlib import Path
+import urllib.error
 import urllib.request
 
 import pytest
@@ -18,6 +20,7 @@ from video_vault.story_generation import (
     STORY_SYSTEM_PROMPT,
     StoryGenerationError,
     StoryContextBudgetError,
+    StoryProviderHTTPError,
     StoryValidationError,
     apply_story_generation_to_storyboard,
     generate_project_story,
@@ -33,6 +36,26 @@ from video_vault.story_input import build_story_input_snapshot, story_input_hash
 from video_vault.story_profiles import CreatorProfileRevisionConflict, StorySettingsRevisionConflict, load_creator_profile, load_project_story_settings, save_creator_profile, save_project_story_settings
 from video_vault.storyboard import generate_storyboard, load_storyboard
 from video_vault.render_manifest import build_render_manifest
+
+
+def _verified_runtime_resolver(source: str = "test.runtime.loaded_instance"):
+    def resolve(_base_url, model, *, configured_context_length=None, **_kwargs):
+        capacity = int(configured_context_length) if configured_context_length else None
+        return {
+            "provider": "local_text",
+            "model": str(model),
+            "context_capacity_tokens": capacity,
+            "source": source if capacity else "lmstudio.runtime.unverified",
+            "verified": bool(capacity),
+            "metadata_status": "verified" if capacity else "blocked",
+            "runtime_authority_required": True,
+            "runtime_context_status": "verified" if capacity else "blocked",
+            "runtime_authoritative": True,
+            "reason_code": "runtime_context_verified" if capacity else "runtime_context_unverified",
+            "configured_context_capacity_tokens": capacity,
+        }
+
+    return resolve
 
 
 def _fixture(tmp_path: Path, *, second_project: bool = False):
@@ -715,6 +738,7 @@ def test_local_text_provider_allows_at_most_one_corrective_retry_and_audits(monk
         "test-model",
         context_length=32768,
         context_source="test.provider_metadata",
+        runtime_context_resolver=_verified_runtime_resolver(),
     ).generate_story({"story_profile_id": "general_diary"})
     assert output == valid
     assert raw["provider_audit"]["calls"] == 2
@@ -722,7 +746,7 @@ def test_local_text_provider_allows_at_most_one_corrective_retry_and_audits(monk
     assert len(raw["provider_audit"]["call_latencies_ms"]) == 2
     assert raw["provider_audit"]["strict_schema"] is True
     assert raw["provider_audit"]["context_budget"]["status"] == "pass"
-    assert raw["provider_audit"]["context_budget"]["context_metadata_source"] == "test.provider_metadata"
+    assert raw["provider_audit"]["context_budget"]["context_metadata_source"] == "test.runtime.loaded_instance"
     assert all(request["max_tokens"] == 2048 for request in requests)
     assert len(raw["provider_audit"]["request_budgets"]) == 2
     assert all(item["budget"]["status"] == "pass" for item in raw["provider_audit"]["request_budgets"])
@@ -741,6 +765,7 @@ def test_corrective_retry_recomputes_budget_and_blocks_second_http(monkeypatch):
         context_length=100000,
         context_source="test.model_metadata.max_context_length",
         reserved_output_tokens=512,
+        runtime_context_resolver=_verified_runtime_resolver(),
     )
     first_messages = [
         {"role": "system", "content": STORY_SYSTEM_PROMPT},
@@ -879,6 +904,7 @@ def test_local_text_provider_blocks_oversized_input_before_http(monkeypatch):
         "8k-model",
         context_length=8192,
         context_source="test.model_metadata.max_context_length",
+        runtime_context_resolver=_verified_runtime_resolver(),
     )
     snapshot = {"story_profile_id": "general_diary", "project_intent": "x" * 100000}
     with pytest.raises(StoryContextBudgetError, match="estimated input .*available context") as caught:
@@ -901,14 +927,18 @@ def test_local_text_provider_unknown_context_blocks_before_http(monkeypatch):
         raise AssertionError("unknown context must block before HTTP")
 
     monkeypatch.setattr(urllib.request, "urlopen", fail_if_called)
-    provider = LocalTextStoryProvider("http://127.0.0.1:1234/v1", "unknown-model")
-    with pytest.raises(StoryContextBudgetError, match="context capacity unknown") as caught:
+    provider = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1",
+        "unknown-model",
+        runtime_context_resolver=_verified_runtime_resolver(),
+    )
+    with pytest.raises(StoryContextBudgetError, match="runtime context unverified") as caught:
         provider.generate_story({"story_profile_id": "general_diary"})
     assert calls == []
-    assert caught.value.budget["reason_code"] == "context_capacity_unknown"
-    assert caught.value.budget["context_metadata_source"] == "unknown"
+    assert caught.value.budget["reason_code"] == "runtime_context_unverified"
+    assert caught.value.budget["context_metadata_source"] == "lmstudio.runtime.unverified"
     assert "estimated input" in str(caught.value)
-    assert "available context unknown" in str(caught.value)
+    assert "generation POST 前 blocked" in str(caught.value)
 
 
 def test_generate_project_story_blocks_context_before_provider_request(tmp_path, monkeypatch):
@@ -922,6 +952,9 @@ def test_generate_project_story_blocks_context_before_provider_request(tmp_path,
     }
     save_project_story_settings(cfg, db, project_id, {"project_intent": "x" * 100000})
     calls = []
+    import video_vault.story_generation as story_generation_module
+
+    monkeypatch.setattr(story_generation_module, "resolve_lmstudio_runtime_context", _verified_runtime_resolver())
 
     def fail_if_called(*args, **kwargs):
         calls.append((args, kwargs))
@@ -941,6 +974,69 @@ def test_generate_project_story_blocks_context_before_provider_request(tmp_path,
     assert caught.value.budget["estimated_input_tokens"] > caught.value.budget["available_context_tokens"]
 
 
+def test_generate_project_story_stale_config_live_8192_blocks_with_zero_post_audit(tmp_path, monkeypatch):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    cfg["story"] = {
+        "provider": "local_text",
+        "model": "story-model",
+        "base_url": "http://127.0.0.1:1234/v1",
+        "context_length": 32768,
+        "context_source": "stale.config",
+    }
+    save_project_story_settings(cfg, db, project_id, {"project_intent": "x" * 10000})
+    methods = []
+
+    class RuntimeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "models": [
+                        {
+                            "type": "llm",
+                            "key": "story-model",
+                            "loaded_instances": [{"id": "story-model", "config": {"context_length": 8192}}],
+                            "max_context_length": 262144,
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    def runtime_only(request, **_kwargs):
+        methods.append(request.method)
+        if request.method == "POST":
+            raise AssertionError("stale config must not permit Story generation POST")
+        return RuntimeResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", runtime_only)
+    with pytest.raises(StoryContextBudgetError) as caught:
+        generate_project_story(cfg, db, project_id, force=True)
+
+    assert methods == ["GET"]
+    assert caught.value.budget["context_capacity_tokens"] == 8192
+    assert caught.value.audit["generation_post_calls"] == 0
+    with connect(db) as con:
+        row = dict(
+            con.execute(
+                "select raw_response_json, validation_json from story_generations where project_id=? order by generation desc limit 1",
+                (project_id,),
+            ).fetchone()
+        )
+    raw = json.loads(row["raw_response_json"])
+    validation = json.loads(row["validation_json"])
+    assert raw["provider_audit"]["generation_post_calls"] == 0
+    assert raw["provider_audit"]["runtime_context"]["context_capacity_tokens"] == 8192
+    assert validation["status"] == "blocked"
+    assert validation["context_budget"]["context_metadata"]["configured_context_capacity_tokens"] == 32768
+
+
 def test_generate_project_story_persists_blocked_retry_budget(tmp_path, monkeypatch):
     cfg, db, project_id, _ = _fixture(tmp_path)
     cfg["story"] = {"provider": "local_text", "model": "retry-model", "base_url": "http://127.0.0.1:1234/v1"}
@@ -950,6 +1046,7 @@ def test_generate_project_story_persists_blocked_retry_budget(tmp_path, monkeypa
         context_length=100000,
         context_source="test.model_metadata.max_context_length",
         reserved_output_tokens=512,
+        runtime_context_resolver=_verified_runtime_resolver(),
     )
     original_generate = provider.generate_story
 
@@ -1002,6 +1099,53 @@ def test_generate_project_story_persists_blocked_retry_budget(tmp_path, monkeypa
     assert len(audit["request_budgets"]) == 2
     assert validation["status"] == "blocked"
     assert len(validation["request_budgets"]) == 2
+
+
+def test_generate_project_story_persists_context_overflow_provider_audit(tmp_path, monkeypatch):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    cfg["story"] = {
+        "provider": "local_text",
+        "model": "story-model",
+        "base_url": "http://127.0.0.1:1234/v1",
+        "context_length": 100000,
+        "context_source": "stale.config",
+    }
+    import video_vault.story_generation as story_generation_module
+
+    monkeypatch.setattr(story_generation_module, "resolve_lmstudio_runtime_context", _verified_runtime_resolver())
+
+    def overflow(request, **_kwargs):
+        body = json.dumps(
+            {
+                "error": {
+                    "type": "exceed_context_size_error",
+                    "message": "Request has 8833 tokens but n_ctx is 8192",
+                }
+            }
+        ).encode("utf-8")
+        raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", {}, BytesIO(body))
+
+    monkeypatch.setattr(urllib.request, "urlopen", overflow)
+    with pytest.raises(StoryProviderHTTPError, match="context overflow"):
+        generate_project_story(cfg, db, project_id, force=True)
+
+    with connect(db) as con:
+        row = dict(
+            con.execute(
+                "select status, error, raw_response_json, validation_json from story_generations where project_id=? order by generation desc limit 1",
+                (project_id,),
+            ).fetchone()
+        )
+    raw = json.loads(row["raw_response_json"])
+    validation = json.loads(row["validation_json"])
+    assert row["status"] == "failed"
+    assert "context overflow" in row["error"]
+    assert raw["provider_audit"]["error_code"] == "provider_context_overflow"
+    assert raw["provider_audit"]["calls"] == 1
+    assert raw["provider_audit"]["retries"] == 0
+    assert validation["status"] == "failed"
+    assert validation["provider_error"]["error_code"] == "provider_context_overflow"
+    assert validation["provider_error"]["provider_error_type"] == "exceed_context_size_error"
 
 
 def test_calibration_uses_approved_outputs_only_and_can_reset(tmp_path: Path):
