@@ -94,9 +94,7 @@ def _positive_int(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
-def provider_context_metadata(provider: Any) -> dict[str, Any]:
-    method = getattr(provider, "context_metadata", None)
-    metadata = method() if callable(method) else None
+def _normalize_provider_context_metadata(provider: Any, metadata: Any) -> dict[str, Any]:
     if not isinstance(metadata, Mapping):
         metadata = {}
     result = dict(metadata)
@@ -112,6 +110,12 @@ def provider_context_metadata(provider: Any) -> dict[str, Any]:
     result["context_capacity_tokens"] = capacity
     result["source"] = str(result.get("source") or "unknown")
     return result
+
+
+def provider_context_metadata(provider: Any) -> dict[str, Any]:
+    method = getattr(provider, "context_metadata", None)
+    metadata = method() if callable(method) else None
+    return _normalize_provider_context_metadata(provider, metadata)
 
 
 def preflight_story_context(
@@ -132,9 +136,43 @@ def preflight_story_context(
         provider=provider,
         provider_metadata=metadata,
     )
-    capacity = metadata.get("context_capacity_tokens")
     reserved = _positive_int(reserved_output_tokens) or DEFAULT_RESERVED_OUTPUT_TOKENS
     estimated_input = int(estimate["estimated_input_tokens"])
+    capacity = metadata.get("context_capacity_tokens")
+    required_context = estimated_input + reserved
+    ensure_runtime = getattr(provider, "ensure_runtime_context", None)
+    if callable(ensure_runtime) and (capacity is None or required_context > int(capacity)):
+        try:
+            ensured = ensure_runtime(
+                required_context_tokens=required_context,
+                current_metadata=metadata,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            ensured = {
+                **metadata,
+                "context_capacity_tokens": None,
+                "source": "lmstudio.runtime.unverified",
+                "verified": False,
+                "metadata_status": "blocked",
+                "runtime_context_status": "blocked",
+                "runtime_authority_required": True,
+                "reason_code": "runtime_provisioning_failed",
+                "runtime_provisioning": {
+                    "status": "blocked",
+                    "reason_code": "runtime_provisioning_failed",
+                    "error": f"{type(exc).__name__}: {exc}"[:500],
+                },
+            }
+        metadata = _normalize_provider_context_metadata(provider, ensured)
+        estimate = estimate_story_input_tokens(
+            snapshot,
+            system_prompt=system_prompt,
+            request_messages=request_messages,
+            provider=provider,
+            provider_metadata=metadata,
+        )
+        estimated_input = int(estimate["estimated_input_tokens"])
+        capacity = metadata.get("context_capacity_tokens")
     budget = {
         "contract_version": STORY_CONTEXT_BUDGET_CONTRACT_VERSION,
         "provider": str(metadata.get("provider") or ""),

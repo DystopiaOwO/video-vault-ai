@@ -83,6 +83,12 @@ DEFAULT_CONFIG = {
         "model": "",
         "base_url": "http://127.0.0.1:1234/v1",
         "timeout_seconds": 180,
+        "runtime_provisioning": {
+            "enabled": False,
+            "target_context_length": 0,
+            "load_timeout_seconds": 180,
+            "cleanup_timeout_seconds": 30,
+        },
         "prompt_version": "project-story-v1",
         "schema_version": 1,
     },

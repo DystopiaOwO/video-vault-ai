@@ -754,12 +754,43 @@ def _story_provider_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
         estimated_input = int(estimated_input) if estimated_input not in (None, "") and int(estimated_input) > 0 else None
     except (TypeError, ValueError):
         estimated_input = None
-    if context_length is None or runtime.get("runtime_context_status") != "verified":
-        capacity_status = "unknown"
-    elif context_length <= _STORY_RESERVED_OUTPUT_TOKENS or (estimated_input is not None and context_length < estimated_input + _STORY_RESERVED_OUTPUT_TOKENS):
-        capacity_status = "insufficient"
-    else:
+    provisioning_raw = story.get("runtime_provisioning")
+    provisioning = dict(provisioning_raw) if isinstance(provisioning_raw, Mapping) else {}
+    provisioning_enabled, provisioning_error = _optional_bool(provisioning.get("enabled"), default=False)
+    target_raw = provisioning.get("target_context_length") or configured_context
+    try:
+        target_context = int(target_raw) if target_raw not in (None, "") and int(target_raw) > 0 else None
+    except (TypeError, ValueError):
+        target_context = None
+    required_context = max(
+        int(target_context or 0),
+        int(estimated_input or 0) + _STORY_RESERVED_OUTPUT_TOKENS,
+        _STORY_RESERVED_OUTPUT_TOKENS + 1,
+    )
+    model_max_context = runtime.get("model_max_context_length")
+    try:
+        model_max_context = int(model_max_context) if model_max_context not in (None, "") and int(model_max_context) > 0 else None
+    except (TypeError, ValueError):
+        model_max_context = None
+    runtime_verified = runtime.get("runtime_context_status") == "verified" and context_length is not None
+    ready_as_is = bool(runtime_verified and int(context_length) >= required_context)
+    provisionable = bool(
+        not provisioning_error
+        and provisioning_enabled
+        and runtime.get("model_exists") is True
+        and runtime.get("validated_network_scope") == "loopback"
+        and model_max_context is not None
+        and model_max_context >= required_context
+    )
+    if ready_as_is:
+        readiness = "ready_as_is"
         capacity_status = "known"
+    elif provisionable:
+        readiness = "provisionable"
+        capacity_status = "insufficient" if runtime_verified else "unknown"
+    else:
+        readiness = "blocked"
+        capacity_status = "insufficient" if runtime_verified else "unknown"
     context_evidence = {
         "context_capacity": context_length,
         "context_capacity_tokens": context_length,
@@ -770,18 +801,32 @@ def _story_provider_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
         "configured_context_source": configured_source,
         "reserved_output_tokens": _STORY_RESERVED_OUTPUT_TOKENS,
         "estimated_input_tokens": estimated_input,
-        "generation_preflight": "story generation independently remains fail closed and re-queries the same loaded-instance authority before every request",
+        "required_context_tokens": required_context,
+        "model_max_context_length": model_max_context,
+        "runtime_readiness": readiness,
+        "runtime_provisioning_enabled": provisioning_enabled,
+        "runtime_provisioning_config_error": provisioning_error,
+        "runtime_provisioning_target_context_tokens": target_context,
+        "runtime_provisioning_action": "not_executed_by_doctor",
+        "model_load_attempted": False,
+        "model_download": False,
+        "persistent_config_mutated": False,
+        "external_instance_unload_attempted": False,
+        "generation_preflight": "story generation independently remains fail closed, may provision only an app-owned loopback instance, then re-queries live context before every request",
         "runtime_context": runtime,
     }
-    if runtime.get("runtime_context_status") != "verified":
-        status = "blocked"
-        summary = f"Story Provider runtime context 未驗證：{runtime.get('reason_code') or 'runtime_context_unverified'}"
-    elif capacity_status == "insufficient":
+    if ready_as_is:
+        status = "pass"
+        summary = "Story Provider exact loaded-instance runtime context contract 通過"
+    elif provisionable:
+        status = "warning"
+        summary = "Story Provider 目前 instance context 不足，但已安裝模型可由 generation 建立 app-owned temporary runtime"
+    elif runtime_verified:
         status = "blocked"
         summary = "Story Provider live loaded-instance context capacity 明顯不足，generation preflight 將 blocked"
     else:
-        status = "pass"
-        summary = "Story Provider exact loaded-instance runtime context contract 通過"
+        status = "blocked"
+        summary = f"Story Provider runtime context 未驗證：{runtime.get('reason_code') or 'runtime_context_unverified'}"
     return _check(
         "provider.story",
         "provider",
@@ -796,7 +841,7 @@ def _story_provider_check(cfg: Mapping[str, Any], mode: str) -> dict[str, Any]:
             "network_scope": runtime.get("validated_network_scope", "blocked"),
             **context_evidence,
         },
-        remediation=None if status == "pass" else "確認 exact local model instance 已載入且 context 足夠；不會採用 stale config、JIT 假設或 cloud fallback。",
+        remediation=None if status in {"pass", "warning"} else "確認 exact local model 已安裝且最大 context 足夠，或啟用受控 app-owned runtime provisioning；不會採用 stale config、下載模型或 cloud fallback。",
     )
 
 
