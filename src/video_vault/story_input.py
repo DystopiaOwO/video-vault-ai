@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from .database import frames, project, project_videos
+from .database import frames, project, project_videos, segments as database_segments
 from .project import _read_json, project_dir, project_segments
 from .story_profiles import (
     load_project_story_settings,
@@ -19,6 +19,9 @@ from .story_context import story_context
 
 STORY_INPUT_SCHEMA_VERSION = 1
 STORY_INPUT_PROMPT_VERSION = "project-story-input-v1"
+CLIP_AI_SUMMARY_MAX_ITEMS = 3
+CLIP_AI_SUMMARY_MAX_UTF8_BYTES = 2048
+SEGMENT_AI_SUMMARY_MAX_UTF8_BYTES = 2048
 
 
 def _canonical(value: Any) -> str:
@@ -29,6 +32,84 @@ def story_input_hash(snapshot: Mapping[str, Any]) -> str:
     payload = dict(snapshot)
     payload.pop("input_hash", None)
     return hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
+
+
+def _truncate_utf8(value: Any, max_bytes: int) -> str:
+    """Bound machine-authored evidence without corrupting UTF-8 text."""
+
+    text = str(value or "").strip()
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    if max_bytes <= 0:
+        return ""
+    suffix = "…"
+    suffix_bytes = suffix.encode("utf-8")
+    budget = max(0, max_bytes - len(suffix_bytes))
+    prefix = encoded[:budget]
+    while prefix:
+        try:
+            return prefix.decode("utf-8").rstrip() + suffix
+        except UnicodeDecodeError:
+            prefix = prefix[:-1]
+    return suffix if len(suffix_bytes) <= max_bytes else ""
+
+
+def _bounded_ai_summary(
+    values: Any,
+    *,
+    max_items: int,
+    max_utf8_bytes: int,
+) -> str:
+    """Keep the first distinct AI observations under a deterministic byte cap."""
+
+    items = values if isinstance(values, (list, tuple)) else [values]
+    selected: list[str] = []
+    seen: set[str] = set()
+    for value in items:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        candidate = " / ".join([*selected, text])
+        if len(candidate.encode("utf-8")) <= max_utf8_bytes:
+            selected.append(text)
+        else:
+            remaining = max_utf8_bytes - len(" / ".join(selected).encode("utf-8"))
+            if selected:
+                remaining -= len(" / ".encode("utf-8"))
+            truncated = _truncate_utf8(text, remaining)
+            if truncated:
+                selected.append(truncated)
+            break
+        if len(selected) >= max_items:
+            break
+    return " / ".join(selected)
+
+
+def _segment_visual_summary(row: Mapping[str, Any]) -> str:
+    """Resolve only evidence that belongs to this stable segment."""
+
+    for key in ("segment_visual_summary", "vision_summary", "visual_summary", "title", "reason"):
+        text = str(row.get(key) or "").strip()
+        if text:
+            return _truncate_utf8(text, SEGMENT_AI_SUMMARY_MAX_UTF8_BYTES)
+    return ""
+
+
+def _segment_story_context(user_summary: str, ai_visual_summary: str, fallback_activity: str) -> dict[str, Any]:
+    """Keep routing provenance without duplicating the segment summary text."""
+
+    context = story_context(user_summary, ai_visual_summary, fallback_activity)
+    result = {
+        "effective_summary_source": context["effective_summary_source"],
+        "activity_source": context["activity_source"],
+        "avoided_activities": context["avoided_activities"],
+        "guidance_applied": context["guidance_applied"],
+    }
+    if context["user_summary"]:
+        result["user_summary"] = context["user_summary"]
+    return result
 
 
 def _technical_quality(value: Any) -> dict[str, Any]:
@@ -54,10 +135,10 @@ def _effective_segment(
     if not segment_id:
         return {}
     user_summary = str(row.get("user_summary") or "").strip()
-    ai_visual_summary = str(row.get("ai_visual_summary") or row.get("visual_summary") or "").strip()
+    ai_visual_summary = _segment_visual_summary(row)
     tags = [str(tag).strip() for tag in (row.get("tags") or []) if str(tag).strip()] if isinstance(row.get("tags"), list) else [item.strip() for item in str(row.get("tags") or "").split(",") if item.strip()]
     fallback_activity = " ".join([str(row.get("activity") or ""), str(row.get("group") or ""), *tags]).strip()
-    context = story_context(user_summary, ai_visual_summary, fallback_activity)
+    context = _segment_story_context(user_summary, ai_visual_summary, fallback_activity)
     audio = dict(effective_audio or {})
     effective_audio_role = str(audio.get("role") or row.get("audio_role") or "")
     audio_source = str(audio.get("source") or ("legacy" if audio.get("legacy") else "audio_settings.default"))
@@ -72,6 +153,7 @@ def _effective_segment(
         "speed": round(float(row.get("speed") or 1.0), 6),
         "timeline_duration_seconds": round(float(row.get("estimated_output_seconds") or row.get("timeline_duration_seconds") or 0), 6),
         "title": str(row.get("title") or ""),
+        "visual_summary": ai_visual_summary,
         "action": str(row.get("action") or ""),
         "shot_role": str(row.get("shot_role") or row.get("suggested_use") or ""),
         "technical_quality": _technical_quality(row.get("technical_quality") or row.get("technical_quality_json")),
@@ -140,11 +222,23 @@ def build_story_input_snapshot(cfg: Mapping[str, Any], db: Path, project_id: int
     plan = _read_json(plan_path)
     clips = [dict(row) for row in project_videos(db, int(project_id))]
     video_by_id = {int(row.get("id") or 0): row for row in clips}
+    segment_evidence_by_uuid = {
+        str(segment["segment_uuid"] or ""): dict(segment)
+        for clip in clips
+        for segment in database_segments(db, int(clip.get("id") or 0))
+        if str(segment["segment_uuid"] or "").strip()
+    }
     ai_summary_by_video = {
-        int(row.get("id") or 0): " / ".join(
-            str(frame["vision_summary"] or "").strip()
-            for frame in frames(db, int(row.get("id") or 0))
-            if str(frame["vision_summary"] or "").strip()
+        int(row.get("id") or 0): _bounded_ai_summary(
+            [
+                frame["vision_summary"]
+                for frame in sorted(
+                    frames(db, int(row.get("id") or 0)),
+                    key=lambda item: (float(item["timestamp_seconds"] or 0), int(item["id"] or 0)),
+                )
+            ],
+            max_items=CLIP_AI_SUMMARY_MAX_ITEMS,
+            max_utf8_bytes=CLIP_AI_SUMMARY_MAX_UTF8_BYTES,
         )
         for row in clips
     }
@@ -153,7 +247,18 @@ def build_story_input_snapshot(cfg: Mapping[str, Any], db: Path, project_id: int
     effective_segments = []
     for row in rows:
         video = video_by_id.get(int(row.get("video_id") or 0), {})
-        effective_row = {**video, "ai_visual_summary": ai_summary_by_video.get(int(row.get("video_id") or 0), ""), **row}
+        segment_id = str(row.get("segment_id") or row.get("segment_uuid") or "")
+        segment_evidence = segment_evidence_by_uuid.get(segment_id, {})
+        segment_user_summary = str(row.get("user_summary") or "")
+        effective_row = {
+            **video,
+            **segment_evidence,
+            **row,
+            # Clip guidance remains complete in clips[]. Segment context must
+            # not inherit and repeat clip-wide summaries for every segment.
+            "user_summary": segment_user_summary,
+            "ai_visual_summary": _segment_visual_summary(row),
+        }
         effective_audio = effective_segment_audio_settings(dict(cfg), int(project_id), effective_row, state=audio_state)
         user_audio_decision = authoritative_segment_audio_decision(
             dict(cfg), int(project_id), str(effective_row.get("segment_id") or ""), state=audio_state
@@ -167,23 +272,31 @@ def build_story_input_snapshot(cfg: Mapping[str, Any], db: Path, project_id: int
         if item:
             effective_segments.append(item)
     effective_segments.sort(key=lambda item: (int(item["clip_order"]), int(item["human_override"]["manual_order"] or 999999), item["segment_uuid"]))
-    clips_payload = [
-        {
+    clips_payload = []
+    for row in clips:
+        clip_ai_summary = ai_summary_by_video.get(
+            int(row.get("id") or 0),
+            _bounded_ai_summary(
+                str(row.get("ai_visual_summary") or row.get("visual_summary") or ""),
+                max_items=CLIP_AI_SUMMARY_MAX_ITEMS,
+                max_utf8_bytes=CLIP_AI_SUMMARY_MAX_UTF8_BYTES,
+            ),
+        )
+        user_summary = str(row.get("user_summary") or "")
+        clips_payload.append({
             "project_media_uuid": str(row.get("project_media_uuid") or ""),
             "clip_order": clip_order.get(int(row.get("id") or 0), 0),
             "duration_seconds": round(float(row.get("duration_seconds") or 0), 6),
             "category": str(row.get("category_override") or row.get("category") or ""),
-            "user_summary": str(row.get("user_summary") or ""),
-            "ai_visual_summary": ai_summary_by_video.get(int(row.get("id") or 0), str(row.get("ai_visual_summary") or row.get("visual_summary") or "")),
-            "effective_summary": str(row.get("user_summary") or row.get("project_summary") or row.get("visual_summary") or ""),
+            "user_summary": user_summary,
+            "ai_visual_summary": clip_ai_summary,
+            "effective_summary": user_summary or clip_ai_summary,
             "story_context": story_context(
-                str(row.get("user_summary") or ""),
-                str(row.get("ai_visual_summary") or row.get("visual_summary") or ""),
+                user_summary,
+                clip_ai_summary,
                 str(row.get("category_override") or row.get("category") or ""),
             ),
-        }
-        for row in clips
-    ]
+        })
     snapshot: dict[str, Any] = {
         "schema_version": STORY_INPUT_SCHEMA_VERSION,
         "prompt_version": STORY_INPUT_PROMPT_VERSION,
@@ -203,8 +316,26 @@ def build_story_input_snapshot(cfg: Mapping[str, Any], db: Path, project_id: int
         "must_keep": list(settings.get("must_keep") or []),
         "exclude_guidance": list(settings.get("exclude_guidance") or []),
         "story_context_provenance": {
-            "contract_version": "story-context-v1",
-            "sources": ["project_videos.user_summary", "frames.vision_summary", "segment.tags"],
+            "contract_version": "story-context-v2",
+            "sources": [
+                "project_videos.user_summary",
+                "frames.vision_summary",
+                "segments.title",
+                "segments.action",
+                "segments.shot_role",
+                "segments.tags",
+                "segments.technical_quality_json",
+                "segment_human_override",
+            ],
+            "clip_ai_summary_policy": {
+                "selection": "first_distinct_timestamp_order",
+                "max_items": CLIP_AI_SUMMARY_MAX_ITEMS,
+                "max_utf8_bytes": CLIP_AI_SUMMARY_MAX_UTF8_BYTES,
+            },
+            "segment_ai_summary_policy": {
+                "selection": "segment_evidence_priority",
+                "max_utf8_bytes": SEGMENT_AI_SUMMARY_MAX_UTF8_BYTES,
+            },
             "filename_semantics": False,
         },
         "clips": sorted(clips_payload, key=lambda item: (int(item["clip_order"]), item["project_media_uuid"])),
