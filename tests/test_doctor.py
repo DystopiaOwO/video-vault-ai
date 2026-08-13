@@ -655,6 +655,92 @@ def test_story_doctor_reports_known_insufficient_and_unknown_context(monkeypatch
     assert endpoint_known["evidence"]["context_metadata_source"] == "lmstudio.api_v1.loaded_instances.config.context_length"
 
 
+def test_story_doctor_reports_ready_provisionable_and_blocked_without_loading(monkeypatch):
+    calls = []
+
+    def runtime_8k(request, **_kwargs):
+        calls.append((request.method, request.full_url))
+        return _JsonResponse(_story_runtime_models("story-model", 8192))
+
+    monkeypatch.setattr(doctor, "urlopen", runtime_8k)
+    base = {
+        "provider": "local_text",
+        "base_url": "http://127.0.0.1:1234/v1",
+        "model": "story-model",
+        "context_length": 32768,
+        "estimated_input_tokens": 29719,
+    }
+    provisionable = doctor._story_provider_check(
+        {
+            "story": {
+                **base,
+                "runtime_provisioning": {"enabled": True, "target_context_length": 32768},
+            }
+        },
+        "full",
+    )
+    disabled = doctor._story_provider_check(
+        {
+            "story": {
+                **base,
+                "runtime_provisioning": {"enabled": "false", "target_context_length": 32768},
+            }
+        },
+        "full",
+    )
+
+    assert calls == [
+        ("GET", "http://127.0.0.1:1234/api/v1/models"),
+        ("GET", "http://127.0.0.1:1234/api/v1/models"),
+    ]
+    assert provisionable["status"] == "warning"
+    assert provisionable["evidence"]["runtime_readiness"] == "provisionable"
+    assert provisionable["evidence"]["required_context_tokens"] == 32768
+    assert provisionable["evidence"]["model_load_attempted"] is False
+    assert provisionable["evidence"]["runtime_provisioning_action"] == "not_executed_by_doctor"
+    assert provisionable["evidence"]["model_download"] is False
+    assert disabled["status"] == "blocked"
+    assert disabled["evidence"]["runtime_readiness"] == "blocked"
+    assert disabled["evidence"]["runtime_provisioning_enabled"] is False
+
+    monkeypatch.setattr(doctor, "urlopen", lambda *_args, **_kwargs: _JsonResponse(_story_runtime_models("story-model", 65536)))
+    ready = doctor._story_provider_check(
+        {
+            "story": {
+                **base,
+                "runtime_provisioning": {"enabled": True, "target_context_length": 32768},
+            }
+        },
+        "full",
+    )
+    assert ready["status"] == "pass"
+    assert ready["evidence"]["runtime_readiness"] == "ready_as_is"
+
+
+def test_story_doctor_provisioning_blocks_when_installed_model_max_context_is_too_small(monkeypatch):
+    payload = _story_runtime_models("story-model", 8192)
+    payload["models"][0]["max_context_length"] = 16384
+    monkeypatch.setattr(doctor, "urlopen", lambda *_args, **_kwargs: _JsonResponse(payload))
+
+    result = doctor._story_provider_check(
+        {
+            "story": {
+                "provider": "local_text",
+                "base_url": "http://127.0.0.1:1234/v1",
+                "model": "story-model",
+                "context_length": 32768,
+                "runtime_provisioning": {"enabled": True, "target_context_length": 32768},
+            }
+        },
+        "full",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["evidence"]["runtime_readiness"] == "blocked"
+    assert result["evidence"]["model_max_context_length"] == 16384
+    assert result["evidence"]["model_load_attempted"] is False
+
+
 def test_story_doctor_public_endpoint_blocks_without_network(monkeypatch):
     calls = []
     monkeypatch.setattr(doctor, "urlopen", lambda *_args, **_kwargs: calls.append("network"))

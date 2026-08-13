@@ -53,3 +53,19 @@ ai:
     provider: "openai"
     model: "gpt-4.1-mini"
     api_key_env: "OPENAI_API_KEY"
+
+# Story runtime provisioning is opt-in. When enabled, generation may load one
+# additional installed model instance, live-verify its applied context, and
+# unload only the exact instance ID returned by that load request.
+story:
+  provider: "mock"
+  model: ""
+  base_url: "http://127.0.0.1:1234/v1"
+  timeout_seconds: 180
+  runtime_context_timeout_seconds: 5
+  max_output_tokens: 2048
+  runtime_provisioning:
+    enabled: false
+    target_context_length: 32768
+    load_timeout_seconds: 180
+    cleanup_timeout_seconds: 30

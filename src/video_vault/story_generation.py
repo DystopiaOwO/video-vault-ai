@@ -12,6 +12,7 @@ import urllib.request
 from typing import Any, Mapping, Protocol
 from uuid import uuid4
 
+from .config import parse_bool
 from .database import connect, init_db, project
 from .project import project_dir
 from .project_lifecycle import CancellationRequested, ProjectRevisionConflict, check_base_revision, current_revision, project_commit
@@ -24,7 +25,7 @@ from .story_context_budget import (
     context_budget_error_message,
     preflight_story_context,
 )
-from .lmstudio_runtime import resolve_lmstudio_runtime_context
+from .lmstudio_runtime import LMStudioRuntimeProvisioner, resolve_lmstudio_runtime_context
 
 
 STORY_OUTPUT_SCHEMA_VERSION = 1
@@ -127,6 +128,14 @@ class StoryContextBudgetError(StoryGenerationError):
 
 class StoryProviderHTTPError(StoryGenerationError):
     """An HTTP failure with a safe, structured provider audit."""
+
+    def __init__(self, message: str, audit: Mapping[str, Any]):
+        super().__init__(message)
+        self.audit = dict(audit)
+
+
+class StoryRuntimeCleanupError(StoryGenerationError):
+    """An app-owned local runtime could not be proven cleaned up safely."""
 
     def __init__(self, message: str, audit: Mapping[str, Any]):
         super().__init__(message)
@@ -512,6 +521,11 @@ class LocalTextStoryProvider:
         reserved_output_tokens: int = DEFAULT_RESERVED_OUTPUT_TOKENS,
         runtime_context_timeout_seconds: float = 5.0,
         runtime_context_resolver: Any | None = None,
+        runtime_provisioning_enabled: bool = False,
+        runtime_target_context_length: int | None = None,
+        runtime_load_timeout_seconds: float = 180.0,
+        runtime_cleanup_timeout_seconds: float = 30.0,
+        runtime_provisioner: Any | None = None,
     ):
         self.base_url = str(base_url).rstrip("/")
         self.model = str(model)
@@ -521,12 +535,25 @@ class LocalTextStoryProvider:
         self.reserved_output_tokens = int(reserved_output_tokens or DEFAULT_RESERVED_OUTPUT_TOKENS)
         self.runtime_context_timeout_seconds = float(runtime_context_timeout_seconds)
         self.runtime_context_resolver = runtime_context_resolver or resolve_lmstudio_runtime_context
+        self.request_model = self.model
+        self.generation_post_calls = 0
         self.last_runtime_context: dict[str, Any] = {}
+        self.runtime_provisioner = runtime_provisioner or LMStudioRuntimeProvisioner(
+            self.base_url,
+            self.model,
+            enabled=runtime_provisioning_enabled,
+            target_context_length=runtime_target_context_length or self.context_length,
+            load_timeout_seconds=runtime_load_timeout_seconds,
+            cleanup_timeout_seconds=runtime_cleanup_timeout_seconds,
+            runtime_context_timeout_seconds=self.runtime_context_timeout_seconds,
+            runtime_context_resolver=self.runtime_context_resolver,
+        )
+        self.last_runtime_cleanup: dict[str, Any] = {}
 
     def context_metadata(self) -> dict[str, Any]:
         metadata = self.runtime_context_resolver(
             self.base_url,
-            self.model,
+            self.request_model,
             configured_context_length=self.context_length,
             configured_context_source=self.context_source,
             timeout_seconds=self.runtime_context_timeout_seconds,
@@ -534,6 +561,37 @@ class LocalTextStoryProvider:
         )
         self.last_runtime_context = dict(metadata) if isinstance(metadata, Mapping) else {}
         return dict(self.last_runtime_context)
+
+    def ensure_runtime_context(
+        self,
+        *,
+        required_context_tokens: int,
+        current_metadata: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        metadata = self.runtime_provisioner.ensure(
+            required_context_tokens,
+            current_metadata,
+            generation_post_calls=self.generation_post_calls,
+        )
+        self.request_model = str(getattr(self.runtime_provisioner, "request_model", self.model) or self.model)
+        self.last_runtime_context = dict(metadata) if isinstance(metadata, Mapping) else {}
+        return dict(self.last_runtime_context)
+
+    def cleanup_runtime_context(self) -> dict[str, Any]:
+        cleanup = self.runtime_provisioner.cleanup()
+        self.last_runtime_cleanup = dict(cleanup) if isinstance(cleanup, Mapping) else {
+            "status": "blocked",
+            "reason_code": "runtime_cleanup_response_malformed",
+        }
+        return dict(self.last_runtime_cleanup)
+
+    def runtime_lifecycle_audit(self) -> dict[str, Any]:
+        return {
+            "configured_model": self.model,
+            "request_model": self.request_model,
+            "runtime_provisioning": dict(getattr(self.runtime_provisioner, "last_evidence", {}) or {}),
+            "runtime_cleanup": dict(self.last_runtime_cleanup),
+        }
 
     def _strict_parse(self, content: Any) -> dict[str, Any]:
         try:
@@ -575,7 +633,7 @@ class LocalTextStoryProvider:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 raw = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            raise _provider_http_error(exc, provider=self.provider, model=self.model) from exc
+            raise _provider_http_error(exc, provider=self.provider, model=self.request_model) from exc
         except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
             raise StoryGenerationError(f"本地文字模型不可用：{exc}") from exc
         content = (((raw.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
@@ -588,7 +646,7 @@ class LocalTextStoryProvider:
             raise
         return parsed, raw, (time.perf_counter() - started) * 1000
 
-    def generate_story(self, snapshot: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    def _generate_story(self, snapshot: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         system = STORY_SYSTEM_PROMPT
         base_messages = [{"role": "system", "content": system}, {"role": "user", "content": _canonical(snapshot)}]
         attempts: list[dict[str, Any]] = []
@@ -624,7 +682,7 @@ class LocalTextStoryProvider:
                 }
                 raise error
             payload = {
-                "model": self.model,
+                "model": self.request_model,
                 "temperature": 0,
                 "max_tokens": self.reserved_output_tokens,
                 "response_format": _STORY_OUTPUT_JSON_SCHEMA,
@@ -632,6 +690,7 @@ class LocalTextStoryProvider:
             }
             started = time.perf_counter()
             try:
+                self.generation_post_calls += 1
                 output, raw, latency = self._request(payload)
                 latencies.append(round(latency, 3))
                 attempts.append({"content": json.dumps(output, ensure_ascii=False, sort_keys=True), "error": ""})
@@ -667,6 +726,22 @@ class LocalTextStoryProvider:
                     "runtime_context": dict(budget.get("context_metadata") or {}),
                 }
                 raise
+            except StoryGenerationError as exc:
+                latencies.append(round((time.perf_counter() - started) * 1000, 3))
+                exc.audit = {
+                    **dict(getattr(exc, "audit", {}) or {}),
+                    "calls": attempt + 1,
+                    "generation_post_calls": attempt + 1,
+                    "retries": attempt,
+                    "call_latencies_ms": latencies,
+                    "total_latency_ms": round(sum(latencies), 3),
+                    "strict_schema": True,
+                    "context_budget": budget,
+                    "request_budgets": request_budgets,
+                    "runtime_context": dict(budget.get("context_metadata") or {}),
+                    "error": str(exc),
+                }
+                raise
         error = last_error or StoryValidationError("本地文字模型 strict schema 驗證失敗")
         error.audit = {
             "calls": 2,
@@ -679,6 +754,29 @@ class LocalTextStoryProvider:
             "error": str(error),
         }
         raise error
+
+    def generate_story(self, snapshot: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        try:
+            output, raw = self._generate_story(snapshot)
+        except Exception as exc:
+            cleanup = self.cleanup_runtime_context()
+            audit = dict(getattr(exc, "audit", {}) or {})
+            audit.update(self.runtime_lifecycle_audit())
+            audit["runtime_cleanup"] = cleanup
+            exc.audit = audit
+            raise
+
+        cleanup = self.cleanup_runtime_context()
+        provider_audit = dict(raw.get("provider_audit") or {})
+        provider_audit.update(self.runtime_lifecycle_audit())
+        provider_audit["runtime_cleanup"] = cleanup
+        raw = {**dict(raw), "provider_audit": provider_audit}
+        if cleanup.get("status") not in {"pass", "not_needed"}:
+            raise StoryRuntimeCleanupError(
+                "app-owned Story runtime cleanup 未能安全完成，generation fail closed",
+                provider_audit,
+            )
+        return output, raw
 
 
 def provider_from_config(cfg: Mapping[str, Any], provider_override: str | None = None) -> StoryProvider:
@@ -708,6 +806,13 @@ def provider_from_config(cfg: Mapping[str, Any], provider_override: str | None =
             context_source = context_source or ("config.ai.local.context_length" if context_length not in (None, "") else None)
         if context_length not in (None, "") and not context_source:
             context_source = "config.story.context_length"
+        runtime_raw = story_cfg.get("runtime_provisioning")
+        runtime_cfg = dict(runtime_raw) if isinstance(runtime_raw, Mapping) else {}
+        runtime_target = (
+            runtime_cfg.get("target_context_length")
+            or runtime_cfg.get("context_length")
+            or context_length
+        )
         return LocalTextStoryProvider(
             base_url,
             model,
@@ -716,6 +821,10 @@ def provider_from_config(cfg: Mapping[str, Any], provider_override: str | None =
             context_source=str(context_source or "unknown"),
             reserved_output_tokens=int(story_cfg.get("max_output_tokens") or DEFAULT_RESERVED_OUTPUT_TOKENS),
             runtime_context_timeout_seconds=float(story_cfg.get("runtime_context_timeout_seconds") or 5),
+            runtime_provisioning_enabled=parse_bool(runtime_cfg.get("enabled"), default=False),
+            runtime_target_context_length=_context_length_or_none(runtime_target),
+            runtime_load_timeout_seconds=float(runtime_cfg.get("load_timeout_seconds") or 180),
+            runtime_cleanup_timeout_seconds=float(runtime_cfg.get("cleanup_timeout_seconds") or 30),
         )
     raise StoryGenerationError(f"不支援的文字故事 provider：{provider}")
 
@@ -927,6 +1036,30 @@ def _cache_store(cache_dir: Path, key: str, raw: Mapping[str, Any], normalized: 
     _atomic_json(cache_dir / f"{key}.json", {"cache_key": key, "schema_version": STORY_OUTPUT_SCHEMA_VERSION, "created_at": _now()})
 
 
+def _provider_runtime_cleanup(provider: Any) -> dict[str, Any]:
+    method = getattr(provider, "cleanup_runtime_context", None)
+    if not callable(method):
+        return {"status": "not_needed", "reason_code": "provider_has_no_owned_runtime"}
+    try:
+        result = method()
+    except (OSError, TypeError, ValueError) as exc:
+        return {
+            "status": "blocked",
+            "reason_code": "runtime_cleanup_failed",
+            "error": f"{type(exc).__name__}: {exc}"[:500],
+        }
+    return dict(result) if isinstance(result, Mapping) else {
+        "status": "blocked",
+        "reason_code": "runtime_cleanup_response_malformed",
+    }
+
+
+def _provider_runtime_lifecycle(provider: Any) -> dict[str, Any]:
+    method = getattr(provider, "runtime_lifecycle_audit", None)
+    result = method() if callable(method) else {}
+    return dict(result) if isinstance(result, Mapping) else {}
+
+
 def generate_project_story(
     cfg: Mapping[str, Any],
     db: Path,
@@ -1003,6 +1136,18 @@ def generate_project_story(
             normalized = normalize_story_output(_merge_locked_chapters(output, previous_story), snapshot, previous=previous_story)
             _cache_store(_cache_dir(cfg, project_id), key, raw, normalized)
             cache_hit = False
+        runtime_cleanup = _provider_runtime_cleanup(provider)
+        lifecycle = _provider_runtime_lifecycle(provider)
+        if lifecycle:
+            provider_audit = dict(raw.get("provider_audit") or {})
+            provider_audit.update(lifecycle)
+            provider_audit["runtime_cleanup"] = runtime_cleanup
+            raw = {**dict(raw), "provider_audit": provider_audit}
+        if runtime_cleanup.get("status") not in {"pass", "not_needed"}:
+            raise StoryRuntimeCleanupError(
+                "app-owned Story runtime cleanup 未能安全完成，publish fail closed",
+                dict(raw.get("provider_audit") or {"runtime_cleanup": runtime_cleanup}),
+            )
         generation_path = _generation_dir(cfg, project_id, generation_uuid)
         _atomic_json(generation_path / "input_snapshot.json", snapshot)
         _atomic_json(generation_path / "raw_response.json", raw)
@@ -1040,10 +1185,20 @@ def generate_project_story(
         result["cache_hit"] = cache_hit
         return result
     except CancellationRequested as exc:
-        _update_generation(db, generation_uuid, status="cancelled", finished_at=_now(), error=str(exc))
+        cleanup = _provider_runtime_cleanup(provider)
+        lifecycle = _provider_runtime_lifecycle(provider)
+        fields: dict[str, Any] = {"status": "cancelled", "finished_at": _now(), "error": str(exc)}
+        if lifecycle:
+            fields["raw_response_json"] = {"provider_audit": {**lifecycle, "runtime_cleanup": cleanup}}
+        _update_generation(db, generation_uuid, **fields)
         raise
     except Exception as exc:
-        audit = getattr(exc, "audit", None)
+        cleanup = _provider_runtime_cleanup(provider)
+        audit = dict(getattr(exc, "audit", {}) or {})
+        lifecycle = _provider_runtime_lifecycle(provider)
+        if lifecycle:
+            audit.update(lifecycle)
+            audit["runtime_cleanup"] = cleanup
         fields = {"status": "failed", "finished_at": _now(), "error": str(exc)}
         if audit:
             fields["raw_response_json"] = {"provider_audit": audit}
@@ -1341,6 +1496,7 @@ __all__ = [
     "StoryGenerationError",
     "StoryContextBudgetError",
     "StoryProviderHTTPError",
+    "StoryRuntimeCleanupError",
     "StoryValidationError",
     "apply_story_generation_to_storyboard",
     "generate_project_story",
