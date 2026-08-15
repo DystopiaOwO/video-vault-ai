@@ -28,6 +28,7 @@ from video_vault.story_generation import (
     normalize_story_output,
     project_story_detail,
     recover_interrupted_story_generations,
+    story_cache_key,
     update_story_generation_review,
     validate_story_output,
 )
@@ -206,6 +207,7 @@ def test_story_generation_is_cached_and_does_not_auto_apply_storyboard(tmp_path:
     first = generate_project_story(cfg, db, project_id)
     assert first["status"] == "succeeded"
     assert first["cache_hit"] is False
+    assert first["validation"]["cache_identity"]["provider_request_contract"]["provider_contract_version"] == "mock-story-v1"
     assert load_storyboard(cfg, project_id) == before_storyboard
     assert current_revision(db, project_id) == before_revision
 
@@ -213,6 +215,36 @@ def test_story_generation_is_cached_and_does_not_auto_apply_storyboard(tmp_path:
     assert second["status"] == "succeeded"
     assert second["cache_hit"] is True
     assert second["input_hash"] == first["input_hash"]
+
+    forced = generate_project_story(cfg, db, project_id, force=True)
+    assert forced["status"] == "succeeded"
+    assert forced["cache_hit"] is False
+
+
+def test_story_cache_identity_uses_effective_reasoning_and_new_contract():
+    snapshot = {"input_hash": "same-snapshot"}
+    none_provider = LocalTextStoryProvider("http://127.0.0.1:1234/v1", "story-model", reasoning_effort="NONE")
+    equivalent_provider = LocalTextStoryProvider("http://127.0.0.1:1234/v1", "story-model", reasoning_effort=" none ")
+    low_provider = LocalTextStoryProvider("http://127.0.0.1:1234/v1", "story-model", reasoning_effort="low")
+
+    def cache_key(provider, **kwargs):
+        return story_cache_key(
+            snapshot,
+            provider=provider.provider,
+            model=provider.model,
+            provider_contract_metadata=provider.cache_contract_metadata(),
+            **kwargs,
+        )
+
+    none_key = cache_key(none_provider)
+    equivalent_key = cache_key(equivalent_provider)
+    low_key = cache_key(low_provider)
+    old_key = cache_key(none_provider, provider_contract_version="story-text-v1")
+
+    assert none_provider.reasoning_effort == equivalent_provider.reasoning_effort == "none"
+    assert none_key == equivalent_key
+    assert none_key != low_key
+    assert none_key != old_key
 
 
 def test_generate_story_does_not_run_destructive_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

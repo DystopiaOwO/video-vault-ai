@@ -30,6 +30,7 @@ from .lmstudio_runtime import LMStudioRuntimeProvisioner, resolve_lmstudio_runti
 
 STORY_OUTPUT_SCHEMA_VERSION = 1
 STORY_PROMPT_VERSION = "project-story-v1"
+STORY_CACHE_CONTRACT_VERSION = "story-cache-v2"
 DEFAULT_REASONING_EFFORT = "none"
 SUPPORTED_REASONING_EFFORTS = {"none", "low", "medium", "high"}
 STORY_GENERATION_STATUSES = {"queued", "running", "validating", "publishing", "succeeded", "failed", "cancelled", "interrupted"}
@@ -151,6 +152,9 @@ class StoryProvider(Protocol):
     def context_metadata(self) -> Mapping[str, Any]:
         """Return model context capacity and its auditable source."""
 
+    def cache_contract_metadata(self) -> Mapping[str, Any]:
+        """Return deterministic metadata for the provider request contract."""
+
     def generate_story(self, snapshot: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         """Return parsed model output and the provider response for audit."""
 
@@ -225,16 +229,37 @@ def _provider_http_error(exc: urllib.error.HTTPError, *, provider: str, model: s
     return StoryProviderHTTPError(message, audit)
 
 
-def story_cache_key(snapshot: Mapping[str, Any], *, provider: str, model: str, prompt_version: str = STORY_PROMPT_VERSION, schema_version: int = STORY_OUTPUT_SCHEMA_VERSION, provider_contract_version: str = "story-text-v1") -> str:
+def story_cache_key(
+    snapshot: Mapping[str, Any],
+    *,
+    provider: str,
+    model: str,
+    prompt_version: str = STORY_PROMPT_VERSION,
+    schema_version: int = STORY_OUTPUT_SCHEMA_VERSION,
+    provider_contract_version: str = STORY_CACHE_CONTRACT_VERSION,
+    provider_contract_metadata: Mapping[str, Any] | None = None,
+) -> str:
+    provider_contract = dict(provider_contract_metadata or {})
+    provider_contract.setdefault("cache_contract_version", str(provider_contract_version))
     payload = {
         "input_hash": str(snapshot.get("input_hash") or ""),
         "provider": str(provider),
         "model": str(model),
         "prompt_version": str(prompt_version),
         "schema_version": int(schema_version),
-        "provider_contract_version": str(provider_contract_version),
+        "provider_request_contract": provider_contract,
     }
     return "story_" + hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
+
+
+def _provider_cache_contract(provider: StoryProvider) -> dict[str, Any]:
+    method = getattr(provider, "cache_contract_metadata", None)
+    if not callable(method):
+        raise StoryGenerationError("Story provider 缺少 deterministic cache contract metadata，generation fail closed")
+    metadata = method()
+    if not isinstance(metadata, Mapping):
+        raise StoryGenerationError("Story provider cache contract metadata 格式錯誤，generation fail closed")
+    return dict(metadata)
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -470,6 +495,9 @@ class MockStoryProvider:
             "verified": True,
         }
 
+    def cache_contract_metadata(self) -> dict[str, Any]:
+        return {"provider_contract_version": "mock-story-v1"}
+
     def generate_story(self, snapshot: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         profile_id = str(snapshot.get("story_profile_id") or "general_diary")
         segments = list(snapshot.get("segments") or [])
@@ -575,6 +603,14 @@ class LocalTextStoryProvider:
         )
         self.last_runtime_context = dict(metadata) if isinstance(metadata, Mapping) else {}
         return dict(self.last_runtime_context)
+
+    def cache_contract_metadata(self) -> dict[str, Any]:
+        return {
+            "provider_contract_version": "local-text-story-v2",
+            "reasoning_effort": self.reasoning_effort,
+            "reserved_output_tokens": self.reserved_output_tokens,
+            "strict_schema": True,
+        }
 
     def ensure_runtime_context(
         self,
@@ -1095,7 +1131,17 @@ def generate_project_story(
     base = int(snapshot["project_revision"])
     check_base_revision(db, project_id, base_revision)
     provider = provider_from_config(cfg, provider_override)
-    key = story_cache_key(snapshot, provider=provider.provider, model=provider.model)
+    provider_cache_contract = _provider_cache_contract(provider)
+    key = story_cache_key(
+        snapshot,
+        provider=provider.provider,
+        model=provider.model,
+        provider_contract_metadata=provider_cache_contract,
+    )
+    cache_identity = {
+        "cache_key": key,
+        "provider_request_contract": provider_cache_contract,
+    }
     with connect(db) as con:
         generation = int(con.execute("select coalesce(max(generation), 0) + 1 from story_generations where project_id=?", (int(project_id),)).fetchone()[0])
         previous = con.execute("select last_successful_story_generation_uuid from projects where id=?", (int(project_id),)).fetchone()
@@ -1138,7 +1184,11 @@ def generate_project_story(
         _update_generation(
             db,
             generation_uuid,
-            validation_json={"status": context_budget["status"], "context_budget": context_budget},
+            validation_json={
+                "status": context_budget["status"],
+                "context_budget": context_budget,
+                "cache_identity": cache_identity,
+            },
         )
         if not context_budget["request_allowed"]:
             raise StoryContextBudgetError(context_budget_error_message(context_budget), context_budget)
@@ -1157,6 +1207,10 @@ def generate_project_story(
             normalized = normalize_story_output(_merge_locked_chapters(output, previous_story), snapshot, previous=previous_story)
             _cache_store(_cache_dir(cfg, project_id), key, raw, normalized)
             cache_hit = False
+        provider_audit = dict(raw.get("provider_audit") or {})
+        provider_audit["cache_identity"] = cache_identity
+        provider_audit["cache_hit"] = cache_hit
+        raw = {**dict(raw), "provider_audit": provider_audit}
         runtime_cleanup = _provider_runtime_cleanup(provider)
         lifecycle = _provider_runtime_lifecycle(provider)
         if lifecycle:
@@ -1177,6 +1231,7 @@ def generate_project_story(
             "status": "passed",
             "cache_hit": cache_hit,
             "cache_key": key,
+            "cache_identity": cache_identity,
             "context_budget": context_budget,
         }
         _atomic_json(generation_path / "validation.json", validation)
@@ -1229,12 +1284,14 @@ def generate_project_story(
                     "status": "blocked",
                     "context_budget": dict(blocked_retry_budget),
                     "request_budgets": list(audit.get("request_budgets") or []),
+                    "cache_identity": cache_identity,
                 }
             elif audit.get("error_code"):
                 fields["validation_json"] = {
                     "status": "failed",
                     "context_budget": dict(audit.get("context_budget") or {}),
                     "request_budgets": list(audit.get("request_budgets") or []),
+                    "cache_identity": cache_identity,
                     "provider_error": {
                         "error_code": str(audit.get("error_code") or "provider_error"),
                         "http_status": audit.get("http_status"),
@@ -1514,6 +1571,7 @@ __all__ = [
     "STORY_GENERATION_STATUSES",
     "STORY_OUTPUT_SCHEMA_VERSION",
     "STORY_PROMPT_VERSION",
+    "STORY_CACHE_CONTRACT_VERSION",
     "StoryGenerationError",
     "StoryContextBudgetError",
     "StoryProviderHTTPError",
