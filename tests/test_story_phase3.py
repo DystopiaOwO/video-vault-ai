@@ -738,7 +738,7 @@ def test_local_text_provider_allows_at_most_one_corrective_retry_and_audits(monk
         "schema_version": 1,
         "project_summary": "摘要",
         "story_profile": "general_diary",
-        "chapters": [],
+        "chapters": [{"title": "章", "purpose": "整理", "segment_uuids": ["segment-a"], "confidence": 0.5}],
         "overall_confidence": 0.5,
     }
     responses = [
@@ -771,7 +771,10 @@ def test_local_text_provider_allows_at_most_one_corrective_retry_and_audits(monk
         context_length=32768,
         context_source="test.provider_metadata",
         runtime_context_resolver=_verified_runtime_resolver(),
-    ).generate_story({"story_profile_id": "general_diary"})
+    ).generate_story({
+        "story_profile_id": "general_diary",
+        "segments": [{"segment_uuid": "segment-a", "human_override": {"include": True}}],
+    })
     assert output == valid
     assert raw["provider_audit"]["calls"] == 2
     assert raw["provider_audit"]["retries"] == 1
@@ -805,7 +808,7 @@ def test_local_text_provider_can_configure_reasoning_effort_and_audits_it(monkey
                 "schema_version": 1,
                 "project_summary": "摘要",
                 "story_profile": "general_diary",
-                "chapters": [],
+                "chapters": [{"title": "章", "purpose": "整理", "segment_uuids": ["segment-a"], "confidence": 0.5}],
                 "overall_confidence": 0.5,
             })}}]}).encode("utf-8")
 
@@ -821,11 +824,209 @@ def test_local_text_provider_can_configure_reasoning_effort_and_audits_it(monkey
         context_length=32768,
         context_source="test.provider_metadata",
         runtime_context_resolver=_verified_runtime_resolver(),
-    ).generate_story({"story_profile_id": "general_diary"})
+    ).generate_story({
+        "story_profile_id": "general_diary",
+        "segments": [{"segment_uuid": "segment-a", "human_override": {"include": True}}],
+    })
 
     assert output["schema_version"] == 1
     assert requests[0]["reasoning_effort"] == "none"
     assert raw["provider_audit"]["reasoning_effort"] == "none"
+
+
+def test_semantic_missing_segment_gets_one_deterministic_corrective_retry(monkeypatch):
+    snapshot = {
+        "story_profile_id": "general_diary",
+        "segments": [
+            {"segment_uuid": "segment-a", "human_override": {"include": True}},
+            {"segment_uuid": "segment-b", "human_override": {"include": True}},
+        ],
+    }
+
+    def output(ids):
+        return {
+            "schema_version": 1,
+            "project_summary": "摘要",
+            "story_profile": "general_diary",
+            "chapters": [{"title": "章", "purpose": "整理", "segment_uuids": ids, "confidence": 0.5}],
+            "overall_confidence": 0.5,
+        }
+
+    responses = [output(["segment-a"]), output(["segment-a", "segment-b"])]
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps(responses.pop(0))}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(json.loads(request.data.decode("utf-8")))
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    result, raw = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1",
+        "semantic-retry-model",
+        context_length=32768,
+        context_source="test.provider_metadata",
+        runtime_context_resolver=_verified_runtime_resolver(),
+    ).generate_story(snapshot)
+
+    audit = raw["provider_audit"]
+    assert result["chapters"][0]["segment_uuids"] == ["segment-a", "segment-b"]
+    assert len(requests) == 2
+    assert audit["calls"] == 2
+    assert audit["retries"] == 1
+    assert audit["semantic_validation_attempts"][0]["status"] == "failed"
+    assert audit["semantic_validation_attempts"][0]["missing_ids"] == ["segment-b"]
+    assert audit["first_attempt_missing_ids"] == ["segment-b"]
+    assert audit["corrective_retry_reason"] == "semantic_validation"
+    assert audit["final_coverage"]["missing_ids"] == []
+    assert audit["final_coverage"]["used_ids"] == ["segment-a", "segment-b"]
+    assert "segment-b" in requests[1]["messages"][-1]["content"]
+    assert "machine-readable findings" in requests[1]["messages"][-1]["content"]
+
+
+def test_semantic_retry_second_incomplete_fails_closed_with_coverage_audit(monkeypatch):
+    snapshot = {
+        "story_profile_id": "general_diary",
+        "segments": [
+            {"segment_uuid": "segment-a", "human_override": {"include": True}},
+            {"segment_uuid": "segment-b", "human_override": {"include": True}},
+        ],
+    }
+    incomplete = {
+        "schema_version": 1,
+        "project_summary": "摘要",
+        "story_profile": "general_diary",
+        "chapters": [{"title": "章", "purpose": "整理", "segment_uuids": ["segment-a"], "confidence": 0.5}],
+        "overall_confidence": 0.5,
+    }
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps(incomplete)}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(json.loads(request.data.decode("utf-8")))
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    provider = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1",
+        "semantic-fail-model",
+        context_length=32768,
+        context_source="test.provider_metadata",
+        runtime_context_resolver=_verified_runtime_resolver(),
+    )
+    with pytest.raises(StoryValidationError) as caught:
+        provider.generate_story(snapshot)
+
+    audit = caught.value.audit
+    assert len(requests) == 2
+    assert audit["calls"] == 2
+    assert audit["retries"] == 1
+    assert len(audit["semantic_validation_attempts"]) == 2
+    assert audit["final_coverage"]["missing_ids"] == ["segment-b"]
+    assert audit["first_attempt_missing_ids"] == ["segment-b"]
+
+
+def test_semantic_corrective_retry_rechecks_budget_before_second_post(monkeypatch):
+    snapshot = {
+        "story_profile_id": "general_diary",
+        "segments": [
+            {"segment_uuid": "segment-a", "human_override": {"include": True}},
+            {"segment_uuid": "segment-b", "human_override": {"include": True}},
+        ],
+    }
+    incomplete = {
+        "schema_version": 1,
+        "project_summary": "摘要",
+        "story_profile": "general_diary",
+        "chapters": [{"title": "章", "purpose": "整理", "segment_uuids": ["segment-a"], "confidence": 0.5}],
+        "overall_confidence": 0.5,
+    }
+    provider = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1",
+        "semantic-budget-model",
+        context_length=100000,
+        context_source="test.model_metadata.max_context_length",
+        reserved_output_tokens=512,
+        runtime_context_resolver=_verified_runtime_resolver(),
+    )
+    first_messages = [
+        {"role": "system", "content": STORY_SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))},
+    ]
+    first_budget = preflight_story_context(
+        snapshot,
+        provider,
+        system_prompt=STORY_SYSTEM_PROMPT,
+        request_messages=first_messages,
+        reserved_output_tokens=provider.reserved_output_tokens,
+    )
+    provider.context_length = first_budget["estimated_input_tokens"] + provider.reserved_output_tokens
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps(incomplete)}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(json.loads(request.data.decode("utf-8")))
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(StoryContextBudgetError) as caught:
+        provider.generate_story(snapshot)
+
+    audit = caught.value.audit
+    assert len(requests) == 1
+    assert audit["generation_post_calls"] == 1
+    assert audit["retries"] == 1
+    assert audit["blocked_retry_budget"]["status"] == "blocked"
+    assert audit["first_attempt_missing_ids"] == ["segment-b"]
+
+
+def test_semantic_findings_report_duplicate_and_invalid_ids():
+    snapshot = {
+        "story_profile_id": "general_diary",
+        "segments": [{"segment_uuid": "segment-a", "human_override": {"include": True}}],
+    }
+    output = {
+        "schema_version": 1,
+        "project_summary": "摘要",
+        "story_profile": "general_diary",
+        "chapters": [{"title": "章", "purpose": "整理", "segment_uuids": ["segment-a", "segment-a", "not-owned"], "confidence": 0.5}],
+        "overall_confidence": 0.5,
+    }
+    with pytest.raises(StoryValidationError) as caught:
+        validate_story_output(output, snapshot)
+
+    findings = caught.value.findings
+    assert findings["duplicate_ids"] == ["segment-a"]
+    assert findings["invalid_ids"] == ["not-owned"]
+    assert "duplicate_segment_ids" in findings["reason_codes"]
+    assert "invalid_segment_ids" in findings["reason_codes"]
 
 
 def test_corrective_retry_recomputes_budget_and_blocks_second_http(monkeypatch):
@@ -1170,6 +1371,68 @@ def test_generate_project_story_persists_blocked_retry_budget(tmp_path, monkeypa
     assert len(audit["request_budgets"]) == 2
     assert validation["status"] == "blocked"
     assert len(validation["request_budgets"]) == 2
+
+
+def test_generate_project_story_semantic_retry_failure_never_publishes(tmp_path, monkeypatch):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    snapshot = build_story_input_snapshot(cfg, db, project_id)
+    ids = [item["segment_uuid"] for item in snapshot["segments"]]
+    provider = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1",
+        "semantic-fail-model",
+        context_length=100000,
+        context_source="test.model_metadata.max_context_length",
+        reserved_output_tokens=512,
+        runtime_context_resolver=_verified_runtime_resolver(),
+    )
+    incomplete = {
+        "schema_version": 1,
+        "project_summary": "摘要",
+        "story_profile": snapshot["story_profile_id"],
+        "chapters": [{"title": "章", "purpose": "整理", "segment_uuids": [ids[0]], "confidence": 0.5}],
+        "overall_confidence": 0.5,
+    }
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps(incomplete)}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        calls.append(json.loads(request.data.decode("utf-8")))
+        return Response()
+
+    import video_vault.story_generation as story_generation_module
+    monkeypatch.setattr(story_generation_module, "provider_from_config", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(StoryValidationError):
+        generate_project_story(cfg, db, project_id, force=True)
+
+    assert len(calls) == 2
+    with connect(db) as con:
+        generation = dict(con.execute(
+            "select status, raw_response_json, validation_json from story_generations where project_id=? order by generation desc limit 1",
+            (project_id,),
+        ).fetchone())
+        project_row = dict(con.execute(
+            "select current_story_generation_uuid, last_successful_story_generation_uuid from projects where id=?",
+            (project_id,),
+        ).fetchone())
+    raw = json.loads(generation["raw_response_json"])
+    validation = json.loads(generation["validation_json"])
+    assert generation["status"] == "failed"
+    assert project_row["current_story_generation_uuid"] in {"", None}
+    assert project_row["last_successful_story_generation_uuid"] in {"", None}
+    assert raw["provider_audit"]["calls"] == 2
+    assert raw["provider_audit"]["final_coverage"]["missing_ids"] == [ids[1]]
+    assert validation["status"] == "failed"
+    assert validation["final_coverage"]["missing_ids"] == [ids[1]]
 
 
 def test_generate_project_story_persists_context_overflow_provider_audit(tmp_path, monkeypatch):
