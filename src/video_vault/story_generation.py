@@ -30,6 +30,8 @@ from .lmstudio_runtime import LMStudioRuntimeProvisioner, resolve_lmstudio_runti
 
 STORY_OUTPUT_SCHEMA_VERSION = 1
 STORY_PROMPT_VERSION = "project-story-v1"
+DEFAULT_REASONING_EFFORT = "none"
+SUPPORTED_REASONING_EFFORTS = {"none", "low", "medium", "high"}
 STORY_GENERATION_STATUSES = {"queued", "running", "validating", "publishing", "succeeded", "failed", "cancelled", "interrupted"}
 STORY_SYSTEM_PROMPT = (
     "你是 video-vault-ai 的 project story planner。只能輸出嚴格 JSON。"
@@ -163,6 +165,16 @@ def _context_length_or_none(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _reasoning_effort(value: Any) -> str:
+    normalized = str(value or DEFAULT_REASONING_EFFORT).strip().lower()
+    if normalized not in SUPPORTED_REASONING_EFFORTS:
+        raise StoryGenerationError(
+            f"不支援的 Story reasoning_effort：{normalized}；可用值為 "
+            + ", ".join(sorted(SUPPORTED_REASONING_EFFORTS))
+        )
+    return normalized
 
 
 def _canonical(value: Any) -> str:
@@ -519,6 +531,7 @@ class LocalTextStoryProvider:
         context_length: int | None = None,
         context_source: str = "unknown",
         reserved_output_tokens: int = DEFAULT_RESERVED_OUTPUT_TOKENS,
+        reasoning_effort: str = DEFAULT_REASONING_EFFORT,
         runtime_context_timeout_seconds: float = 5.0,
         runtime_context_resolver: Any | None = None,
         runtime_provisioning_enabled: bool = False,
@@ -533,6 +546,7 @@ class LocalTextStoryProvider:
         self.context_length = _context_length_or_none(context_length)
         self.context_source = str(context_source or "unknown")
         self.reserved_output_tokens = int(reserved_output_tokens or DEFAULT_RESERVED_OUTPUT_TOKENS)
+        self.reasoning_effort = _reasoning_effort(reasoning_effort)
         self.runtime_context_timeout_seconds = float(runtime_context_timeout_seconds)
         self.runtime_context_resolver = runtime_context_resolver or resolve_lmstudio_runtime_context
         self.request_model = self.model
@@ -589,6 +603,7 @@ class LocalTextStoryProvider:
         return {
             "configured_model": self.model,
             "request_model": self.request_model,
+            "reasoning_effort": self.reasoning_effort,
             "runtime_provisioning": dict(getattr(self.runtime_provisioner, "last_evidence", {}) or {}),
             "runtime_cleanup": dict(self.last_runtime_cleanup),
         }
@@ -685,6 +700,7 @@ class LocalTextStoryProvider:
                 "model": self.request_model,
                 "temperature": 0,
                 "max_tokens": self.reserved_output_tokens,
+                "reasoning_effort": self.reasoning_effort,
                 "response_format": _STORY_OUTPUT_JSON_SCHEMA,
                 "messages": messages,
             }
@@ -701,6 +717,7 @@ class LocalTextStoryProvider:
                     "call_latencies_ms": latencies,
                     "total_latency_ms": round(sum(latencies), 3),
                     "strict_schema": True,
+                    "reasoning_effort": self.reasoning_effort,
                     "context_budget": budget,
                     "request_budgets": request_budgets,
                 }
@@ -721,6 +738,7 @@ class LocalTextStoryProvider:
                     "call_latencies_ms": latencies,
                     "total_latency_ms": round(sum(latencies), 3),
                     "strict_schema": True,
+                    "reasoning_effort": self.reasoning_effort,
                     "context_budget": budget,
                     "request_budgets": request_budgets,
                     "runtime_context": dict(budget.get("context_metadata") or {}),
@@ -739,6 +757,7 @@ class LocalTextStoryProvider:
                     "context_budget": budget,
                     "request_budgets": request_budgets,
                     "runtime_context": dict(budget.get("context_metadata") or {}),
+                    "reasoning_effort": self.reasoning_effort,
                     "error": str(exc),
                 }
                 raise
@@ -750,6 +769,7 @@ class LocalTextStoryProvider:
             "call_latencies_ms": latencies,
             "total_latency_ms": round(sum(latencies), 3),
             "strict_schema": True,
+            "reasoning_effort": self.reasoning_effort,
             "request_budgets": request_budgets,
             "error": str(error),
         }
@@ -820,6 +840,7 @@ def provider_from_config(cfg: Mapping[str, Any], provider_override: str | None =
             context_length=_context_length_or_none(context_length),
             context_source=str(context_source or "unknown"),
             reserved_output_tokens=int(story_cfg.get("max_output_tokens") or DEFAULT_RESERVED_OUTPUT_TOKENS),
+            reasoning_effort=_reasoning_effort(story_cfg.get("reasoning_effort")),
             runtime_context_timeout_seconds=float(story_cfg.get("runtime_context_timeout_seconds") or 5),
             runtime_provisioning_enabled=parse_bool(runtime_cfg.get("enabled"), default=False),
             runtime_target_context_length=_context_length_or_none(runtime_target),

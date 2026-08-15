@@ -748,6 +748,7 @@ def test_local_text_provider_allows_at_most_one_corrective_retry_and_audits(monk
     assert raw["provider_audit"]["context_budget"]["status"] == "pass"
     assert raw["provider_audit"]["context_budget"]["context_metadata_source"] == "test.runtime.loaded_instance"
     assert all(request["max_tokens"] == 2048 for request in requests)
+    assert all(request["reasoning_effort"] == "none" for request in requests)
     assert len(raw["provider_audit"]["request_budgets"]) == 2
     assert all(item["budget"]["status"] == "pass" for item in raw["provider_audit"]["request_budgets"])
     assert requests[1]["messages"][2]["role"] == "assistant"
@@ -755,6 +756,44 @@ def test_local_text_provider_allows_at_most_one_corrective_retry_and_audits(monk
     assert all(request["response_format"]["type"] == "json_schema" for request in requests)
     assert all(request["response_format"]["json_schema"]["strict"] is True for request in requests)
     assert all(request["response_format"]["json_schema"]["schema"]["properties"]["story_profile"]["enum"] == ["travel_diary", "coffee_matcha_diary", "roasting_diary", "general_diary"] for request in requests)
+
+
+def test_local_text_provider_can_configure_reasoning_effort_and_audits_it(monkeypatch):
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps({
+                "schema_version": 1,
+                "project_summary": "摘要",
+                "story_profile": "general_diary",
+                "chapters": [],
+                "overall_confidence": 0.5,
+            })}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(json.loads(request.data.decode("utf-8")))
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    output, raw = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1",
+        "test-model",
+        reasoning_effort="none",
+        context_length=32768,
+        context_source="test.provider_metadata",
+        runtime_context_resolver=_verified_runtime_resolver(),
+    ).generate_story({"story_profile_id": "general_diary"})
+
+    assert output["schema_version"] == 1
+    assert requests[0]["reasoning_effort"] == "none"
+    assert raw["provider_audit"]["reasoning_effort"] == "none"
 
 
 def test_corrective_retry_recomputes_budget_and_blocks_second_http(monkeypatch):
