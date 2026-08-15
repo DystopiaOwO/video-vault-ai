@@ -158,6 +158,7 @@ def test_runtime_provisioning_config_boolean_and_target_are_normalized():
             "model": "story-model",
             "base_url": "http://127.0.0.1:1234/v1",
             "context_length": 32768,
+            "reasoning_effort": "low",
             "runtime_provisioning": {
                 "enabled": "false",
                 "target_context_length": 32768,
@@ -178,6 +179,7 @@ def test_runtime_provisioning_config_boolean_and_target_are_normalized():
     )
 
     assert isinstance(disabled, LocalTextStoryProvider)
+    assert disabled.reasoning_effort == "low"
     assert disabled.runtime_provisioner.enabled is False
     assert enabled.runtime_provisioner.enabled is True
     assert enabled.runtime_provisioner.target_context_length == 32768
@@ -426,6 +428,7 @@ def test_app_owned_32k_instance_is_live_verified_used_and_cleaned_without_touchi
     assert len(router.generation_requests) == 1
     assert router.generation_requests[0]["model"] == "story-model:2"
     assert router.generation_requests[0]["max_tokens"] == 2048
+    assert router.generation_requests[0]["reasoning_effort"] == "none"
     assert router.unload_requests == [{"instance_id": "story-model:2"}]
     assert router.instances == {"story-model": {"context_length": 8192, "parallel": 1}}
     audit = raw["provider_audit"]
@@ -449,6 +452,7 @@ def test_installed_but_unloaded_model_can_be_provisioned_without_jit_or_download
     assert len(router.load_requests) == 1
     assert len(router.generation_requests) == 1
     assert router.generation_requests[0]["model"] == "story-model:2"
+    assert router.generation_requests[0]["reasoning_effort"] == "none"
     assert router.unload_requests == [{"instance_id": "story-model:2"}]
     assert router.instances == {}
     assert raw["provider_audit"]["runtime_provisioning"]["model_download"] is False

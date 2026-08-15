@@ -83,6 +83,7 @@ DEFAULT_CONFIG = {
         "model": "",
         "base_url": "http://127.0.0.1:1234/v1",
         "timeout_seconds": 180,
+        "reasoning_effort": "none",
         "runtime_provisioning": {
             "enabled": False,
             "target_context_length": 0,
