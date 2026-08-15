@@ -745,47 +745,49 @@ class LocalTextStoryProvider:
         if isinstance(content, list):
             content = "".join(str(item.get("text") or item) if isinstance(item, Mapping) else str(item) for item in content)
         content = str(content)
+        usage = raw.get("usage") if isinstance(raw.get("usage"), Mapping) else {}
+        finish_reason = choice.get("finish_reason")
+        max_tokens = request_payload.get("max_tokens")
+        try:
+            max_tokens = int(max_tokens) if max_tokens is not None else None
+        except (TypeError, ValueError):
+            max_tokens = None
+        def usage_int(name: str) -> int | None:
+            value = usage.get(name)
+            try:
+                return int(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+        completion_tokens = usage_int("completion_tokens")
+        probable_truncation = (
+            str(finish_reason or "").lower() == "length"
+            or (completion_tokens is not None and max_tokens is not None and completion_tokens >= max_tokens)
+        )
+        completion_audit = {
+            "attempt": int(attempt),
+            "finish_reason": str(finish_reason) if finish_reason is not None else None,
+            "prompt_tokens": usage_int("prompt_tokens"),
+            "completion_tokens": completion_tokens,
+            "total_tokens": usage_int("total_tokens"),
+            "content_chars": len(content),
+            "content_bytes": len(content.encode("utf-8")),
+            "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "max_tokens": max_tokens,
+            "reasoning_effort": self.reasoning_effort,
+            "probable_truncation": probable_truncation,
+            "truncation_basis": (
+                "finish_reason_length" if str(finish_reason or "").lower() == "length"
+                else "completion_tokens_at_max" if probable_truncation else "none"
+            ),
+            "strict_parse_error": None,
+        }
         try:
             parsed = self._strict_parse(content)
         except StoryValidationError as exc:
-            usage = raw.get("usage") if isinstance(raw.get("usage"), Mapping) else {}
-            finish_reason = choice.get("finish_reason")
-            max_tokens = request_payload.get("max_tokens")
-            try:
-                max_tokens = int(max_tokens) if max_tokens is not None else None
-            except (TypeError, ValueError):
-                max_tokens = None
-            def usage_int(name: str) -> int | None:
-                value = usage.get(name)
-                try:
-                    return int(value) if value is not None else None
-                except (TypeError, ValueError):
-                    return None
-            completion_tokens = usage_int("completion_tokens")
-            probable_truncation = (
-                str(finish_reason or "").lower() == "length"
-                or (completion_tokens is not None and max_tokens is not None and completion_tokens >= max_tokens)
-            )
-            exc.completion_audit = {
-                "attempt": int(attempt),
-                "finish_reason": str(finish_reason) if finish_reason is not None else None,
-                "prompt_tokens": usage_int("prompt_tokens"),
-                "completion_tokens": completion_tokens,
-                "total_tokens": usage_int("total_tokens"),
-                "content_chars": len(content),
-                "content_bytes": len(content.encode("utf-8")),
-                "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
-                "max_tokens": max_tokens,
-                "reasoning_effort": self.reasoning_effort,
-                "probable_truncation": probable_truncation,
-                "truncation_basis": (
-                    "finish_reason_length" if str(finish_reason or "").lower() == "length"
-                    else "completion_tokens_at_max" if probable_truncation else "none"
-                ),
-                "strict_parse_error": str(exc),
-            }
+            completion_audit["strict_parse_error"] = str(exc)
+            exc.completion_audit = completion_audit
             raise
-        return parsed, raw, (time.perf_counter() - started) * 1000
+        return parsed, raw, (time.perf_counter() - started) * 1000, completion_audit
 
     def _generate_story(self, snapshot: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         system = STORY_SYSTEM_PROMPT
@@ -844,7 +846,8 @@ class LocalTextStoryProvider:
             started = time.perf_counter()
             try:
                 self.generation_post_calls += 1
-                output, raw, latency = self._request(payload, attempt=attempt + 1)
+                output, raw, latency, completion_audit = self._request(payload, attempt=attempt + 1)
+                completion_attempts.append(completion_audit)
                 latencies.append(round(latency, 3))
                 try:
                     validate_story_output(output, snapshot)

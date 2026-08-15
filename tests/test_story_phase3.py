@@ -853,20 +853,25 @@ def test_strict_parse_failure_audit_classifies_completion_without_raw_content(
 
     assert output == valid
     evidence = raw["provider_audit"]["completion_attempts"]
-    assert len(evidence) == 1
-    assert evidence[0]["attempt"] == 1
-    assert evidence[0]["finish_reason"] == finish_reason
-    assert evidence[0]["prompt_tokens"] == 300
-    assert evidence[0]["completion_tokens"] == completion_tokens
-    assert evidence[0]["total_tokens"] == 300 + completion_tokens
-    assert evidence[0]["max_tokens"] == 512
-    assert evidence[0]["reasoning_effort"] == "none"
-    assert evidence[0]["probable_truncation"] is expected_truncated
-    assert evidence[0]["content_chars"] == len('{"schema_version": 1')
-    assert evidence[0]["content_bytes"] == len('{"schema_version": 1'.encode("utf-8"))
-    assert "content" not in evidence[0]
-    assert "reasoning_content" not in evidence[0]
-    assert "raw_content" not in evidence[0]
+    assert len(evidence) == 2
+    failed = evidence[0]
+    assert failed["attempt"] == 1
+    assert failed["finish_reason"] == finish_reason
+    assert failed["prompt_tokens"] == 300
+    assert failed["completion_tokens"] == completion_tokens
+    assert failed["total_tokens"] == 300 + completion_tokens
+    assert failed["max_tokens"] == 512
+    assert failed["reasoning_effort"] == "none"
+    assert failed["probable_truncation"] is expected_truncated
+    assert failed["content_chars"] == len('{"schema_version": 1')
+    assert failed["content_bytes"] == len('{"schema_version": 1'.encode("utf-8"))
+    assert failed["strict_parse_error"]
+    assert evidence[1]["attempt"] == 2
+    assert evidence[1]["strict_parse_error"] is None
+    for item in evidence:
+        assert "content" not in item
+        assert "reasoning_content" not in item
+        assert "raw_content" not in item
 
 
 def test_local_text_provider_can_configure_reasoning_effort_and_audits_it(monkeypatch):
