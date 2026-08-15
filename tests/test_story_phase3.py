@@ -801,15 +801,72 @@ def test_local_text_provider_allows_at_most_one_corrective_retry_and_audits(monk
     assert raw["provider_audit"]["context_budget"]["context_metadata_source"] == "test.runtime.loaded_instance"
     assert all(request["max_tokens"] == 2048 for request in requests)
     assert all(request["reasoning_effort"] == "none" for request in requests)
+    assert "chapter" in requests[0]["messages"][0]["content"]
+    assert "title" in requests[0]["messages"][0]["content"]
+    assert "segment_uuid" in requests[0]["messages"][0]["content"]
     assert len(raw["provider_audit"]["request_budgets"]) == 2
     assert all(item["budget"]["status"] == "pass" for item in raw["provider_audit"]["request_budgets"])
     assert len(requests[1]["messages"]) == 3
     assert all(message["role"] != "assistant" for message in requests[1]["messages"])
-    assert "strict JSON schema" in requests[1]["messages"][-1]["content"]
+    assert "schema required" in requests[1]["messages"][-1]["content"]
     assert '{"unknown": true}' not in requests[1]["messages"][-1]["content"]
     assert all(request["response_format"]["type"] == "json_schema" for request in requests)
     assert all(request["response_format"]["json_schema"]["strict"] is True for request in requests)
     assert all(request["response_format"]["json_schema"]["schema"]["properties"]["story_profile"]["enum"] == ["travel_diary", "coffee_matcha_diary", "roasting_diary", "general_diary"] for request in requests)
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "completion_tokens", "expected_truncated"),
+    [("length", 512, True), ("stop", 40, False)],
+)
+def test_strict_parse_failure_audit_classifies_completion_without_raw_content(
+    monkeypatch, finish_reason, completion_tokens, expected_truncated,
+):
+    valid = _complete_story(["segment-a"])
+    responses = [
+        {
+            "choices": [{"finish_reason": finish_reason, "message": {"content": '{"schema_version": 1'}}],
+            "usage": {"prompt_tokens": 300, "completion_tokens": completion_tokens, "total_tokens": 300 + completion_tokens},
+        },
+        {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(valid)}}]},
+    ]
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps(responses.pop(0)).encode("utf-8")
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    output, raw = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1", "completion-audit-model", context_length=32768,
+        context_source="test.provider_metadata", reserved_output_tokens=512,
+        runtime_context_resolver=_verified_runtime_resolver(),
+    ).generate_story({
+        "story_profile_id": "general_diary",
+        "segments": [{"segment_uuid": "segment-a", "human_override": {"include": True}}],
+    })
+
+    assert output == valid
+    evidence = raw["provider_audit"]["completion_attempts"]
+    assert len(evidence) == 1
+    assert evidence[0]["attempt"] == 1
+    assert evidence[0]["finish_reason"] == finish_reason
+    assert evidence[0]["prompt_tokens"] == 300
+    assert evidence[0]["completion_tokens"] == completion_tokens
+    assert evidence[0]["total_tokens"] == 300 + completion_tokens
+    assert evidence[0]["max_tokens"] == 512
+    assert evidence[0]["reasoning_effort"] == "none"
+    assert evidence[0]["probable_truncation"] is expected_truncated
+    assert evidence[0]["content_chars"] == len('{"schema_version": 1')
+    assert evidence[0]["content_bytes"] == len('{"schema_version": 1'.encode("utf-8"))
+    assert "content" not in evidence[0]
+    assert "reasoning_content" not in evidence[0]
+    assert "raw_content" not in evidence[0]
 
 
 def test_local_text_provider_can_configure_reasoning_effort_and_audits_it(monkeypatch):
@@ -906,7 +963,7 @@ def test_semantic_missing_segment_gets_one_deterministic_corrective_retry(monkey
     assert audit["final_coverage"]["used_ids"] == ["segment-a", "segment-b"]
     retry_prompt = requests[1]["messages"][-1]["content"]
     assert "segment-b" in retry_prompt
-    assert "machine-readable findings" in retry_prompt
+    assert "findings" in retry_prompt
     assert "expected_ids" not in retry_prompt
     assert "used_ids" not in retry_prompt
     assert "suppressed_ids" not in retry_prompt

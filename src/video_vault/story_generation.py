@@ -37,9 +37,11 @@ STORY_GENERATION_STATUSES = {"queued", "running", "validating", "publishing", "s
 STORY_SYSTEM_PROMPT = (
     "你是 video-vault-ai 的 project story planner。只能輸出嚴格 JSON。"
     "只能引用輸入提供的 segment_uuid，不得發明事件、地點、參數或不存在的內容。"
+    "chapter 的 title、purpose 必須非空且簡短，segment_uuids 至少 1 個；所有 required 欄位都要輸出，文字欄位簡短。"
     "所有 human_override.include=true 的 segment 必須 exactly once 出現在 chapters[].segment_uuids，"
     "或依輸入既有 duplicate_group 契約出現在 suppressed_segments；不得無聲省略。"
     "suppressed_segments 的 representative 必須 exactly 出現在 chapter，且與被 suppress segment 屬於同一 duplicate_group。"
+    "不要自行建立 duplicate_group 或 suppression；若輸入沒有明確合法 duplicate_group，suppressed_segments 必須為空。"
     "不要要求圖片，不要輸出 frame bytes、image_url 或 base64。"
     "不得決定 approval 或 render。咖啡、抹茶與烘豆不得自行寫成教學、業配或虛構專業參數。"
 )
@@ -720,7 +722,7 @@ class LocalTextStoryProvider:
                 )
         return output
 
-    def _request(self, request_payload: Mapping[str, Any]) -> tuple[dict[str, Any], Any, float]:
+    def _request(self, request_payload: Mapping[str, Any], *, attempt: int) -> tuple[dict[str, Any], Any, float]:
         started = time.perf_counter()
         request = urllib.request.Request(
             self.base_url + "/chat/completions",
@@ -735,13 +737,53 @@ class LocalTextStoryProvider:
             raise _provider_http_error(exc, provider=self.provider, model=self.request_model) from exc
         except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
             raise StoryGenerationError(f"本地文字模型不可用：{exc}") from exc
-        content = (((raw.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+        choice = (raw.get("choices") or [{}])[0]
+        if not isinstance(choice, Mapping):
+            choice = {}
+        message = choice.get("message") if isinstance(choice.get("message"), Mapping) else {}
+        content = (message.get("content") or "") if isinstance(message, Mapping) else ""
         if isinstance(content, list):
             content = "".join(str(item.get("text") or item) if isinstance(item, Mapping) else str(item) for item in content)
+        content = str(content)
         try:
             parsed = self._strict_parse(content)
         except StoryValidationError as exc:
-            exc.raw_content = str(content)
+            usage = raw.get("usage") if isinstance(raw.get("usage"), Mapping) else {}
+            finish_reason = choice.get("finish_reason")
+            max_tokens = request_payload.get("max_tokens")
+            try:
+                max_tokens = int(max_tokens) if max_tokens is not None else None
+            except (TypeError, ValueError):
+                max_tokens = None
+            def usage_int(name: str) -> int | None:
+                value = usage.get(name)
+                try:
+                    return int(value) if value is not None else None
+                except (TypeError, ValueError):
+                    return None
+            completion_tokens = usage_int("completion_tokens")
+            probable_truncation = (
+                str(finish_reason or "").lower() == "length"
+                or (completion_tokens is not None and max_tokens is not None and completion_tokens >= max_tokens)
+            )
+            exc.completion_audit = {
+                "attempt": int(attempt),
+                "finish_reason": str(finish_reason) if finish_reason is not None else None,
+                "prompt_tokens": usage_int("prompt_tokens"),
+                "completion_tokens": completion_tokens,
+                "total_tokens": usage_int("total_tokens"),
+                "content_chars": len(content),
+                "content_bytes": len(content.encode("utf-8")),
+                "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "max_tokens": max_tokens,
+                "reasoning_effort": self.reasoning_effort,
+                "probable_truncation": probable_truncation,
+                "truncation_basis": (
+                    "finish_reason_length" if str(finish_reason or "").lower() == "length"
+                    else "completion_tokens_at_max" if probable_truncation else "none"
+                ),
+                "strict_parse_error": str(exc),
+            }
             raise
         return parsed, raw, (time.perf_counter() - started) * 1000
 
@@ -751,6 +793,7 @@ class LocalTextStoryProvider:
         attempts: list[dict[str, Any]] = []
         latencies: list[float] = []
         request_budgets: list[dict[str, Any]] = []
+        completion_attempts: list[dict[str, Any]] = []
         semantic_attempts: list[dict[str, Any]] = []
         last_error: StoryValidationError | None = None
         for attempt in range(2):
@@ -758,22 +801,13 @@ class LocalTextStoryProvider:
             if attempt:
                 if isinstance(last_error, StorySemanticValidationError):
                     compact_findings = _compact_semantic_retry_findings(last_error.findings)
-                    corrective_retry_reason = {
-                        "contract": "project_story_semantic_coverage",
-                        "instruction": "修正 validation findings，重新輸出完整 JSON，不要解釋或省略 segment。",
-                        "findings": compact_findings,
-                    }
                     retry_message = (
-                        "上一個輸出通過 strict JSON，但不符合 project semantic contract。"
-                        "所有 expected included segment 必須 exactly once 出現在 chapter，"
-                        "或依既有 duplicate_group 合法放入 suppressed_segments。"
-                        "請只依照以下 machine-readable findings 修正，重新輸出完整 JSON，不要解釋：\n"
-                        + _canonical(corrective_retry_reason)
+                        "輸出完整 Story JSON；只修正以下 findings；保留所有 required 欄位；文字簡短，不要解釋："
+                        + _canonical(compact_findings)
                     )
                 else:
                     retry_message = (
-                        "上一個輸出未符合 strict JSON schema。"
-                        "請根據以下 structural validation failure，重新輸出完整 Story JSON，不要解釋：\n"
+                        "重新輸出完整 Story JSON；補齊以下 schema required 欄位；文字保持簡短，不要解釋："
                         + str(last_error)
                     )
                 messages.append({"role": "user", "content": retry_message})
@@ -810,7 +844,7 @@ class LocalTextStoryProvider:
             started = time.perf_counter()
             try:
                 self.generation_post_calls += 1
-                output, raw, latency = self._request(payload)
+                output, raw, latency = self._request(payload, attempt=attempt + 1)
                 latencies.append(round(latency, 3))
                 try:
                     validate_story_output(output, snapshot)
@@ -842,6 +876,7 @@ class LocalTextStoryProvider:
                     "reasoning_effort": self.reasoning_effort,
                     "context_budget": budget,
                     "request_budgets": request_budgets,
+                    "completion_attempts": completion_attempts,
                     **_semantic_audit_fields(semantic_attempts, _story_coverage_summary(output, snapshot)),
                 }
                 return output, {**dict(raw), "provider_audit": audit}
@@ -850,6 +885,9 @@ class LocalTextStoryProvider:
             except StoryValidationError as exc:
                 last_error = exc
                 latencies.append(round((time.perf_counter() - started) * 1000, 3))
+                completion_audit = getattr(exc, "completion_audit", None)
+                if isinstance(completion_audit, Mapping):
+                    completion_attempts.append(dict(completion_audit))
                 semantic_attempts.append({
                     "attempt": attempt + 1,
                     "status": "not_run",
@@ -871,6 +909,7 @@ class LocalTextStoryProvider:
                     "reasoning_effort": self.reasoning_effort,
                     "context_budget": budget,
                     "request_budgets": request_budgets,
+                    "completion_attempts": completion_attempts,
                     "runtime_context": dict(budget.get("context_metadata") or {}),
                     **_semantic_audit_fields(semantic_attempts),
                 }
@@ -887,6 +926,7 @@ class LocalTextStoryProvider:
                     "strict_schema": True,
                     "context_budget": budget,
                     "request_budgets": request_budgets,
+                    "completion_attempts": completion_attempts,
                     "runtime_context": dict(budget.get("context_metadata") or {}),
                     "reasoning_effort": self.reasoning_effort,
                     **_semantic_audit_fields(semantic_attempts),
@@ -903,6 +943,7 @@ class LocalTextStoryProvider:
             "strict_schema": True,
             "reasoning_effort": self.reasoning_effort,
             "request_budgets": request_budgets,
+            "completion_attempts": completion_attempts,
             **_semantic_audit_fields(semantic_attempts),
             "error": str(error),
         }
