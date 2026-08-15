@@ -64,8 +64,21 @@ def _valid_story():
         "schema_version": 1,
         "project_summary": "摘要",
         "story_profile": "general_diary",
-        "chapters": [{"title": "章", "purpose": "整理", "segment_uuids": ["segment-a"], "confidence": 0.8}],
+        "chapters": [{
+            "title": "章",
+            "purpose": "整理",
+            "segment_uuids": ["segment-a"],
+            "pacing_intent": "自然",
+            "transition_intent": "場景切換",
+            "natural_audio_intent": "保留環境音",
+            "title_card_suggestion": "",
+            "notes": "",
+            "confidence": 0.8,
+            "needs_review_reasons": [],
+        }],
         "overall_confidence": 0.8,
+        "needs_review_reasons": [],
+        "suppressed_segments": [],
     }
 
 
