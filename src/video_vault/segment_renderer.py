@@ -11,10 +11,11 @@ from typing import Any, Callable, Mapping
 from .audio_pipeline import atempo_filter, build_audio_filter, build_silence_filter, normalize_audio_role
 from .color_pipeline import build_color_filter
 from .encoder_contract import encoder_arguments, validate_encoder_contract
-from .media_probe import MediaProbe, probe_media
+from .media_probe import MediaProbe, SourceProbeRegistry, probe_media
 from .render_errors import SegmentRenderError, is_encoder_fallback_error
 from .render_job_models import RenderCancelled
 from .render_profiles import get_render_profile
+from .source_fingerprint import resolve_source_fingerprint
 from .segment_cache import (
     build_segment_cache_key,
     cache_key_payload,
@@ -51,6 +52,8 @@ def render_segment(
     *,
     cache_root: Path | None = None,
     runner: Callable[..., Any] | None = None,
+    source_probe: MediaProbe | None = None,
+    source_probe_registry: SourceProbeRegistry | None = None,
 ) -> SegmentRenderResult:
     source = Path(str(segment.get("source_file") or "")).expanduser().resolve()
     if not source.is_file():
@@ -79,9 +82,14 @@ def render_segment(
     expected = float(segment.get("timeline_duration_seconds") or ((end - start) / speed))
     root = cache_root or Path(str(cfg.get("library_root") or ".")) / "08_projects" / f"project_{manifest.get('project_id')}" / "cache" / "segments"
     root.mkdir(parents=True, exist_ok=True)
-    key = build_segment_cache_key(manifest, segment)
+    source_fingerprint = (
+        source_probe_registry.fingerprint(source)
+        if source_probe_registry is not None
+        else resolve_source_fingerprint(source)
+    )
+    key = build_segment_cache_key(manifest, segment, source_fingerprint=source_fingerprint)
     paths = cache_paths(root, key)
-    payload = cache_key_payload(manifest, segment)
+    payload = cache_key_payload(manifest, segment, source_fingerprint=source_fingerprint)
     if _valid_cache(paths, payload, profile, expected, str(cfg.get("ffprobe_path") or "ffprobe")):
         metadata = read_cache_metadata(paths["metadata"]) or {}
         used = str(metadata.get("encoder_used") or encoder)
@@ -94,7 +102,11 @@ def render_segment(
     used = encoder
     qc_errors: tuple[str, ...] = ()
     try:
-        probe = probe_media(str(cfg.get("ffprobe_path") or "ffprobe"), source)
+        probe = source_probe or (
+            source_probe_registry.probe(source)
+            if source_probe_registry is not None
+            else probe_media(str(cfg.get("ffprobe_path") or "ffprobe"), source, "fast")
+        )
         if probe.duration_seconds > 0 and end > probe.duration_seconds + 0.001:
             raise SegmentRenderError(f"segment end {end} exceeds source duration {probe.duration_seconds}")
         command = build_segment_ffmpeg_command(cfg, manifest, segment, probe, output=paths["partial"], encoder=encoder)
@@ -192,7 +204,7 @@ def validate_segment_output(output_path: str | Path, profile: Mapping[str, Any],
     if not path.is_file() or path.stat().st_size <= 0:
         return SegmentQCResult(False, 0.0, ("output is missing or empty",))
     try:
-        probe = probe_media(ffprobe_path, path)
+        probe = probe_media(ffprobe_path, path, "fast")
     except Exception as exc:
         return SegmentQCResult(False, 0.0, (str(exc),))
     errors: list[str] = []

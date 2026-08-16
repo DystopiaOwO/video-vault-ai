@@ -11,9 +11,15 @@ from typing import Any, Mapping
 SEGMENT_RENDERER_CONTRACT_VERSION = 4
 
 
-def cache_key_payload(manifest: Mapping[str, Any], segment: Mapping[str, Any]) -> dict[str, Any]:
+def cache_key_payload(
+    manifest: Mapping[str, Any],
+    segment: Mapping[str, Any],
+    *,
+    source_fingerprint: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     source = Path(str(segment["source_file"])).expanduser().resolve()
     stat = source.stat() if source.exists() else None
+    supplied_source = dict(source_fingerprint or {})
     profile = dict(manifest.get("profile") or {})
     settings = dict(manifest.get("settings") or {})
     color = dict(segment.get("color") or settings.get("color") or {})
@@ -24,7 +30,7 @@ def cache_key_payload(manifest: Mapping[str, Any], segment: Mapping[str, Any]) -
         "source_file": str(source),
         "source_size": stat.st_size if stat else None,
         "source_mtime_ns": stat.st_mtime_ns if stat else None,
-        "source_sha256": _sha256_file(source) if source.is_file() else None,
+        "source_sha256": str(supplied_source.get("sha256") or (_sha256_file(source) if source.is_file() else "")) or None,
         "segment_id": str(segment.get("segment_id") or ""),
         "source_in_seconds": float(segment.get("source_in_seconds") or 0),
         "source_out_seconds": float(segment.get("source_out_seconds") or 0),
@@ -53,8 +59,13 @@ def cache_key_payload(manifest: Mapping[str, Any], segment: Mapping[str, Any]) -
     }
 
 
-def build_segment_cache_key(manifest: Mapping[str, Any], segment: Mapping[str, Any]) -> str:
-    payload = cache_key_payload(manifest, segment)
+def build_segment_cache_key(
+    manifest: Mapping[str, Any],
+    segment: Mapping[str, Any],
+    *,
+    source_fingerprint: Mapping[str, Any] | None = None,
+) -> str:
+    payload = cache_key_payload(manifest, segment, source_fingerprint=source_fingerprint)
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
