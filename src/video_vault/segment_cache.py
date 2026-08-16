@@ -8,7 +8,28 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-SEGMENT_RENDERER_CONTRACT_VERSION = 4
+SEGMENT_RENDERER_CONTRACT_VERSION = 5
+
+
+def encoder_cache_identity(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the deterministic encoder binding used by a segment cache key.
+
+    A formal render has a resolved encoder contract.  Legacy/non-formal callers
+    may only have a raw request, which remains explicit and is never confused
+    with a resolved contract-bound artifact.
+    """
+    contract = settings.get("encoder_contract")
+    if isinstance(contract, Mapping):
+        return {
+            "binding": "resolved_contract",
+            "version": str(contract.get("version") or ""),
+            "hash": str(contract.get("contract_hash") or ""),
+            "implementation": str(contract.get("implementation") or ""),
+        }
+    return {
+        "binding": "raw_request",
+        "requested": str(settings.get("encoder") or "auto"),
+    }
 
 
 def cache_key_payload(
@@ -44,7 +65,11 @@ def cache_key_payload(
             for key in ("_preview_slice", "_timeline_offset_seconds", "_segment_timeline_duration_seconds")
         },
         "profile": {key: profile.get(key) for key in ("profile_id", "width", "height", "fps", "video_codec", "pixel_format", "audio_codec", "audio_sample_rate", "audio_channels")},
+        # Keep the raw request for readability/backward diagnostics.  The
+        # binding below is the cache identity that prevents a legacy auto/CPU
+        # artifact from being reused by a resolved formal encoder contract.
         "encoder": settings.get("encoder", "auto"),
+        "encoder_cache_identity": encoder_cache_identity(settings),
         "audio_codec": profile.get("audio_codec"),
         "audio_sample_rate": profile.get("audio_sample_rate"),
         "audio_channels": profile.get("audio_channels"),
@@ -135,6 +160,7 @@ __all__ = [
     "build_segment_cache_key",
     "cache_key_payload",
     "cache_paths",
+    "encoder_cache_identity",
     "publish_cache_atomically",
     "read_cache_metadata",
     "segment_cache_key",

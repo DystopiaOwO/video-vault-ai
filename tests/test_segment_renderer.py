@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from dataclasses import replace
@@ -6,6 +7,7 @@ import pytest
 
 from video_vault.media_probe import MediaProbe
 from video_vault.render_errors import SegmentRenderError, is_encoder_fallback_error
+from video_vault.segment_cache import build_segment_cache_key, cache_key_payload, cache_paths, write_cache_metadata
 from video_vault.segment_renderer import build_segment_ffmpeg_command, map_encoder, render_segment
 
 
@@ -105,6 +107,14 @@ def _render_inputs(tmp_path: Path, encoder="cpu"):
     return {"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe", "library_root": str(tmp_path)}, manifest, segment
 
 
+def _valid_nvenc_contract(monkeypatch):
+    import video_vault.encoder_contract as encoder_contract
+
+    monkeypatch.setattr(encoder_contract, "_nvenc_probe", lambda _: {"result": "pass", "returncode": 0, "stderr_tail": ""})
+    monkeypatch.setattr(encoder_contract, "_ffmpeg_version", lambda _: "ffmpeg-test")
+    return encoder_contract.resolve_encoder_contract({"ffmpeg_path": "ffmpeg"}, {"fps": 30, "pixel_format": "yuv420p"}, "auto")
+
+
 def test_metadata_publish_failure_rolls_back_all_formal_files(monkeypatch, tmp_path: Path):
     import video_vault.segment_renderer as renderer
 
@@ -140,6 +150,53 @@ def test_standalone_render_segment_performs_one_fast_source_probe(monkeypatch, t
     result = renderer.render_segment(cfg, manifest, segment, cache_root=tmp_path / "cache", runner=runner)
     assert not result.cache_hit
     assert modes == ["fast"]
+
+
+def test_resolved_encoder_contract_is_persisted_and_reused_for_cache_hits(monkeypatch, tmp_path: Path):
+    import video_vault.segment_renderer as renderer
+
+    cfg, manifest, segment = _render_inputs(tmp_path, encoder="auto")
+    contract = _valid_nvenc_contract(monkeypatch)
+    manifest["settings"]["encoder_contract"] = contract
+    monkeypatch.setattr(renderer, "probe_media", lambda *args: _probe())
+    monkeypatch.setattr(renderer, "validate_segment_output", lambda *args: renderer.SegmentQCResult(True, 1.0))
+
+    def runner(command, **kwargs):
+        Path(command[-1]).write_bytes(b"partial")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    first = render_segment(cfg, manifest, segment, cache_root=tmp_path / "cache", runner=runner)
+    metadata = json.loads(first.output_path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert metadata["encoder_contract_binding"] == "resolved_contract"
+    assert metadata["encoder_contract_version"] == contract["version"]
+    assert metadata["encoder_contract_hash"] == contract["contract_hash"]
+    assert metadata["encoder_contract_implementation"] == "h264_nvenc"
+    assert metadata["encoder_used"] == "h264_nvenc"
+
+    def unexpected_render(*args, **kwargs):
+        raise AssertionError("resolved cache should hit")
+
+    hit = render_segment(cfg, manifest, segment, cache_root=tmp_path / "cache", runner=unexpected_render)
+    assert hit.cache_hit
+    assert hit.encoder_used == "h264_nvenc"
+
+
+def test_legacy_unbound_metadata_cannot_satisfy_resolved_encoder_cache(monkeypatch, tmp_path: Path):
+    import video_vault.segment_renderer as renderer
+
+    cfg, manifest, segment = _render_inputs(tmp_path, encoder="auto")
+    contract = _valid_nvenc_contract(monkeypatch)
+    manifest["settings"]["encoder_contract"] = contract
+    source_fingerprint = renderer.resolve_source_fingerprint(Path(segment["source_file"]))
+    key = build_segment_cache_key(manifest, segment, source_fingerprint=source_fingerprint)
+    payload = cache_key_payload(manifest, segment, source_fingerprint=source_fingerprint)
+    paths = cache_paths(tmp_path / "cache", key)
+    paths["output"].parent.mkdir(parents=True, exist_ok=True)
+    paths["output"].write_bytes(b"legacy")
+    write_cache_metadata(paths["metadata"], key, payload, encoder_requested="auto", encoder_used="h264_nvenc")
+    monkeypatch.setattr(renderer, "validate_segment_output", lambda *args: renderer.SegmentQCResult(True, 1.0))
+
+    assert not renderer._valid_cache(paths, payload, {"width": 1920, "height": 1080, "fps": 30, "pixel_format": "yuv420p", "audio_sample_rate": 48000, "audio_channels": 2}, 1.0, "ffprobe")
 
 
 def test_segment_end_beyond_source_duration_fails_closed(monkeypatch, tmp_path: Path):

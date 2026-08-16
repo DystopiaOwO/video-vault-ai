@@ -1,7 +1,9 @@
+import hashlib
+import json
 from pathlib import Path
 import os
 
-from video_vault.segment_cache import build_segment_cache_key, cache_key_payload, cache_paths
+from video_vault.segment_cache import SEGMENT_RENDERER_CONTRACT_VERSION, build_segment_cache_key, cache_key_payload, cache_paths
 
 
 def _inputs(source: Path, lut: Path | None = None):
@@ -101,3 +103,62 @@ def test_segment_audio_change_only_invalidates_that_segment(tmp_path: Path):
     changed = dict(first_segment, audio={"role": "keep", "volume_db": -6, "fade_in_seconds": 0.2, "fade_out_seconds": 0.3})
     assert build_segment_cache_key(manifest, changed) != first_key
     assert build_segment_cache_key(manifest, second_segment) == second_key
+
+
+def _resolved_encoder_contract(implementation: str, contract_hash: str, stderr: str = ""):
+    return {
+        "version": "2",
+        "contract_hash": contract_hash,
+        "implementation": implementation,
+        "nvenc_probe": {"result": "failed" if stderr else "pass", "stderr_tail": stderr},
+    }
+
+
+def test_segment_cache_binds_resolved_encoder_contract_and_bumps_version(tmp_path: Path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    raw_manifest, segment = _inputs(source)
+    raw_manifest["settings"]["encoder"] = "auto"
+    cpu_manifest = {**raw_manifest, "settings": {**raw_manifest["settings"], "encoder_contract": _resolved_encoder_contract("libx264", "cpu-hash")}}
+    nvenc_manifest = {**raw_manifest, "settings": {**raw_manifest["settings"], "encoder_contract": _resolved_encoder_contract("h264_nvenc", "nvenc-hash")}}
+
+    assert SEGMENT_RENDERER_CONTRACT_VERSION == 5
+    assert build_segment_cache_key(raw_manifest, segment) != build_segment_cache_key(cpu_manifest, segment)
+    assert build_segment_cache_key(cpu_manifest, segment) != build_segment_cache_key(nvenc_manifest, segment)
+    assert cache_key_payload(nvenc_manifest, segment)["encoder_cache_identity"] == {
+        "binding": "resolved_contract",
+        "version": "2",
+        "hash": "nvenc-hash",
+        "implementation": "h264_nvenc",
+    }
+
+
+def test_pre_vid36_v4_auto_payload_cannot_match_resolved_v5_key(tmp_path: Path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    raw_manifest, segment = _inputs(source)
+    raw_manifest["settings"]["encoder"] = "auto"
+    legacy_payload = cache_key_payload(raw_manifest, segment)
+    legacy_payload["contract_version"] = 4
+    legacy_key = hashlib.sha256(json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    resolved_manifest = {**raw_manifest, "settings": {**raw_manifest["settings"], "encoder_contract": _resolved_encoder_contract("h264_nvenc", "nvenc-hash")}}
+    assert legacy_key != build_segment_cache_key(resolved_manifest, segment)
+
+
+def test_probe_diagnostics_do_not_change_resolved_encoder_cache_identity(tmp_path: Path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    manifest, segment = _inputs(source)
+    base = {"encoder": "auto", "color": {"mode": "none"}, "audio": {}}
+    first = {**manifest, "settings": {**base, "encoder_contract": _resolved_encoder_contract("h264_nvenc", "same-hash", "first stderr")}}
+    second = {**manifest, "settings": {**base, "encoder_contract": _resolved_encoder_contract("h264_nvenc", "same-hash", "different stderr")}}
+    assert build_segment_cache_key(first, segment) == build_segment_cache_key(second, segment)
+
+
+def test_explicit_cpu_contract_is_deterministic_and_separate_from_raw_request(tmp_path: Path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    manifest, segment = _inputs(source)
+    explicit = {**manifest, "settings": {**manifest["settings"], "encoder": "cpu", "encoder_contract": _resolved_encoder_contract("libx264", "cpu-hash")}}
+    assert build_segment_cache_key(explicit, segment) == build_segment_cache_key(explicit, segment)
+    assert build_segment_cache_key(explicit, segment) != build_segment_cache_key(manifest, segment)

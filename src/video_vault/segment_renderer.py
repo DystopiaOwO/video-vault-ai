@@ -20,6 +20,7 @@ from .segment_cache import (
     build_segment_cache_key,
     cache_key_payload,
     cache_paths,
+    encoder_cache_identity,
     publish_cache_atomically,
     read_cache_metadata,
     write_cache_metadata_temp,
@@ -62,6 +63,7 @@ def render_segment(
     profile = get_render_profile(profile_id)
     settings = dict(manifest.get("settings") or {})
     requested = str(settings.get("encoder") or "auto")
+    encoder_identity = encoder_cache_identity(settings)
     contract = settings.get("encoder_contract")
     if isinstance(contract, Mapping):
         validate_encoder_contract(contract, profile)
@@ -121,6 +123,10 @@ def render_segment(
             payload,
             encoder_requested=requested,
             encoder_used=used,
+            encoder_contract_binding=encoder_identity["binding"],
+            encoder_contract_version=encoder_identity.get("version", ""),
+            encoder_contract_hash=encoder_identity.get("hash", ""),
+            encoder_contract_implementation=encoder_identity.get("implementation", ""),
             duration_seconds=qc.duration_seconds,
             warnings=warnings,
         )
@@ -299,6 +305,25 @@ def _valid_cache(paths: dict[str, Path], payload: Mapping[str, Any], profile: Ma
     if not paths["output"].is_file() or paths["output"].stat().st_size <= 0 or not metadata:
         return False
     if metadata.get("cache_key") != paths["output"].stem or metadata.get("key_payload") != dict(payload):
+        return False
+    identity = payload.get("encoder_cache_identity")
+    if not isinstance(identity, Mapping):
+        return False
+    if metadata.get("encoder_contract_binding") != identity.get("binding"):
+        return False
+    if identity.get("binding") == "resolved_contract":
+        if any(
+            metadata.get(metadata_key) != identity.get(identity_key)
+            for metadata_key, identity_key in (
+                ("encoder_contract_version", "version"),
+                ("encoder_contract_hash", "hash"),
+                ("encoder_contract_implementation", "implementation"),
+            )
+        ):
+            return False
+        if metadata.get("encoder_used") != identity.get("implementation"):
+            return False
+    elif metadata.get("encoder_requested") != identity.get("requested"):
         return False
     return validate_segment_output(paths["output"], profile, expected, ffprobe_path).passed
 
