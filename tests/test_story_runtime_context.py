@@ -64,8 +64,29 @@ def _valid_story():
         "schema_version": 1,
         "project_summary": "摘要",
         "story_profile": "general_diary",
-        "chapters": [],
+        "chapters": [{
+            "title": "章",
+            "purpose": "整理",
+            "segment_uuids": ["segment-a"],
+            "pacing_intent": "自然",
+            "transition_intent": "場景切換",
+            "natural_audio_intent": "保留環境音",
+            "title_card_suggestion": "",
+            "notes": "",
+            "confidence": 0.8,
+            "needs_review_reasons": [],
+        }],
         "overall_confidence": 0.8,
+        "needs_review_reasons": [],
+        "suppressed_segments": [],
+    }
+
+
+def _story_snapshot(**values):
+    return {
+        "story_profile_id": "general_diary",
+        "segments": [{"segment_uuid": "segment-a", "human_override": {"include": True}}],
+        **values,
     }
 
 
@@ -233,7 +254,7 @@ def test_stale_32768_live_8192_blocks_before_generation_post(monkeypatch):
         reserved_output_tokens=2048,
     )
     with pytest.raises(StoryContextBudgetError) as caught:
-        provider.generate_story({"project_intent": "x" * 10000})
+        provider.generate_story(_story_snapshot(project_intent="x" * 10000))
 
     assert methods == ["GET"]
     budget = caught.value.budget
@@ -261,7 +282,7 @@ def test_live_verified_sufficient_context_allows_generation_post(monkeypatch):
         "story-model",
         context_length=8192,
         context_source="stale.config",
-    ).generate_story({"story_profile_id": "general_diary"})
+    ).generate_story(_story_snapshot())
 
     assert output == _valid_story()
     assert [method for method, _url in calls] == ["GET", "POST"]
@@ -312,7 +333,7 @@ def test_runtime_reload_revalidates_before_retry_and_blocks_second_post(monkeypa
         reserved_output_tokens=512,
     )
     with pytest.raises(StoryContextBudgetError) as caught:
-        provider.generate_story({"project_intent": "x" * 10000})
+        provider.generate_story(_story_snapshot(project_intent="x" * 10000))
 
     assert methods == ["GET", "POST", "GET"]
     audit = caught.value.audit
@@ -345,7 +366,7 @@ def test_public_endpoint_is_blocked_without_any_runtime_or_generation_request():
     )
 
     with pytest.raises(StoryContextBudgetError) as caught:
-        provider.generate_story({"story_profile_id": "general_diary"})
+        provider.generate_story(_story_snapshot())
 
     assert calls == []
     assert caught.value.budget["reason_code"] == "runtime_endpoint_scope_blocked"
@@ -376,7 +397,7 @@ def test_context_overflow_http_error_is_classified_and_not_retried(monkeypatch):
         context_length=32768,
     )
     with pytest.raises(StoryProviderHTTPError, match="context overflow") as caught:
-        provider.generate_story({"story_profile_id": "general_diary"})
+        provider.generate_story(_story_snapshot())
 
     assert methods == ["GET", "POST"]
     audit = caught.value.audit
@@ -404,7 +425,7 @@ def test_generic_provider_timeout_persists_request_and_budget_audit(monkeypatch)
         context_length=32768,
     )
     with pytest.raises(StoryGenerationError, match="本地文字模型不可用") as caught:
-        provider.generate_story({"story_profile_id": "general_diary"})
+        provider.generate_story(_story_snapshot())
 
     assert methods == ["GET", "POST"]
     audit = caught.value.audit
@@ -419,7 +440,7 @@ def test_app_owned_32k_instance_is_live_verified_used_and_cleaned_without_touchi
     router = _LMStudioRouter()
     monkeypatch.setattr(urllib.request, "urlopen", router)
 
-    output, raw = _provisioning_provider().generate_story({"project_intent": "x" * 10000})
+    output, raw = _provisioning_provider().generate_story(_story_snapshot(project_intent="x" * 10000))
 
     assert output == _valid_story()
     assert router.load_requests == [
@@ -446,7 +467,7 @@ def test_installed_but_unloaded_model_can_be_provisioned_without_jit_or_download
     router.instances = {}
     monkeypatch.setattr(urllib.request, "urlopen", router)
 
-    output, raw = _provisioning_provider().generate_story({"project_intent": "x" * 10000})
+    output, raw = _provisioning_provider().generate_story(_story_snapshot(project_intent="x" * 10000))
 
     assert output == _valid_story()
     assert len(router.load_requests) == 1
@@ -464,7 +485,7 @@ def test_runtime_load_resource_failure_blocks_with_zero_story_post(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", router)
 
     with pytest.raises(StoryContextBudgetError) as caught:
-        _provisioning_provider().generate_story({"project_intent": "x" * 10000})
+        _provisioning_provider().generate_story(_story_snapshot(project_intent="x" * 10000))
 
     assert len(router.load_requests) == 1
     assert router.generation_requests == []
@@ -479,7 +500,7 @@ def test_post_load_applied_context_mismatch_blocks_zero_story_post_and_cleans_ow
     monkeypatch.setattr(urllib.request, "urlopen", router)
 
     with pytest.raises(StoryContextBudgetError) as caught:
-        _provisioning_provider().generate_story({"project_intent": "x" * 10000})
+        _provisioning_provider().generate_story(_story_snapshot(project_intent="x" * 10000))
 
     assert caught.value.budget["reason_code"] == "runtime_post_load_verification_failed"
     assert router.generation_requests == []
@@ -493,7 +514,7 @@ def test_model_max_context_mismatch_blocks_before_load_and_story_post(monkeypatc
     monkeypatch.setattr(urllib.request, "urlopen", router)
 
     with pytest.raises(StoryContextBudgetError) as caught:
-        _provisioning_provider().generate_story({"project_intent": "x" * 10000})
+        _provisioning_provider().generate_story(_story_snapshot(project_intent="x" * 10000))
 
     assert caught.value.budget["reason_code"] == "runtime_model_max_context_insufficient"
     assert router.load_requests == []
@@ -507,7 +528,7 @@ def test_cleanup_failure_keeps_story_generation_fail_closed(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", router)
 
     with pytest.raises(StoryRuntimeCleanupError, match="cleanup") as caught:
-        _provisioning_provider().generate_story({"project_intent": "x" * 10000})
+        _provisioning_provider().generate_story(_story_snapshot(project_intent="x" * 10000))
 
     assert len(router.generation_requests) == 1
     assert router.unload_requests == [{"instance_id": "story-model:2"}]
@@ -523,7 +544,7 @@ def test_owned_runtime_change_before_corrective_retry_blocks_second_post_without
     monkeypatch.setattr(urllib.request, "urlopen", router)
 
     with pytest.raises(StoryContextBudgetError) as caught:
-        _provisioning_provider().generate_story({"project_intent": "x" * 10000})
+        _provisioning_provider().generate_story(_story_snapshot(project_intent="x" * 10000))
 
     assert len(router.load_requests) == 1
     assert len(router.generation_requests) == 1
@@ -538,7 +559,7 @@ def test_load_returning_preexisting_instance_is_never_claimed_or_unloaded(monkey
     monkeypatch.setattr(urllib.request, "urlopen", router)
 
     with pytest.raises(StoryContextBudgetError) as caught:
-        _provisioning_provider().generate_story({"project_intent": "x" * 10000})
+        _provisioning_provider().generate_story(_story_snapshot(project_intent="x" * 10000))
 
     assert caught.value.budget["reason_code"] == "runtime_load_returned_preexisting_instance"
     assert router.generation_requests == []
@@ -559,7 +580,7 @@ def test_provisioning_enabled_public_endpoint_blocks_without_any_network(monkeyp
     )
 
     with pytest.raises(StoryContextBudgetError) as caught:
-        provider.generate_story({"project_intent": "x" * 10000})
+        provider.generate_story(_story_snapshot(project_intent="x" * 10000))
 
     assert calls == []
     assert caught.value.budget["reason_code"] == "runtime_provisioning_endpoint_blocked"

@@ -18,6 +18,7 @@ from video_vault.story_calibration import calibration_path, compute_calibration,
 from video_vault.story_generation import (
     LocalTextStoryProvider,
     STORY_SYSTEM_PROMPT,
+    STORY_PROMPT_VERSION,
     StoryGenerationError,
     StoryContextBudgetError,
     StoryProviderHTTPError,
@@ -57,6 +58,29 @@ def _verified_runtime_resolver(source: str = "test.runtime.loaded_instance"):
         }
 
     return resolve
+
+
+def _complete_story(segment_uuids: list[str], *, confidence: float = 0.5) -> dict:
+    return {
+        "schema_version": 1,
+        "project_summary": "摘要",
+        "story_profile": "general_diary",
+        "chapters": [{
+            "title": "章",
+            "purpose": "整理",
+            "segment_uuids": list(segment_uuids),
+            "pacing_intent": "自然",
+            "transition_intent": "場景切換",
+            "natural_audio_intent": "保留環境音",
+            "title_card_suggestion": "",
+            "notes": "",
+            "confidence": confidence,
+            "needs_review_reasons": [],
+        }],
+        "overall_confidence": confidence,
+        "needs_review_reasons": [],
+        "suppressed_segments": [],
+    }
 
 
 def _fixture(tmp_path: Path, *, second_project: bool = False):
@@ -245,6 +269,25 @@ def test_story_cache_identity_uses_effective_reasoning_and_new_contract():
     assert none_key == equivalent_key
     assert none_key != low_key
     assert none_key != old_key
+
+
+def test_story_cache_identity_invalidates_pre_vid30_prompt_contract():
+    snapshot = {"input_hash": "same-snapshot"}
+    common = {
+        "snapshot": snapshot,
+        "provider": "local_text",
+        "model": "story-model",
+        "schema_version": 1,
+        "provider_contract_version": "story-text-v1",
+    }
+
+    v1_key = story_cache_key(**common, prompt_version="project-story-v1")
+    v2_key = story_cache_key(**common, prompt_version="project-story-v2")
+    default_key = story_cache_key(**common)
+
+    assert v1_key != v2_key
+    assert default_key == v2_key
+    assert STORY_PROMPT_VERSION == "project-story-v2"
 
 
 def test_generate_story_does_not_run_destructive_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -734,13 +777,7 @@ def test_story_input_uses_story_context_provenance_without_filename_semantics(tm
 
 
 def test_local_text_provider_allows_at_most_one_corrective_retry_and_audits(monkeypatch):
-    valid = {
-        "schema_version": 1,
-        "project_summary": "摘要",
-        "story_profile": "general_diary",
-        "chapters": [],
-        "overall_confidence": 0.5,
-    }
+    valid = _complete_story(["segment-a"])
     responses = [
         {"choices": [{"message": {"content": json.dumps({"unknown": True})}}]},
         {"choices": [{"message": {"content": json.dumps(valid)}}]},
@@ -771,7 +808,10 @@ def test_local_text_provider_allows_at_most_one_corrective_retry_and_audits(monk
         context_length=32768,
         context_source="test.provider_metadata",
         runtime_context_resolver=_verified_runtime_resolver(),
-    ).generate_story({"story_profile_id": "general_diary"})
+    ).generate_story({
+        "story_profile_id": "general_diary",
+        "segments": [{"segment_uuid": "segment-a", "human_override": {"include": True}}],
+    })
     assert output == valid
     assert raw["provider_audit"]["calls"] == 2
     assert raw["provider_audit"]["retries"] == 1
@@ -781,13 +821,77 @@ def test_local_text_provider_allows_at_most_one_corrective_retry_and_audits(monk
     assert raw["provider_audit"]["context_budget"]["context_metadata_source"] == "test.runtime.loaded_instance"
     assert all(request["max_tokens"] == 2048 for request in requests)
     assert all(request["reasoning_effort"] == "none" for request in requests)
+    assert "chapter" in requests[0]["messages"][0]["content"]
+    assert "title" in requests[0]["messages"][0]["content"]
+    assert "segment_uuid" in requests[0]["messages"][0]["content"]
     assert len(raw["provider_audit"]["request_budgets"]) == 2
     assert all(item["budget"]["status"] == "pass" for item in raw["provider_audit"]["request_budgets"])
-    assert requests[1]["messages"][2]["role"] == "assistant"
-    assert json.loads(requests[1]["messages"][2]["content"]) == {"unknown": True}
+    assert len(requests[1]["messages"]) == 3
+    assert all(message["role"] != "assistant" for message in requests[1]["messages"])
+    assert "schema required" in requests[1]["messages"][-1]["content"]
+    assert '{"unknown": true}' not in requests[1]["messages"][-1]["content"]
     assert all(request["response_format"]["type"] == "json_schema" for request in requests)
     assert all(request["response_format"]["json_schema"]["strict"] is True for request in requests)
     assert all(request["response_format"]["json_schema"]["schema"]["properties"]["story_profile"]["enum"] == ["travel_diary", "coffee_matcha_diary", "roasting_diary", "general_diary"] for request in requests)
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "completion_tokens", "expected_truncated"),
+    [("length", 512, True), ("stop", 40, False)],
+)
+def test_strict_parse_failure_audit_classifies_completion_without_raw_content(
+    monkeypatch, finish_reason, completion_tokens, expected_truncated,
+):
+    valid = _complete_story(["segment-a"])
+    responses = [
+        {
+            "choices": [{"finish_reason": finish_reason, "message": {"content": '{"schema_version": 1'}}],
+            "usage": {"prompt_tokens": 300, "completion_tokens": completion_tokens, "total_tokens": 300 + completion_tokens},
+        },
+        {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(valid)}}]},
+    ]
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps(responses.pop(0)).encode("utf-8")
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    output, raw = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1", "completion-audit-model", context_length=32768,
+        context_source="test.provider_metadata", reserved_output_tokens=512,
+        runtime_context_resolver=_verified_runtime_resolver(),
+    ).generate_story({
+        "story_profile_id": "general_diary",
+        "segments": [{"segment_uuid": "segment-a", "human_override": {"include": True}}],
+    })
+
+    assert output == valid
+    evidence = raw["provider_audit"]["completion_attempts"]
+    assert len(evidence) == 2
+    failed = evidence[0]
+    assert failed["attempt"] == 1
+    assert failed["finish_reason"] == finish_reason
+    assert failed["prompt_tokens"] == 300
+    assert failed["completion_tokens"] == completion_tokens
+    assert failed["total_tokens"] == 300 + completion_tokens
+    assert failed["max_tokens"] == 512
+    assert failed["reasoning_effort"] == "none"
+    assert failed["probable_truncation"] is expected_truncated
+    assert failed["content_chars"] == len('{"schema_version": 1')
+    assert failed["content_bytes"] == len('{"schema_version": 1'.encode("utf-8"))
+    assert failed["strict_parse_error"]
+    assert evidence[1]["attempt"] == 2
+    assert evidence[1]["strict_parse_error"] is None
+    for item in evidence:
+        assert "content" not in item
+        assert "reasoning_content" not in item
+        assert "raw_content" not in item
 
 
 def test_local_text_provider_can_configure_reasoning_effort_and_audits_it(monkeypatch):
@@ -805,8 +909,10 @@ def test_local_text_provider_can_configure_reasoning_effort_and_audits_it(monkey
                 "schema_version": 1,
                 "project_summary": "摘要",
                 "story_profile": "general_diary",
-                "chapters": [],
+                "chapters": _complete_story(["segment-a"])["chapters"],
                 "overall_confidence": 0.5,
+                "needs_review_reasons": [],
+                "suppressed_segments": [],
             })}}]}).encode("utf-8")
 
     def fake_urlopen(request, **_kwargs):
@@ -821,11 +927,327 @@ def test_local_text_provider_can_configure_reasoning_effort_and_audits_it(monkey
         context_length=32768,
         context_source="test.provider_metadata",
         runtime_context_resolver=_verified_runtime_resolver(),
-    ).generate_story({"story_profile_id": "general_diary"})
+    ).generate_story({
+        "story_profile_id": "general_diary",
+        "segments": [{"segment_uuid": "segment-a", "human_override": {"include": True}}],
+    })
 
     assert output["schema_version"] == 1
     assert requests[0]["reasoning_effort"] == "none"
     assert raw["provider_audit"]["reasoning_effort"] == "none"
+
+
+def test_semantic_missing_segment_gets_one_deterministic_corrective_retry(monkeypatch):
+    snapshot = {
+        "story_profile_id": "general_diary",
+        "segments": [
+            {"segment_uuid": "segment-a", "human_override": {"include": True}},
+            {"segment_uuid": "segment-b", "human_override": {"include": True}},
+        ],
+    }
+
+    def output(ids):
+        return _complete_story(ids)
+
+    responses = [output(["segment-a"]), output(["segment-a", "segment-b"])]
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps(responses.pop(0))}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(json.loads(request.data.decode("utf-8")))
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    result, raw = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1",
+        "semantic-retry-model",
+        context_length=32768,
+        context_source="test.provider_metadata",
+        runtime_context_resolver=_verified_runtime_resolver(),
+    ).generate_story(snapshot)
+
+    audit = raw["provider_audit"]
+    assert result["chapters"][0]["segment_uuids"] == ["segment-a", "segment-b"]
+    assert len(requests) == 2
+    assert audit["calls"] == 2
+    assert audit["retries"] == 1
+    assert audit["semantic_validation_attempts"][0]["status"] == "failed"
+    assert audit["semantic_validation_attempts"][0]["missing_ids"] == ["segment-b"]
+    assert audit["first_attempt_missing_ids"] == ["segment-b"]
+    assert audit["corrective_retry_reason"] == "semantic_validation"
+    assert audit["final_coverage"]["missing_ids"] == []
+    assert audit["final_coverage"]["used_ids"] == ["segment-a", "segment-b"]
+    retry_prompt = requests[1]["messages"][-1]["content"]
+    assert "segment-b" in retry_prompt
+    assert "findings" in retry_prompt
+    assert "expected_ids" not in retry_prompt
+    assert "used_ids" not in retry_prompt
+    assert "suppressed_ids" not in retry_prompt
+    assert '"segment-a"' not in retry_prompt
+
+
+def test_semantic_compact_retry_near_context_can_post_twice(monkeypatch):
+    snapshot = {
+        "story_profile_id": "general_diary",
+        "segments": [
+            {"segment_uuid": "segment-a", "human_override": {"include": True}},
+            {"segment_uuid": "segment-b", "human_override": {"include": True}},
+        ],
+    }
+    responses = [_complete_story(["segment-a"]), _complete_story(["segment-a", "segment-b"])]
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps(responses.pop(0))}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(json.loads(request.data.decode("utf-8")))
+        return Response()
+
+    provider = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1", "near-context-model", context_length=100000,
+        context_source="test.provider_metadata", runtime_context_resolver=_verified_runtime_resolver(),
+    )
+    first_messages = [
+        {"role": "system", "content": STORY_SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))},
+    ]
+    first_budget = preflight_story_context(
+        snapshot, provider, system_prompt=STORY_SYSTEM_PROMPT,
+        request_messages=first_messages, reserved_output_tokens=provider.reserved_output_tokens,
+    )
+    provider.context_length = first_budget["estimated_request_tokens"] + 2000
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    output, raw = provider.generate_story(snapshot)
+
+    assert output["chapters"][0]["segment_uuids"] == ["segment-a", "segment-b"]
+    assert len(requests) == 2
+    assert raw["provider_audit"]["request_budgets"][1]["budget"]["status"] == "pass"
+    assert raw["provider_audit"]["request_budgets"][1]["budget"]["estimated_input_tokens"] < provider.context_length
+    retry_prompt = requests[1]["messages"][-1]["content"]
+    assert "segment-b" in retry_prompt
+    assert "expected_ids" not in retry_prompt
+    assert '"segment-a"' not in retry_prompt
+
+
+def test_semantic_retry_second_incomplete_fails_closed_with_coverage_audit(monkeypatch):
+    snapshot = {
+        "story_profile_id": "general_diary",
+        "segments": [
+            {"segment_uuid": "segment-a", "human_override": {"include": True}},
+            {"segment_uuid": "segment-b", "human_override": {"include": True}},
+        ],
+    }
+    incomplete = _complete_story(["segment-a"])
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps(incomplete)}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(json.loads(request.data.decode("utf-8")))
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    provider = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1",
+        "semantic-fail-model",
+        context_length=32768,
+        context_source="test.provider_metadata",
+        runtime_context_resolver=_verified_runtime_resolver(),
+    )
+    with pytest.raises(StoryValidationError) as caught:
+        provider.generate_story(snapshot)
+
+    audit = caught.value.audit
+    assert len(requests) == 2
+    assert audit["calls"] == 2
+    assert audit["retries"] == 1
+    assert len(audit["semantic_validation_attempts"]) == 2
+    assert audit["final_coverage"]["missing_ids"] == ["segment-b"]
+    assert audit["first_attempt_missing_ids"] == ["segment-b"]
+
+
+def test_semantic_corrective_retry_rechecks_budget_before_second_post(monkeypatch):
+    snapshot = {
+        "story_profile_id": "general_diary",
+        "segments": [
+            {"segment_uuid": "segment-a", "human_override": {"include": True}},
+            {"segment_uuid": "segment-b", "human_override": {"include": True}},
+        ],
+    }
+    incomplete = _complete_story(["segment-a"])
+    provider = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1",
+        "semantic-budget-model",
+        context_length=100000,
+        context_source="test.model_metadata.max_context_length",
+        reserved_output_tokens=512,
+        runtime_context_resolver=_verified_runtime_resolver(),
+    )
+    first_messages = [
+        {"role": "system", "content": STORY_SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))},
+    ]
+    first_budget = preflight_story_context(
+        snapshot,
+        provider,
+        system_prompt=STORY_SYSTEM_PROMPT,
+        request_messages=first_messages,
+        reserved_output_tokens=provider.reserved_output_tokens,
+    )
+    provider.context_length = first_budget["estimated_input_tokens"] + provider.reserved_output_tokens
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps(incomplete)}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(json.loads(request.data.decode("utf-8")))
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(StoryContextBudgetError) as caught:
+        provider.generate_story(snapshot)
+
+    audit = caught.value.audit
+    assert len(requests) == 1
+    assert audit["generation_post_calls"] == 1
+    assert audit["retries"] == 1
+    assert audit["blocked_retry_budget"]["status"] == "blocked"
+    assert audit["first_attempt_missing_ids"] == ["segment-b"]
+
+
+def test_semantic_findings_report_duplicate_and_invalid_ids():
+    snapshot = {
+        "story_profile_id": "general_diary",
+        "segments": [{"segment_uuid": "segment-a", "human_override": {"include": True}}],
+    }
+    output = {
+        "schema_version": 1,
+        "project_summary": "摘要",
+        "story_profile": "general_diary",
+        "chapters": [{"title": "章", "purpose": "整理", "segment_uuids": ["segment-a", "segment-a", "not-owned"], "confidence": 0.5}],
+        "overall_confidence": 0.5,
+    }
+    with pytest.raises(StoryValidationError) as caught:
+        validate_story_output(output, snapshot)
+
+    findings = caught.value.findings
+    assert findings["duplicate_ids"] == ["segment-a"]
+    assert findings["invalid_ids"] == ["not-owned"]
+    assert "duplicate_segment_ids" in findings["reason_codes"]
+    assert "invalid_segment_ids" in findings["reason_codes"]
+
+
+@pytest.mark.parametrize("field", sorted({
+    "schema_version", "project_summary", "story_profile", "chapters", "overall_confidence",
+    "needs_review_reasons", "suppressed_segments",
+}))
+def test_local_strict_parse_rejects_missing_root_required_field(field):
+    provider = LocalTextStoryProvider("http://127.0.0.1:1234/v1", "strict-model")
+    output = _complete_story(["segment-a"])
+    output.pop(field)
+
+    with pytest.raises(StoryValidationError, match="缺少欄位"):
+        provider._strict_parse(json.dumps(output, ensure_ascii=False))
+
+
+@pytest.mark.parametrize("field", sorted({
+    "title", "purpose", "segment_uuids", "pacing_intent", "transition_intent",
+    "natural_audio_intent", "title_card_suggestion", "notes", "confidence", "needs_review_reasons",
+}))
+def test_local_strict_parse_rejects_missing_chapter_required_field(field):
+    provider = LocalTextStoryProvider("http://127.0.0.1:1234/v1", "strict-model")
+    output = _complete_story(["segment-a"])
+    output["chapters"][0].pop(field)
+
+    with pytest.raises(StoryValidationError, match="chapter 1 schema 不符合契約"):
+        provider._strict_parse(json.dumps(output, ensure_ascii=False))
+
+
+@pytest.mark.parametrize("field", sorted({"segment_uuid", "representative_segment_uuid", "reason"}))
+def test_local_strict_parse_rejects_missing_suppressed_required_field(field):
+    provider = LocalTextStoryProvider("http://127.0.0.1:1234/v1", "strict-model")
+    output = _complete_story(["segment-a"])
+    output["suppressed_segments"] = [{
+        "segment_uuid": "segment-b",
+        "representative_segment_uuid": "segment-a",
+        "reason": "duplicate",
+    }]
+    output["suppressed_segments"][0].pop(field)
+
+    with pytest.raises(StoryValidationError, match="suppressed_segments 1 schema 不符合契約"):
+        provider._strict_parse(json.dumps(output, ensure_ascii=False))
+
+
+def test_structural_incomplete_chapter_uses_compact_retry_and_passes(monkeypatch):
+    first = _complete_story(["segment-a"])
+    first["chapters"][0].pop("notes")
+    corrected = _complete_story(["segment-a"])
+    responses = [first, corrected]
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps(responses.pop(0))}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(json.loads(request.data.decode("utf-8")))
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    output, raw = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1", "structural-retry-model", context_length=32768,
+        context_source="test.provider_metadata", runtime_context_resolver=_verified_runtime_resolver(),
+    ).generate_story({
+        "story_profile_id": "general_diary",
+        "segments": [{"segment_uuid": "segment-a", "human_override": {"include": True}}],
+    })
+
+    assert output == corrected
+    assert len(requests) == 2
+    assert all(message["role"] != "assistant" for message in requests[1]["messages"])
+    assert "notes" in requests[1]["messages"][-1]["content"]
+    assert raw["provider_audit"]["calls"] == 2
+    assert raw["provider_audit"]["retries"] == 1
 
 
 def test_corrective_retry_recomputes_budget_and_blocks_second_http(monkeypatch):
@@ -1170,6 +1592,62 @@ def test_generate_project_story_persists_blocked_retry_budget(tmp_path, monkeypa
     assert len(audit["request_budgets"]) == 2
     assert validation["status"] == "blocked"
     assert len(validation["request_budgets"]) == 2
+
+
+def test_generate_project_story_semantic_retry_failure_never_publishes(tmp_path, monkeypatch):
+    cfg, db, project_id, _ = _fixture(tmp_path)
+    snapshot = build_story_input_snapshot(cfg, db, project_id)
+    ids = [item["segment_uuid"] for item in snapshot["segments"]]
+    provider = LocalTextStoryProvider(
+        "http://127.0.0.1:1234/v1",
+        "semantic-fail-model",
+        context_length=100000,
+        context_source="test.model_metadata.max_context_length",
+        reserved_output_tokens=512,
+        runtime_context_resolver=_verified_runtime_resolver(),
+    )
+    incomplete = _complete_story([ids[0]])
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": json.dumps(incomplete)}}]}).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        calls.append(json.loads(request.data.decode("utf-8")))
+        return Response()
+
+    import video_vault.story_generation as story_generation_module
+    monkeypatch.setattr(story_generation_module, "provider_from_config", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(StoryValidationError):
+        generate_project_story(cfg, db, project_id, force=True)
+
+    assert len(calls) == 2
+    with connect(db) as con:
+        generation = dict(con.execute(
+            "select status, raw_response_json, validation_json from story_generations where project_id=? order by generation desc limit 1",
+            (project_id,),
+        ).fetchone())
+        project_row = dict(con.execute(
+            "select current_story_generation_uuid, last_successful_story_generation_uuid from projects where id=?",
+            (project_id,),
+        ).fetchone())
+    raw = json.loads(generation["raw_response_json"])
+    validation = json.loads(generation["validation_json"])
+    assert generation["status"] == "failed"
+    assert project_row["current_story_generation_uuid"] in {"", None}
+    assert project_row["last_successful_story_generation_uuid"] in {"", None}
+    assert raw["provider_audit"]["calls"] == 2
+    assert raw["provider_audit"]["final_coverage"]["missing_ids"] == [ids[1]]
+    assert validation["status"] == "failed"
+    assert validation["final_coverage"]["missing_ids"] == [ids[1]]
 
 
 def test_generate_project_story_persists_context_overflow_provider_audit(tmp_path, monkeypatch):

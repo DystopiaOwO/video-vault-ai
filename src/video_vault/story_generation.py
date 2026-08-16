@@ -29,7 +29,7 @@ from .lmstudio_runtime import LMStudioRuntimeProvisioner, resolve_lmstudio_runti
 
 
 STORY_OUTPUT_SCHEMA_VERSION = 1
-STORY_PROMPT_VERSION = "project-story-v1"
+STORY_PROMPT_VERSION = "project-story-v2"
 STORY_CACHE_CONTRACT_VERSION = "story-cache-v2"
 DEFAULT_REASONING_EFFORT = "none"
 SUPPORTED_REASONING_EFFORTS = {"none", "low", "medium", "high"}
@@ -37,6 +37,11 @@ STORY_GENERATION_STATUSES = {"queued", "running", "validating", "publishing", "s
 STORY_SYSTEM_PROMPT = (
     "你是 video-vault-ai 的 project story planner。只能輸出嚴格 JSON。"
     "只能引用輸入提供的 segment_uuid，不得發明事件、地點、參數或不存在的內容。"
+    "chapter 的 title、purpose 必須非空且簡短，segment_uuids 至少 1 個；所有 required 欄位都要輸出，文字欄位簡短。"
+    "所有 human_override.include=true 的 segment 必須 exactly once 出現在 chapters[].segment_uuids，"
+    "或依輸入既有 duplicate_group 契約出現在 suppressed_segments；不得無聲省略。"
+    "suppressed_segments 的 representative 必須 exactly 出現在 chapter，且與被 suppress segment 屬於同一 duplicate_group。"
+    "不要自行建立 duplicate_group 或 suppression；若輸入沒有明確合法 duplicate_group，suppressed_segments 必須為空。"
     "不要要求圖片，不要輸出 frame bytes、image_url 或 base64。"
     "不得決定 approval 或 render。咖啡、抹茶與烘豆不得自行寫成教學、業配或虛構專業參數。"
 )
@@ -103,6 +108,25 @@ _STORY_OUTPUT_JSON_SCHEMA = {
     },
 }
 
+_STORY_SCHEMA_ROOT_KEYS = frozenset(
+    _STORY_OUTPUT_JSON_SCHEMA["json_schema"]["schema"]["properties"]
+)
+_STORY_SCHEMA_ROOT_REQUIRED_KEYS = frozenset(
+    _STORY_OUTPUT_JSON_SCHEMA["json_schema"]["schema"]["required"]
+)
+_STORY_SCHEMA_CHAPTER_KEYS = frozenset(
+    _STORY_OUTPUT_JSON_SCHEMA["json_schema"]["schema"]["properties"]["chapters"]["items"]["properties"]
+)
+_STORY_SCHEMA_CHAPTER_REQUIRED_KEYS = frozenset(
+    _STORY_OUTPUT_JSON_SCHEMA["json_schema"]["schema"]["properties"]["chapters"]["items"]["required"]
+)
+_STORY_SCHEMA_SUPPRESSED_KEYS = frozenset(
+    _STORY_OUTPUT_JSON_SCHEMA["json_schema"]["schema"]["properties"]["suppressed_segments"]["items"]["properties"]
+)
+_STORY_SCHEMA_SUPPRESSED_REQUIRED_KEYS = frozenset(
+    _STORY_OUTPUT_JSON_SCHEMA["json_schema"]["schema"]["properties"]["suppressed_segments"]["items"]["required"]
+)
+
 
 class StoryGenerationError(RuntimeError):
     pass
@@ -110,6 +134,14 @@ class StoryGenerationError(RuntimeError):
 
 class StoryValidationError(StoryGenerationError):
     pass
+
+
+class StorySemanticValidationError(StoryValidationError):
+    """A structurally valid Story output violates the project semantic contract."""
+
+    def __init__(self, message: str, findings: Mapping[str, Any]):
+        super().__init__(message)
+        self.findings = dict(findings)
 
 
 class StoryContextBudgetError(StoryGenerationError):
@@ -542,14 +574,12 @@ class MockStoryProvider:
 class LocalTextStoryProvider:
     provider = "local_text"
 
-    _ROOT_KEYS = {
-        "schema_version", "project_summary", "story_profile", "chapters",
-        "overall_confidence", "needs_review_reasons", "suppressed_segments",
-    }
-    _CHAPTER_KEYS = {
-        "title", "purpose", "segment_uuids", "pacing_intent", "transition_intent",
-        "natural_audio_intent", "title_card_suggestion", "notes", "confidence", "needs_review_reasons",
-    }
+    _ROOT_KEYS = _STORY_SCHEMA_ROOT_KEYS
+    _ROOT_REQUIRED_KEYS = _STORY_SCHEMA_ROOT_REQUIRED_KEYS
+    _CHAPTER_KEYS = _STORY_SCHEMA_CHAPTER_KEYS
+    _CHAPTER_REQUIRED_KEYS = _STORY_SCHEMA_CHAPTER_REQUIRED_KEYS
+    _SUPPRESSED_KEYS = _STORY_SCHEMA_SUPPRESSED_KEYS
+    _SUPPRESSED_REQUIRED_KEYS = _STORY_SCHEMA_SUPPRESSED_REQUIRED_KEYS
 
     def __init__(
         self,
@@ -652,7 +682,7 @@ class LocalTextStoryProvider:
         if not isinstance(output, dict):
             raise StoryValidationError("文字模型輸出必須是 JSON object")
         unknown = sorted(set(output) - self._ROOT_KEYS)
-        missing = sorted({"schema_version", "project_summary", "story_profile", "chapters", "overall_confidence"} - set(output))
+        missing = sorted(self._ROOT_REQUIRED_KEYS - set(output))
         if unknown or missing:
             bits = []
             if unknown:
@@ -666,13 +696,33 @@ class LocalTextStoryProvider:
             if not isinstance(chapter, Mapping):
                 raise StoryValidationError(f"文字模型 chapter {index} 必須是物件")
             unknown_chapter = sorted(set(chapter) - self._CHAPTER_KEYS)
-            if unknown_chapter:
-                raise StoryValidationError(f"文字模型 chapter {index} 含未知欄位：{', '.join(unknown_chapter)}")
+            missing_chapter = sorted(self._CHAPTER_REQUIRED_KEYS - set(chapter))
+            if unknown_chapter or missing_chapter:
+                bits = []
+                if unknown_chapter:
+                    bits.append("未知欄位：" + ", ".join(unknown_chapter))
+                if missing_chapter:
+                    bits.append("缺少欄位：" + ", ".join(missing_chapter))
+                raise StoryValidationError(f"文字模型 chapter {index} schema 不符合契約（" + "；".join(bits) + "）")
         if "suppressed_segments" in output and not isinstance(output["suppressed_segments"], list):
             raise StoryValidationError("文字模型 suppressed_segments 必須是陣列")
+        for index, item in enumerate(output.get("suppressed_segments") or [], 1):
+            if not isinstance(item, Mapping):
+                raise StoryValidationError(f"文字模型 suppressed_segments {index} 必須是物件")
+            unknown_item = sorted(set(item) - self._SUPPRESSED_KEYS)
+            missing_item = sorted(self._SUPPRESSED_REQUIRED_KEYS - set(item))
+            if unknown_item or missing_item:
+                bits = []
+                if unknown_item:
+                    bits.append("未知欄位：" + ", ".join(unknown_item))
+                if missing_item:
+                    bits.append("缺少欄位：" + ", ".join(missing_item))
+                raise StoryValidationError(
+                    f"文字模型 suppressed_segments {index} schema 不符合契約（" + "；".join(bits) + "）"
+                )
         return output
 
-    def _request(self, request_payload: Mapping[str, Any]) -> tuple[dict[str, Any], Any, float]:
+    def _request(self, request_payload: Mapping[str, Any], *, attempt: int) -> tuple[dict[str, Any], Any, float]:
         started = time.perf_counter()
         request = urllib.request.Request(
             self.base_url + "/chat/completions",
@@ -687,15 +737,57 @@ class LocalTextStoryProvider:
             raise _provider_http_error(exc, provider=self.provider, model=self.request_model) from exc
         except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
             raise StoryGenerationError(f"本地文字模型不可用：{exc}") from exc
-        content = (((raw.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+        choice = (raw.get("choices") or [{}])[0]
+        if not isinstance(choice, Mapping):
+            choice = {}
+        message = choice.get("message") if isinstance(choice.get("message"), Mapping) else {}
+        content = (message.get("content") or "") if isinstance(message, Mapping) else ""
         if isinstance(content, list):
             content = "".join(str(item.get("text") or item) if isinstance(item, Mapping) else str(item) for item in content)
+        content = str(content)
+        usage = raw.get("usage") if isinstance(raw.get("usage"), Mapping) else {}
+        finish_reason = choice.get("finish_reason")
+        max_tokens = request_payload.get("max_tokens")
+        try:
+            max_tokens = int(max_tokens) if max_tokens is not None else None
+        except (TypeError, ValueError):
+            max_tokens = None
+        def usage_int(name: str) -> int | None:
+            value = usage.get(name)
+            try:
+                return int(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+        completion_tokens = usage_int("completion_tokens")
+        probable_truncation = (
+            str(finish_reason or "").lower() == "length"
+            or (completion_tokens is not None and max_tokens is not None and completion_tokens >= max_tokens)
+        )
+        completion_audit = {
+            "attempt": int(attempt),
+            "finish_reason": str(finish_reason) if finish_reason is not None else None,
+            "prompt_tokens": usage_int("prompt_tokens"),
+            "completion_tokens": completion_tokens,
+            "total_tokens": usage_int("total_tokens"),
+            "content_chars": len(content),
+            "content_bytes": len(content.encode("utf-8")),
+            "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "max_tokens": max_tokens,
+            "reasoning_effort": self.reasoning_effort,
+            "probable_truncation": probable_truncation,
+            "truncation_basis": (
+                "finish_reason_length" if str(finish_reason or "").lower() == "length"
+                else "completion_tokens_at_max" if probable_truncation else "none"
+            ),
+            "strict_parse_error": None,
+        }
         try:
             parsed = self._strict_parse(content)
         except StoryValidationError as exc:
-            exc.raw_content = str(content)
+            completion_audit["strict_parse_error"] = str(exc)
+            exc.completion_audit = completion_audit
             raise
-        return parsed, raw, (time.perf_counter() - started) * 1000
+        return parsed, raw, (time.perf_counter() - started) * 1000, completion_audit
 
     def _generate_story(self, snapshot: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         system = STORY_SYSTEM_PROMPT
@@ -703,14 +795,24 @@ class LocalTextStoryProvider:
         attempts: list[dict[str, Any]] = []
         latencies: list[float] = []
         request_budgets: list[dict[str, Any]] = []
+        completion_attempts: list[dict[str, Any]] = []
+        semantic_attempts: list[dict[str, Any]] = []
         last_error: StoryValidationError | None = None
         for attempt in range(2):
             messages = list(base_messages)
             if attempt:
-                messages.extend([
-                    {"role": "assistant", "content": attempts[-1].get("content", "")},
-                    {"role": "user", "content": "上一個輸出不符合 strict schema。只修正 schema，重新輸出完整 JSON，不要解釋。"},
-                ])
+                if isinstance(last_error, StorySemanticValidationError):
+                    compact_findings = _compact_semantic_retry_findings(last_error.findings)
+                    retry_message = (
+                        "輸出完整 Story JSON；只修正以下 findings；保留所有 required 欄位；文字簡短，不要解釋："
+                        + _canonical(compact_findings)
+                    )
+                else:
+                    retry_message = (
+                        "重新輸出完整 Story JSON；補齊以下 schema required 欄位；文字保持簡短，不要解釋："
+                        + str(last_error)
+                    )
+                messages.append({"role": "user", "content": retry_message})
             budget = preflight_story_context(
                 snapshot,
                 self,
@@ -729,6 +831,7 @@ class LocalTextStoryProvider:
                     "context_budget": budget,
                     "blocked_retry_budget": budget if attempt > 0 else None,
                     "runtime_context": dict(budget.get("context_metadata") or {}),
+                    **_semantic_audit_fields(semantic_attempts),
                     "error": str(error),
                 }
                 raise error
@@ -743,8 +846,28 @@ class LocalTextStoryProvider:
             started = time.perf_counter()
             try:
                 self.generation_post_calls += 1
-                output, raw, latency = self._request(payload)
+                output, raw, latency, completion_audit = self._request(payload, attempt=attempt + 1)
+                completion_attempts.append(completion_audit)
                 latencies.append(round(latency, 3))
+                try:
+                    validate_story_output(output, snapshot)
+                except StorySemanticValidationError as exc:
+                    findings = dict(exc.findings)
+                    semantic_attempts.append({"attempt": attempt + 1, "status": "failed", **findings})
+                    last_error = exc
+                    attempts.append({
+                        "content": json.dumps(output, ensure_ascii=False, sort_keys=True),
+                        "error": str(exc),
+                        "semantic_findings": findings,
+                    })
+                    if attempt == 1:
+                        break
+                    continue
+                semantic_attempts.append({
+                    "attempt": attempt + 1,
+                    "status": "passed",
+                    **_story_semantic_findings(output, snapshot, []),
+                })
                 attempts.append({"content": json.dumps(output, ensure_ascii=False, sort_keys=True), "error": ""})
                 audit = {
                     "calls": attempt + 1,
@@ -756,11 +879,23 @@ class LocalTextStoryProvider:
                     "reasoning_effort": self.reasoning_effort,
                     "context_budget": budget,
                     "request_budgets": request_budgets,
+                    "completion_attempts": completion_attempts,
+                    **_semantic_audit_fields(semantic_attempts, _story_coverage_summary(output, snapshot)),
                 }
                 return output, {**dict(raw), "provider_audit": audit}
+            except StorySemanticValidationError:
+                raise
             except StoryValidationError as exc:
                 last_error = exc
                 latencies.append(round((time.perf_counter() - started) * 1000, 3))
+                completion_audit = getattr(exc, "completion_audit", None)
+                if isinstance(completion_audit, Mapping):
+                    completion_attempts.append(dict(completion_audit))
+                semantic_attempts.append({
+                    "attempt": attempt + 1,
+                    "status": "not_run",
+                    "reason_code": "structural_validation_failed",
+                })
                 attempts.append({"content": str(getattr(exc, "raw_content", "")), "error": str(exc)})
                 if attempt == 1:
                     break
@@ -777,7 +912,9 @@ class LocalTextStoryProvider:
                     "reasoning_effort": self.reasoning_effort,
                     "context_budget": budget,
                     "request_budgets": request_budgets,
+                    "completion_attempts": completion_attempts,
                     "runtime_context": dict(budget.get("context_metadata") or {}),
+                    **_semantic_audit_fields(semantic_attempts),
                 }
                 raise
             except StoryGenerationError as exc:
@@ -792,8 +929,10 @@ class LocalTextStoryProvider:
                     "strict_schema": True,
                     "context_budget": budget,
                     "request_budgets": request_budgets,
+                    "completion_attempts": completion_attempts,
                     "runtime_context": dict(budget.get("context_metadata") or {}),
                     "reasoning_effort": self.reasoning_effort,
+                    **_semantic_audit_fields(semantic_attempts),
                     "error": str(exc),
                 }
                 raise
@@ -807,6 +946,8 @@ class LocalTextStoryProvider:
             "strict_schema": True,
             "reasoning_effort": self.reasoning_effort,
             "request_budgets": request_budgets,
+            "completion_attempts": completion_attempts,
+            **_semantic_audit_fields(semantic_attempts),
             "error": str(error),
         }
         raise error
@@ -895,6 +1036,119 @@ def _validate_confidence(value: Any, label: str, errors: list[str]) -> float:
     if not 0 <= confidence <= 1:
         errors.append(f"{label} confidence 必須介於 0 與 1")
     return confidence
+
+
+def _story_coverage_summary(output: Mapping[str, Any], snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    expected_ids = {
+        str(item.get("segment_uuid") or "")
+        for item in snapshot.get("segments") or []
+        if bool((item.get("human_override") or {}).get("include", True))
+    }
+    allowed_ids = {str(item.get("segment_uuid") or "") for item in snapshot.get("segments") or []}
+    chapters = output.get("chapters") if isinstance(output.get("chapters"), list) else []
+    used_sequence: list[str] = []
+    for chapter in chapters:
+        if not isinstance(chapter, Mapping) or not isinstance(chapter.get("segment_uuids"), list):
+            continue
+        used_sequence.extend(str(value).strip() for value in chapter.get("segment_uuids") or [] if str(value).strip())
+    raw_suppressed = output.get("suppressed_segments") if isinstance(output.get("suppressed_segments"), list) else []
+    suppressed_ids: set[str] = set()
+    representative_ids: set[str] = set()
+    for item in raw_suppressed:
+        if not isinstance(item, Mapping):
+            continue
+        segment_id = str(item.get("segment_uuid") or "").strip()
+        representative_id = str(item.get("representative_segment_uuid") or "").strip()
+        if segment_id:
+            suppressed_ids.add(segment_id)
+        if representative_id:
+            representative_ids.add(representative_id)
+    used_ids = set(used_sequence)
+    duplicate_ids = sorted({segment_id for segment_id in used_sequence if used_sequence.count(segment_id) > 1})
+    invalid_ids = sorted((used_ids | suppressed_ids | representative_ids) - allowed_ids)
+    conflict_ids = sorted(used_ids & suppressed_ids)
+    missing_ids = sorted(expected_ids - used_ids - suppressed_ids)
+    missing_representative_ids = sorted(representative_ids - used_ids)
+    return {
+        "expected_ids": sorted(expected_ids),
+        "used_ids": sorted(used_ids),
+        "suppressed_ids": sorted(suppressed_ids),
+        "missing_ids": missing_ids,
+        "duplicate_ids": duplicate_ids,
+        "invalid_ids": invalid_ids,
+        "conflict_ids": conflict_ids,
+        "missing_representative_ids": missing_representative_ids,
+    }
+
+
+def _story_semantic_findings(
+    output: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    errors: list[str],
+) -> dict[str, Any]:
+    summary = _story_coverage_summary(output, snapshot)
+    reason_codes: list[str] = []
+    if summary["missing_ids"]:
+        reason_codes.append("missing_expected_segments")
+    if summary["duplicate_ids"]:
+        reason_codes.append("duplicate_segment_ids")
+    if summary["invalid_ids"]:
+        reason_codes.append("invalid_segment_ids")
+    if summary["conflict_ids"]:
+        reason_codes.append("chapter_suppressed_conflict")
+    if summary["missing_representative_ids"]:
+        reason_codes.append("suppressed_representative_missing")
+    if errors and not reason_codes:
+        reason_codes.append("semantic_validation_error")
+    return {
+        **summary,
+        "reason_codes": reason_codes,
+        "validation_errors": list(errors),
+    }
+
+
+def _semantic_audit_fields(
+    semantic_attempts: list[Mapping[str, Any]],
+    final_coverage: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    first_failure = next(
+        (item for item in semantic_attempts if str(item.get("status") or "") == "failed"),
+        {},
+    )
+    if final_coverage is None:
+        last_attempt = next(reversed(semantic_attempts), {}) if semantic_attempts else {}
+        final_coverage = {
+            key: list(last_attempt.get(key) or [])
+            for key in (
+                "expected_ids", "used_ids", "suppressed_ids", "missing_ids",
+                "duplicate_ids", "invalid_ids", "conflict_ids", "missing_representative_ids",
+            )
+            if key in last_attempt
+        }
+    return {
+        "semantic_validation_attempts": [dict(item) for item in semantic_attempts],
+        "first_attempt_missing_ids": list(first_failure.get("missing_ids") or []),
+        "first_attempt_duplicate_ids": list(first_failure.get("duplicate_ids") or []),
+        "first_attempt_invalid_ids": list(first_failure.get("invalid_ids") or []),
+        "corrective_retry_reason": "semantic_validation" if first_failure else "",
+        "final_coverage": dict(final_coverage or {}),
+    }
+
+
+def _compact_semantic_retry_findings(findings: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep corrective retry context actionable without replaying full coverage."""
+    compact: dict[str, Any] = {}
+    for key in (
+        "missing_ids", "duplicate_ids", "invalid_ids", "conflict_ids",
+        "missing_representative_ids", "reason_codes",
+    ):
+        values = findings.get(key)
+        if isinstance(values, list) and values:
+            compact[key] = [str(value) for value in values]
+    errors = findings.get("validation_errors")
+    if isinstance(errors, list) and errors:
+        compact["validation_errors"] = [str(value)[:240] for value in errors[:4]]
+    return compact
 
 
 def validate_story_output(output: Mapping[str, Any], snapshot: Mapping[str, Any]) -> dict[str, Any]:
@@ -1004,7 +1258,10 @@ def validate_story_output(output: Mapping[str, Any], snapshot: Mapping[str, Any]
                 f"suppressed segment {item['segment_uuid']} 的 representative 必須出現在 chapter：{item['representative_segment_uuid']}"
             )
     if errors:
-        raise StoryValidationError("；".join(errors))
+        raise StorySemanticValidationError(
+            "；".join(errors),
+            _story_semantic_findings(output, snapshot, errors),
+        )
     return {
         "schema_version": STORY_OUTPUT_SCHEMA_VERSION,
         "project_summary": str(output["project_summary"]).strip(),
@@ -1285,6 +1542,19 @@ def generate_project_story(
                     "context_budget": dict(blocked_retry_budget),
                     "request_budgets": list(audit.get("request_budgets") or []),
                     "cache_identity": cache_identity,
+                }
+            elif audit.get("semantic_validation_attempts"):
+                fields["validation_json"] = {
+                    "status": "failed",
+                    "context_budget": dict(audit.get("context_budget") or {}),
+                    "request_budgets": list(audit.get("request_budgets") or []),
+                    "cache_identity": cache_identity,
+                    "semantic_validation_attempts": list(audit.get("semantic_validation_attempts") or []),
+                    "first_attempt_missing_ids": list(audit.get("first_attempt_missing_ids") or []),
+                    "first_attempt_duplicate_ids": list(audit.get("first_attempt_duplicate_ids") or []),
+                    "first_attempt_invalid_ids": list(audit.get("first_attempt_invalid_ids") or []),
+                    "corrective_retry_reason": str(audit.get("corrective_retry_reason") or ""),
+                    "final_coverage": dict(audit.get("final_coverage") or {}),
                 }
             elif audit.get("error_code"):
                 fields["validation_json"] = {
@@ -1576,6 +1846,7 @@ __all__ = [
     "StoryContextBudgetError",
     "StoryProviderHTTPError",
     "StoryRuntimeCleanupError",
+    "StorySemanticValidationError",
     "StoryValidationError",
     "apply_story_generation_to_storyboard",
     "generate_project_story",
