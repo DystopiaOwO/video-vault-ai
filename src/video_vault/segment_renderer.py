@@ -218,16 +218,17 @@ def build_segment_ffmpeg_command(
             video_filters.append(color)
         geometry = gpu_contract.get("display_geometry") if isinstance(gpu_contract.get("display_geometry"), Mapping) else {}
         policy = str(geometry.get("composition_policy") or settings.get("display_geometry_policy") or "preserve_aspect_pad")
+        geometry_normalization = _display_geometry_normalization_filter(probe)
         if policy == "crop_to_fill":
             geometry_filters = [
-                "setsar=1",
+                geometry_normalization,
                 f"scale={profile['width']}:{profile['height']}:force_original_aspect_ratio=increase",
                 f"crop={profile['width']}:{profile['height']}:(iw-ow)/2:(ih-oh)/2",
             ]
         else:
             background = str(settings.get("display_background_color") or "black") if policy == "background" else "black"
             geometry_filters = [
-                "setsar=1",
+                geometry_normalization,
                 f"scale={profile['width']}:{profile['height']}:force_original_aspect_ratio=decrease",
                 f"pad={profile['width']}:{profile['height']}:(ow-iw)/2:(oh-ih)/2:color={background}",
             ]
@@ -286,6 +287,29 @@ def build_segment_ffmpeg_command(
         "-movflags", "+faststart", "-f", "mp4", str(output),
     ])
     return args
+
+
+def _display_geometry_normalization_filter(probe: MediaProbe) -> str:
+    """Convert source sample aspect ratio into square-pixel display geometry.
+
+    FFmpeg's ``setsar=1`` is only safe after the source's display geometry has
+    been represented in pixel dimensions.  Expanding the coded width by SAR
+    first keeps scale/crop/pad decisions based on displayed pixels rather than
+    the coded raster.  The final ``setsar=1`` is part of the returned filter.
+    """
+
+    raw_sar = str(probe.sample_aspect_ratio or "1:1").strip().replace("/", ":")
+    try:
+        numerator_text, denominator_text = raw_sar.split(":", 1)
+        numerator = int(numerator_text)
+        denominator = int(denominator_text)
+    except (TypeError, ValueError):
+        numerator, denominator = 1, 1
+    if numerator <= 0 or denominator <= 0:
+        numerator, denominator = 1, 1
+    if numerator == denominator:
+        return "setsar=1"
+    return f"scale=ceil(iw*{numerator}/{denominator}/2)*2:ih:eval=init,setsar=1"
 
 
 def _effective_segment_audio(manifest: Mapping[str, Any], segment: Mapping[str, Any]) -> dict[str, Any]:

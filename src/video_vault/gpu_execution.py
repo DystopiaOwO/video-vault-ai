@@ -22,6 +22,7 @@ GPU_EXECUTION_CONTRACT_VERSION = "1"
 GPU_PROBE_STDERR_TAIL_LIMIT = 2000
 _DIAGNOSTIC_KEYS = frozenset({"capability_probe", "stderr_tail", "timing", "ffmpeg_command"})
 DISPLAY_GEOMETRY_POLICIES = frozenset({"preserve_aspect_pad", "crop_to_fill", "background"})
+DISPLAY_GEOMETRY_CONTRACT_VERSION = "2"
 
 
 class GPUExecutionError(ValueError):
@@ -177,7 +178,7 @@ def _resolve_contract(
         "filter_used": "cpu",
         "hardware_api": "cpu",
         "hardware_device": "cpu",
-        "filter_chain": ["autorotate", "setsar", "scale", "pad", "fps", "format", "setsar", "setparams"],
+        "filter_chain": ["autorotate", "display_geometry_normalize", "setsar", "scale", "pad", "fps", "format", "setsar", "setparams"],
         "result": "fallback" if requested != "cpu" else "not_requested",
         "fallback_reason": "explicit_cpu" if requested == "cpu" else "",
         "capability_probe": dict(capability),
@@ -273,6 +274,8 @@ def _display_geometry_contract(settings: Mapping[str, Any], probe: MediaProbe, p
     target_height = int(profile.get("height") or 0)
     target_ratio = target_width / target_height if target_height else 0.0
     return {
+        "contract_version": DISPLAY_GEOMETRY_CONTRACT_VERSION,
+        "sar_normalization": "display_pixel_width_before_composition",
         "coded_width": int(probe.coded_width or probe.width),
         "coded_height": int(probe.coded_height or probe.height),
         "sample_aspect_ratio": str(probe.sample_aspect_ratio or "1:1"),

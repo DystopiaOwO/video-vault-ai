@@ -120,6 +120,99 @@ def test_tiny_media_pipeline_preserves_source_and_decodes_frame(tmp_path: Path, 
     assert not list(tmp_path.rglob("*.tmp"))
 
 
+def test_non_square_sar_uses_display_geometry_before_final_square_pixels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import video_vault.segment_renderer as renderer
+
+    source = tmp_path / "sar-source.mp4"
+    created = subprocess.run(
+        [
+            FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=red:size=720x480:rate=10",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=8000",
+            "-t", "0.6", "-vf", "setsar=4/3", "-c:v", "libx264", "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "8000", "-ac", "1",
+            "-shortest", str(source),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert created.returncode == 0, created.stderr
+
+    tiny_profile = {
+        "profile_id": "smoke_160x90",
+        "width": 160,
+        "height": 90,
+        "fps": 10,
+        "video_codec": "h264",
+        "pixel_format": "yuv420p",
+        "audio_codec": "aac",
+        "audio_sample_rate": 8000,
+        "audio_channels": 1,
+    }
+    monkeypatch.setattr(renderer, "get_render_profile", lambda profile_id: dict(tiny_profile))
+    manifest = {
+        "project_id": 1,
+        "profile": {"profile_id": "smoke_160x90"},
+        "settings": {"encoder": "cpu", "color": {"mode": "none"}, "audio": {}},
+    }
+    segment = {
+        "segment_id": "sar_001",
+        "clip_id": "sar_001",
+        "video_id": 1,
+        "source_file": str(source),
+        "source_in_seconds": 0.0,
+        "source_out_seconds": 0.5,
+        "speed": 1.0,
+        "timeline_duration_seconds": 0.5,
+        "audio_role": "keep_original",
+    }
+    cfg = {"ffmpeg_path": FFMPEG, "ffprobe_path": FFPROBE, "library_root": str(tmp_path)}
+    result = renderer.render_segment(cfg, manifest, segment, cache_root=tmp_path / "sar-cache")
+    assert result.output_path.is_file()
+
+    source_probe = probe_media(FFPROBE, source, mode="fast")
+    output_probe = probe_media(FFPROBE, result.output_path, mode="fast")
+    assert source_probe.sample_aspect_ratio == "4:3"
+    assert source_probe.display_aspect_ratio == "2:1"
+    assert (output_probe.width, output_probe.height) == (160, 90)
+    assert output_probe.sample_aspect_ratio == "1:1"
+    assert output_probe.display_aspect_ratio == "16:9"
+
+    def first_rgb_frame(path: Path) -> bytes:
+        decoded = subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-i", str(path), "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
+            capture_output=True,
+            check=False,
+        )
+        assert decoded.returncode == 0, decoded.stderr.decode("utf-8", errors="replace")
+        assert len(decoded.stdout) == 160 * 90 * 3
+        return decoded.stdout
+
+    frame = first_rgb_frame(result.output_path)
+    top_left = frame[0:3]
+    content_left = frame[(5 * 160) * 3:(5 * 160 + 1) * 3]
+    assert max(top_left) < 20
+    assert content_left[0] > 150 and content_left[1] < 80 and content_left[2] < 80
+
+    square_source = tmp_path / "square-equivalent.mp4"
+    square_created = subprocess.run(
+        [
+            FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=red:size=960x480:rate=10",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=8000",
+            "-t", "0.6", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-ar", "8000", "-ac", "1", "-shortest", str(square_source),
+        ],
+        capture_output=True,
+        check=False,
+    )
+    assert square_created.returncode == 0, square_created.stderr.decode("utf-8", errors="replace")
+    square_segment = dict(segment, segment_id="sar_square_001", source_file=str(square_source))
+    square_result = renderer.render_segment(cfg, manifest, square_segment, cache_root=tmp_path / "square-cache")
+    assert first_rgb_frame(square_result.output_path) == frame
+
+
 def test_adaptive_perception_publishes_a_short_clip_without_tail_decode_failure(tmp_path: Path):
     source = tmp_path / "short-perception.mp4"
     created = subprocess.run(
