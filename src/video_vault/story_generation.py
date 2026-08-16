@@ -29,7 +29,7 @@ from .lmstudio_runtime import LMStudioRuntimeProvisioner, resolve_lmstudio_runti
 
 
 STORY_OUTPUT_SCHEMA_VERSION = 1
-STORY_PROMPT_VERSION = "project-story-v1"
+STORY_PROMPT_VERSION = "project-story-v2"
 STORY_CACHE_CONTRACT_VERSION = "story-cache-v2"
 DEFAULT_REASONING_EFFORT = "none"
 SUPPORTED_REASONING_EFFORTS = {"none", "low", "medium", "high"}

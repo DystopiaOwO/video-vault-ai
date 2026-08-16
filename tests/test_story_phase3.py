@@ -18,6 +18,7 @@ from video_vault.story_calibration import calibration_path, compute_calibration,
 from video_vault.story_generation import (
     LocalTextStoryProvider,
     STORY_SYSTEM_PROMPT,
+    STORY_PROMPT_VERSION,
     StoryGenerationError,
     StoryContextBudgetError,
     StoryProviderHTTPError,
@@ -268,6 +269,25 @@ def test_story_cache_identity_uses_effective_reasoning_and_new_contract():
     assert none_key == equivalent_key
     assert none_key != low_key
     assert none_key != old_key
+
+
+def test_story_cache_identity_invalidates_pre_vid30_prompt_contract():
+    snapshot = {"input_hash": "same-snapshot"}
+    common = {
+        "snapshot": snapshot,
+        "provider": "local_text",
+        "model": "story-model",
+        "schema_version": 1,
+        "provider_contract_version": "story-text-v1",
+    }
+
+    v1_key = story_cache_key(**common, prompt_version="project-story-v1")
+    v2_key = story_cache_key(**common, prompt_version="project-story-v2")
+    default_key = story_cache_key(**common)
+
+    assert v1_key != v2_key
+    assert default_key == v2_key
+    assert STORY_PROMPT_VERSION == "project-story-v2"
 
 
 def test_generate_story_does_not_run_destructive_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
