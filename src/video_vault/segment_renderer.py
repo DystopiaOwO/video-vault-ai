@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 import math
 from pathlib import Path
 import subprocess
+import time
 from typing import Any, Callable, Mapping
 
 from .audio_pipeline import atempo_filter, build_audio_filter, build_silence_filter, normalize_audio_role
 from .color_pipeline import build_color_filter
 from .encoder_contract import encoder_arguments, validate_encoder_contract
+from .gpu_execution import GPUExecutionRegistry
 from .media_probe import MediaProbe, SourceProbeRegistry, probe_media
 from .render_errors import SegmentRenderError, is_encoder_fallback_error
 from .render_job_models import RenderCancelled
@@ -44,6 +47,8 @@ class SegmentRenderResult:
     encoder_used: str
     duration_seconds: float
     warnings: tuple[str, ...] = ()
+    gpu_execution_contract: dict[str, Any] | None = None
+    elapsed_seconds: float = 0.0
 
 
 def render_segment(
@@ -55,6 +60,7 @@ def render_segment(
     runner: Callable[..., Any] | None = None,
     source_probe: MediaProbe | None = None,
     source_probe_registry: SourceProbeRegistry | None = None,
+    gpu_execution_registry: GPUExecutionRegistry | None = None,
 ) -> SegmentRenderResult:
     source = Path(str(segment.get("source_file") or "")).expanduser().resolve()
     if not source.is_file():
@@ -82,6 +88,17 @@ def render_segment(
     if not 0.25 <= speed <= 4.0:
         raise SegmentRenderError("speed must be between 0.25 and 4.0")
     expected = float(segment.get("timeline_duration_seconds") or ((end - start) / speed))
+    probe = source_probe or (
+        source_probe_registry.probe(source)
+        if source_probe_registry is not None
+        else probe_media(str(cfg.get("ffprobe_path") or "ffprobe"), source, "fast")
+    )
+    gpu_registry = gpu_execution_registry or GPUExecutionRegistry(cfg)
+    gpu_contract = gpu_registry.resolve(manifest, segment, probe, contract if isinstance(contract, Mapping) else None)
+    effective_manifest = deepcopy(manifest)
+    effective_manifest.setdefault("settings", {})["gpu_execution_contract"] = dict(gpu_contract)
+    settings = dict(effective_manifest.get("settings") or {})
+    contract = settings.get("encoder_contract")
     root = cache_root or Path(str(cfg.get("library_root") or ".")) / "08_projects" / f"project_{manifest.get('project_id')}" / "cache" / "segments"
     root.mkdir(parents=True, exist_ok=True)
     source_fingerprint = (
@@ -89,13 +106,24 @@ def render_segment(
         if source_probe_registry is not None
         else resolve_source_fingerprint(source)
     )
-    key = build_segment_cache_key(manifest, segment, source_fingerprint=source_fingerprint)
+    key = build_segment_cache_key(effective_manifest, segment, source_fingerprint=source_fingerprint)
     paths = cache_paths(root, key)
-    payload = cache_key_payload(manifest, segment, source_fingerprint=source_fingerprint)
+    payload = cache_key_payload(effective_manifest, segment, source_fingerprint=source_fingerprint)
     if _valid_cache(paths, payload, profile, expected, str(cfg.get("ffprobe_path") or "ffprobe")):
         metadata = read_cache_metadata(paths["metadata"]) or {}
         used = str(metadata.get("encoder_used") or encoder)
-        return SegmentRenderResult(str(segment["segment_id"]), paths["output"], key, True, requested, used, expected, tuple(metadata.get("warnings") or []))
+        return SegmentRenderResult(
+            str(segment["segment_id"]),
+            paths["output"],
+            key,
+            True,
+            requested,
+            used,
+            expected,
+            tuple(metadata.get("warnings") or []),
+            dict(metadata.get("gpu_execution_contract") or gpu_contract),
+            float(metadata.get("elapsed_seconds") or 0.0),
+        )
     _remove_invalid_cache(paths)
 
     warnings: list[str] = []
@@ -103,15 +131,11 @@ def render_segment(
     command: list[str] | None = None
     used = encoder
     qc_errors: tuple[str, ...] = ()
+    started = time.perf_counter()
     try:
-        probe = source_probe or (
-            source_probe_registry.probe(source)
-            if source_probe_registry is not None
-            else probe_media(str(cfg.get("ffprobe_path") or "ffprobe"), source, "fast")
-        )
         if probe.duration_seconds > 0 and end > probe.duration_seconds + 0.001:
             raise SegmentRenderError(f"segment end {end} exceeds source duration {probe.duration_seconds}")
-        command = build_segment_ffmpeg_command(cfg, manifest, segment, probe, output=paths["partial"], encoder=encoder)
+        command = build_segment_ffmpeg_command(cfg, effective_manifest, segment, probe, output=paths["partial"], encoder=encoder)
         result, used = _run_with_fallback(command, encoder, requested, runner, warnings, attempts, expected, allow_fallback=not isinstance(contract, Mapping))
         qc = validate_segment_output(paths["partial"], profile, expected, str(cfg.get("ffprobe_path") or "ffprobe"))
         qc_errors = qc.errors
@@ -127,7 +151,16 @@ def render_segment(
             encoder_contract_version=encoder_identity.get("version", ""),
             encoder_contract_hash=encoder_identity.get("hash", ""),
             encoder_contract_implementation=encoder_identity.get("implementation", ""),
+            gpu_execution_contract=dict(gpu_contract),
+            gpu_execution_contract_version=str(gpu_contract.get("version") or ""),
+            gpu_execution_contract_hash=str(gpu_contract.get("contract_hash") or ""),
+            gpu_execution_decode_used=str(gpu_contract.get("decode_used") or "cpu"),
+            gpu_execution_filter_used=str(gpu_contract.get("filter_used") or "cpu"),
+            gpu_execution_hardware_api=str(gpu_contract.get("hardware_api") or "cpu"),
+            gpu_execution_filter_chain=list(gpu_contract.get("filter_chain") or []),
+            gpu_execution_fallback_reason=str(gpu_contract.get("fallback_reason") or ""),
             duration_seconds=qc.duration_seconds,
+            elapsed_seconds=round(time.perf_counter() - started, 6),
             warnings=warnings,
         )
         publish_cache_atomically(paths["partial"], paths["output"], paths["metadata_temp"], paths["metadata"])
@@ -142,7 +175,10 @@ def render_segment(
             raise
         raise SegmentRenderError(str(exc)) from exc
     _write_render_log(paths["log"], str(segment.get("segment_id") or ""), key, requested, used, command, attempts, None, ())
-    return SegmentRenderResult(str(segment["segment_id"]), paths["output"], key, False, requested, used, qc.duration_seconds, tuple(warnings))
+    return SegmentRenderResult(
+        str(segment["segment_id"]), paths["output"], key, False, requested, used, qc.duration_seconds,
+        tuple(warnings), dict(gpu_contract), round(time.perf_counter() - started, 6),
+    )
 
 
 def build_segment_ffmpeg_command(
@@ -157,6 +193,7 @@ def build_segment_ffmpeg_command(
     profile = get_render_profile(str((manifest.get("profile") or {}).get("profile_id")))
     settings = dict(manifest.get("settings") or {})
     contract = settings.get("encoder_contract")
+    gpu_contract = settings.get("gpu_execution_contract") if isinstance(settings.get("gpu_execution_contract"), Mapping) else {}
     start = float(segment["source_in_seconds"])
     end = float(segment["source_out_seconds"])
     speed = float(segment["speed"])
@@ -166,11 +203,32 @@ def build_segment_ffmpeg_command(
     audio = _effective_segment_audio(manifest, segment)
     normalize_audio_role(audio["role"])
     video_filters = [f"trim=start={start:.6f}:end={end:.6f}", "setpts=PTS-STARTPTS", f"setpts=PTS/{speed:g}"]
-    if color:
-        video_filters.append(color)
-    video_filters.extend([f"scale={profile['width']}:{profile['height']}:force_original_aspect_ratio=decrease", f"pad={profile['width']}:{profile['height']}:(ow-iw)/2:(oh-ih)/2", f"fps={profile['fps']}", f"format={profile['pixel_format']}"])
+    gpu_path = str(gpu_contract.get("implementation") or "") == "nvdec_cuda"
+    if gpu_path:
+        video_filters.append(f"scale_cuda={profile['width']}:{profile['height']}:format={profile['pixel_format']}")
+        video_filters.append(
+            "setparams="
+            f"colorspace={str(profile.get('color_matrix') or 'bt709')}:"
+            f"color_primaries={str(profile.get('color_primaries') or 'bt709')}:"
+            f"color_trc={str(profile.get('color_transfer') or 'bt709')}:"
+            f"range={'limited' if str(profile.get('color_range') or 'tv') == 'tv' else 'full'}"
+        )
+    else:
+        if color:
+            video_filters.append(color)
+        video_filters.extend([f"scale={profile['width']}:{profile['height']}:force_original_aspect_ratio=decrease", f"pad={profile['width']}:{profile['height']}:(ow-iw)/2:(oh-ih)/2", f"fps={profile['fps']}", f"format={profile['pixel_format']}"])
+        video_filters.append(
+            "setparams="
+            f"colorspace={str(profile.get('color_matrix') or 'bt709')}:"
+            f"color_primaries={str(profile.get('color_primaries') or 'bt709')}:"
+            f"color_trc={str(profile.get('color_transfer') or 'bt709')}:"
+            f"range={'limited' if str(profile.get('color_range') or 'tv') == 'tv' else 'full'}"
+        )
     graph = [f"[0:v]{','.join(video_filters)}[vout]"]
-    args = [str(cfg.get("ffmpeg_path") or "ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(segment["source_file"])]
+    args = [str(cfg.get("ffmpeg_path") or "ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+    if gpu_path:
+        args.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
+    args.extend(["-i", str(segment["source_file"])])
     if probe.has_audio:
         audio_filter = build_audio_filter(audio["role"], speed, settings, start=start, end=end, audio_settings=audio)
         graph.append(f"[0:a]{audio_filter}[aout]")
@@ -181,14 +239,27 @@ def build_segment_ffmpeg_command(
     if isinstance(contract, Mapping):
         validate_encoder_contract(contract, profile)
         video_args = encoder_arguments(contract)
+    output_video_args = ["-r", str(profile["fps"])]
+    if gpu_path:
+        # CUDA frames do not use the CPU ``fps`` filter.  Bound the output
+        # duration explicitly so CFR muxing cannot retain an extra source
+        # frame when the input cadence is not an exact multiple of the target.
+        output_video_args.extend(["-t", f"{timeline:.6f}"])
+    # ``scale_cuda`` already establishes the CUDA yuv420p format consumed by
+    # h264_nvenc.  Repeating a software ``-pix_fmt yuv420p`` output constraint
+    # makes FFmpeg insert an invalid auto_scale transfer on this path.  CPU
+    # and mixed paths retain the explicit output pixel-format contract.
+    if not gpu_path:
+        output_video_args.extend(["-pix_fmt", str(profile["pixel_format"])])
     args.extend([
         "-filter_complex", ";".join(graph),
         "-map", "[vout]", "-map", "[aout]",
         *video_args,
-        "-r", str(profile["fps"]), "-pix_fmt", str(profile["pixel_format"]),
+        *output_video_args,
         "-c:a", str(profile["audio_codec"]), "-ar", str(profile["audio_sample_rate"]), "-ac", str(profile["audio_channels"]),
         "-color_primaries", str(profile.get("color_primaries") or "bt709"), "-color_trc", str(profile.get("color_transfer") or "bt709"),
-        "-colorspace", str(profile.get("color_matrix") or "bt709"), "-color_range", str(profile.get("color_range") or "tv"),
+        *([] if gpu_path else ["-colorspace", str(profile.get("color_matrix") or "bt709")]),
+        "-color_range", str(profile.get("color_range") or "tv"),
         "-movflags", "+faststart", "-f", "mp4", str(output),
     ])
     return args
@@ -324,6 +395,13 @@ def _valid_cache(paths: dict[str, Path], payload: Mapping[str, Any], profile: Ma
         if metadata.get("encoder_used") != identity.get("implementation"):
             return False
     elif metadata.get("encoder_requested") != identity.get("requested"):
+        return False
+    gpu_identity = payload.get("gpu_execution_identity")
+    if not isinstance(gpu_identity, Mapping):
+        return False
+    if metadata.get("gpu_execution_contract_version") != gpu_identity.get("version"):
+        return False
+    if metadata.get("gpu_execution_contract_hash") != gpu_identity.get("hash"):
         return False
     return validate_segment_output(paths["output"], profile, expected, ffprobe_path).passed
 

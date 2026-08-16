@@ -9,10 +9,23 @@ from types import SimpleNamespace
 import pytest
 
 from video_vault.final_qc import FinalQCResult, validate_final_output
-from video_vault.project_renderer import _final_cache_miss_reason, _policy_key
+from video_vault.project_renderer import _final_cache_miss_reason, _policy_key, _resolve_current_gpu_execution
+from video_vault.media_probe import MediaProbe, SourceProbeRegistry
 from video_vault.render_api import build_render_report_dto
 from video_vault.render_profiles import get_render_profile
 from video_vault.segment_cache import build_segment_cache_key
+
+
+def _current_gpu_execution(segment_id: str, contract_hash: str, cache_key: str, implementation: str = "cpu") -> dict:
+    return {
+        "contracts": [{
+            "segment_id": segment_id,
+            "contract_version": "1",
+            "contract_hash": contract_hash,
+            "implementation": implementation,
+        }],
+        "cache_keys": [{"segment_id": segment_id, "cache_key": cache_key}],
+    }
 
 
 def test_render_report_dto_redacts_local_paths():
@@ -61,6 +74,9 @@ def test_final_cache_revalidation_binds_snapshot_and_encoder_contract(monkeypatc
         "qc_schema_version": 2,
         "approval_snapshot": snapshot,
         "encoder_contract": contract,
+        "gpu_execution_contract_version": "1",
+        "gpu_execution_requested": "auto",
+        "gpu_execution_segments": [{"segment_id": "seg-1", "contract_version": "1", "contract_hash": "cpu-test", "implementation": "cpu"}],
         "cache": {
             "qc_policy_version": 2,
             "snapshot_id": snapshot["snapshot_id"],
@@ -68,7 +84,7 @@ def test_final_cache_revalidation_binds_snapshot_and_encoder_contract(monkeypatc
             "encoder_contract_hash": contract["contract_hash"],
             "loudness_policy_key": _policy_key(None),
         },
-        "segments": [{"cache_key": cache_key}],
+        "segments": [{"segment_id": "seg-1", "cache_key": cache_key}],
         "bgm": {"fingerprint": {}},
         "output_size": output.stat().st_size,
         "output_sha256": "digest",
@@ -82,6 +98,7 @@ def test_final_cache_revalidation_binds_snapshot_and_encoder_contract(monkeypatc
     assert _final_cache_miss_reason(
         output, report_path, manifest, "m" * 64, "final_1080p", None, "ffprobe",
         approval_snapshot=snapshot, encoder_contract=contract,
+        current_gpu_execution=_current_gpu_execution("seg-1", "cpu-test", cache_key),
     ) == ""
 
     report["cache"]["encoder_contract_hash"] = "changed"
@@ -98,6 +115,7 @@ def test_report_cache_revalidation_fails_closed_when_qc_probe_errors(monkeypatch
     report_path = output.with_name(output.name + ".render.json")
     report_path.write_text(json.dumps({
         "manifest_hash": "m", "profile_id": "final_1080p", "qc_schema_version": 2,
+        "gpu_execution_contract_version": "1", "gpu_execution_requested": "auto", "gpu_execution_segments": [],
         "cache": {"qc_policy_version": 2, "loudness_policy_key": _policy_key(None)},
         "segments": [], "bgm": {"fingerprint": {}}, "output_size": output.stat().st_size,
         "output_sha256": "digest", "qc": {"passed": True},
@@ -128,10 +146,11 @@ def test_final_cache_hit_revalidates_loudness_against_current_policy(monkeypatch
     policy = {"enabled": True, "target_lufs": -14.0, "true_peak_db": -1.0}
     report = {
         "manifest_hash": "m" * 64, "profile_id": "final_1080p", "qc_schema_version": 2,
+        "gpu_execution_contract_version": "1", "gpu_execution_requested": "auto", "gpu_execution_segments": [{"segment_id": "seg-1", "contract_version": "1", "contract_hash": "cpu-test", "implementation": "cpu"}],
         "loudness_policy": policy,
         "loudness": {"final": {"measured_I": -14.0, "measured_TP": -1.0}},
         "cache": {"qc_policy_version": 2, "loudness_policy_key": _policy_key(policy)},
-        "segments": [{"cache_key": cache_key}], "bgm": {"fingerprint": {}},
+        "segments": [{"segment_id": "seg-1", "cache_key": cache_key}], "bgm": {"fingerprint": {}},
         "output_size": output.stat().st_size, "output_sha256": "digest", "qc": {"passed": True},
     }
     report_path = output.with_name(output.name + ".render.json")
@@ -150,10 +169,110 @@ def test_final_cache_hit_revalidates_loudness_against_current_policy(monkeypatch
     reason = _final_cache_miss_reason(
         output, report_path, manifest, "m" * 64, "final_1080p", None, "ffprobe",
         loudness_policy=policy,
+        current_gpu_execution=_current_gpu_execution("seg-1", "cpu-test", cache_key),
     )
 
     assert reason == "final_qc_revalidation_failed"
     assert captured["loudness"] is measured
+
+
+def test_final_cache_cpu_fallback_misses_when_current_gpu_contract_changes(monkeypatch, tmp_path: Path):
+    output = tmp_path / "final.mp4"
+    output.write_bytes(b"final")
+    report_path = output.with_name(output.name + ".render.json")
+    manifest = {
+        "manifest_hash": "m" * 64,
+        "profile": {"profile_id": "final_1080p"},
+        "segments": [{"segment_id": "seg-1", "order": 1}],
+    }
+    report = {
+        "manifest_hash": "m" * 64,
+        "profile_id": "final_1080p",
+        "qc_schema_version": 2,
+        "gpu_execution_contract_version": "1",
+        "gpu_execution_requested": "auto",
+        "gpu_execution_segments": [{"segment_id": "seg-1", "contract_version": "1", "contract_hash": "cpu-hash", "implementation": "cpu"}],
+        "cache": {"qc_policy_version": 2, "loudness_policy_key": _policy_key(None)},
+        "segments": [{"segment_id": "seg-1", "cache_key": "cpu-key"}],
+        "bgm": {"fingerprint": {}},
+        "output_size": output.stat().st_size,
+        "output_sha256": "digest",
+        "qc": {"passed": True},
+    }
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    monkeypatch.setattr("video_vault.project_renderer.sha256_file", lambda _path: "digest")
+    monkeypatch.setattr("video_vault.project_renderer.validate_final_output", lambda *args, **kwargs: FinalQCResult(True, 1.0, "digest"))
+
+    current = _current_gpu_execution("seg-1", "gpu-hash", "gpu-key", "nvdec_cuda")
+    reason = _final_cache_miss_reason(output, report_path, manifest, "m" * 64, "final_1080p", None, "ffprobe", current_gpu_execution=current)
+
+    assert reason == "gpu_execution_contract_changed"
+
+
+def test_final_cache_identical_gpu_contract_hits_and_diagnostics_do_not_matter(monkeypatch, tmp_path: Path):
+    output = tmp_path / "final.mp4"
+    output.write_bytes(b"final")
+    report_path = output.with_name(output.name + ".render.json")
+    manifest = {"manifest_hash": "m" * 64, "profile": {"profile_id": "final_1080p"}, "segments": [{"segment_id": "seg-1", "order": 1}]}
+    report = {
+        "manifest_hash": "m" * 64,
+        "profile_id": "final_1080p",
+        "qc_schema_version": 2,
+        "gpu_execution_contract_version": "1",
+        "gpu_execution_requested": "auto",
+        "gpu_execution_segments": [{"segment_id": "seg-1", "contract_version": "1", "contract_hash": "gpu-hash", "implementation": "nvdec_cuda", "capability_probe": {"stderr_tail": "old"}}],
+        "cache": {"qc_policy_version": 2, "loudness_policy_key": _policy_key(None)},
+        "segments": [{"segment_id": "seg-1", "cache_key": "gpu-key"}],
+        "bgm": {"fingerprint": {}},
+        "output_size": output.stat().st_size,
+        "output_sha256": "digest",
+        "qc": {"passed": True},
+    }
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    monkeypatch.setattr("video_vault.project_renderer.sha256_file", lambda _path: "digest")
+    monkeypatch.setattr("video_vault.project_renderer.validate_final_output", lambda *args, **kwargs: FinalQCResult(True, 1.0, "digest"))
+    current = _current_gpu_execution("seg-1", "gpu-hash", "gpu-key", "nvdec_cuda")
+
+    assert _final_cache_miss_reason(output, report_path, manifest, "m" * 64, "final_1080p", None, "ffprobe", current_gpu_execution=current) == ""
+    report["segments"][0]["cache_key"] = "different-key"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    assert _final_cache_miss_reason(output, report_path, manifest, "m" * 64, "final_1080p", None, "ffprobe", current_gpu_execution=current) == "segment_cache_changed"
+
+
+def test_current_gpu_resolution_reuses_source_probe_registry(monkeypatch, tmp_path: Path):
+    import video_vault.media_probe as media_probe
+
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    calls = {"probe": 0}
+    fake_probe = MediaProbe(source, 2.0, True, True, 1280, 720, 30.0, 30, 1, "yuv420p", "h264", "aac", 48000, 2)
+
+    def fake_metadata(_ffprobe, _path):
+        calls["probe"] += 1
+        return fake_probe
+
+    monkeypatch.setattr(media_probe, "probe_media_metadata", fake_metadata)
+    stat = source.stat()
+    registry = SourceProbeRegistry("ffprobe", approved_fingerprints={str(source.resolve()): {"canonical_path": str(source.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "sha256": "a" * 64}})
+
+    class FakeGPU:
+        def resolve(self, *_args):
+            return {"version": "1", "contract_hash": "gpu-hash", "implementation": "nvdec_cuda"}
+
+    manifest = {
+        "profile": {"profile_id": "final_1080p", "width": 1920, "height": 1080, "fps": 30, "pixel_format": "yuv420p", "video_codec": "h264", "audio_codec": "aac", "audio_sample_rate": 48000, "audio_channels": 2},
+        "settings": {"encoder": "auto"},
+        "segments": [
+            {"segment_id": "a", "order": 1, "source_file": str(source), "source_in_seconds": 0, "source_out_seconds": 1, "speed": 1},
+            {"segment_id": "b", "order": 2, "source_file": str(source), "source_in_seconds": 1, "source_out_seconds": 2, "speed": 1},
+        ],
+    }
+    result = _resolve_current_gpu_execution(manifest, None, registry, FakeGPU())
+
+    assert len(result["contracts"]) == 2
+    assert calls["probe"] == 1
+    assert registry.audit()["source_probe_calls"] == 1
+    assert registry.audit()["source_probe_cache_hits"] == 1
 
 
 @pytest.mark.media_smoke
