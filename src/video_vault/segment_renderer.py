@@ -244,10 +244,13 @@ def build_segment_ffmpeg_command(
     if gpu_path:
         args.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
     else:
-        # Make the product contract explicit.  FFmpeg's default autorotate is
-        # correct for Display Matrix sources; the GPU contract only resolves
-        # when no CPU-only display transform is required.
-        args.append("-autorotate")
+        # FFmpeg's CPU path enables autorotate by default.  Do not add a
+        # spelling-dependent boolean CLI flag here: FFmpeg 6 accepts the
+        # option differently from newer builds and can then fail to register
+        # the input before parsing the filter graph.  The display-matrix
+        # contract is already enforced by MediaProbe and the CPU-only
+        # resolver path; the default autorotate behavior is the portable part.
+        pass
     args.extend(["-i", str(segment["source_file"])])
     if probe.has_audio:
         audio_filter = build_audio_filter(audio["role"], speed, settings, start=start, end=end, audio_settings=audio)

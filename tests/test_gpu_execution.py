@@ -91,7 +91,6 @@ def test_rotated_display_geometry_falls_back_before_cuda_scale(monkeypatch):
     manifest = {**_manifest(), "settings": {**_manifest()["settings"], "gpu_execution_contract": contract}}
     command = build_segment_ffmpeg_command({"ffmpeg_path": "ffmpeg"}, manifest, _segment(), rotated, output="out.mp4", encoder="h264_nvenc")
     text = " ".join(command)
-    assert "-autorotate" in command
     assert "setsar=1" in text
     assert "scale=1920:1080:force_original_aspect_ratio=decrease" in text
     assert "scale_cuda=1920:1080" not in text
