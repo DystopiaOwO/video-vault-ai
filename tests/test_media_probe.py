@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from video_vault.media_probe import probe_media
+from video_vault.media_probe import SourceProbeRegistry, probe_media, probe_media_metadata
 from video_vault.render_errors import MediaProbeError
 
 
@@ -68,3 +68,67 @@ def test_probe_reports_ffprobe_failure(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("video_vault.media_probe.subprocess.run", lambda *args, **kwargs: _result({}, returncode=1))
     with pytest.raises(MediaProbeError, match="ffprobe failed"):
         probe_media("ffprobe", source)
+
+
+def test_fast_metadata_probe_omits_counting_flags(monkeypatch, tmp_path: Path):
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"source")
+    payload = {
+        "streams": [{"codec_type": "video", "width": 1920, "height": 1080, "avg_frame_rate": "30/1", "pix_fmt": "yuv420p", "codec_name": "h264"}],
+        "format": {"duration": "2.5"},
+    }
+    commands = []
+    monkeypatch.setattr("video_vault.media_probe.subprocess.run", lambda command, **kwargs: (commands.append(command) or _result(payload)))
+    probe_media_metadata("ffprobe", source)
+    assert "-count_frames" not in commands[0]
+    assert "-count_packets" not in commands[0]
+
+
+def test_deep_probe_retains_frame_and_packet_counting(monkeypatch, tmp_path: Path):
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"source")
+    payload = {
+        "streams": [{"codec_type": "video", "width": 1, "height": 1, "avg_frame_rate": "1/1", "codec_name": "h264"}],
+        "format": {"duration": "1"},
+    }
+    commands = []
+    monkeypatch.setattr("video_vault.media_probe.subprocess.run", lambda command, **kwargs: (commands.append(command) or _result(payload)))
+    probe_media("ffprobe", source)
+    assert "-count_frames" in commands[0]
+    assert "-count_packets" in commands[0]
+
+
+def test_source_probe_registry_deduplicates_unique_sources(monkeypatch, tmp_path: Path):
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    payload = {"streams": [{"codec_type": "video", "avg_frame_rate": "30/1"}], "format": {"duration": "1"}}
+    calls = []
+    monkeypatch.setattr("video_vault.media_probe.subprocess.run", lambda command, **kwargs: (calls.append(command) or _result(payload)))
+    registry = SourceProbeRegistry("ffprobe")
+    registry.probe(first)
+    registry.probe(first)
+    registry.probe(first)
+    registry.probe(second)
+    audit = registry.audit()
+    assert len(calls) == 2
+    assert audit["unique_source_count"] == 2
+    assert audit["source_probe_calls"] == 2
+    assert audit["source_probe_cache_hits"] == 2
+    assert audit["source_probe_mode"] == "fast_metadata"
+
+
+def test_source_probe_registry_blocks_same_path_identity_change(monkeypatch, tmp_path: Path):
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"source")
+    payload = {"streams": [{"codec_type": "video", "avg_frame_rate": "30/1"}], "format": {"duration": "1"}}
+    monkeypatch.setattr("video_vault.media_probe.subprocess.run", lambda *args, **kwargs: _result(payload))
+    original = {"size": 6, "mtime_ns": 10, "source_identity": {"contract": "test", "device": 1, "inode": 1}}
+    replacement = {"size": 6, "mtime_ns": 10, "source_identity": {"contract": "test", "device": 1, "inode": 2}}
+    states = iter([original, original, replacement])
+    monkeypatch.setattr("video_vault.media_probe.source_stat", lambda path: next(states))
+    registry = SourceProbeRegistry("ffprobe")
+    registry.probe(source)
+    with pytest.raises(MediaProbeError, match="identity changed"):
+        registry.probe(source)

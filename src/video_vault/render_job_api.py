@@ -103,5 +103,6 @@ def _safe_report_summary(report: dict[str, Any], *, currentity: str) -> dict[str
             "warnings": list(qc.get("warnings") or []),
         },
         "cache": report.get("cache") or {},
+        "probe_audit": report.get("probe_audit") or {},
         "created_at": report.get("created_at"),
     }

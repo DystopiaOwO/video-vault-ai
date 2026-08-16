@@ -60,6 +60,19 @@ def test_cache_key_tracks_source_content_even_when_size_and_mtime_match(tmp_path
     assert build_segment_cache_key(manifest, segment) != first
 
 
+def test_approved_source_fingerprint_avoids_rehash_for_cache_key(monkeypatch, tmp_path: Path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    manifest, segment = _inputs(source)
+    expected = build_segment_cache_key(manifest, segment)
+    fingerprint = {"path": str(source.resolve()), "size": source.stat().st_size, "mtime_ns": source.stat().st_mtime_ns, "sha256": ""}
+    import hashlib
+    fingerprint["sha256"] = hashlib.sha256(b"source").hexdigest()
+    monkeypatch.setattr("video_vault.segment_cache._sha256_file", lambda path: (_ for _ in ()).throw(AssertionError("unexpected source hash")))
+    assert build_segment_cache_key(manifest, segment, source_fingerprint=fingerprint) == expected
+    assert cache_key_payload(manifest, segment, source_fingerprint=fingerprint)["source_sha256"] == fingerprint["sha256"]
+
+
 def test_cache_paths_use_hash_and_partial_mp4_suffix(tmp_path: Path):
     paths = cache_paths(tmp_path, "abc123")
     assert paths["output"].name == "abc123.mp4"

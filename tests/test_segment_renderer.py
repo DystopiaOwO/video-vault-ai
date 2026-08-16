@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+from dataclasses import replace
 
 import pytest
 
@@ -50,6 +51,39 @@ def test_no_audio_source_gets_silence_input():
     assert "-map [aout]" in text
 
 
+def test_validate_segment_output_uses_fast_metadata_probe(monkeypatch, tmp_path: Path):
+    import video_vault.segment_renderer as renderer
+
+    output = tmp_path / "segment.mp4"
+    output.write_bytes(b"encoded")
+    modes = []
+    monkeypatch.setattr(renderer, "probe_media", lambda *args: (modes.append(args[2]) or _probe()))
+    result = renderer.validate_segment_output(output, {"width": 1280, "height": 720, "fps": 24, "pixel_format": "yuv420p", "audio_sample_rate": 48000, "audio_channels": 2}, 5)
+    assert result.passed
+    assert modes == ["fast"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("width", 1920, "resolution mismatch"),
+        ("fps", 30.0, "fps mismatch"),
+        ("pixel_format", "yuv422p", "pixel format mismatch"),
+        ("sample_rate", 44100, "sample rate mismatch"),
+        ("channels", 1, "channel mismatch"),
+    ],
+)
+def test_validate_segment_output_keeps_format_assertions(monkeypatch, tmp_path: Path, field, value, message):
+    import video_vault.segment_renderer as renderer
+
+    output = tmp_path / "segment.mp4"
+    output.write_bytes(b"encoded")
+    monkeypatch.setattr(renderer, "probe_media", lambda *args: replace(_probe(), **{field: value}))
+    result = renderer.validate_segment_output(output, {"width": 1280, "height": 720, "fps": 24, "pixel_format": "yuv420p", "audio_sample_rate": 48000, "audio_channels": 2}, 5)
+    assert not result.passed
+    assert any(message in error for error in result.errors)
+
+
 @pytest.mark.parametrize(("requested", "expected"), [("auto", "h264_nvenc"), ("cpu", "libx264"), ("libx264", "libx264"), ("h264_nvenc", "h264_nvenc")])
 def test_encoder_mapping(requested, expected):
     assert map_encoder(requested) == expected
@@ -89,6 +123,33 @@ def test_metadata_publish_failure_rolls_back_all_formal_files(monkeypatch, tmp_p
     assert not list((tmp_path / "cache").glob("*.json"))
     assert not list((tmp_path / "cache").glob("*.partial.mp4"))
     assert not list((tmp_path / "cache").glob(".*.tmp"))
+
+
+def test_standalone_render_segment_performs_one_fast_source_probe(monkeypatch, tmp_path: Path):
+    import video_vault.segment_renderer as renderer
+
+    cfg, manifest, segment = _render_inputs(tmp_path)
+    modes = []
+    monkeypatch.setattr(renderer, "probe_media", lambda *args: (modes.append(args[2]) or _probe()))
+    monkeypatch.setattr(renderer, "validate_segment_output", lambda *args: renderer.SegmentQCResult(True, 1.0))
+
+    def runner(command, **kwargs):
+        Path(command[-1]).write_bytes(b"partial")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    result = renderer.render_segment(cfg, manifest, segment, cache_root=tmp_path / "cache", runner=runner)
+    assert not result.cache_hit
+    assert modes == ["fast"]
+
+
+def test_segment_end_beyond_source_duration_fails_closed(monkeypatch, tmp_path: Path):
+    import video_vault.segment_renderer as renderer
+
+    cfg, manifest, segment = _render_inputs(tmp_path)
+    segment["source_out_seconds"] = 6
+    monkeypatch.setattr(renderer, "probe_media", lambda *args: _probe())
+    with pytest.raises(SegmentRenderError, match="exceeds source duration"):
+        renderer.render_segment(cfg, manifest, segment, cache_root=tmp_path / "cache", runner=lambda *args, **kwargs: None)
 
 
 def test_ffmpeg_filter_failure_keeps_log_without_formal_cache(monkeypatch, tmp_path: Path):

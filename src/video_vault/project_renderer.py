@@ -19,6 +19,7 @@ from .artifact_retention import (
 )
 from .final_qc import FinalQCResult, sha256_file, validate_final_output
 from .loudness import LoudnessError, build_second_pass_command, measure_loudness
+from .media_probe import SourceProbeRegistry
 from .project import can_project_render, project_dir
 from .render_manifest import manifest_hash, validate_render_manifest
 from .segment_cache import build_segment_cache_key, cache_paths
@@ -169,6 +170,7 @@ def render_project(
             raise ProjectRenderError(str(exc)) from exc
     else:
         bgm_fp = None
+    approved_source_fingerprints = _approved_source_fingerprints(snapshot)
     profile_id = str((manifest.get("profile") or {}).get("profile_id") or "unknown")
     paths = prepare_final_output_paths(
         folder,
@@ -182,6 +184,7 @@ def render_project(
         encoder_contract=encoder_contract,
         loudness_policy=normalization,
         ffmpeg_path=ffmpeg_path,
+        source_fingerprints=approved_source_fingerprints,
     )
     output = paths.output
     report_path = paths.report
@@ -233,6 +236,10 @@ def render_project(
     loudness_final = None
     total_segment_duration = max(0.001, sum(float(item["timeline_duration_seconds"]) for item in segments))
     completed_segment_duration = 0.0
+    source_probes = SourceProbeRegistry(
+        ffprobe_path,
+        approved_fingerprints=approved_source_fingerprints,
+    )
     try:
         work_dir.mkdir(parents=True, exist_ok=True)
         if manifest.get("visual_items") and not visual_timeline.get("resolved_items"):
@@ -252,7 +259,7 @@ def render_project(
                 force=True,
             )
             _execution_begin_ffmpeg(execution, "segments", segment_start, segment_span, segment_duration, f"正在輸出片段 {index}/{len(segments)}")
-            segment_results.append(render_segment(cfg, manifest, segment, runner=runner))
+            segment_results.append(render_segment(cfg, manifest, segment, runner=runner, source_probe_registry=source_probes))
             completed_segment_duration += segment_duration
             _execution_check(execution)
             _execution_update(execution, stage="segments", percent=5 + 70 * (completed_segment_duration / total_segment_duration), message=f"已完成片段 {index}/{len(segments)}", current_segment_id=str(segment.get("segment_id") or ""), current_segment_index=index)
@@ -344,7 +351,7 @@ def render_project(
             "analysis": loudness_analysis.to_dict() if loudness_analysis is not None else {},
             "final": loudness_final.to_dict() if loudness_final is not None else {},
         }
-        report = build_render_report(project_id, manifest, output, qc, segment_results, track, bgm_fp, output_size=partial.stat().st_size, approval_snapshot=snapshot, encoder_contract=encoder_contract, loudness=report_loudness, loudness_policy=normalization, bgm_source="new" if (folder / "audio_settings.json").is_file() else "legacy", cache_miss_reason=paths.cache_miss_reason, disk_preflight=disk_preflight, visual_timeline=visual_timeline, visual_evidence=visual_evidence)
+        report = build_render_report(project_id, manifest, output, qc, segment_results, track, bgm_fp, output_size=partial.stat().st_size, approval_snapshot=snapshot, encoder_contract=encoder_contract, loudness=report_loudness, loudness_policy=normalization, bgm_source="new" if (folder / "audio_settings.json").is_file() else "legacy", cache_miss_reason=paths.cache_miss_reason, disk_preflight=disk_preflight, visual_timeline=visual_timeline, visual_evidence=visual_evidence, source_probe_audit=source_probes.audit())
         report_temp_created = True
         report_temp.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         _execution_check(execution)
@@ -442,6 +449,7 @@ def prepare_final_output_paths(
     encoder_contract: Mapping[str, Any] | None = None,
     loudness_policy: Mapping[str, Any] | None = None,
     ffmpeg_path: str = "ffmpeg",
+    source_fingerprints: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> FinalOutputPaths:
     renders = (Path(folder) / "renders").expanduser().resolve()
     managed = output_path is None
@@ -453,7 +461,7 @@ def prepare_final_output_paths(
     report_temp = report.with_name(f".{report.name}.tmp")
     log = renders / "logs" / f"{approved_hash}.log"
     validate_project_output_path(folder, manifest, output, partial, report, report_temp)
-    cache_miss_reason = _final_cache_miss_reason(output, report, manifest, approved_hash, profile_id, bgm_fp, ffprobe_path, approval_snapshot=approval_snapshot, encoder_contract=encoder_contract, loudness_policy=loudness_policy, ffmpeg_path=ffmpeg_path)
+    cache_miss_reason = _final_cache_miss_reason(output, report, manifest, approved_hash, profile_id, bgm_fp, ffprobe_path, approval_snapshot=approval_snapshot, encoder_contract=encoder_contract, loudness_policy=loudness_policy, ffmpeg_path=ffmpeg_path, source_fingerprints=source_fingerprints)
     cache_hit = not cache_miss_reason
     paths = FinalOutputPaths(output, partial, report, report_temp, log, managed, cache_hit, cache_miss_reason)
     if cache_hit:
@@ -534,6 +542,7 @@ def build_render_report(
     disk_preflight: Mapping[str, Any] | None = None,
     visual_timeline: Mapping[str, Any] | None = None,
     visual_evidence: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] | None = None,
+    source_probe_audit: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     visual = dict(visual_timeline or {})
     return {
@@ -573,6 +582,7 @@ def build_render_report(
             "encoder_contract_hash": (encoder_contract or {}).get("contract_hash") or _stable_hash(dict(encoder_contract or {})),
             "visual_timeline_hash": stable_visual_hash(visual) if visual else "",
         },
+        "probe_audit": dict(source_probe_audit or {}),
         "disk_preflight": dict(disk_preflight or {}),
         "measurements": dict(qc.measurements or {}),
         "profile_id": manifest["profile"]["profile_id"],
@@ -599,6 +609,20 @@ def build_render_report(
     }
 
 
+def _approved_source_fingerprints(snapshot: Mapping[str, Any] | None) -> dict[str, Mapping[str, Any]]:
+    """Index immutable approval evidence without hashing any source file."""
+
+    result: dict[str, Mapping[str, Any]] = {}
+    for asset in (snapshot or {}).get("assets", []) or []:
+        if not isinstance(asset, Mapping) or str(asset.get("kind") or "") != "source":
+            continue
+        path = str(asset.get("canonical_path") or "").strip()
+        if not path:
+            continue
+        result[str(Path(path).expanduser().resolve())] = asset
+    return result
+
+
 def _validate_phase4a_settings(manifest: Mapping[str, Any]) -> None:
     settings = manifest.get("settings") or {}
     transition = settings.get("transition") or {}
@@ -612,7 +636,7 @@ def _final_cache_valid(output: Path, report_path: Path, manifest: Mapping[str, A
     return not _final_cache_miss_reason(output, report_path, manifest, manifest_id, profile_id, bgm_fp, ffprobe_path, **kwargs)
 
 
-def _final_cache_miss_reason(output: Path, report_path: Path, manifest: Mapping[str, Any], manifest_id: str, profile_id: str, bgm_fp: Mapping[str, Any] | None, ffprobe_path: str, *, approval_snapshot: Mapping[str, Any] | None = None, encoder_contract: Mapping[str, Any] | None = None, loudness_policy: Mapping[str, Any] | None = None, ffmpeg_path: str = "ffmpeg") -> str:
+def _final_cache_miss_reason(output: Path, report_path: Path, manifest: Mapping[str, Any], manifest_id: str, profile_id: str, bgm_fp: Mapping[str, Any] | None, ffprobe_path: str, *, approval_snapshot: Mapping[str, Any] | None = None, encoder_contract: Mapping[str, Any] | None = None, loudness_policy: Mapping[str, Any] | None = None, ffmpeg_path: str = "ffmpeg", source_fingerprints: Mapping[str, Mapping[str, Any]] | None = None) -> str:
     if not output.is_file() or not report_path.is_file():
         return "output_or_report_missing"
     try:
@@ -645,7 +669,16 @@ def _final_cache_miss_reason(output: Path, report_path: Path, manifest: Mapping[
         current_visual_hash = stable_visual_hash(current_visual) if isinstance(current_visual, Mapping) and current_visual else ""
         if str(cache.get("visual_timeline_hash") or "") != current_visual_hash:
             return "visual_timeline_changed"
-        expected_keys = [build_segment_cache_key(manifest, segment) for segment in sorted(manifest["segments"], key=lambda item: int(item["order"]))]
+        expected_keys = [
+            build_segment_cache_key(
+                manifest,
+                segment,
+                source_fingerprint=(source_fingerprints or {}).get(
+                    str(Path(str(segment.get("source_file") or "")).expanduser().resolve())
+                ),
+            )
+            for segment in sorted(manifest["segments"], key=lambda item: int(item["order"]))
+        ]
         actual_keys = [item.get("cache_key") for item in report.get("segments", [])]
         if actual_keys != expected_keys:
             return "segment_cache_changed"
