@@ -27,7 +27,7 @@ from .bgm_pipeline import bgm_fingerprint
 from .final_qc import sha256_file
 from .media_probe import MediaProbe, probe_media
 from .project import project_dir
-from .segment_cache import build_segment_cache_key
+from .segment_provenance import SEGMENT_APPROVAL_PROVENANCE_VERSION, approval_source_fingerprints, segment_approval_provenance
 
 
 QA_RUN_SCHEMA_VERSION = 1
@@ -177,7 +177,7 @@ def run_delivery_qa(
         _black_flash_check(analysis, profile["resolved_thresholds"], float(probe.duration_seconds) if probe else 0.0),
         _freeze_silence_check(analysis, profile["resolved_thresholds"], profile["profile_id"]),
         _border_crop_check(analysis, probe, stream_details, manifest, profile["resolved_thresholds"]),
-        _audio_check(analysis, probe, render_report, manifest, profile["resolved_thresholds"]),
+        _audio_check(analysis, probe, render_report, manifest, profile["resolved_thresholds"], approval_snapshot=snapshot),
         _continuity_check(manifest, snapshot, profile["resolved_thresholds"]),
     ]
     _attach_threshold_audit(checks, profile)
@@ -896,7 +896,7 @@ def _border_crop_check(analysis: Mapping[str, Any], probe: MediaProbe | None, st
     return _check("border_crop_safe_area", "pass", "邊框、裁切、方向與安全區檢查符合門檻", metrics)
 
 
-def _audio_check(analysis: Mapping[str, Any], probe: MediaProbe | None, render_report: Mapping[str, Any], manifest: Mapping[str, Any], thresholds: Mapping[str, Any]) -> dict[str, Any]:
+def _audio_check(analysis: Mapping[str, Any], probe: MediaProbe | None, render_report: Mapping[str, Any], manifest: Mapping[str, Any], thresholds: Mapping[str, Any], *, approval_snapshot: Mapping[str, Any] | None = None) -> dict[str, Any]:
     loudness = _mapping(_mapping(render_report.get("loudness")).get("final"))
     measured_lufs = _finite(loudness.get("measured_I"))
     measured_peak = _finite(loudness.get("measured_TP"))
@@ -922,7 +922,7 @@ def _audio_check(analysis: Mapping[str, Any], probe: MediaProbe | None, render_r
     }
     failures: list[str] = []
     warnings: list[str] = []
-    provenance = _audio_render_provenance(manifest, render_report)
+    provenance = _audio_render_provenance(manifest, render_report, approval_snapshot=approval_snapshot)
     metrics["render_audio_provenance"] = provenance["metrics"]
     failures.extend(provenance["failures"])
     if probe is None or not probe.has_audio:
@@ -990,21 +990,27 @@ def _audio_check(analysis: Mapping[str, Any], probe: MediaProbe | None, render_r
     return _check("audio", "pass", "音訊 stream、loudness、peak、尾端與 role 契約通過", metrics)
 
 
-def _audio_render_provenance(manifest: Mapping[str, Any], render_report: Mapping[str, Any]) -> dict[str, Any]:
-    """Verify that the formal report proves the approved audio contract was rendered."""
+def _audio_render_provenance(manifest: Mapping[str, Any], render_report: Mapping[str, Any], *, approval_snapshot: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Verify ordered approval semantics, independently from artifact caches."""
 
     expected_segments = _ordered_segments(manifest)
-    expected_keys: list[str] = []
+    approved_sources = approval_source_fingerprints(approval_snapshot)
+    expected_provenance: list[dict[str, Any]] = []
     segment_failures: list[dict[str, Any]] = []
     for index, segment in enumerate(expected_segments):
-        try:
-            expected_keys.append(build_segment_cache_key(manifest, segment))
-        except (OSError, TypeError, ValueError, KeyError) as exc:
-            expected_keys.append("")
-            segment_failures.append({"index": index, "reason": "approved segment cache key unavailable", "error": _safe_error(exc)})
+        source_path = str(Path(str(segment.get("source_file") or "")).expanduser().resolve())
+        provenance = segment_approval_provenance(
+            manifest,
+            segment,
+            source_fingerprint=approved_sources.get(source_path),
+        )
+        expected_provenance.append(provenance)
+        if not provenance["payload"]["source_fingerprint"]["available"]:
+            segment_failures.append({"index": index, "reason": "approved source fingerprint unavailable"})
     raw_reported_segments = render_report.get("segments")
     reported_segments = raw_reported_segments if isinstance(raw_reported_segments, list) else []
     reported_keys: list[str] = []
+    reported_provenance: list[dict[str, Any]] = []
     reported_segment_errors: list[dict[str, Any]] = []
     if not isinstance(raw_reported_segments, list):
         reported_segment_errors.append({
@@ -1017,35 +1023,31 @@ def _audio_render_provenance(manifest: Mapping[str, Any], render_report: Mapping
             reported_segment_errors.append({"index": index, "reason": "reported segment must be an object"})
             continue
         cache_key = item.get("cache_key")
-        if not isinstance(cache_key, str) or not cache_key.strip():
-            reported_keys.append("")
-            reported_segment_errors.append({"index": index, "reason": "reported segment cache_key missing or empty"})
-            continue
-        # Preserve the reported value byte-for-byte for the exact ordered
-        # comparison; whitespace must not be silently normalized.
-        reported_keys.append(cache_key)
+        reported_keys.append(cache_key if isinstance(cache_key, str) else "")
+        reported_provenance.append({
+            "segment_id": str(item.get("segment_id") or ""),
+            "version": str(item.get("approval_provenance_version") or ""),
+            "hash": str(item.get("approval_provenance_hash") or ""),
+        })
     approved_count = len(expected_segments)
-    approved_key_count = len(expected_keys)
     reported_count = len(reported_segments)
     reported_key_count = len(reported_keys)
-    if reported_count != approved_count or reported_key_count != approved_key_count or reported_key_count != reported_count:
+    if reported_count != approved_count:
         segment_failures.append({
-            "reason": "segment/key count mismatch",
+            "reason": "segment/provenance count mismatch",
             "approved_segment_count": approved_count,
-            "approved_key_count": approved_key_count,
             "reported_segment_count": reported_count,
-            "reported_key_count": reported_key_count,
         })
     segment_failures.extend(reported_segment_errors)
-    for index in range(max(len(expected_keys), len(reported_keys))):
-        expected = expected_keys[index] if index < len(expected_keys) else ""
-        actual = reported_keys[index] if index < len(reported_keys) else ""
-        if not expected or expected != actual:
+    for index in range(max(len(expected_provenance), len(reported_provenance))):
+        expected = expected_provenance[index] if index < len(expected_provenance) else {}
+        actual = reported_provenance[index] if index < len(reported_provenance) else {}
+        if not expected or actual.get("version") != SEGMENT_APPROVAL_PROVENANCE_VERSION or actual.get("hash") != expected.get("hash") or actual.get("segment_id") != expected.get("payload", {}).get("segment_id"):
             segment_failures.append({
                 "index": index,
-                "reason": "segment cache key mismatch",
-                "approved_cache_key": expected,
-                "reported_cache_key": actual,
+                "reason": "segment approval-semantic provenance mismatch",
+                "approved_provenance": {"version": expected.get("version"), "hash": expected.get("hash")},
+                "reported_provenance": actual,
             })
 
     expected_bgm = next(
@@ -1076,13 +1078,22 @@ def _audio_render_provenance(manifest: Mapping[str, Any], render_report: Mapping
         and reported_bgm_fp == {}
     )
     provenance_metrics = {
-        "approved_segment_cache_keys": expected_keys,
+        "approval_provenance_version": SEGMENT_APPROVAL_PROVENANCE_VERSION,
+        "approved_segment_provenance": [
+            {"segment_id": item["payload"]["segment_id"], "version": item["version"], "hash": item["hash"]}
+            for item in expected_provenance
+        ],
+        "reported_segment_provenance": reported_provenance,
         "reported_segment_cache_keys": reported_keys,
         "segment_mismatches": segment_failures,
         "approved_segment_count": approved_count,
-        "approved_key_count": approved_key_count,
         "reported_segment_count": reported_count,
-        "reported_key_count": reported_key_count,
+        "cache_audit": {
+            "reported_key_count": reported_key_count,
+            "missing_reported_cache_keys": sum(1 for item in reported_keys if not item),
+            "identity_used_for_gate": "approval_semantic_provenance",
+            "cache_key_used_for_gate": False,
+        },
         "approved_audio_contract": [
             {
                 "segment_id": str(segment.get("segment_id") or segment.get("segment_uuid") or ""),
@@ -1103,7 +1114,7 @@ def _audio_render_provenance(manifest: Mapping[str, Any], render_report: Mapping
     }
     failures: list[str] = []
     if segment_failures:
-        failures.append("Render Report segment cache key 與核准 audio contract 不一致")
+        failures.append("Render Report segment approval-semantic provenance 與核准 audio contract 不一致")
     if not bgm_fingerprint_match:
         failures.append("Render Report BGM used/fingerprint 與核准 BGM contract 不一致")
     return {"failures": failures, "metrics": _safe_value(provenance_metrics)}

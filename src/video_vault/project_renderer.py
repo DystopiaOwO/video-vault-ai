@@ -24,6 +24,7 @@ from .project import can_project_render, project_dir
 from .render_manifest import manifest_hash, validate_render_manifest
 from .segment_cache import build_segment_cache_key, cache_paths
 from .segment_renderer import SegmentRenderResult, render_segment
+from .segment_provenance import approval_source_fingerprints, segment_approval_provenance
 from .timeline_assembler import TimelineAssemblyError, build_concat_file, build_timeline_command, run_command
 from .visual_renderer import (
     VisualRenderError,
@@ -545,6 +546,20 @@ def build_render_report(
     source_probe_audit: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     visual = dict(visual_timeline or {})
+    ordered_manifest_segments = sorted(
+        [item for item in manifest.get("segments", []) if isinstance(item, Mapping)],
+        key=lambda item: int(item.get("order") or 0),
+    )
+    approved_sources = approval_source_fingerprints(approval_snapshot)
+    segment_provenance = []
+    for segment, result in zip(ordered_manifest_segments, segment_results):
+        source_path = str(Path(str(segment.get("source_file") or "")).expanduser().resolve())
+        provenance = segment_approval_provenance(
+            manifest,
+            segment,
+            source_fingerprint=approved_sources.get(source_path),
+        )
+        segment_provenance.append((str(result.segment_id), provenance))
     return {
         "project_id": project_id,
         "manifest_hash": manifest["manifest_hash"],
@@ -600,9 +615,11 @@ def build_render_report(
                 "encoder_requested": item.encoder_requested,
                 "encoder_used": item.encoder_used,
                 "duration_seconds": item.duration_seconds,
+                "approval_provenance_version": provenance["version"],
+                "approval_provenance_hash": provenance["hash"],
                 "warnings": list(item.warnings),
             }
-            for item in segment_results
+            for item, (_, provenance) in zip(segment_results, segment_provenance)
         ],
         "bgm": {"used": bool(track), **dict(track or {}), "fingerprint": dict(bgm_fp or {})},
         "qc": {"passed": qc.passed, "warnings": list(qc.warnings), "errors": list(qc.errors)},
