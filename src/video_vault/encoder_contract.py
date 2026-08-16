@@ -12,6 +12,9 @@ from typing import Any, Mapping
 # contract.  Bump this when switching from the invalid ``-rc cq`` spelling to
 # FFmpeg's supported VBR + CQ contract.
 ENCODER_CONTRACT_VERSION = "2"
+NVENC_PROBE_GEOMETRY = "256x256"
+NVENC_PROBE_STDERR_TAIL_LIMIT = 2000
+_DIAGNOSTIC_CONTRACT_KEYS = frozenset({"nvenc_probe"})
 
 
 class EncoderContractError(ValueError):
@@ -20,12 +23,14 @@ class EncoderContractError(ValueError):
 
 def resolve_encoder_contract(cfg: Mapping[str, Any], profile: Mapping[str, Any], requested: str | None = None) -> dict[str, Any]:
     choice = str(requested or "auto").lower()
+    probe_audit: dict[str, Any] | None = None
     if choice in {"cpu", "x264", "libx264"}:
         implementation, fallback_reason = "libx264", "explicit_cpu"
     elif choice in {"nvenc", "h264_nvenc"}:
         implementation, fallback_reason = "h264_nvenc", "explicit_nvenc"
     elif choice == "auto":
-        if _nvenc_probe(str(cfg.get("ffmpeg_path") or "ffmpeg")):
+        probe_audit = _normalize_probe_audit(_nvenc_probe(str(cfg.get("ffmpeg_path") or "ffmpeg")))
+        if probe_audit["result"] == "pass" and probe_audit["returncode"] == 0:
             implementation, fallback_reason = "h264_nvenc", ""
         else:
             implementation, fallback_reason = "libx264", "nvenc_probe_failed"
@@ -49,7 +54,11 @@ def resolve_encoder_contract(cfg: Mapping[str, Any], profile: Mapping[str, Any],
         "pixel_format": str(profile.get("pixel_format") or "yuv420p"),
         "ffmpeg_version": _ffmpeg_version(str(cfg.get("ffmpeg_path") or "ffmpeg")),
     }
-    contract["contract_hash"] = hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    if probe_audit is not None:
+        # Diagnostics are persisted for auditability but deliberately excluded
+        # from semantic identity and all cache hashes.
+        contract["nvenc_probe"] = probe_audit
+    contract["contract_hash"] = _contract_hash(contract)
     return contract
 
 
@@ -60,7 +69,7 @@ def validate_encoder_contract(contract: Mapping[str, Any], profile: Mapping[str,
         raise EncoderContractError("unsupported resolved encoder")
     expected = dict(contract)
     supplied_hash = str(expected.pop("contract_hash", ""))
-    if hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest() != supplied_hash:
+    if _contract_hash(expected) != supplied_hash:
         raise EncoderContractError("encoder contract hash mismatch")
     fps = _fps_fraction(profile)
     if (int(contract.get("fps_num") or 0), int(contract.get("fps_den") or 0)) != fps:
@@ -79,7 +88,7 @@ def encoder_arguments(contract: Mapping[str, Any]) -> list[str]:
     return args
 
 
-def _nvenc_probe(ffmpeg_path: str) -> bool:
+def _nvenc_probe(ffmpeg_path: str) -> dict[str, Any]:
     # 16x16 is below the minimum frame dimension accepted by the RTX 5070 Ti
     # NVENC path.  Keep this short, but use a legal frame and the same basic
     # options as the formal h264_nvenc contract.
@@ -92,7 +101,7 @@ def _nvenc_probe(ffmpeg_path: str) -> bool:
         "-f",
         "lavfi",
         "-i",
-        "color=c=black:s=256x256:d=0.04",
+        f"color=c=black:s={NVENC_PROBE_GEOMETRY}:d=0.04",
         "-frames:v",
         "1",
         "-c:v",
@@ -114,9 +123,101 @@ def _nvenc_probe(ffmpeg_path: str) -> bool:
         "-",
     ]
     try:
-        return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False, timeout=15).returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+        completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False, timeout=15)
+        returncode = getattr(completed, "returncode", None)
+        stderr_tail = _stderr_tail(getattr(completed, "stderr", ""))
+        passed = returncode == 0
+        return {
+            "attempted": True,
+            "geometry": NVENC_PROBE_GEOMETRY,
+            "result": "pass" if passed else "failed",
+            "returncode": returncode,
+            "stderr_tail": stderr_tail,
+            "failure_class": None if passed else _classify_probe_failure(stderr_tail),
+            "timed_out": False,
+            "start_failed": False,
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "attempted": True,
+            "geometry": NVENC_PROBE_GEOMETRY,
+            "result": "failed",
+            "returncode": None,
+            "stderr_tail": _stderr_tail(getattr(exc, "stderr", "")),
+            "failure_class": "timeout",
+            "timed_out": True,
+            "start_failed": False,
+        }
+    except OSError as exc:
+        return {
+            "attempted": True,
+            "geometry": NVENC_PROBE_GEOMETRY,
+            "result": "failed",
+            "returncode": None,
+            "stderr_tail": _stderr_tail(getattr(exc, "strerror", "")),
+            "failure_class": "start_failed",
+            "timed_out": False,
+            "start_failed": True,
+        }
+
+
+def _normalize_probe_audit(value: Mapping[str, Any] | bool) -> dict[str, Any]:
+    """Normalize test doubles and real probe results to the audit contract."""
+
+    if isinstance(value, Mapping):
+        result = "pass" if str(value.get("result") or "") == "pass" else "failed"
+        return {
+            "attempted": bool(value.get("attempted", True)),
+            "geometry": str(value.get("geometry") or NVENC_PROBE_GEOMETRY),
+            "result": result,
+            "returncode": value.get("returncode"),
+            "stderr_tail": _stderr_tail(value.get("stderr_tail", "")),
+            "failure_class": value.get("failure_class"),
+            "timed_out": bool(value.get("timed_out", False)),
+            "start_failed": bool(value.get("start_failed", False)),
+        }
+    passed = bool(value)
+    return {
+        "attempted": True,
+        "geometry": NVENC_PROBE_GEOMETRY,
+        "result": "pass" if passed else "failed",
+        "returncode": 0 if passed else None,
+        "stderr_tail": "",
+        "failure_class": None if passed else "encoder_initialization_failed",
+        "timed_out": False,
+        "start_failed": False,
+    }
+
+
+def _stderr_tail(value: Any) -> str:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    text = str(value or "")
+    return text[-NVENC_PROBE_STDERR_TAIL_LIMIT:]
+
+
+def _classify_probe_failure(stderr_tail: str) -> str:
+    text = str(stderr_tail or "").lower()
+    if "frame dimension" in text or "minimum supported value" in text:
+        return "geometry_invalid"
+    if "unknown encoder" in text or "encoder not found" in text:
+        return "encoder_unavailable"
+    if any(token in text for token in ("nvencodeapi", "driver does not support", "minimum required nvidia driver")):
+        return "driver_api_mismatch"
+    if any(token in text for token in ("no capable devices", "openencodesessionex", "cannot init cuda", "cannot initialize cuda")):
+        return "device_initialization_failed"
+    if any(token in text for token in ("unable to parse", "error setting option", "invalid option")):
+        return "encoder_option_incompatible"
+    return "encoder_initialization_failed"
+
+
+def _contract_hash(contract: Mapping[str, Any]) -> str:
+    semantic = {
+        key: value
+        for key, value in contract.items()
+        if key != "contract_hash" and key not in _DIAGNOSTIC_CONTRACT_KEYS
+    }
+    return hashlib.sha256(json.dumps(semantic, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _ffmpeg_version(ffmpeg_path: str) -> str:

@@ -85,6 +85,7 @@ def _safe_report_summary(report: dict[str, Any], *, currentity: str) -> dict[str
             "approved_project_revision": snapshot.get("approved_project_revision"),
         },
         "encoder_contract": report.get("encoder_contract") or {},
+        "encoder_probe_audit": report.get("encoder_probe_audit") or ((report.get("encoder_contract") or {}).get("nvenc_probe") if isinstance(report.get("encoder_contract"), dict) else {}) or {},
         "loudness": report.get("loudness") or {},
         "color": report.get("color") or {},
         "timing": report.get("timing") or {},

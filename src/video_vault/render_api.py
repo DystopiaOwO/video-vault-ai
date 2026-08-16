@@ -126,6 +126,8 @@ def build_render_report_dto(report: Mapping[str, Any], *, currentity: str) -> Re
         "duration_seconds": report.get("duration_seconds"),
     }
     snapshot = _mapping(report.get("approval_snapshot"))
+    encoder_contract = _mapping(report.get("encoder_contract"))
+    encoder_probe_audit = _mapping(report.get("encoder_probe_audit")) or _mapping(encoder_contract.get("nvenc_probe"))
     return RenderReportDTO(
         status=currentity,
         project_id=_int_or_none(report.get("project_id")),
@@ -135,7 +137,8 @@ def build_render_report_dto(report: Mapping[str, Any], *, currentity: str) -> Re
         ) if key in snapshot}),
         profile=_safe(profile),
         profile_id=str(report.get("profile_id") or profile.get("profile_id") or ""),
-        encoder_contract=_safe(_mapping(report.get("encoder_contract"))),
+        encoder_contract=_safe(encoder_contract),
+        encoder_probe_audit=_safe(encoder_probe_audit),
         loudness=_safe(loudness),
         lufs=lufs,
         true_peak=true_peak,

@@ -555,6 +555,7 @@ def build_render_report(
             "approved_project_revision": (approval_snapshot or {}).get("approved_project_revision", ""),
         },
         "encoder_contract": dict(encoder_contract or {}),
+        "encoder_probe_audit": dict((encoder_contract or {}).get("nvenc_probe") or {}),
         "loudness": dict(loudness) if isinstance(loudness, Mapping) else (loudness.to_dict() if loudness is not None and hasattr(loudness, "to_dict") else {}),
         "bgm_source": str(bgm_source or "unknown"),
         "color": {
