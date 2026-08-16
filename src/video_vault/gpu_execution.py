@@ -21,6 +21,7 @@ from .media_probe import MediaProbe
 GPU_EXECUTION_CONTRACT_VERSION = "1"
 GPU_PROBE_STDERR_TAIL_LIMIT = 2000
 _DIAGNOSTIC_KEYS = frozenset({"capability_probe", "stderr_tail", "timing", "ffmpeg_command"})
+DISPLAY_GEOMETRY_POLICIES = frozenset({"preserve_aspect_pad", "crop_to_fill", "background"})
 
 
 class GPUExecutionError(ValueError):
@@ -58,6 +59,12 @@ class GPUExecutionRegistry:
             probe.fps_den,
             probe.video_codec,
             probe.pixel_format,
+            probe.sample_aspect_ratio,
+            probe.display_aspect_ratio,
+            probe.display_ratio,
+            probe.rotation_degrees,
+            probe.display_matrix,
+            str(settings.get("display_geometry_policy") or "preserve_aspect_pad"),
             str(profile.get("width") or ""),
             str(profile.get("height") or ""),
             str(profile.get("fps") or ""),
@@ -170,10 +177,11 @@ def _resolve_contract(
         "filter_used": "cpu",
         "hardware_api": "cpu",
         "hardware_device": "cpu",
-        "filter_chain": ["scale", "pad", "fps", "format", "setparams"],
+        "filter_chain": ["autorotate", "setsar", "scale", "pad", "fps", "format", "setsar", "setparams"],
         "result": "fallback" if requested != "cpu" else "not_requested",
         "fallback_reason": "explicit_cpu" if requested == "cpu" else "",
         "capability_probe": dict(capability),
+        "display_geometry": _display_geometry_contract(settings, probe, profile),
     }
     if requested == "cpu":
         return _finalize(base)
@@ -241,7 +249,11 @@ def _unsupported_reason(settings: Mapping[str, Any], segment: Mapping[str, Any],
         return f"unsupported_source_pixel_format:{probe.pixel_format}"
     if _color_requested(settings, segment):
         return "unsupported_cuda_filter:color_processing"
-    source_ratio = probe.width / probe.height if probe.height else 0.0
+    if probe.rotation_degrees % 360:
+        return "requires_cpu_display_matrix_transform"
+    if str(probe.sample_aspect_ratio or "1:1") not in {"1:1", "1/1"}:
+        return "requires_cpu_sample_aspect_normalization"
+    source_ratio = probe.display_ratio or (probe.width / probe.height if probe.height else 0.0)
     target_ratio = float(profile.get("width") or 0) / float(profile.get("height") or 1)
     if abs(source_ratio - target_ratio) > 0.01:
         return "requires_cpu_pad_or_aspect_conversion"
@@ -250,6 +262,32 @@ def _unsupported_reason(settings: Mapping[str, Any], segment: Mapping[str, Any],
     # not by itself require a CPU ``fps`` filter, and treating it as a hard
     # incompatibility would incorrectly reject the authoritative Coffee input.
     return ""
+
+
+def _display_geometry_contract(settings: Mapping[str, Any], probe: MediaProbe, profile: Mapping[str, Any]) -> dict[str, Any]:
+    policy = str(settings.get("display_geometry_policy") or "preserve_aspect_pad").strip().lower()
+    if policy not in DISPLAY_GEOMETRY_POLICIES:
+        raise GPUExecutionError(f"unsupported display geometry policy: {policy}")
+    source_ratio = float(probe.display_ratio or 0.0)
+    target_width = int(profile.get("width") or 0)
+    target_height = int(profile.get("height") or 0)
+    target_ratio = target_width / target_height if target_height else 0.0
+    return {
+        "coded_width": int(probe.coded_width or probe.width),
+        "coded_height": int(probe.coded_height or probe.height),
+        "sample_aspect_ratio": str(probe.sample_aspect_ratio or "1:1"),
+        "display_aspect_ratio": str(probe.display_aspect_ratio or ""),
+        "display_ratio": round(float(probe.display_ratio or 0.0), 12),
+        "display_width": int(probe.display_width or probe.width),
+        "display_height": int(probe.display_height or probe.height),
+        "rotation_degrees": int(probe.rotation_degrees or 0),
+        "display_matrix": str(probe.display_matrix or ""),
+        "provenance": str(probe.display_geometry_source or "unknown"),
+        "source_orientation": "portrait" if source_ratio and source_ratio < 1 else "landscape" if source_ratio else "unknown",
+        "target_orientation": "portrait" if target_ratio and target_ratio < 1 else "landscape" if target_ratio else "unknown",
+        "composition_policy": policy,
+        "composition_policy_source": "manifest.settings" if settings.get("display_geometry_policy") else "safe_default",
+    }
 
 
 def _color_requested(settings: Mapping[str, Any], segment: Mapping[str, Any]) -> str:

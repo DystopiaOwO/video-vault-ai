@@ -1,4 +1,5 @@
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 
 from video_vault.gpu_execution import GPU_EXECUTION_CONTRACT_VERSION, GPUExecutionRegistry, execution_contract_hash, gpu_execution_cache_identity
@@ -66,6 +67,61 @@ def test_unsupported_source_gets_explicit_cpu_fallback(monkeypatch):
     pixel_contract = GPUExecutionRegistry({"ffmpeg_path": "ffmpeg"}).resolve(_manifest(), _segment(), _probe(pixel_format="yuv444p10le"), _encoder())
     assert pixel_contract["implementation"] == "cpu"
     assert pixel_contract["fallback_reason"] == "unsupported_source_pixel_format:yuv444p10le"
+
+
+def test_rotated_display_geometry_falls_back_before_cuda_scale(monkeypatch):
+    _capability_pass(monkeypatch)
+    rotated = replace(
+        _probe(),
+        coded_width=3840,
+        coded_height=2176,
+        display_aspect_ratio="9:16",
+        display_ratio=9 / 16,
+        display_width=2160,
+        display_height=3840,
+        rotation_degrees=-90,
+        display_matrix="matrix -90",
+        display_geometry_source="display_matrix",
+    )
+    contract = GPUExecutionRegistry({"ffmpeg_path": "ffmpeg"}).resolve(_manifest(), _segment(), rotated, _encoder())
+    assert contract["implementation"] == "cpu"
+    assert contract["fallback_reason"] == "requires_cpu_display_matrix_transform"
+    assert contract["display_geometry"]["display_aspect_ratio"] == "9:16"
+
+    manifest = {**_manifest(), "settings": {**_manifest()["settings"], "gpu_execution_contract": contract}}
+    command = build_segment_ffmpeg_command({"ffmpeg_path": "ffmpeg"}, manifest, _segment(), rotated, output="out.mp4", encoder="h264_nvenc")
+    text = " ".join(command)
+    assert "-autorotate" in command
+    assert "setsar=1" in text
+    assert "scale=1920:1080:force_original_aspect_ratio=decrease" in text
+    assert "scale_cuda=1920:1080" not in text
+
+
+def test_display_geometry_changes_segment_cache_identity(tmp_path):
+    source = tmp_path / "coffee.mkv"
+    source.write_bytes(b"source")
+    segment = {**_segment(), "source_file": str(source)}
+    base = _manifest()
+    first = {"version": "1", "implementation": "cpu", "decode_used": "cpu", "filter_used": "cpu", "hardware_api": "cpu", "display_geometry": {"display_aspect_ratio": "16:9", "rotation_degrees": 0}}
+    second = {**first, "display_geometry": {"display_aspect_ratio": "9:16", "rotation_degrees": -90}}
+    manifest_a = {**base, "settings": {**base["settings"], "gpu_execution_contract": first}}
+    manifest_b = {**base, "settings": {**base["settings"], "gpu_execution_contract": second}}
+    assert build_segment_cache_key(manifest_a, segment) != build_segment_cache_key(manifest_b, segment)
+
+
+def test_display_geometry_policy_is_explicit_and_deterministic(monkeypatch):
+    _capability_pass(monkeypatch)
+    rotated = replace(_probe(), rotation_degrees=90, display_ratio=9 / 16, display_aspect_ratio="9:16")
+    manifest = {**_manifest(), "settings": {**_manifest()["settings"], "display_geometry_policy": "crop_to_fill"}}
+    contract = GPUExecutionRegistry({"ffmpeg_path": "ffmpeg"}).resolve(manifest, _segment(), rotated, _encoder())
+    assert contract["display_geometry"]["composition_policy"] == "crop_to_fill"
+    assert contract["display_geometry"]["composition_policy_source"] == "manifest.settings"
+
+    command_manifest = {**manifest, "settings": {**manifest["settings"], "gpu_execution_contract": contract}}
+    command = build_segment_ffmpeg_command({"ffmpeg_path": "ffmpeg"}, command_manifest, _segment(), rotated, output="out.mp4", encoder="h264_nvenc")
+    text = " ".join(command)
+    assert "force_original_aspect_ratio=increase" in text
+    assert "crop=1920:1080" in text
 
 
 def test_gpu_execution_cache_identity_differs_from_cpu_and_ignores_diagnostics():

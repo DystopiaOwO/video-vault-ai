@@ -10,7 +10,7 @@ from typing import Any, Mapping
 from .gpu_execution import gpu_execution_cache_identity
 
 
-SEGMENT_RENDERER_CONTRACT_VERSION = 5
+SEGMENT_RENDERER_CONTRACT_VERSION = 6
 
 
 def encoder_cache_identity(settings: Mapping[str, Any]) -> dict[str, Any]:
@@ -48,6 +48,7 @@ def cache_key_payload(
     color = dict(segment.get("color") or settings.get("color") or {})
     lut = Path(str(color.get("lut_path"))).expanduser().resolve() if color.get("lut_path") else None
     lut_stat = lut.stat() if lut and lut.exists() else None
+    gpu_contract = settings.get("gpu_execution_contract") if isinstance(settings.get("gpu_execution_contract"), Mapping) else {}
     return {
         "contract_version": SEGMENT_RENDERER_CONTRACT_VERSION,
         "source_file": str(source),
@@ -72,7 +73,8 @@ def cache_key_payload(
         # artifact from being reused by a resolved formal encoder contract.
         "encoder": settings.get("encoder", "auto"),
         "encoder_cache_identity": encoder_cache_identity(settings),
-        "gpu_execution_identity": gpu_execution_cache_identity(settings.get("gpu_execution_contract")),
+        "gpu_execution_identity": gpu_execution_cache_identity(gpu_contract),
+        "display_geometry": dict(gpu_contract.get("display_geometry") or {}),
         "audio_codec": profile.get("audio_codec"),
         "audio_sample_rate": profile.get("audio_sample_rate"),
         "audio_channels": profile.get("audio_channels"),

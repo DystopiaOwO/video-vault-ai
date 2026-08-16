@@ -216,7 +216,22 @@ def build_segment_ffmpeg_command(
     else:
         if color:
             video_filters.append(color)
-        video_filters.extend([f"scale={profile['width']}:{profile['height']}:force_original_aspect_ratio=decrease", f"pad={profile['width']}:{profile['height']}:(ow-iw)/2:(oh-ih)/2", f"fps={profile['fps']}", f"format={profile['pixel_format']}"])
+        geometry = gpu_contract.get("display_geometry") if isinstance(gpu_contract.get("display_geometry"), Mapping) else {}
+        policy = str(geometry.get("composition_policy") or settings.get("display_geometry_policy") or "preserve_aspect_pad")
+        if policy == "crop_to_fill":
+            geometry_filters = [
+                "setsar=1",
+                f"scale={profile['width']}:{profile['height']}:force_original_aspect_ratio=increase",
+                f"crop={profile['width']}:{profile['height']}:(iw-ow)/2:(ih-oh)/2",
+            ]
+        else:
+            background = str(settings.get("display_background_color") or "black") if policy == "background" else "black"
+            geometry_filters = [
+                "setsar=1",
+                f"scale={profile['width']}:{profile['height']}:force_original_aspect_ratio=decrease",
+                f"pad={profile['width']}:{profile['height']}:(ow-iw)/2:(oh-ih)/2:color={background}",
+            ]
+        video_filters.extend([*geometry_filters, f"fps={profile['fps']}", f"format={profile['pixel_format']}", "setsar=1"])
         video_filters.append(
             "setparams="
             f"colorspace={str(profile.get('color_matrix') or 'bt709')}:"
@@ -228,6 +243,11 @@ def build_segment_ffmpeg_command(
     args = [str(cfg.get("ffmpeg_path") or "ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
     if gpu_path:
         args.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
+    else:
+        # Make the product contract explicit.  FFmpeg's default autorotate is
+        # correct for Display Matrix sources; the GPU contract only resolves
+        # when no CPU-only display transform is required.
+        args.append("-autorotate")
     args.extend(["-i", str(segment["source_file"])])
     if probe.has_audio:
         audio_filter = build_audio_filter(audio["role"], speed, settings, start=start, end=end, audio_settings=audio)

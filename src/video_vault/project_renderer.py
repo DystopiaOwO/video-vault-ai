@@ -671,6 +671,7 @@ def build_render_report(
                 "filter_chain": list((item.gpu_execution_contract or {}).get("filter_chain") or []),
                 "fallback_reason": str((item.gpu_execution_contract or {}).get("fallback_reason") or ""),
                 "capability_probe": dict((item.gpu_execution_contract or {}).get("capability_probe") or {}),
+                "display_geometry": dict((item.gpu_execution_contract or {}).get("display_geometry") or {}),
                 "encoder_used": item.encoder_used,
                 "elapsed_seconds": item.elapsed_seconds,
             }
@@ -705,6 +706,7 @@ def build_render_report(
                 "gpu_execution_contract_hash": str((item.gpu_execution_contract or {}).get("contract_hash") or ""),
                 "gpu_execution_fallback_reason": str((item.gpu_execution_contract or {}).get("fallback_reason") or ""),
                 "gpu_capability_probe": dict((item.gpu_execution_contract or {}).get("capability_probe") or {}),
+                "display_geometry": dict((item.gpu_execution_contract or {}).get("display_geometry") or {}),
                 "render_elapsed_seconds": item.elapsed_seconds,
                 "approval_provenance_version": provenance["version"],
                 "approval_provenance_hash": provenance["hash"],
