@@ -50,6 +50,8 @@ def test_supported_coffee_resolves_nvdec_cuda_and_emits_real_path(monkeypatch):
     assert "-hwaccel cuda" in text
     assert "-hwaccel_output_format cuda" in text
     assert "scale_cuda=1920:1080:format=yuv420p" in text
+    assert "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=limited" in text
+    assert "-t" in command
     assert "-c:v h264_nvenc" in text
     assert "-pix_fmt" not in command
 

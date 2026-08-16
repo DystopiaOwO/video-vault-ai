@@ -206,10 +206,24 @@ def build_segment_ffmpeg_command(
     gpu_path = str(gpu_contract.get("implementation") or "") == "nvdec_cuda"
     if gpu_path:
         video_filters.append(f"scale_cuda={profile['width']}:{profile['height']}:format={profile['pixel_format']}")
+        video_filters.append(
+            "setparams="
+            f"colorspace={str(profile.get('color_matrix') or 'bt709')}:"
+            f"color_primaries={str(profile.get('color_primaries') or 'bt709')}:"
+            f"color_trc={str(profile.get('color_transfer') or 'bt709')}:"
+            f"range={'limited' if str(profile.get('color_range') or 'tv') == 'tv' else 'full'}"
+        )
     else:
         if color:
             video_filters.append(color)
         video_filters.extend([f"scale={profile['width']}:{profile['height']}:force_original_aspect_ratio=decrease", f"pad={profile['width']}:{profile['height']}:(ow-iw)/2:(oh-ih)/2", f"fps={profile['fps']}", f"format={profile['pixel_format']}"])
+        video_filters.append(
+            "setparams="
+            f"colorspace={str(profile.get('color_matrix') or 'bt709')}:"
+            f"color_primaries={str(profile.get('color_primaries') or 'bt709')}:"
+            f"color_trc={str(profile.get('color_transfer') or 'bt709')}:"
+            f"range={'limited' if str(profile.get('color_range') or 'tv') == 'tv' else 'full'}"
+        )
     graph = [f"[0:v]{','.join(video_filters)}[vout]"]
     args = [str(cfg.get("ffmpeg_path") or "ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
     if gpu_path:
@@ -226,6 +240,11 @@ def build_segment_ffmpeg_command(
         validate_encoder_contract(contract, profile)
         video_args = encoder_arguments(contract)
     output_video_args = ["-r", str(profile["fps"])]
+    if gpu_path:
+        # CUDA frames do not use the CPU ``fps`` filter.  Bound the output
+        # duration explicitly so CFR muxing cannot retain an extra source
+        # frame when the input cadence is not an exact multiple of the target.
+        output_video_args.extend(["-t", f"{timeline:.6f}"])
     # ``scale_cuda`` already establishes the CUDA yuv420p format consumed by
     # h264_nvenc.  Repeating a software ``-pix_fmt yuv420p`` output constraint
     # makes FFmpeg insert an invalid auto_scale transfer on this path.  CPU

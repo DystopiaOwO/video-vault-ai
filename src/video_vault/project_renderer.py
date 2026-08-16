@@ -24,7 +24,7 @@ from .loudness import LoudnessError, build_second_pass_command, measure_loudness
 from .media_probe import SourceProbeRegistry
 from .project import can_project_render, project_dir
 from .render_manifest import manifest_hash, validate_render_manifest
-from .segment_cache import cache_paths
+from .segment_cache import build_segment_cache_key, cache_paths
 from .segment_renderer import SegmentRenderResult, render_segment
 from .segment_provenance import approval_source_fingerprints, segment_approval_provenance
 from .timeline_assembler import TimelineAssemblyError, build_concat_file, build_timeline_command, run_command
@@ -177,6 +177,15 @@ def render_project(
         bgm_fp = None
     approved_source_fingerprints = _approved_source_fingerprints(snapshot)
     profile_id = str((manifest.get("profile") or {}).get("profile_id") or "unknown")
+    # Keep these registries alive across final-cache currentity validation and
+    # the render path.  A cache candidate must resolve the same source/GPU
+    # evidence that a cache miss will use, while VID-31 still gets one fast
+    # probe per unique source.
+    source_probes = SourceProbeRegistry(
+        ffprobe_path,
+        approved_fingerprints=approved_source_fingerprints,
+    )
+    gpu_execution = GPUExecutionRegistry(cfg)
     paths = prepare_final_output_paths(
         folder,
         manifest,
@@ -191,6 +200,8 @@ def render_project(
         ffmpeg_path=ffmpeg_path,
         source_fingerprints=approved_source_fingerprints,
         gpu_execution_requested=gpu_execution_requested,
+        source_probe_registry=source_probes,
+        gpu_execution_registry=gpu_execution,
     )
     output = paths.output
     report_path = paths.report
@@ -206,6 +217,7 @@ def render_project(
             str(item.get("segment_id") or ""): {
                 "version": item.get("contract_version"),
                 "contract_hash": item.get("contract_hash"),
+                "implementation": item.get("implementation"),
                 "decode_requested": item.get("decode_requested"),
                 "decode_used": item.get("decode_used"),
                 "filter_requested": item.get("filter_requested"),
@@ -260,11 +272,6 @@ def render_project(
     loudness_final = None
     total_segment_duration = max(0.001, sum(float(item["timeline_duration_seconds"]) for item in segments))
     completed_segment_duration = 0.0
-    source_probes = SourceProbeRegistry(
-        ffprobe_path,
-        approved_fingerprints=approved_source_fingerprints,
-    )
-    gpu_execution = GPUExecutionRegistry(cfg)
     render_started = time.perf_counter()
     segment_started = time.perf_counter()
     try:
@@ -481,6 +488,8 @@ def prepare_final_output_paths(
     ffmpeg_path: str = "ffmpeg",
     source_fingerprints: Mapping[str, Mapping[str, Any]] | None = None,
     gpu_execution_requested: str = "auto",
+    source_probe_registry: SourceProbeRegistry | None = None,
+    gpu_execution_registry: GPUExecutionRegistry | None = None,
 ) -> FinalOutputPaths:
     renders = (Path(folder) / "renders").expanduser().resolve()
     managed = output_path is None
@@ -492,7 +501,21 @@ def prepare_final_output_paths(
     report_temp = report.with_name(f".{report.name}.tmp")
     log = renders / "logs" / f"{approved_hash}.log"
     validate_project_output_path(folder, manifest, output, partial, report, report_temp)
-    cache_miss_reason = _final_cache_miss_reason(output, report, manifest, approved_hash, profile_id, bgm_fp, ffprobe_path, approval_snapshot=approval_snapshot, encoder_contract=encoder_contract, loudness_policy=loudness_policy, ffmpeg_path=ffmpeg_path, source_fingerprints=source_fingerprints, gpu_execution_requested=gpu_execution_requested)
+    current_gpu_execution = None
+    if output.is_file() and report.is_file() and source_probe_registry is not None and gpu_execution_registry is not None:
+        try:
+            current_gpu_execution = _resolve_current_gpu_execution(
+                manifest,
+                encoder_contract,
+                source_probe_registry,
+                gpu_execution_registry,
+            )
+        except Exception:
+            # A cache candidate whose current source/GPU contract cannot be
+            # resolved is not current.  The render path will retry with these
+            # same registries and fail closed if the source remains invalid.
+            current_gpu_execution = None
+    cache_miss_reason = _final_cache_miss_reason(output, report, manifest, approved_hash, profile_id, bgm_fp, ffprobe_path, approval_snapshot=approval_snapshot, encoder_contract=encoder_contract, loudness_policy=loudness_policy, ffmpeg_path=ffmpeg_path, source_fingerprints=source_fingerprints, gpu_execution_requested=gpu_execution_requested, current_gpu_execution=current_gpu_execution)
     cache_hit = not cache_miss_reason
     paths = FinalOutputPaths(output, partial, report, report_temp, log, managed, cache_hit, cache_miss_reason)
     if cache_hit:
@@ -638,6 +661,7 @@ def build_render_report(
                 "segment_id": item.segment_id,
                 "contract_version": str((item.gpu_execution_contract or {}).get("version") or ""),
                 "contract_hash": str((item.gpu_execution_contract or {}).get("contract_hash") or ""),
+                "implementation": str((item.gpu_execution_contract or {}).get("implementation") or ""),
                 "decode_requested": str((item.gpu_execution_contract or {}).get("decode_requested") or ""),
                 "decode_used": str((item.gpu_execution_contract or {}).get("decode_used") or ""),
                 "filter_requested": str((item.gpu_execution_contract or {}).get("filter_requested") or ""),
@@ -670,6 +694,7 @@ def build_render_report(
                 "encoder_used": item.encoder_used,
                 "duration_seconds": item.duration_seconds,
                 "gpu_execution_contract_version": str((item.gpu_execution_contract or {}).get("version") or ""),
+                "gpu_execution_implementation": str((item.gpu_execution_contract or {}).get("implementation") or ""),
                 "decode_requested": str((item.gpu_execution_contract or {}).get("decode_requested") or ""),
                 "decode_used": str((item.gpu_execution_contract or {}).get("decode_used") or ""),
                 "filter_requested": str((item.gpu_execution_contract or {}).get("filter_requested") or ""),
@@ -720,7 +745,38 @@ def _final_cache_valid(output: Path, report_path: Path, manifest: Mapping[str, A
     return not _final_cache_miss_reason(output, report_path, manifest, manifest_id, profile_id, bgm_fp, ffprobe_path, **kwargs)
 
 
-def _final_cache_miss_reason(output: Path, report_path: Path, manifest: Mapping[str, Any], manifest_id: str, profile_id: str, bgm_fp: Mapping[str, Any] | None, ffprobe_path: str, *, approval_snapshot: Mapping[str, Any] | None = None, encoder_contract: Mapping[str, Any] | None = None, loudness_policy: Mapping[str, Any] | None = None, ffmpeg_path: str = "ffmpeg", source_fingerprints: Mapping[str, Mapping[str, Any]] | None = None, gpu_execution_requested: str = "auto") -> str:
+def _resolve_current_gpu_execution(
+    manifest: Mapping[str, Any],
+    encoder_contract: Mapping[str, Any] | None,
+    source_probe_registry: SourceProbeRegistry,
+    gpu_execution_registry: GPUExecutionRegistry,
+) -> dict[str, Any]:
+    """Resolve current ordered GPU contracts and artifact keys for cache checks."""
+
+    contracts: list[dict[str, Any]] = []
+    cache_keys: list[dict[str, Any]] = []
+    ordered_segments = sorted(manifest.get("segments") or [], key=lambda item: int(item.get("order") or 0))
+    for segment in ordered_segments:
+        source = Path(str(segment.get("source_file") or "")).expanduser().resolve()
+        probe = source_probe_registry.probe(source)
+        gpu_contract = gpu_execution_registry.resolve(manifest, segment, probe, encoder_contract)
+        effective_manifest = deepcopy(manifest)
+        effective_manifest.setdefault("settings", {})["gpu_execution_contract"] = dict(gpu_contract)
+        source_fingerprint = source_probe_registry.fingerprint(source)
+        cache_key = build_segment_cache_key(effective_manifest, segment, source_fingerprint=source_fingerprint)
+        contracts.append(
+            {
+                "segment_id": str(segment.get("segment_id") or ""),
+                "contract_version": str(gpu_contract.get("version") or ""),
+                "contract_hash": str(gpu_contract.get("contract_hash") or ""),
+                "implementation": str(gpu_contract.get("implementation") or ""),
+            }
+        )
+        cache_keys.append({"segment_id": str(segment.get("segment_id") or ""), "cache_key": cache_key})
+    return {"contracts": contracts, "cache_keys": cache_keys}
+
+
+def _final_cache_miss_reason(output: Path, report_path: Path, manifest: Mapping[str, Any], manifest_id: str, profile_id: str, bgm_fp: Mapping[str, Any] | None, ffprobe_path: str, *, approval_snapshot: Mapping[str, Any] | None = None, encoder_contract: Mapping[str, Any] | None = None, loudness_policy: Mapping[str, Any] | None = None, ffmpeg_path: str = "ffmpeg", source_fingerprints: Mapping[str, Mapping[str, Any]] | None = None, gpu_execution_requested: str = "auto", current_gpu_execution: Mapping[str, Any] | None = None) -> str:
     if not output.is_file() or not report_path.is_file():
         return "output_or_report_missing"
     try:
@@ -758,12 +814,47 @@ def _final_cache_miss_reason(output: Path, report_path: Path, manifest: Mapping[
             return "gpu_execution_evidence_missing"
         if any(not isinstance(item, Mapping) or not str(item.get("contract_hash") or "") for item in gpu_segments):
             return "gpu_execution_evidence_missing"
+        if current_gpu_execution is None:
+            if manifest.get("segments"):
+                return "gpu_execution_currentity_unavailable"
+            current_gpu_execution = {"contracts": [], "cache_keys": []}
+        expected_gpu_contracts = [
+            {
+                "segment_id": str(item.get("segment_id") or ""),
+                "contract_version": str(item.get("contract_version") or ""),
+                "contract_hash": str(item.get("contract_hash") or ""),
+                "implementation": str(item.get("implementation") or ""),
+            }
+            for item in current_gpu_execution.get("contracts") or []
+            if isinstance(item, Mapping)
+        ]
+        actual_gpu_contracts = [
+            {
+                "segment_id": str(item.get("segment_id") or ""),
+                "contract_version": str(item.get("contract_version") or ""),
+                "contract_hash": str(item.get("contract_hash") or ""),
+                "implementation": str(item.get("implementation") or ""),
+            }
+            for item in gpu_segments
+            if isinstance(item, Mapping)
+        ]
+        if actual_gpu_contracts != expected_gpu_contracts:
+            return "gpu_execution_contract_changed"
         current_visual = manifest.get("visual_timeline")
         current_visual_hash = stable_visual_hash(current_visual) if isinstance(current_visual, Mapping) and current_visual else ""
         if str(cache.get("visual_timeline_hash") or "") != current_visual_hash:
             return "visual_timeline_changed"
-        actual_keys = [item.get("cache_key") for item in report.get("segments", [])]
-        if len(actual_keys) != len(manifest.get("segments") or []) or any(not key for key in actual_keys):
+        expected_keys = [
+            (str(item.get("segment_id") or ""), str(item.get("cache_key") or ""))
+            for item in current_gpu_execution.get("cache_keys") or []
+            if isinstance(item, Mapping)
+        ]
+        actual_keys = [
+            (str(item.get("segment_id") or ""), str(item.get("cache_key") or ""))
+            for item in report.get("segments", [])
+            if isinstance(item, Mapping)
+        ]
+        if actual_keys != expected_keys or any(not key for _, key in actual_keys):
             return "segment_cache_changed"
         if (report.get("bgm") or {}).get("fingerprint") != dict(bgm_fp or {}):
             return "bgm_changed"

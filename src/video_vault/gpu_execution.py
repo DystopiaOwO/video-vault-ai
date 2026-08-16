@@ -170,7 +170,7 @@ def _resolve_contract(
         "filter_used": "cpu",
         "hardware_api": "cpu",
         "hardware_device": "cpu",
-        "filter_chain": [],
+        "filter_chain": ["scale", "pad", "fps", "format", "setparams"],
         "result": "fallback" if requested != "cpu" else "not_requested",
         "fallback_reason": "explicit_cpu" if requested == "cpu" else "",
         "capability_probe": dict(capability),
@@ -199,6 +199,7 @@ def _resolve_contract(
         "setpts=PTS-STARTPTS",
         f"setpts=PTS/{float(segment.get('speed') or 1):g}",
         scale,
+        f"setparams=colorspace={str(profile.get('color_matrix') or 'bt709')}:color_primaries={str(profile.get('color_primaries') or 'bt709')}:color_trc={str(profile.get('color_transfer') or 'bt709')}:range={'limited' if str(profile.get('color_range') or 'tv') == 'tv' else 'full'}",
     ]
     base.update(
         {
