@@ -1,14 +1,17 @@
 from pathlib import Path
 import shutil
+import subprocess
 from types import SimpleNamespace
 
 import pytest
 
+import video_vault.visual_compositor as visual_compositor
 from video_vault.visual_compositor import (
     VisualCompositionError,
     render_visual_cards,
     resolve_visual_timeline,
     stable_visual_hash,
+    visual_cache_key,
 )
 
 
@@ -167,6 +170,67 @@ def test_visual_hash_changes_when_text_or_duration_changes():
     assert stable_visual_hash(base) != stable_visual_hash(changed)
 
 
+def _chapter_card_timeline():
+    resolved = resolve_visual_timeline(
+        {"items": [{"stable_id": "chapter", "type": "chapter_card", "duration_seconds": 1.5, "text": "Chapter", "style_id": "location-lower-left", "animation_id": "static"}]},
+        _segments(),
+        PROFILE,
+        require_assets=True,
+    )
+    return {**resolved, "sequence": [entry for entry in resolved["sequence"] if entry["kind"] == "visual"]}
+
+
+def test_visual_render_cache_version_is_separate_from_approved_timeline_identity(monkeypatch):
+    timeline = _chapter_card_timeline()
+    item = timeline["resolved_items"][0]
+    approved_before = resolve_visual_timeline(timeline, _segments(), PROFILE, require_assets=True)
+
+    monkeypatch.setattr(visual_compositor, "VISUAL_RENDER_CACHE_VERSION", "visual-render-cache-v1")
+    old_key = visual_cache_key(item, PROFILE)
+    monkeypatch.setattr(visual_compositor, "VISUAL_RENDER_CACHE_VERSION", "visual-render-cache-v2")
+    new_key = visual_cache_key(item, PROFILE)
+    approved_after = resolve_visual_timeline(timeline, _segments(), PROFILE, require_assets=True)
+
+    assert old_key != new_key
+    assert approved_before["resolution_version"] == "visual-composition-v1"
+    assert approved_after["resolution_version"] == approved_before["resolution_version"]
+    assert approved_after["resolution_hash"] == approved_before["resolution_hash"]
+    assert [item["stable_id"] for item in approved_after["resolved_items"]] == [item["stable_id"] for item in approved_before["resolved_items"]]
+    assert [item["duration_seconds"] for item in approved_after["resolved_items"]] == [item["duration_seconds"] for item in approved_before["resolved_items"]]
+
+
+def test_old_visual_render_cache_version_misses_and_new_version_hits(tmp_path: Path, monkeypatch):
+    timeline = _chapter_card_timeline()
+    calls = []
+
+    class Runner:
+        def run(self, command, **kwargs):
+            calls.append((command, kwargs))
+            Path(command[-1]).write_bytes(b"rendered chapter card")
+            return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(visual_compositor, "VISUAL_RENDER_CACHE_VERSION", "visual-render-cache-v1")
+    _, old_evidence, _ = render_visual_cards(
+        timeline, {}, tmp_path / "cache", tmp_path / "work", PROFILE, "ffmpeg", runner=Runner()
+    )
+    old_key = old_evidence[0]["cache_key"]
+
+    monkeypatch.setattr(visual_compositor, "VISUAL_RENDER_CACHE_VERSION", "visual-render-cache-v2")
+    _, new_evidence, _ = render_visual_cards(
+        timeline, {}, tmp_path / "cache", tmp_path / "work", PROFILE, "ffmpeg", runner=Runner()
+    )
+    assert new_evidence[0]["cache_key"] != old_key
+    assert new_evidence[0]["cache_hit"] is False
+    assert len(calls) == 2
+
+    _, repeat_evidence, _ = render_visual_cards(
+        timeline, {}, tmp_path / "cache", tmp_path / "work", PROFILE, "ffmpeg", runner=Runner()
+    )
+    assert repeat_evidence[0]["cache_key"] == new_evidence[0]["cache_key"]
+    assert repeat_evidence[0]["cache_hit"] is True
+    assert len(calls) == 2
+
+
 def test_visual_card_render_uses_managed_runner(tmp_path: Path):
     timeline = resolve_visual_timeline(
         {"items": [{"stable_id": "intro", "type": "intro", "duration_seconds": 1, "text": "Title", "style_id": "title-center", "animation_id": "fade-in-out"}]},
@@ -193,6 +257,57 @@ def test_visual_card_render_uses_managed_runner(tmp_path: Path):
     )
     assert paths[0].is_file()
     assert calls and calls[0][1]["expected_duration_seconds"] == 1.0
+
+
+def test_chapter_card_background_is_dark_but_not_formal_black(tmp_path: Path):
+    timeline = resolve_visual_timeline(
+        {"items": [{"stable_id": "chapter", "type": "chapter_card", "duration_seconds": 1, "text": "Chapter", "style_id": "location-lower-left", "animation_id": "static"}]},
+        _segments(),
+        PROFILE,
+        require_assets=True,
+    )
+    calls = []
+
+    class Runner:
+        def run(self, command, **kwargs):
+            calls.append((command, kwargs))
+            Path(command[-1]).write_bytes(b"managed visual")
+            return SimpleNamespace(returncode=0, stderr="")
+
+    render_visual_cards(
+        {**timeline, "sequence": [entry for entry in timeline["sequence"] if entry["kind"] == "visual"]},
+        {},
+        tmp_path / "cache",
+        tmp_path / "work",
+        PROFILE,
+        "ffmpeg",
+        runner=Runner(),
+    )
+    command = calls[0][0]
+    color_input = command[command.index("-i") + 1]
+    assert color_input.startswith("color=c=0x20242a:")
+    assert "color=c=black" not in color_input
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required for blackdetect media test")
+def test_real_rendered_chapter_card_has_no_interior_blackdetect_event(tmp_path: Path):
+    timeline = _chapter_card_timeline()
+    paths, _, _ = render_visual_cards(
+        timeline, {}, tmp_path / "cache", tmp_path / "work", PROFILE, "ffmpeg"
+    )
+    result = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "info", "-nostdin", "-i", str(paths[0]),
+            "-vf", "blackdetect=d=0.5:pix_th=0.10", "-an", "-f", "null", "-",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "black_start:" not in result.stderr
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required for visual card media test")
