@@ -10,6 +10,7 @@ import math
 from pathlib import Path
 import subprocess
 import hashlib
+import time
 from typing import Any, Callable, Mapping
 
 from .bgm_pipeline import BgmPipelineError, bgm_fingerprint, build_bgm_mix_command, validate_bgm_track
@@ -18,11 +19,12 @@ from .artifact_retention import (
     ensure_render_free_space,
 )
 from .final_qc import FinalQCResult, sha256_file, validate_final_output
+from .gpu_execution import GPU_EXECUTION_CONTRACT_VERSION, GPUExecutionRegistry
 from .loudness import LoudnessError, build_second_pass_command, measure_loudness
 from .media_probe import SourceProbeRegistry
 from .project import can_project_render, project_dir
 from .render_manifest import manifest_hash, validate_render_manifest
-from .segment_cache import build_segment_cache_key, cache_paths
+from .segment_cache import cache_paths
 from .segment_renderer import SegmentRenderResult, render_segment
 from .segment_provenance import approval_source_fingerprints, segment_approval_provenance
 from .timeline_assembler import TimelineAssemblyError, build_concat_file, build_timeline_command, run_command
@@ -163,6 +165,8 @@ def render_project(
     normalization = dict(((manifest.get("settings") or {}).get("audio") or {}).get("normalization") or {})
     ffmpeg_path = str(cfg.get("ffmpeg_path") or "ffmpeg")
     ffprobe_path = str(cfg.get("ffprobe_path") or "ffprobe")
+    configured_gpu_execution = (manifest.get("settings") or {}).get("gpu_execution")
+    gpu_execution_requested = str(configured_gpu_execution or ("auto" if str((encoder_contract or {}).get("implementation") or "") == "h264_nvenc" else "cpu"))
     if track is not None:
         try:
             validate_bgm_track(track, ffprobe_path)
@@ -186,6 +190,7 @@ def render_project(
         loudness_policy=normalization,
         ffmpeg_path=ffmpeg_path,
         source_fingerprints=approved_source_fingerprints,
+        gpu_execution_requested=gpu_execution_requested,
     )
     output = paths.output
     report_path = paths.report
@@ -197,6 +202,22 @@ def render_project(
         _execution_update(execution, stage="done", percent=100, message="Final Cache 命中，正式輸出已存在")
         report = _read_json(report_path)
         cache_root = folder / "cache" / "segments"
+        gpu_segments = {
+            str(item.get("segment_id") or ""): {
+                "version": item.get("contract_version"),
+                "contract_hash": item.get("contract_hash"),
+                "decode_requested": item.get("decode_requested"),
+                "decode_used": item.get("decode_used"),
+                "filter_requested": item.get("filter_requested"),
+                "filter_used": item.get("filter_used"),
+                "hardware_api": item.get("hardware_api"),
+                "hardware_device": item.get("hardware_device"),
+                "filter_chain": item.get("filter_chain") or [],
+                "fallback_reason": item.get("fallback_reason"),
+                "capability_probe": item.get("capability_probe") or {},
+            }
+            for item in report.get("gpu_execution_segments", []) if isinstance(item, Mapping)
+        }
         cached_results = tuple(
             SegmentRenderResult(
                 str(item["segment_id"]),
@@ -207,6 +228,8 @@ def render_project(
                 str(item.get("encoder_used") or ""),
                 float(item.get("duration_seconds") or 0),
                 tuple(item.get("warnings") or []),
+                dict(gpu_segments.get(str(item.get("segment_id") or "")) or {}),
+                float((gpu_segments.get(str(item.get("segment_id") or "")) or {}).get("elapsed_seconds") or 0.0),
             )
             for item in report.get("segments", [])
         )
@@ -241,6 +264,9 @@ def render_project(
         ffprobe_path,
         approved_fingerprints=approved_source_fingerprints,
     )
+    gpu_execution = GPUExecutionRegistry(cfg)
+    render_started = time.perf_counter()
+    segment_started = time.perf_counter()
     try:
         work_dir.mkdir(parents=True, exist_ok=True)
         if manifest.get("visual_items") and not visual_timeline.get("resolved_items"):
@@ -260,10 +286,12 @@ def render_project(
                 force=True,
             )
             _execution_begin_ffmpeg(execution, "segments", segment_start, segment_span, segment_duration, f"正在輸出片段 {index}/{len(segments)}")
-            segment_results.append(render_segment(cfg, manifest, segment, runner=runner, source_probe_registry=source_probes))
+            segment_results.append(render_segment(cfg, manifest, segment, runner=runner, source_probe_registry=source_probes, gpu_execution_registry=gpu_execution))
             completed_segment_duration += segment_duration
             _execution_check(execution)
             _execution_update(execution, stage="segments", percent=5 + 70 * (completed_segment_duration / total_segment_duration), message=f"已完成片段 {index}/{len(segments)}", current_segment_id=str(segment.get("segment_id") or ""), current_segment_index=index)
+        segment_elapsed = time.perf_counter() - segment_started
+        assembly_started = time.perf_counter()
         # Production results carry the stable segment id.  Keep a positional
         # fallback for legacy callers/test doubles that only return one shared
         # placeholder id; the manifest order remains authoritative.
@@ -320,6 +348,7 @@ def render_project(
             result = run_command(command, runner)
         if int(getattr(result, "returncode", 0) or 0) != 0:
             raise ProjectRenderError(str(getattr(result, "stderr", "") or "FFmpeg project render failed"))
+        assembly_elapsed = time.perf_counter() - assembly_started
         if visual_overlays:
             visual_partial = partial.with_name(f".{partial.stem}.visual.mp4")
             apply_lower_thirds(ffmpeg_path, partial, visual_partial, visual_overlays, manifest["profile"], work_dir, expected, runner=runner or getattr(execution, "runner", None))
@@ -352,7 +381,7 @@ def render_project(
             "analysis": loudness_analysis.to_dict() if loudness_analysis is not None else {},
             "final": loudness_final.to_dict() if loudness_final is not None else {},
         }
-        report = build_render_report(project_id, manifest, output, qc, segment_results, track, bgm_fp, output_size=partial.stat().st_size, approval_snapshot=snapshot, encoder_contract=encoder_contract, loudness=report_loudness, loudness_policy=normalization, bgm_source="new" if (folder / "audio_settings.json").is_file() else "legacy", cache_miss_reason=paths.cache_miss_reason, disk_preflight=disk_preflight, visual_timeline=visual_timeline, visual_evidence=visual_evidence, source_probe_audit=source_probes.audit())
+        report = build_render_report(project_id, manifest, output, qc, segment_results, track, bgm_fp, output_size=partial.stat().st_size, approval_snapshot=snapshot, encoder_contract=encoder_contract, loudness=report_loudness, loudness_policy=normalization, bgm_source="new" if (folder / "audio_settings.json").is_file() else "legacy", cache_miss_reason=paths.cache_miss_reason, disk_preflight=disk_preflight, visual_timeline=visual_timeline, visual_evidence=visual_evidence, source_probe_audit=source_probes.audit(), gpu_execution_requested=gpu_execution_requested, render_timing={"segment_render_elapsed_seconds": round(segment_elapsed, 6), "assembly_elapsed_seconds": round(assembly_elapsed, 6), "total_elapsed_seconds": round(time.perf_counter() - render_started, 6)})
         report_temp_created = True
         report_temp.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         _execution_check(execution)
@@ -451,6 +480,7 @@ def prepare_final_output_paths(
     loudness_policy: Mapping[str, Any] | None = None,
     ffmpeg_path: str = "ffmpeg",
     source_fingerprints: Mapping[str, Mapping[str, Any]] | None = None,
+    gpu_execution_requested: str = "auto",
 ) -> FinalOutputPaths:
     renders = (Path(folder) / "renders").expanduser().resolve()
     managed = output_path is None
@@ -462,7 +492,7 @@ def prepare_final_output_paths(
     report_temp = report.with_name(f".{report.name}.tmp")
     log = renders / "logs" / f"{approved_hash}.log"
     validate_project_output_path(folder, manifest, output, partial, report, report_temp)
-    cache_miss_reason = _final_cache_miss_reason(output, report, manifest, approved_hash, profile_id, bgm_fp, ffprobe_path, approval_snapshot=approval_snapshot, encoder_contract=encoder_contract, loudness_policy=loudness_policy, ffmpeg_path=ffmpeg_path, source_fingerprints=source_fingerprints)
+    cache_miss_reason = _final_cache_miss_reason(output, report, manifest, approved_hash, profile_id, bgm_fp, ffprobe_path, approval_snapshot=approval_snapshot, encoder_contract=encoder_contract, loudness_policy=loudness_policy, ffmpeg_path=ffmpeg_path, source_fingerprints=source_fingerprints, gpu_execution_requested=gpu_execution_requested)
     cache_hit = not cache_miss_reason
     paths = FinalOutputPaths(output, partial, report, report_temp, log, managed, cache_hit, cache_miss_reason)
     if cache_hit:
@@ -544,6 +574,8 @@ def build_render_report(
     visual_timeline: Mapping[str, Any] | None = None,
     visual_evidence: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] | None = None,
     source_probe_audit: Mapping[str, Any] | None = None,
+    gpu_execution_requested: str = "auto",
+    render_timing: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     visual = dict(visual_timeline or {})
     ordered_manifest_segments = sorted(
@@ -599,6 +631,28 @@ def build_render_report(
             "visual_timeline_hash": stable_visual_hash(visual) if visual else "",
         },
         "probe_audit": dict(source_probe_audit or {}),
+        "gpu_execution_contract_version": GPU_EXECUTION_CONTRACT_VERSION,
+        "gpu_execution_requested": str(gpu_execution_requested or "auto"),
+        "gpu_execution_segments": [
+            {
+                "segment_id": item.segment_id,
+                "contract_version": str((item.gpu_execution_contract or {}).get("version") or ""),
+                "contract_hash": str((item.gpu_execution_contract or {}).get("contract_hash") or ""),
+                "decode_requested": str((item.gpu_execution_contract or {}).get("decode_requested") or ""),
+                "decode_used": str((item.gpu_execution_contract or {}).get("decode_used") or ""),
+                "filter_requested": str((item.gpu_execution_contract or {}).get("filter_requested") or ""),
+                "filter_used": str((item.gpu_execution_contract or {}).get("filter_used") or ""),
+                "hardware_api": str((item.gpu_execution_contract or {}).get("hardware_api") or ""),
+                "hardware_device": str((item.gpu_execution_contract or {}).get("hardware_device") or ""),
+                "filter_chain": list((item.gpu_execution_contract or {}).get("filter_chain") or []),
+                "fallback_reason": str((item.gpu_execution_contract or {}).get("fallback_reason") or ""),
+                "capability_probe": dict((item.gpu_execution_contract or {}).get("capability_probe") or {}),
+                "encoder_used": item.encoder_used,
+                "elapsed_seconds": item.elapsed_seconds,
+            }
+            for item in segment_results
+        ],
+        "render_timing": dict(render_timing or {}),
         "disk_preflight": dict(disk_preflight or {}),
         "measurements": dict(qc.measurements or {}),
         "profile_id": manifest["profile"]["profile_id"],
@@ -615,6 +669,18 @@ def build_render_report(
                 "encoder_requested": item.encoder_requested,
                 "encoder_used": item.encoder_used,
                 "duration_seconds": item.duration_seconds,
+                "gpu_execution_contract_version": str((item.gpu_execution_contract or {}).get("version") or ""),
+                "decode_requested": str((item.gpu_execution_contract or {}).get("decode_requested") or ""),
+                "decode_used": str((item.gpu_execution_contract or {}).get("decode_used") or ""),
+                "filter_requested": str((item.gpu_execution_contract or {}).get("filter_requested") or ""),
+                "filter_used": str((item.gpu_execution_contract or {}).get("filter_used") or ""),
+                "hardware_api": str((item.gpu_execution_contract or {}).get("hardware_api") or ""),
+                "hardware_device": str((item.gpu_execution_contract or {}).get("hardware_device") or ""),
+                "filter_chain": list((item.gpu_execution_contract or {}).get("filter_chain") or []),
+                "gpu_execution_contract_hash": str((item.gpu_execution_contract or {}).get("contract_hash") or ""),
+                "gpu_execution_fallback_reason": str((item.gpu_execution_contract or {}).get("fallback_reason") or ""),
+                "gpu_capability_probe": dict((item.gpu_execution_contract or {}).get("capability_probe") or {}),
+                "render_elapsed_seconds": item.elapsed_seconds,
                 "approval_provenance_version": provenance["version"],
                 "approval_provenance_hash": provenance["hash"],
                 "warnings": list(item.warnings),
@@ -654,7 +720,7 @@ def _final_cache_valid(output: Path, report_path: Path, manifest: Mapping[str, A
     return not _final_cache_miss_reason(output, report_path, manifest, manifest_id, profile_id, bgm_fp, ffprobe_path, **kwargs)
 
 
-def _final_cache_miss_reason(output: Path, report_path: Path, manifest: Mapping[str, Any], manifest_id: str, profile_id: str, bgm_fp: Mapping[str, Any] | None, ffprobe_path: str, *, approval_snapshot: Mapping[str, Any] | None = None, encoder_contract: Mapping[str, Any] | None = None, loudness_policy: Mapping[str, Any] | None = None, ffmpeg_path: str = "ffmpeg", source_fingerprints: Mapping[str, Mapping[str, Any]] | None = None) -> str:
+def _final_cache_miss_reason(output: Path, report_path: Path, manifest: Mapping[str, Any], manifest_id: str, profile_id: str, bgm_fp: Mapping[str, Any] | None, ffprobe_path: str, *, approval_snapshot: Mapping[str, Any] | None = None, encoder_contract: Mapping[str, Any] | None = None, loudness_policy: Mapping[str, Any] | None = None, ffmpeg_path: str = "ffmpeg", source_fingerprints: Mapping[str, Mapping[str, Any]] | None = None, gpu_execution_requested: str = "auto") -> str:
     if not output.is_file() or not report_path.is_file():
         return "output_or_report_missing"
     try:
@@ -683,22 +749,21 @@ def _final_cache_miss_reason(output: Path, report_path: Path, manifest: Mapping[
                 return "encoder_contract_changed"
         if _policy_key(loudness_policy) != str(cache.get("loudness_policy_key") or _policy_key(report.get("loudness_policy") or {})):
             return "loudness_policy_changed"
+        if str(report.get("gpu_execution_contract_version") or "") != GPU_EXECUTION_CONTRACT_VERSION:
+            return "gpu_execution_contract_outdated"
+        if str(report.get("gpu_execution_requested") or "") != str(gpu_execution_requested or "auto"):
+            return "gpu_execution_request_changed"
+        gpu_segments = report.get("gpu_execution_segments")
+        if not isinstance(gpu_segments, list) or len(gpu_segments) != len(manifest.get("segments") or []):
+            return "gpu_execution_evidence_missing"
+        if any(not isinstance(item, Mapping) or not str(item.get("contract_hash") or "") for item in gpu_segments):
+            return "gpu_execution_evidence_missing"
         current_visual = manifest.get("visual_timeline")
         current_visual_hash = stable_visual_hash(current_visual) if isinstance(current_visual, Mapping) and current_visual else ""
         if str(cache.get("visual_timeline_hash") or "") != current_visual_hash:
             return "visual_timeline_changed"
-        expected_keys = [
-            build_segment_cache_key(
-                manifest,
-                segment,
-                source_fingerprint=(source_fingerprints or {}).get(
-                    str(Path(str(segment.get("source_file") or "")).expanduser().resolve())
-                ),
-            )
-            for segment in sorted(manifest["segments"], key=lambda item: int(item["order"]))
-        ]
         actual_keys = [item.get("cache_key") for item in report.get("segments", [])]
-        if actual_keys != expected_keys:
+        if len(actual_keys) != len(manifest.get("segments") or []) or any(not key for key in actual_keys):
             return "segment_cache_changed"
         if (report.get("bgm") or {}).get("fingerprint") != dict(bgm_fp or {}):
             return "bgm_changed"

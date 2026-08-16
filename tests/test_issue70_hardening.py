@@ -61,6 +61,9 @@ def test_final_cache_revalidation_binds_snapshot_and_encoder_contract(monkeypatc
         "qc_schema_version": 2,
         "approval_snapshot": snapshot,
         "encoder_contract": contract,
+        "gpu_execution_contract_version": "1",
+        "gpu_execution_requested": "auto",
+        "gpu_execution_segments": [{"segment_id": "seg-1", "contract_hash": "cpu-test"}],
         "cache": {
             "qc_policy_version": 2,
             "snapshot_id": snapshot["snapshot_id"],
@@ -98,6 +101,7 @@ def test_report_cache_revalidation_fails_closed_when_qc_probe_errors(monkeypatch
     report_path = output.with_name(output.name + ".render.json")
     report_path.write_text(json.dumps({
         "manifest_hash": "m", "profile_id": "final_1080p", "qc_schema_version": 2,
+        "gpu_execution_contract_version": "1", "gpu_execution_requested": "auto", "gpu_execution_segments": [],
         "cache": {"qc_policy_version": 2, "loudness_policy_key": _policy_key(None)},
         "segments": [], "bgm": {"fingerprint": {}}, "output_size": output.stat().st_size,
         "output_sha256": "digest", "qc": {"passed": True},
@@ -128,6 +132,7 @@ def test_final_cache_hit_revalidates_loudness_against_current_policy(monkeypatch
     policy = {"enabled": True, "target_lufs": -14.0, "true_peak_db": -1.0}
     report = {
         "manifest_hash": "m" * 64, "profile_id": "final_1080p", "qc_schema_version": 2,
+        "gpu_execution_contract_version": "1", "gpu_execution_requested": "auto", "gpu_execution_segments": [{"segment_id": "seg-1", "contract_hash": "cpu-test"}],
         "loudness_policy": policy,
         "loudness": {"final": {"measured_I": -14.0, "measured_TP": -1.0}},
         "cache": {"qc_policy_version": 2, "loudness_policy_key": _policy_key(policy)},

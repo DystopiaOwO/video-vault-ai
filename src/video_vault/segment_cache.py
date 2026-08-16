@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from .gpu_execution import gpu_execution_cache_identity
+
 
 SEGMENT_RENDERER_CONTRACT_VERSION = 5
 
@@ -70,6 +72,7 @@ def cache_key_payload(
         # artifact from being reused by a resolved formal encoder contract.
         "encoder": settings.get("encoder", "auto"),
         "encoder_cache_identity": encoder_cache_identity(settings),
+        "gpu_execution_identity": gpu_execution_cache_identity(settings.get("gpu_execution_contract")),
         "audio_codec": profile.get("audio_codec"),
         "audio_sample_rate": profile.get("audio_sample_rate"),
         "audio_channels": profile.get("audio_channels"),
