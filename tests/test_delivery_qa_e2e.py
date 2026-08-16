@@ -9,7 +9,7 @@ import pytest
 from video_vault.database import create_project_row, init_db
 from video_vault.delivery_qa import run_delivery_qa
 from video_vault.project import project_dir
-from video_vault.segment_cache import build_segment_cache_key
+from video_vault.segment_provenance import segment_approval_provenance
 
 
 FFMPEG = shutil.which("ffmpeg")
@@ -54,12 +54,14 @@ def test_real_ffmpeg_delivery_qa_creates_evidence_without_touching_source(tmp_pa
         "settings": {},
         "bgm": [],
     }
-    snapshot = {"snapshot_id": "approval-real", "snapshot_hash": "d" * 64, "manifest_hash": manifest_hash, "manifest": manifest, "assets": [{"canonical_path": str(source), "sha256": original_hash, "kind": "source_media"}]}
+    source_asset = {"canonical_path": str(source), "sha256": original_hash, "size": source.stat().st_size, "mtime_ns": source.stat().st_mtime_ns, "kind": "source_media"}
+    snapshot = {"snapshot_id": "approval-real", "snapshot_hash": "d" * 64, "manifest_hash": manifest_hash, "manifest": manifest, "assets": [source_asset]}
+    provenance = segment_approval_provenance(manifest, manifest["segments"][0], source_fingerprint=source_asset)
     output.with_name(output.name + ".render.json").write_text(json.dumps({
         "manifest_hash": manifest_hash,
         "output_sha256": _sha(output),
         "loudness": {"final": {"measured_I": -14, "measured_TP": -1.2}},
-        "segments": [{"cache_key": build_segment_cache_key(manifest, manifest["segments"][0])}],
+        "segments": [{"segment_id": "stable-segment-1", "cache_key": "legacy-cache-audit", "approval_provenance_version": provenance["version"], "approval_provenance_hash": provenance["hash"]}],
         "bgm": {"used": False, "fingerprint": {}},
         "qc": {"passed": True},
         "measurements": {"decode": {"ok": True}, "timestamp_monotonic": True},
@@ -120,11 +122,13 @@ def test_real_ffmpeg_brightness_flash_switch_creates_timestamped_warning(tmp_pat
         "settings": {},
         "bgm": [],
     }
-    snapshot = {"snapshot_id": "approval-flash", "snapshot_hash": "f" * 64, "manifest_hash": manifest_hash, "manifest": manifest, "assets": [{"canonical_path": str(source), "sha256": _sha(source), "kind": "source_media"}]}
+    source_asset = {"canonical_path": str(source), "sha256": _sha(source), "size": source.stat().st_size, "mtime_ns": source.stat().st_mtime_ns, "kind": "source_media"}
+    snapshot = {"snapshot_id": "approval-flash", "snapshot_hash": "f" * 64, "manifest_hash": manifest_hash, "manifest": manifest, "assets": [source_asset]}
+    provenance = segment_approval_provenance(manifest, manifest["segments"][0], source_fingerprint=source_asset)
     output.with_name(output.name + ".render.json").write_text(json.dumps({
         "manifest_hash": manifest_hash,
         "output_sha256": _sha(output),
-        "segments": [{"cache_key": build_segment_cache_key(manifest, manifest["segments"][0])}],
+        "segments": [{"segment_id": "flash-segment", "cache_key": "legacy-cache-audit", "approval_provenance_version": provenance["version"], "approval_provenance_hash": provenance["hash"]}],
         "bgm": {"used": False, "fingerprint": {}},
         "qc": {"passed": True},
         "measurements": {"decode": {"ok": True}, "timestamp_monotonic": True},

@@ -10,6 +10,8 @@ from video_vault.loudness import LoudnessError, _loudnorm_json
 from video_vault.project_renderer import build_render_report
 from video_vault.render_api import build_render_report_dto
 from video_vault.final_qc import FinalQCResult
+from video_vault.segment_renderer import SegmentRenderResult
+from video_vault.segment_provenance import SEGMENT_APPROVAL_PROVENANCE_VERSION, segment_approval_provenance
 
 
 def _profile() -> dict:
@@ -178,6 +180,43 @@ def test_render_report_and_api_expose_encoder_probe_audit(tmp_path):
     assert report["encoder_probe_audit"] == contract["nvenc_probe"]
     dto = build_render_report_dto(report, currentity="current").to_dict()
     assert dto["encoder_probe_audit"] == contract["nvenc_probe"]
+
+
+def test_render_report_records_semantic_segment_provenance_without_runtime_identity(tmp_path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"approved source")
+    segment = {
+        "segment_id": "segment-1",
+        "order": 1,
+        "source_file": str(source),
+        "source_in_seconds": 0,
+        "source_out_seconds": 2,
+        "source_duration_seconds": 2,
+        "speed": 1,
+        "timeline_duration_seconds": 2,
+        "audio_role": "lower_original",
+        "audio": {"role": "lower_original", "volume_db": -1, "fade_in_seconds": 0, "fade_out_seconds": 0},
+    }
+    manifest = {
+        "manifest_hash": "m",
+        "profile": {"profile_id": "final_1080p", "width": 1920, "height": 1080, "fps": 30, "video_codec": "h264", "pixel_format": "yuv420p", "audio_codec": "aac", "audio_sample_rate": 48000, "audio_channels": 2},
+        "settings": {"encoder": "auto", "encoder_contract": {"implementation": "h264_nvenc", "version": "2", "contract_hash": "runtime"}},
+        "segments": [segment],
+    }
+    source_asset = {"canonical_path": str(source), "kind": "source", "sha256": "a" * 64, "size": source.stat().st_size, "mtime_ns": source.stat().st_mtime_ns}
+    snapshot = {"assets": [source_asset]}
+    (tmp_path / "final.mp4").write_bytes(b"final")
+    result = SegmentRenderResult("segment-1", tmp_path / "segment.mp4", "artifact-cache-v5", False, "auto", "h264_nvenc", 2.0)
+    report = build_render_report(1, manifest, tmp_path / "final.mp4", FinalQCResult(True, 2.0, "digest"), [result], None, None, approval_snapshot=snapshot)
+    item = report["segments"][0]
+    expected = segment_approval_provenance(manifest, segment, source_fingerprint=source_asset)
+    assert item["approval_provenance_version"] == SEGMENT_APPROVAL_PROVENANCE_VERSION
+    assert item["approval_provenance_hash"] == expected["hash"]
+    assert item["cache_key"] == "artifact-cache-v5"
+
+    runtime_changed = {**manifest, "settings": {"encoder": "auto", "encoder_contract": {"implementation": "libx264", "version": "2", "contract_hash": "other", "nvenc_probe": {"stderr_tail": "changed"}}}}
+    changed = build_render_report(1, runtime_changed, tmp_path / "final.mp4", FinalQCResult(True, 2.0, "digest"), [result], None, None, approval_snapshot=snapshot)
+    assert changed["segments"][0]["approval_provenance_hash"] == item["approval_provenance_hash"]
 
 
 def test_pre_vid33_encoder_contract_version_is_rejected(monkeypatch):

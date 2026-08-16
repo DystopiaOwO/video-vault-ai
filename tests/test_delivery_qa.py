@@ -11,7 +11,7 @@ from video_vault.bgm_pipeline import bgm_fingerprint
 from video_vault.media_probe import MediaProbe
 from video_vault.project import project_dir
 from video_vault.render_job_store import RenderJobStore
-from video_vault.segment_cache import build_segment_cache_key
+from video_vault.segment_provenance import segment_approval_provenance
 
 
 def _sha(path: Path) -> str:
@@ -47,7 +47,7 @@ def _fixture(tmp_path: Path, monkeypatch, *, analysis=None, loudness=True):
         "approved_project_revision": project_revision(db, project_id),
         "manifest_hash": manifest_hash,
         "manifest": manifest,
-        "assets": [{"canonical_path": str(source), "sha256": _sha(source), "kind": "source_media"}],
+        "assets": [{"canonical_path": str(source), "sha256": _sha(source), "size": source.stat().st_size, "mtime_ns": source.stat().st_mtime_ns, "kind": "source_media"}],
     }
     (folder / "review_status.json").write_text(json.dumps({
         "status": "approved",
@@ -59,7 +59,12 @@ def _fixture(tmp_path: Path, monkeypatch, *, analysis=None, loudness=True):
         "manifest_hash": manifest_hash,
         "output_sha256": _sha(output),
         "loudness": {"final": {"measured_I": -14.0, "measured_TP": -1.2}} if loudness else {},
-        "segments": [{"segment_id": "segment-uuid-1", "cache_key": build_segment_cache_key(manifest, manifest["segments"][0])}],
+        "segments": [{
+            "segment_id": "segment-uuid-1",
+            "cache_key": "artifact-cache-key-v5",
+            "approval_provenance_version": segment_approval_provenance(manifest, manifest["segments"][0], source_fingerprint=snapshot["assets"][0])["version"],
+            "approval_provenance_hash": segment_approval_provenance(manifest, manifest["segments"][0], source_fingerprint=snapshot["assets"][0])["hash"],
+        }],
         "bgm": {"used": False, "fingerprint": {}},
         "qc": {"passed": True},
         "measurements": {"decode": {"ok": True}, "timestamp_monotonic": True},
@@ -253,20 +258,22 @@ def test_audio_check_audits_clipping_invalid_samples_bgm_coverage_and_effective_
         "segments": [{"segment_id": "segment-1", "source_file": str(source), "audio_role": "keep_original", "audio": {"role": "mute", "fade_in_seconds": 0.1, "fade_out_seconds": 0.1}}],
         "bgm": [{"track_id": 1, "source_path": str(bgm_source), "loop": False, "start_seconds": 0, "duration_seconds": 2, "fade_in_seconds": 0, "fade_out_seconds": 0}],
     }
+    approval = {"assets": [{"canonical_path": str(source), "kind": "source_media", "sha256": _sha(source), "size": source.stat().st_size, "mtime_ns": source.stat().st_mtime_ns}]}
+    provenance = segment_approval_provenance(manifest, manifest["segments"][0], source_fingerprint=approval["assets"][0])
     render_report = {
         "loudness": {"final": {"measured_I": -14, "measured_TP": -1.2}},
-        "segments": [{"cache_key": build_segment_cache_key(manifest, manifest["segments"][0])}],
+        "segments": [{"segment_id": "segment-1", "cache_key": "resolved-v5-cache", "approval_provenance_version": provenance["version"], "approval_provenance_hash": provenance["hash"]}],
         "bgm": {"used": True, "fingerprint": bgm_fingerprint(manifest["bgm"][0])},
     }
-    warning = delivery_qa._audio_check({"ok": True, "events": {"silence": []}, "max_volume_db": -0.01, "invalid_sample_count": 0}, probe, render_report, manifest, delivery_qa._GENERAL_THRESHOLDS)
+    warning = delivery_qa._audio_check({"ok": True, "events": {"silence": []}, "max_volume_db": -0.01, "invalid_sample_count": 0}, probe, render_report, manifest, delivery_qa._GENERAL_THRESHOLDS, approval_snapshot=approval)
     assert warning["status"] == "warning"
     assert warning["metrics"]["audio_roles"] == {"mute": 1}
     assert "提前終止" in warning["summary"]
-    blocked = delivery_qa._audio_check({"ok": True, "events": {"silence": []}, "max_volume_db": 0, "invalid_sample_count": 1}, probe, render_report, manifest, delivery_qa._GENERAL_THRESHOLDS)
+    blocked = delivery_qa._audio_check({"ok": True, "events": {"silence": []}, "max_volume_db": 0, "invalid_sample_count": 1}, probe, render_report, manifest, delivery_qa._GENERAL_THRESHOLDS, approval_snapshot=approval)
     assert blocked["status"] == "blocked"
 
 
-def test_audio_provenance_blocks_wrong_segment_keys_and_bgm_and_accepts_correct_contract(tmp_path: Path):
+def test_audio_provenance_ignores_cache_key_but_blocks_semantic_mutations(tmp_path: Path):
     source = tmp_path / "segment.mp4"
     source.write_bytes(b"segment")
     bgm_source = tmp_path / "bgm.mp3"
@@ -294,43 +301,50 @@ def test_audio_provenance_blocks_wrong_segment_keys_and_bgm_and_accepts_correct_
     }
     probe = MediaProbe(Path("formal.mp4"), 10.0, True, True, 1920, 1080, 30.0, 30, 1, "yuv420p", "h264", "aac", 48000, 2, frame_count=300, video_end_seconds=10.0, audio_end_seconds=10.0)
     analysis = {"ok": True, "events": {"silence": []}, "max_volume_db": -1.3, "invalid_sample_count": 0}
+    approval = {"assets": [{"canonical_path": str(source), "kind": "source_media", "sha256": _sha(source), "size": source.stat().st_size, "mtime_ns": source.stat().st_mtime_ns}]}
+    provenance = segment_approval_provenance(manifest, manifest["segments"][0], source_fingerprint=approval["assets"][0])
     correct = {
         "loudness": {"final": {"measured_I": -14, "measured_TP": -1.2}},
-        "segments": [{"cache_key": build_segment_cache_key(manifest, manifest["segments"][0])}],
+        "segments": [{"segment_id": "segment-1", "cache_key": "resolved-nvenc-v5", "approval_provenance_version": provenance["version"], "approval_provenance_hash": provenance["hash"]}],
         "bgm": {"used": True, "fingerprint": bgm_fingerprint(manifest["bgm"][0])},
     }
-    assert delivery_qa._audio_check(analysis, probe, correct, manifest, delivery_qa._GENERAL_THRESHOLDS)["status"] == "pass"
+    assert delivery_qa._audio_check(analysis, probe, correct, manifest, delivery_qa._GENERAL_THRESHOLDS, approval_snapshot=approval)["status"] == "pass"
 
     keep_manifest = {**manifest, "segments": [{**manifest["segments"][0], "audio": {"role": "keep", "fade_in_seconds": 0.1, "fade_out_seconds": 0.2}}]}
-    wrong_segment = {**correct, "segments": [{"cache_key": build_segment_cache_key(keep_manifest, keep_manifest["segments"][0])}]}
-    assert delivery_qa._audio_check(analysis, probe, wrong_segment, manifest, delivery_qa._GENERAL_THRESHOLDS)["status"] == "blocked"
+    wrong_segment_provenance = segment_approval_provenance(keep_manifest, keep_manifest["segments"][0], source_fingerprint=approval["assets"][0])
+    wrong_segment = {**correct, "segments": [{**correct["segments"][0], "approval_provenance_hash": wrong_segment_provenance["hash"]}]}
+    assert delivery_qa._audio_check(analysis, probe, wrong_segment, manifest, delivery_qa._GENERAL_THRESHOLDS, approval_snapshot=approval)["status"] == "blocked"
 
     fade_manifest = {**manifest, "segments": [{**manifest["segments"][0], "audio": {"role": "lower", "fade_in_seconds": 0.1, "fade_out_seconds": 0.8}}]}
-    wrong_fade = {**correct, "segments": [{"cache_key": build_segment_cache_key(fade_manifest, fade_manifest["segments"][0])}]}
-    assert delivery_qa._audio_check(analysis, probe, wrong_fade, manifest, delivery_qa._GENERAL_THRESHOLDS)["status"] == "blocked"
+    wrong_fade_provenance = segment_approval_provenance(fade_manifest, fade_manifest["segments"][0], source_fingerprint=approval["assets"][0])
+    wrong_fade = {**correct, "segments": [{**correct["segments"][0], "approval_provenance_hash": wrong_fade_provenance["hash"]}]}
+    assert delivery_qa._audio_check(analysis, probe, wrong_fade, manifest, delivery_qa._GENERAL_THRESHOLDS, approval_snapshot=approval)["status"] == "blocked"
 
     wrong_bgm = {**correct, "bgm": {"used": False, "fingerprint": {}}}
-    assert delivery_qa._audio_check(analysis, probe, wrong_bgm, manifest, delivery_qa._GENERAL_THRESHOLDS)["status"] == "blocked"
+    assert delivery_qa._audio_check(analysis, probe, wrong_bgm, manifest, delivery_qa._GENERAL_THRESHOLDS, approval_snapshot=approval)["status"] == "blocked"
 
     second_segment = {**manifest["segments"][0], "segment_id": "segment-2", "source_in_seconds": 10, "source_out_seconds": 20}
     two_segment_manifest = {**manifest, "segments": [manifest["segments"][0], second_segment]}
-    first_key = build_segment_cache_key(two_segment_manifest, two_segment_manifest["segments"][0])
-    second_key = build_segment_cache_key(two_segment_manifest, two_segment_manifest["segments"][1])
-    exact_report = {**correct, "segments": [{"cache_key": first_key}, {"cache_key": second_key}]}
-    exact = delivery_qa._audio_render_provenance(two_segment_manifest, exact_report)
+    first = segment_approval_provenance(two_segment_manifest, two_segment_manifest["segments"][0], source_fingerprint=approval["assets"][0])
+    second = segment_approval_provenance(two_segment_manifest, two_segment_manifest["segments"][1], source_fingerprint=approval["assets"][0])
+    exact_report = {**correct, "segments": [
+        {"segment_id": "segment-1", "cache_key": "cache-a", "approval_provenance_version": first["version"], "approval_provenance_hash": first["hash"]},
+        {"segment_id": "segment-2", "cache_key": "cache-b", "approval_provenance_version": second["version"], "approval_provenance_hash": second["hash"]},
+    ]}
+    exact = delivery_qa._audio_render_provenance(two_segment_manifest, exact_report, approval_snapshot=approval)
     assert exact["failures"] == []
     assert exact["metrics"]["approved_segment_count"] == 2
-    assert exact["metrics"]["approved_key_count"] == 2
     assert exact["metrics"]["reported_segment_count"] == 2
-    assert exact["metrics"]["reported_key_count"] == 2
+    assert exact["metrics"]["cache_audit"]["identity_used_for_gate"] == "approval_semantic_provenance"
+    assert exact["metrics"]["cache_audit"]["cache_key_used_for_gate"] is False
 
     for reported_segments in (
-        [{"cache_key": first_key}, {"cache_key": second_key}, "corrupt trailing entry"],
-        [{"cache_key": first_key}, "corrupt middle entry", {"cache_key": second_key}],
-        [{"cache_key": first_key}, {}],
-        [{"cache_key": first_key}, {"cache_key": second_key}, {"cache_key": first_key}],
+        [exact_report["segments"][0], exact_report["segments"][1], "corrupt trailing entry"],
+        [exact_report["segments"][0], "corrupt middle entry", exact_report["segments"][1]],
+        [exact_report["segments"][0], {}],
+        [exact_report["segments"][0], exact_report["segments"][1], exact_report["segments"][0]],
     ):
-        malformed = delivery_qa._audio_render_provenance(two_segment_manifest, {**correct, "segments": reported_segments})
+        malformed = delivery_qa._audio_render_provenance(two_segment_manifest, {**correct, "segments": reported_segments}, approval_snapshot=approval)
         assert malformed["failures"], malformed
 
 
