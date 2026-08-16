@@ -8,7 +8,10 @@ import subprocess
 from typing import Any, Mapping
 
 
-ENCODER_CONTRACT_VERSION = "1"
+# VID-33: the NVENC rate-control arguments are part of the persisted render
+# contract.  Bump this when switching from the invalid ``-rc cq`` spelling to
+# FFmpeg's supported VBR + CQ contract.
+ENCODER_CONTRACT_VERSION = "2"
 
 
 class EncoderContractError(ValueError):
@@ -35,7 +38,7 @@ def resolve_encoder_contract(cfg: Mapping[str, Any], profile: Mapping[str, Any],
         "implementation": implementation,
         "fallback_reason": fallback_reason,
         "preset": "p5" if implementation == "h264_nvenc" else "medium",
-        "rate_control": "cq" if implementation == "h264_nvenc" else "crf",
+        "rate_control": "vbr" if implementation == "h264_nvenc" else "crf",
         "quality": 23,
         "h264_profile": "high",
         "h264_level": "4.2",
@@ -77,7 +80,39 @@ def encoder_arguments(contract: Mapping[str, Any]) -> list[str]:
 
 
 def _nvenc_probe(ffmpeg_path: str) -> bool:
-    command = [ffmpeg_path, "-hide_banner", "-loglevel", "error", "-nostdin", "-f", "lavfi", "-i", "color=c=black:s=16x16:d=0.04", "-frames:v", "1", "-c:v", "h264_nvenc", "-f", "null", "-"]
+    # 16x16 is below the minimum frame dimension accepted by the RTX 5070 Ti
+    # NVENC path.  Keep this short, but use a legal frame and the same basic
+    # options as the formal h264_nvenc contract.
+    command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=256x256:d=0.04",
+        "-frames:v",
+        "1",
+        "-c:v",
+        "h264_nvenc",
+        "-profile:v",
+        "high",
+        "-level:v",
+        "4.2",
+        "-preset",
+        "p5",
+        "-rc",
+        "vbr",
+        "-cq",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-f",
+        "null",
+        "-",
+    ]
     try:
         return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False, timeout=15).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
