@@ -33,6 +33,7 @@ class RenderReportDTO:
     profile: dict[str, Any] | None = None
     profile_id: str = ""
     encoder_contract: dict[str, Any] | None = None
+    encoder_probe_audit: dict[str, Any] | None = None
     loudness: dict[str, Any] | None = None
     lufs: Any = None
     true_peak: Any = None
