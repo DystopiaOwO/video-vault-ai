@@ -195,6 +195,36 @@ def test_visual_card_render_uses_managed_runner(tmp_path: Path):
     assert calls and calls[0][1]["expected_duration_seconds"] == 1.0
 
 
+def test_chapter_card_background_is_dark_but_not_formal_black(tmp_path: Path):
+    timeline = resolve_visual_timeline(
+        {"items": [{"stable_id": "chapter", "type": "chapter_card", "duration_seconds": 1, "text": "Chapter", "style_id": "location-lower-left", "animation_id": "static"}]},
+        _segments(),
+        PROFILE,
+        require_assets=True,
+    )
+    calls = []
+
+    class Runner:
+        def run(self, command, **kwargs):
+            calls.append((command, kwargs))
+            Path(command[-1]).write_bytes(b"managed visual")
+            return SimpleNamespace(returncode=0, stderr="")
+
+    render_visual_cards(
+        {**timeline, "sequence": [entry for entry in timeline["sequence"] if entry["kind"] == "visual"]},
+        {},
+        tmp_path / "cache",
+        tmp_path / "work",
+        PROFILE,
+        "ffmpeg",
+        runner=Runner(),
+    )
+    command = calls[0][0]
+    color_input = command[command.index("-i") + 1]
+    assert color_input.startswith("color=c=0x20242a:")
+    assert "color=c=black" not in color_input
+
+
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required for visual card media test")
 def test_render_visual_card_writes_cache_and_report_evidence(tmp_path: Path):
     timeline = resolve_visual_timeline(

@@ -20,6 +20,11 @@ from typing import Any, Mapping, Sequence
 
 VISUAL_COMPOSITION_VERSION = "visual-composition-v1"
 SUPPORTED_ANIMATIONS = {"static", "fade-in-out"}
+# Chapter cards are intentionally dark, but a full-black card is interpreted
+# as an unintended interior blank interval by the formal Delivery QA contract.
+# Keep the visual treatment dark while retaining enough luma for the approved
+# black-frame threshold to distinguish a title card from missing video.
+CHAPTER_CARD_BACKGROUND = "0x20242a"
 STYLE_CONTRACTS: dict[str, dict[str, Any]] = {
     "location-lower-left": {
         "version": 1,
@@ -394,7 +399,7 @@ def _render_card(ffmpeg_path: str, item: Mapping[str, Any], output: Path, work_d
     video_filter += "[v]"
     command = [
         str(ffmpeg_path), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-        "-f", "lavfi", "-i", f"color=c=black@0.85:s={int(profile['width'])}x{int(profile['height'])}:r={profile['fps']}:d={float(item['duration_seconds']):.6f}",
+        "-f", "lavfi", "-i", f"color=c={CHAPTER_CARD_BACKGROUND}:s={int(profile['width'])}x{int(profile['height'])}:r={profile['fps']}:d={float(item['duration_seconds']):.6f}",
         "-f", "lavfi", "-i", f"anullsrc=r={int(profile['audio_sample_rate'])}:cl=stereo",
         "-filter_complex", video_filter, "-map", "[v]", "-map", "1:a:0", "-t", f"{duration:.6f}",
         "-c:v", str(profile["video_codec"]), "-pix_fmt", str(profile["pixel_format"]), "-c:a", str(profile["audio_codec"]),
