@@ -4,7 +4,7 @@ from video_vault.render_profiles import get_render_profile, list_render_profiles
 
 
 def test_render_profiles_are_deterministic():
-    assert list_render_profiles() == ("accurate_preview_1080p", "final_1080p")
+    assert list_render_profiles() == ("accurate_preview_1080p", "final_1080p", "final_1080p_portrait")
     assert get_render_profile("final_1080p") == {
         "profile_id": "final_1080p",
         "width": 1920,
@@ -21,6 +21,8 @@ def test_render_profiles_are_deterministic():
         "color_range": "tv",
         "hdr_intent": "sdr",
     }
+    portrait = get_render_profile("final_1080p_portrait")
+    assert (portrait["width"], portrait["height"]) == (1080, 1920)
 
 
 def test_unknown_profile_fails_clearly():

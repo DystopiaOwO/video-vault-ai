@@ -132,6 +132,19 @@ create table if not exists projects (
   created_at text default current_timestamp,
   updated_at text default current_timestamp
 );
+create table if not exists creative_briefs (
+  project_id integer primary key,
+  schema_version integer not null default 1,
+  brief_version integer not null default 1,
+  status text not null default 'needs_confirmation',
+  recommendation_json text not null default '{}',
+  approved_json text not null default '{}',
+  source_geometry_json text not null default '{}',
+  story_relevant_hash text not null default '',
+  visual_contract_hash text not null default '',
+  approved_at text,
+  updated_at text default current_timestamp
+);
 create table if not exists project_videos (
   project_id integer not null,
   video_id integer not null,

@@ -7,6 +7,43 @@ export type Project = {
   video_count?: number;
 };
 
+export type CreativeBriefOutput = {
+  orientation?: "landscape" | "portrait" | string;
+  aspect_ratio?: string;
+  width?: number;
+  height?: number;
+  render_profile_id?: string;
+};
+
+export type CreativeBriefFraming = {
+  recommended_strategy?: string;
+  approved_strategy?: string;
+  reason?: string;
+};
+
+export type CreativeBrief = {
+  schema_version?: number;
+  contract_version?: string;
+  brief_version?: number;
+  status?: "needs_confirmation" | "approved" | string;
+  recommendation?: {
+    output?: CreativeBriefOutput;
+    reason?: string;
+    source?: string;
+    source_orientation_summary?: { portrait?: number; landscape?: number; square?: number; unknown?: number };
+    framing_intent?: { portrait_source_in_landscape?: CreativeBriefFraming; landscape_source_in_portrait?: CreativeBriefFraming };
+  };
+  approved?: {
+    output?: CreativeBriefOutput;
+    framing_intent?: { portrait_source_in_landscape?: CreativeBriefFraming; landscape_source_in_portrait?: CreativeBriefFraming };
+    approval_source?: string;
+  };
+  source_geometry?: { orientation_counts?: Record<string, number>; sources?: Array<Record<string, unknown>>; source_count?: number };
+  visual_contract_hash?: string;
+  story_relevant_hash?: string;
+  approved_at?: string;
+};
+
 export type PerceptionWindowResult = {
   window_uuid: string;
   segment_uuid?: string;
@@ -423,6 +460,7 @@ export type ProjectDetail = {
   audio: AudioState;
   storyboard: StoryboardState;
   story?: StoryDetail;
+  creative_brief?: CreativeBrief;
   delivery_qa?: DeliveryQAState;
 };
 
@@ -727,6 +765,11 @@ export const api = {
     json<{ ok: boolean; creator_profile?: Record<string, unknown>; profile_version?: number; error?: string; code?: string }>("/api/creator-profile", post({ profile, expected_version: expectedVersion })),
   saveStorySettings: (projectId: number, settings: Record<string, unknown>, baseRevision?: number, expectedVersion?: number) =>
     json<{ ok: boolean; settings?: StoryDetail["settings"]; profile_version?: number; project_revision?: number; error?: string; code?: string }>("/api/project/story/settings", post({ project_id: projectId, settings, base_revision: baseRevision, expected_version: expectedVersion ?? Number(settings.profile_version || 1) })),
+  creativeBrief: (projectId: number) => json<CreativeBrief>(`/api/project/creative-brief?project_id=${projectId}`),
+  recommendCreativeBrief: (projectId: number, baseRevision?: number) =>
+    json<{ ok: boolean; creative_brief?: CreativeBrief; project_revision?: number; error?: string; code?: string }>("/api/project/creative-brief/recommend", post({ project_id: projectId, base_revision: baseRevision })),
+  saveCreativeBrief: (projectId: number, brief: Record<string, unknown>, approvalSource: "recommendation" | "human_override", baseRevision?: number) =>
+    json<{ ok: boolean; creative_brief?: CreativeBrief; project_revision?: number; error?: string; code?: string }>("/api/project/creative-brief", post({ project_id: projectId, brief, approval_source: approvalSource, base_revision: baseRevision })),
   generateStory: (projectId: number, force = false, provider?: string, baseRevision?: number) =>
     json<{ ok: boolean; generation?: StoryGeneration; story?: StoryDetail; error?: string; code?: string }>("/api/project/story/generate", post({ project_id: projectId, force, provider, base_revision: baseRevision })),
   updateStoryReview: (projectId: number, storyGenerationUuid: string, review: Record<string, unknown>, baseRevision?: number) =>

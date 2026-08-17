@@ -23,6 +23,8 @@
     "plan_id": {"type": "string"},
     "profile": {"$ref": "#/$defs/profile"},
     "settings": {"type": "object"},
+    "creative_brief": {"type": "object"},
+    "approved_creative_brief": {"type": "object"},
     "segments": {"type": "array", "items": {"$ref": "#/$defs/segment"}, "minItems": 1},
     "bgm": {"type": "array", "items": {"type": "object"}},
     "expected_duration_seconds": {"type": "number", "minimum": 0},

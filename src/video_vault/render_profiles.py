@@ -38,6 +38,22 @@ _PROFILES: dict[str, dict[str, object]] = {
         "color_range": "tv",
         "hdr_intent": "sdr",
     },
+    "final_1080p_portrait": {
+        "profile_id": "final_1080p_portrait",
+        "width": 1080,
+        "height": 1920,
+        "fps": 30,
+        "video_codec": "h264",
+        "pixel_format": "yuv420p",
+        "audio_codec": "aac",
+        "audio_sample_rate": 48000,
+        "audio_channels": 2,
+        "color_primaries": "bt709",
+        "color_transfer": "bt709",
+        "color_matrix": "bt709",
+        "color_range": "tv",
+        "hdr_intent": "sdr",
+    },
 }
 
 

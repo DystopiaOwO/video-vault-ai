@@ -10,6 +10,7 @@ type Props = {
   setMessage: (value: string) => void;
   refreshProject: (options?: ProjectDataLoadOptions) => Promise<unknown>;
   mutationControls: ProjectMutationControls;
+  creativeBriefApproved?: boolean;
 };
 
 type SegmentWithUuid = { segment_uuid?: string };
@@ -32,7 +33,7 @@ function draftFor(generation?: StoryGeneration) {
   };
 }
 
-export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject, mutationControls }: Props) {
+export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject, mutationControls, creativeBriefApproved = true }: Props) {
   const story = detail.story;
   const [settings, setSettings] = useState(story?.settings || {});
   const [creator, setCreator] = useState<Record<string, unknown>>(story?.creator_profile || {});
@@ -102,6 +103,10 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
   }
 
   async function generate(force = false) {
+    if (!creativeBriefApproved) {
+      setMessage("請先完成 Creative Brief 的成片方向核准，再生成 Story。");
+      return;
+    }
     const mutation = mutationControls.beginProjectMutation(detail.project.id, "story");
     if (!mutation) return;
     setBusy("generate");
@@ -279,7 +284,7 @@ export function StoryUnderstandingWorkspace({ detail, setMessage, refreshProject
       <div className="row">
         <button type="button" disabled={Boolean(busy)} onClick={() => void saveSettings()}>儲存設定</button>
         <button type="button" disabled={Boolean(busy)} onClick={() => void saveCreator()}>儲存 Creator</button>
-        <button type="button" className="primary" disabled={Boolean(busy)} onClick={() => void generate()}>{busy === "generate" ? "生成中…" : "生成故事"}</button>
+        <button type="button" className="primary" disabled={Boolean(busy) || !creativeBriefApproved} onClick={() => void generate()}>{busy === "generate" ? "生成中…" : creativeBriefApproved ? "生成故事" : "先核准 Creative Brief"}</button>
         {generation && <button type="button" disabled={Boolean(busy)} onClick={() => void generate(true)}>重新生成</button>}
       </div>
     </div>
