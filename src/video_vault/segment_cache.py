@@ -79,6 +79,7 @@ def cache_key_payload(
         "gpu_execution_identity": gpu_execution_cache_identity(gpu_contract),
         "visual_render_contract_version": "visual-render-v1" if visual_style_hash else "none",
         "visual_style_hash": visual_style_hash,
+        "visual_render_plan_hash": str(manifest.get("visual_render_plan_hash") or ""),
         "visual_title_text": str(segment.get("title_text") or segment.get("title") or ""),
         "display_geometry": dict(gpu_contract.get("display_geometry") or {}),
         "audio_codec": profile.get("audio_codec"),

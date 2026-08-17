@@ -1,4 +1,6 @@
 from pathlib import Path
+import shutil
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +17,7 @@ from video_vault.visual_style import (
     materialize_visual_style,
     render_true_frame_preview,
     resolve_visual_render_plan,
+    _refresh_visual_style_currentity,
     _select_representative_frames,
     validate_materialized_visual_style,
     visual_style_options,
@@ -109,12 +112,82 @@ def test_shared_render_plan_changes_pixel_contract_for_framing_and_title_tokens(
     assert "y=h*0.060000" in second["title"]["filter"]
 
 
+def test_title_motion_and_roles_are_real_resolved_semantics():
+    snapshot = materialize_visual_style("cinematic", _brief())
+    none_style = dict(snapshot)
+    none_title = dict(snapshot["title_style"])
+    none_title["motion"] = {**none_title["motion"], "preset": "none"}
+    none_style["title_style"] = none_title
+    none_style["resolved_hash"] = __import__("hashlib").sha256(__import__("json").dumps({key: value for key, value in none_style.items() if key != "resolved_hash"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    rise = resolve_visual_render_plan(snapshot, width=1920, height=1080, title_text="A", title_role="chapter_title")
+    lower = resolve_visual_render_plan(snapshot, width=1920, height=1080, title_text="A", title_role="lower_third")
+    none = resolve_visual_render_plan(none_style, width=1920, height=1080, title_text="A")
+    assert "min(t/0.280000" in rise["title"]["filter"]
+    assert "((1-min(t/0.280000" in rise["title"]["filter"]
+    assert rise["title"]["role"] == "chapter_title"
+    assert lower["title"]["role"] == "lower_third"
+    assert lower["title"]["max_width_pixels"] < rise["title"]["max_width_pixels"]
+    assert "alpha=" not in none["title"]["filter"]
+
+
 def test_background_treatment_is_not_preserve_full_frame():
     background = materialize_visual_style("diary_natural", _brief())
     preserve_brief = _brief()
     preserve_brief["approved"]["framing_intent"]["portrait_source_in_landscape"]["approved_strategy_id"] = "preserve_full_frame"
     preserve = materialize_visual_style("diary_natural", preserve_brief)
     assert resolve_visual_render_plan(background, width=1920, height=1080)["framing"]["filter"] != resolve_visual_render_plan(preserve, width=1920, height=1080)["framing"]["filter"]
+
+
+def test_framing_policy_is_resolved_per_source_orientation():
+    snapshot = materialize_visual_style("diary_natural", _brief("landscape"))
+    landscape = resolve_visual_render_plan(snapshot, width=1920, height=1080, source_geometry={"display_ratio": 16 / 9, "source_orientation": "landscape", "sample_aspect_ratio": "1:1"})
+    portrait = resolve_visual_render_plan(snapshot, width=1920, height=1080, source_geometry={"display_ratio": 9 / 16, "source_orientation": "portrait", "sample_aspect_ratio": "1:1"})
+    assert landscape["framing"]["direction_id"] == "same_orientation"
+    assert landscape["framing"]["strategy_id"] == "preserve_full_frame"
+    assert portrait["framing"]["direction_id"] == "portrait_source_in_landscape"
+    assert portrait["framing"]["strategy_id"] == "background_treatment"
+    assert landscape["resolved_hash"] != portrait["resolved_hash"]
+
+
+def test_visual_plan_preserves_rotated_non_square_sar_before_framing():
+    snapshot = materialize_visual_style("diary_natural", _brief("landscape"))
+    plan = resolve_visual_render_plan(
+        snapshot,
+        width=1920,
+        height=1080,
+        source_geometry={
+            "display_ratio": 9 / 16,
+            "source_orientation": "portrait",
+            "sample_aspect_ratio": "4:3",
+            "rotation_degrees": 90,
+            "display_matrix": "synthetic-display-matrix",
+        },
+    )
+    assert "scale=ceil(iw*3/4/2)*2:ih" in plan["filter_complex"]
+    assert plan["source_geometry"]["display_matrix"] == "synthetic-display-matrix"
+    assert plan["framing"]["direction_id"] == "portrait_source_in_landscape"
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required for visual graph smoke")
+def test_real_background_graph_keeps_foreground_aspect_safe(tmp_path: Path):
+    source = tmp_path / "portrait.mp4"
+    output = tmp_path / "preview.png"
+    generated = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "testsrc=size=64x128:rate=2", "-t", "0.5", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source)],
+        capture_output=True, text=True, encoding="utf-8", check=False,
+    )
+    assert generated.returncode == 0, generated.stderr
+    snapshot = materialize_visual_style("diary_natural", _brief("landscape"))
+    result = render_true_frame_preview(
+        {"ffmpeg_path": "ffmpeg"}, 1, source, 0.0, snapshot, output,
+        source_geometry={"display_ratio": 0.5, "source_orientation": "portrait", "sample_aspect_ratio": "1:1"},
+    )
+    assert output.is_file() and output.stat().st_size > 0
+    assert result["visual_render_plan"]["graph_type"] == "split_background_overlay"
+    probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=width,height,sample_aspect_ratio,display_aspect_ratio", "-of", "json", str(output)], capture_output=True, text=True, encoding="utf-8", check=False)
+    assert probe.returncode == 0
+    assert '"width": 1920' in probe.stdout
+    assert '"height": 1080' in probe.stdout
 
 
 def test_dji_lut_missing_resource_fails_closed(tmp_path: Path):
@@ -181,3 +254,17 @@ def test_unapproved_project_state_is_needs_confirmation(tmp_path: Path):
     assert state["status"] == "needs_confirmation"
     assert state["approved"] == {}
     assert state["recommendation"]["visual_style_id"] == "diary_natural"
+
+
+def test_creative_brief_visual_hash_change_stales_approved_style_but_recommendation_refresh_does_not(tmp_path: Path, monkeypatch):
+    db = tmp_path / "db.sqlite3"
+    init_db(db)
+    approved = {"technical_transform": {"mode": "none", "requires_lut": False, "strategy": "user_managed", "version": "1", "source_colorspace": "unknown", "lut_identity": {}, "applied_once": False}}
+    state = {"status": "approved", "approved": approved, "creative_brief_hash": "brief-v1", "project_id": 7}
+    monkeypatch.setattr("video_vault.visual_style._load_brief", lambda *_args: {"status": "approved", "visual_contract_hash": "brief-v1"})
+    current = _refresh_visual_style_currentity({"library_root": str(tmp_path)}, db, 7, state)
+    assert current["status"] == "approved"
+    monkeypatch.setattr("video_vault.visual_style._load_brief", lambda *_args: {"status": "approved", "visual_contract_hash": "brief-v2"})
+    stale = _refresh_visual_style_currentity({"library_root": str(tmp_path)}, db, 7, state)
+    assert stale["status"] == "stale"
+    assert stale["stale_reason"] == "creative_brief_visual_contract_changed"

@@ -13,7 +13,7 @@ from typing import Any, Callable, Mapping
 from .audio_pipeline import atempo_filter, build_audio_filter, build_silence_filter, normalize_audio_role
 from .color_pipeline import build_color_filter
 from .encoder_contract import encoder_arguments, validate_encoder_contract
-from .gpu_execution import GPUExecutionRegistry
+from .gpu_execution import GPUExecutionRegistry, apply_visual_execution_contract
 from .visual_style import resolve_visual_render_plan
 from .media_probe import MediaProbe, SourceProbeRegistry, probe_media
 from .render_errors import SegmentRenderError, is_encoder_fallback_error
@@ -100,7 +100,11 @@ def render_segment(
     gpu_contract = gpu_registry.resolve(manifest, segment, probe, contract if isinstance(contract, Mapping) else None)
     effective_manifest = deepcopy(manifest)
     effective_manifest.setdefault("settings", {})["gpu_execution_contract"] = dict(gpu_contract)
-    visual_plan = _resolve_visual_plan(visual_style_snapshot, profile, segment, settings)
+    visual_plan = _resolve_visual_plan(visual_style_snapshot, profile, segment, settings, probe)
+    gpu_contract = apply_visual_execution_contract(gpu_contract, visual_plan, encoder=encoder)
+    effective_manifest.setdefault("settings", {})["gpu_execution_contract"] = dict(gpu_contract)
+    if visual_plan:
+        effective_manifest["visual_render_plan_hash"] = str(visual_plan.get("resolved_hash") or "")
     settings = dict(effective_manifest.get("settings") or {})
     contract = settings.get("encoder_contract")
     root = cache_root or Path(str(cfg.get("library_root") or ".")) / "08_projects" / f"project_{manifest.get('project_id')}" / "cache" / "segments"
@@ -213,15 +217,13 @@ def build_segment_ffmpeg_command(
     audio = _effective_segment_audio(manifest, segment)
     normalize_audio_role(audio["role"])
     video_filters = [f"trim=start={start:.6f}:end={end:.6f}", "setpts=PTS-STARTPTS", f"setpts=PTS/{speed:g}"]
-    gpu_path = str(gpu_contract.get("implementation") or "") == "nvdec_cuda"
-    if gpu_path:
-        if visual_render_plan:
-            # The approved visual contract contains CPU filters (LUT, title,
-            # and aspect-safe framing).  Make the CUDA->CPU boundary explicit
-            # and auditable instead of silently dropping those semantics.
-            video_filters.extend(["hwdownload", "format=yuv420p", str(((visual_render_plan.get("framing") or {}).get("filter") or ""))])
-        else:
-            video_filters.append(f"scale_cuda={profile['width']}:{profile['height']}:format={profile['pixel_format']}")
+    gpu_path = str(gpu_contract.get("decode_used") or "") == "nvdec" and str(gpu_contract.get("hardware_api") or "") == "cuda"
+    if gpu_path and visual_render_plan:
+        # The effective contract is nvdec_cpu_visual_nvenc, so the approved
+        # visual graph is explicitly evaluated after the CUDA->CPU boundary.
+        video_filters.extend(["hwdownload", "format=yuv420p"])
+    elif gpu_path:
+        video_filters.append(f"scale_cuda={profile['width']}:{profile['height']}:format={profile['pixel_format']}")
         video_filters.append(
             "setparams="
             f"colorspace={str(profile.get('color_matrix') or 'bt709')}:"
@@ -231,16 +233,6 @@ def build_segment_ffmpeg_command(
         )
         if color:
             video_filters.extend(["hwdownload", "format=yuv420p", color])
-        if visual_filter or visual_title_filter:
-            # Approved style filters are CPU filters.  Downloading only at
-            # this explicit boundary keeps NVDEC/NVENC provenance truthful and
-            # prevents a GPU path from silently skipping an approved LUT/look.
-            if not visual_render_plan:
-                video_filters.extend(["hwdownload", "format=yuv420p"])
-            if visual_filter:
-                video_filters.append(visual_filter)
-            if visual_title_filter:
-                video_filters.append(visual_title_filter)
     else:
         if color:
             video_filters.append(color)
@@ -248,7 +240,7 @@ def build_segment_ffmpeg_command(
         policy = str(geometry.get("composition_policy") or settings.get("display_geometry_policy") or "preserve_aspect_pad")
         geometry_normalization = _display_geometry_normalization_filter(probe)
         if visual_render_plan:
-            geometry_filters = [str(((visual_render_plan.get("framing") or {}).get("filter") or ""))]
+            geometry_filters = [] if str(visual_render_plan.get("graph_type") or "linear") == "split_background_overlay" else [str(visual_render_plan.get("filter_graph") or "")]
         elif policy == "crop_to_fill":
             geometry_filters = [
                 geometry_normalization,
@@ -263,9 +255,9 @@ def build_segment_ffmpeg_command(
                 f"pad={profile['width']}:{profile['height']}:(ow-iw)/2:(oh-ih)/2:color={background}",
             ]
         video_filters.extend([*geometry_filters, f"fps={profile['fps']}", f"format={profile['pixel_format']}", "setsar=1"])
-        if visual_filter:
+        if visual_filter and not visual_render_plan:
             video_filters.append(visual_filter)
-        if visual_title_filter:
+        if visual_title_filter and not visual_render_plan:
             video_filters.append(visual_title_filter)
         video_filters.append(
             "setparams="
@@ -274,7 +266,33 @@ def build_segment_ffmpeg_command(
             f"color_trc={str(profile.get('color_transfer') or 'bt709')}:"
             f"range={'limited' if str(profile.get('color_range') or 'tv') == 'tv' else 'full'}"
         )
-    graph = [f"[0:v]{','.join(video_filters)}[vout]"]
+    graph: list[str] = []
+    if visual_render_plan and str(visual_render_plan.get("graph_type") or "linear") == "split_background_overlay":
+        graph.append(f"[0:v]{','.join(video_filters)}[visual_in]")
+        # Background graph already includes its color/title tail so it is not
+        # accidentally applied twice at this boundary.
+        suffix = ""
+        visual_graph = str(visual_render_plan.get("filter_complex") or "").replace("[0:v]", "[visual_in]", 1)
+        if suffix:
+            visual_graph = visual_graph + f",{suffix}"
+        if gpu_path:
+            visual_graph += ",".join(["", f"fps={profile['fps']}", f"format={profile['pixel_format']}", "setsar=1", "setparams=" f"colorspace={str(profile.get('color_matrix') or 'bt709')}:color_primaries={str(profile.get('color_primaries') or 'bt709')}:color_trc={str(profile.get('color_transfer') or 'bt709')}:range={'limited' if str(profile.get('color_range') or 'tv') == 'tv' else 'full'}"])
+        graph.append(visual_graph + "[vout]")
+    else:
+        if visual_render_plan and gpu_path:
+            # GPU mixed path needs the same linear visual plan as Preview.
+            video_filters.append(str(visual_render_plan.get("filter_graph") or ""))
+            video_filters.extend([
+                f"fps={profile['fps']}",
+                f"format={profile['pixel_format']}",
+                "setsar=1",
+                "setparams="
+                f"colorspace={str(profile.get('color_matrix') or 'bt709')}:"
+                f"color_primaries={str(profile.get('color_primaries') or 'bt709')}:"
+                f"color_trc={str(profile.get('color_transfer') or 'bt709')}:"
+                f"range={'limited' if str(profile.get('color_range') or 'tv') == 'tv' else 'full'}",
+            ])
+        graph.append(f"[0:v]{','.join(video_filters)}[vout]")
     args = [str(cfg.get("ffmpeg_path") or "ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
     if gpu_path:
         args.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
@@ -323,7 +341,7 @@ def build_segment_ffmpeg_command(
     return args
 
 
-def _resolve_visual_plan(snapshot: Mapping[str, Any] | None, profile: Mapping[str, Any], segment: Mapping[str, Any], settings: Mapping[str, Any]) -> dict[str, Any] | None:
+def _resolve_visual_plan(snapshot: Mapping[str, Any] | None, profile: Mapping[str, Any], segment: Mapping[str, Any], settings: Mapping[str, Any], probe: MediaProbe | None = None) -> dict[str, Any] | None:
     if not isinstance(snapshot, Mapping):
         return None
     color = segment.get("color") if isinstance(segment.get("color"), Mapping) else settings.get("color")
@@ -333,7 +351,29 @@ def _resolve_visual_plan(snapshot: Mapping[str, Any] | None, profile: Mapping[st
         height=int(profile["height"]),
         title_text=str(segment.get("title_text") or segment.get("title") or ""),
         color_settings=dict(color or {}),
+        source_display_ratio=float(probe.display_ratio or 0.0) if probe is not None else None,
+        source_geometry=_probe_geometry(probe),
+        title_role=str(segment.get("title_role") or "chapter_title"),
+        title_duration_seconds=float(segment.get("timeline_duration_seconds") or 0.0) or None,
     )
+
+
+def _probe_geometry(probe: MediaProbe | None) -> dict[str, Any]:
+    if probe is None:
+        return {}
+    return {
+        "coded_width": int(probe.coded_width or probe.width),
+        "coded_height": int(probe.coded_height or probe.height),
+        "sample_aspect_ratio": str(probe.sample_aspect_ratio or "1:1"),
+        "display_aspect_ratio": str(probe.display_aspect_ratio or ""),
+        "display_ratio": float(probe.display_ratio or 0.0),
+        "display_width": int(probe.display_width or probe.width),
+        "display_height": int(probe.display_height or probe.height),
+        "rotation_degrees": int(probe.rotation_degrees or 0),
+        "display_matrix": str(probe.display_matrix or ""),
+        "source_orientation": "portrait" if float(probe.display_ratio or 0.0) < 1 else "landscape" if float(probe.display_ratio or 0.0) else "unknown",
+        "provenance": str(probe.display_geometry_source or "unknown"),
+    }
 
 
 def _display_geometry_normalization_filter(probe: MediaProbe) -> str:

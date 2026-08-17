@@ -19,7 +19,7 @@ from .artifact_retention import (
     ensure_render_free_space,
 )
 from .final_qc import FinalQCResult, sha256_file, validate_final_output
-from .gpu_execution import GPU_EXECUTION_CONTRACT_VERSION, GPUExecutionRegistry
+from .gpu_execution import GPU_EXECUTION_CONTRACT_VERSION, GPUExecutionRegistry, apply_visual_execution_contract
 from .loudness import LoudnessError, build_second_pass_command, measure_loudness
 from .media_probe import SourceProbeRegistry
 from .project import can_project_render, project_dir
@@ -34,6 +34,7 @@ from .visual_renderer import (
     prepare_visual_filter,
 )
 from .visual_compositor import VisualCompositionError, apply_lower_thirds, render_visual_cards, resolve_visual_timeline, stable_visual_hash
+from .visual_style import resolve_visual_render_plan
 
 
 class ProjectRenderError(RuntimeError):
@@ -203,6 +204,7 @@ def render_project(
         gpu_execution_requested=gpu_execution_requested,
         source_probe_registry=source_probes,
         gpu_execution_registry=gpu_execution,
+        approved_visual_style=approved_visual_style,
     )
     output = paths.output
     report_path = paths.report
@@ -492,6 +494,7 @@ def prepare_final_output_paths(
     gpu_execution_requested: str = "auto",
     source_probe_registry: SourceProbeRegistry | None = None,
     gpu_execution_registry: GPUExecutionRegistry | None = None,
+    approved_visual_style: Mapping[str, Any] | None = None,
 ) -> FinalOutputPaths:
     renders = (Path(folder) / "renders").expanduser().resolve()
     managed = output_path is None
@@ -511,6 +514,7 @@ def prepare_final_output_paths(
                 encoder_contract,
                 source_probe_registry,
                 gpu_execution_registry,
+                approved_visual_style=approved_visual_style,
             )
         except Exception:
             # A cache candidate whose current source/GPU contract cannot be
@@ -674,6 +678,8 @@ def build_render_report(
                 "decode_used": str((item.gpu_execution_contract or {}).get("decode_used") or ""),
                 "filter_requested": str((item.gpu_execution_contract or {}).get("filter_requested") or ""),
                 "filter_used": str((item.gpu_execution_contract or {}).get("filter_used") or ""),
+                "execution_mode": str((item.gpu_execution_contract or {}).get("execution_mode") or ""),
+                "encode_used": str((item.gpu_execution_contract or {}).get("encode_used") or item.encoder_used or ""),
                 "hardware_api": str((item.gpu_execution_contract or {}).get("hardware_api") or ""),
                 "hardware_device": str((item.gpu_execution_contract or {}).get("hardware_device") or ""),
                 "filter_chain": list((item.gpu_execution_contract or {}).get("filter_chain") or []),
@@ -708,6 +714,8 @@ def build_render_report(
                 "decode_used": str((item.gpu_execution_contract or {}).get("decode_used") or ""),
                 "filter_requested": str((item.gpu_execution_contract or {}).get("filter_requested") or ""),
                 "filter_used": str((item.gpu_execution_contract or {}).get("filter_used") or ""),
+                "execution_mode": str((item.gpu_execution_contract or {}).get("execution_mode") or ""),
+                "encode_used": str((item.gpu_execution_contract or {}).get("encode_used") or item.encoder_used or ""),
                 "hardware_api": str((item.gpu_execution_contract or {}).get("hardware_api") or ""),
                 "hardware_device": str((item.gpu_execution_contract or {}).get("hardware_device") or ""),
                 "filter_chain": list((item.gpu_execution_contract or {}).get("filter_chain") or []),
@@ -762,6 +770,8 @@ def _resolve_current_gpu_execution(
     encoder_contract: Mapping[str, Any] | None,
     source_probe_registry: SourceProbeRegistry,
     gpu_execution_registry: GPUExecutionRegistry,
+    *,
+    approved_visual_style: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve current ordered GPU contracts and artifact keys for cache checks."""
 
@@ -772,8 +782,32 @@ def _resolve_current_gpu_execution(
         source = Path(str(segment.get("source_file") or "")).expanduser().resolve()
         probe = source_probe_registry.probe(source)
         gpu_contract = gpu_execution_registry.resolve(manifest, segment, probe, encoder_contract)
+        visual_plan = None
+        if isinstance(approved_visual_style, Mapping):
+            color = segment.get("color") if isinstance(segment.get("color"), Mapping) else (manifest.get("settings") or {}).get("color")
+            visual_plan = resolve_visual_render_plan(
+                approved_visual_style,
+                width=int((manifest.get("profile") or {}).get("width") or 0),
+                height=int((manifest.get("profile") or {}).get("height") or 0),
+                title_text=str(segment.get("title_text") or segment.get("title") or ""),
+                color_settings=dict(color or {}),
+                source_display_ratio=float(probe.display_ratio or 0.0),
+                source_geometry={
+                    "sample_aspect_ratio": probe.sample_aspect_ratio,
+                    "display_aspect_ratio": probe.display_aspect_ratio,
+                    "display_ratio": probe.display_ratio,
+                    "rotation_degrees": probe.rotation_degrees,
+                    "display_matrix": probe.display_matrix,
+                    "source_orientation": "portrait" if probe.display_ratio and probe.display_ratio < 1 else "landscape" if probe.display_ratio else "unknown",
+                },
+                title_role=str(segment.get("title_role") or "chapter_title"),
+                title_duration_seconds=float(segment.get("timeline_duration_seconds") or 0.0) or None,
+            )
+            gpu_contract = apply_visual_execution_contract(gpu_contract, visual_plan, encoder=str((encoder_contract or {}).get("implementation") or ""))
         effective_manifest = deepcopy(manifest)
         effective_manifest.setdefault("settings", {})["gpu_execution_contract"] = dict(gpu_contract)
+        if visual_plan:
+            effective_manifest["visual_render_plan_hash"] = str(visual_plan.get("resolved_hash") or "")
         source_fingerprint = source_probe_registry.fingerprint(source)
         cache_key = build_segment_cache_key(effective_manifest, segment, source_fingerprint=source_fingerprint)
         contracts.append(

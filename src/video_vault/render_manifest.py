@@ -176,6 +176,8 @@ def build_render_manifest(
         manifest["creative_brief"] = creative_brief
         manifest["approved_creative_brief"] = approved_brief
     visual_style_state = ensure_visual_style_state(cfg, db, project_id)
+    if str(visual_style_state.get("status") or "") == "stale" and visual_style_state.get("approved"):
+        raise ValueError("approved Visual Style is stale; re-preview and re-approve before Render: " + str(visual_style_state.get("stale_reason") or "currentity_changed"))
     if str(visual_style_state.get("status") or "") == "approved":
         visual_style = visual_style_state.get("approved") or {}
         visual_style_validation = validate_materialized_visual_style(visual_style)

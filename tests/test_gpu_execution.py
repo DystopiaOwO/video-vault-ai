@@ -2,7 +2,7 @@ from pathlib import Path
 from dataclasses import replace
 from types import SimpleNamespace
 
-from video_vault.gpu_execution import GPU_EXECUTION_CONTRACT_VERSION, GPUExecutionRegistry, execution_contract_hash, gpu_execution_cache_identity
+from video_vault.gpu_execution import GPU_EXECUTION_CONTRACT_VERSION, GPUExecutionRegistry, apply_visual_execution_contract, execution_contract_hash, gpu_execution_cache_identity
 from video_vault.media_probe import MediaProbe
 from video_vault.segment_cache import build_segment_cache_key
 from video_vault.segment_provenance import segment_approval_provenance
@@ -209,6 +209,19 @@ def test_gpu_execution_cache_identity_differs_from_cpu_and_ignores_diagnostics()
     assert execution_contract_hash(gpu) == execution_contract_hash(gpu2)
     assert gpu_execution_cache_identity(gpu)["hash"] == gpu_execution_cache_identity(gpu2)["hash"]
     assert gpu_execution_cache_identity(gpu)["hash"] != gpu_execution_cache_identity(cpu)["hash"]
+
+
+def test_styled_nvdec_contract_truthfully_records_cpu_visual_boundary():
+    base = {"version": "1", "implementation": "nvdec_cuda", "decode_used": "nvdec", "filter_used": "cuda", "hardware_api": "cuda", "filter_chain": ["scale_cuda=1920:1080"]}
+    plan = {"execution_mode": "mixed_cpu_visual_filters", "resolved_hash": "plan"}
+    effective = apply_visual_execution_contract(base, plan, encoder="h264_nvenc")
+    assert effective["implementation"] == "nvdec_cpu_visual_nvenc"
+    assert effective["decode_used"] == "nvdec"
+    assert effective["filter_used"] == "cpu"
+    assert effective["encode_used"] == "h264_nvenc"
+    assert effective["execution_mode"] == "nvdec_cpu_visual_nvenc"
+    assert "approved_visual_graph" in effective["filter_chain"]
+    assert gpu_execution_cache_identity(effective)["hash"] != gpu_execution_cache_identity(base)["hash"]
 
 
 def test_sar_normalization_contract_invalidates_old_geometry_cache():
