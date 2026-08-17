@@ -329,7 +329,7 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
     from .storyboard import storyboard_for_api
     from .story_generation import project_story_detail
     from .delivery_qa import delivery_qa_for_api
-    from .creative_brief import ensure_creative_brief
+    from .creative_brief import creative_brief_api_payload, ensure_creative_brief
 
     public_bgm = []
     for bgm_row in project_bgm_tracks(db, project_id):
@@ -374,7 +374,7 @@ def project_detail(cfg: dict, db: Path, project_id: int) -> dict:
         "audio": audio_state_for_api(cfg, project_id, db),
         "storyboard": storyboard_for_api(cfg, db, project_id),
         "story": project_story_detail(cfg, db, project_id),
-        "creative_brief": ensure_creative_brief(cfg, db, project_id),
+        "creative_brief": creative_brief_api_payload(ensure_creative_brief(cfg, db, project_id)),
         "delivery_qa": delivery_qa_for_api(cfg, project_id),
     }
 

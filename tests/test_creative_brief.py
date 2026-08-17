@@ -1,12 +1,24 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from video_vault.creative_brief import (
     CREATIVE_BRIEF_STATUS_APPROVED,
+    FRAMING_STRATEGY_REGISTRY,
+    MISMATCH_DIRECTION_REGISTRY,
+    OUTPUT_CONTRACT_REGISTRY,
+    FramingStrategyRegistry,
+    MismatchDirectionRegistry,
+    OutputContractRegistry,
+    _recommendation,
+    _normalize_approved,
+    creative_brief_options,
     ensure_creative_brief,
     load_creative_brief,
     recommend_creative_brief,
     save_approved_creative_brief,
+    validate_materialized_approved,
 )
 from video_vault.database import add_analysis, connect, init_db, upsert_video
 from video_vault.project import build_project_plan, create_project
@@ -99,3 +111,96 @@ def test_approved_brief_is_render_manifest_source_of_truth(tmp_path, monkeypatch
     assert manifest["profile"]["width"] == 1080
     assert manifest["profile"]["height"] == 1920
     assert manifest["approved_creative_brief"]["output"]["orientation"] == "portrait"
+
+
+def _synthetic_registries():
+    directions = MismatchDirectionRegistry(MISMATCH_DIRECTION_REGISTRY.entries())
+    outputs = OutputContractRegistry(OUTPUT_CONTRACT_REGISTRY.entries())
+    outputs.register({
+        "output_contract_id": "square_1_1_test",
+        "version": "1",
+        "orientation": "square",
+        "aspect_ratio": "1:1",
+        "width": 1080,
+        "height": 1080,
+        "render_profile_id": "test_square_1080",
+        "enabled_for_round1_ui": False,
+        "label": "Test square 1:1",
+        "capability": {"test_only": True},
+    })
+    strategies = FramingStrategyRegistry(directions, FRAMING_STRATEGY_REGISTRY.entries())
+    strategies.register({
+        "strategy_id": "edge_extend_test",
+        "version": "1",
+        "supported_direction_ids": ["portrait_source_in_landscape", "landscape_source_in_portrait"],
+        "label": "Test edge extension",
+        "description": "synthetic registry-only strategy",
+        "semantic": {"kind": "edge_extend", "test_only": True},
+    })
+    return outputs, directions, strategies
+
+
+def test_horizontal_registry_materializes_synthetic_output_and_strategy_without_special_case():
+    outputs, directions, strategies = _synthetic_registries()
+    recommendation = _recommendation({"orientation_counts": {"portrait": 1, "landscape": 1}, "source_count": 2})
+    materialized = _normalize_approved(
+        {
+            "output": {"output_contract_id": "square_1_1_test", "output_contract_version": "1", "aspect_ratio": "1:1", "width": 1080, "height": 1080},
+            "framing_intent": {
+                direction["direction_id"]: {"approved_strategy_id": "edge_extend_test", "approved_strategy_version": "1"}
+                for direction in directions.entries()
+            },
+        },
+        recommendation,
+        output_registry=outputs,
+        direction_registry=directions,
+        strategy_registry=strategies,
+        allow_disabled=True,
+    )
+    assert materialized["output"]["output_contract_id"] == "square_1_1_test"
+    assert materialized["output"]["width"] == 1080
+    assert materialized["framing_intent"]["portrait_source_in_landscape"]["approved_strategy_id"] == "edge_extend_test"
+    assert validate_materialized_approved(materialized, output_registry=outputs, direction_registry=directions, strategy_registry=strategies)["valid"]
+
+
+def test_registry_unknown_ids_and_versions_fail_closed():
+    outputs, directions, strategies = _synthetic_registries()
+    recommendation = _recommendation({"orientation_counts": {}, "source_count": 0})
+    with pytest.raises(ValueError, match="unknown output_contract_id"):
+        _normalize_approved({"output": {"output_contract_id": "missing"}}, recommendation, output_registry=outputs, direction_registry=directions, strategy_registry=strategies)
+    with pytest.raises(ValueError, match="unsupported output contract version"):
+        _normalize_approved({"output": {"output_contract_id": "square_1_1_test", "output_contract_version": "99"}}, recommendation, output_registry=outputs, direction_registry=directions, strategy_registry=strategies)
+    with pytest.raises(ValueError, match="Creative Brief"):
+        _normalize_approved({"output": {"output_contract_id": "square_1_1_test"}, "framing_intent": {"portrait_source_in_landscape": {"approved_strategy_id": "missing"}}}, recommendation, output_registry=outputs, direction_registry=directions, strategy_registry=strategies, allow_disabled=True)
+
+
+def test_approved_materialization_is_stable_when_new_registry_default_is_added():
+    outputs, directions, strategies = _synthetic_registries()
+    recommendation = _recommendation({"orientation_counts": {}, "source_count": 0})
+    approved = _normalize_approved(
+        {"output": {"output_contract_id": "landscape_16_9", "output_contract_version": "1"}, "framing_intent": {}},
+        recommendation,
+        output_registry=outputs,
+        direction_registry=directions,
+        strategy_registry=strategies,
+    )
+    updated_outputs = OutputContractRegistry(outputs.entries())
+    updated_outputs.register({
+        "output_contract_id": "landscape_16_9_v2",
+        "version": "2",
+        "orientation": "landscape",
+        "aspect_ratio": "2:1",
+        "width": 2000,
+        "height": 1000,
+        "render_profile_id": "test_landscape_v2",
+        "enabled_for_round1_ui": False,
+    })
+    assert validate_materialized_approved(approved, output_registry=updated_outputs, direction_registry=directions, strategy_registry=strategies)["valid"]
+    assert approved["output"]["output_contract_id"] == "landscape_16_9"
+    assert approved["output"]["aspect_ratio"] == "16:9"
+
+
+def test_api_options_are_materialized_from_registry():
+    options = creative_brief_options()
+    assert {item["output_contract_id"] for item in options["output_contracts"]} == {"landscape_16_9", "portrait_9_16"}
+    assert {item["strategy_id"] for item in options["framing_strategies"]} >= {"crop_reframe", "background_treatment", "preserve_full_frame", "auto_recommended"}

@@ -8,14 +8,28 @@ export type Project = {
 };
 
 export type CreativeBriefOutput = {
+  output_contract_id?: string;
+  output_contract_version?: string;
   orientation?: "landscape" | "portrait" | string;
   aspect_ratio?: string;
   width?: number;
   height?: number;
   render_profile_id?: string;
+  capability?: Record<string, unknown>;
 };
 
 export type CreativeBriefFraming = {
+  direction_id?: string;
+  direction_version?: string;
+  source_orientation?: string;
+  target_orientation?: string;
+  strategy_id?: string;
+  strategy_version?: string;
+  approved_strategy_id?: string;
+  approved_strategy_version?: string;
+  recommended_strategy_id?: string;
+  recommended_strategy_version?: string;
+  resolved_semantic?: Record<string, unknown>;
   recommended_strategy?: string;
   approved_strategy?: string;
   reason?: string;
@@ -42,6 +56,15 @@ export type CreativeBrief = {
   visual_contract_hash?: string;
   story_relevant_hash?: string;
   approved_at?: string;
+  registry_version?: string;
+  registry_hash?: string;
+  options?: {
+    registry_version?: string;
+    registry_hash?: string;
+    output_contracts?: Array<CreativeBriefOutput & { label?: string; enabled_for_round1_ui?: boolean; version?: string }>;
+    mismatch_directions?: Array<{ direction_id: string; version: string; source_orientation: string; target_orientation: string; label: string; description?: string }>;
+    framing_strategies?: Array<{ strategy_id: string; version: string; supported_direction_ids: string[]; label: string; description?: string; semantic?: Record<string, unknown>; capability?: Record<string, unknown> }>;
+  };
 };
 
 export type PerceptionWindowResult = {
@@ -766,6 +789,7 @@ export const api = {
   saveStorySettings: (projectId: number, settings: Record<string, unknown>, baseRevision?: number, expectedVersion?: number) =>
     json<{ ok: boolean; settings?: StoryDetail["settings"]; profile_version?: number; project_revision?: number; error?: string; code?: string }>("/api/project/story/settings", post({ project_id: projectId, settings, base_revision: baseRevision, expected_version: expectedVersion ?? Number(settings.profile_version || 1) })),
   creativeBrief: (projectId: number) => json<CreativeBrief>(`/api/project/creative-brief?project_id=${projectId}`),
+  creativeBriefOptions: () => json<NonNullable<CreativeBrief["options"]>>("/api/project/creative-brief/options"),
   recommendCreativeBrief: (projectId: number, baseRevision?: number) =>
     json<{ ok: boolean; creative_brief?: CreativeBrief; project_revision?: number; error?: string; code?: string }>("/api/project/creative-brief/recommend", post({ project_id: projectId, base_revision: baseRevision })),
   saveCreativeBrief: (projectId: number, brief: Record<string, unknown>, approvalSource: "recommendation" | "human_override", baseRevision?: number) =>

@@ -12,47 +12,58 @@ type Props = {
   mutationControls: ProjectMutationControls;
 };
 
-const OUTPUTS: Record<string, { orientation: string; aspect_ratio: string; width: number; height: number; render_profile_id: string }> = {
-  landscape: { orientation: "landscape", aspect_ratio: "16:9", width: 1920, height: 1080, render_profile_id: "final_1080p" },
-  portrait: { orientation: "portrait", aspect_ratio: "9:16", width: 1080, height: 1920, render_profile_id: "final_1080p_portrait" },
-};
+type BriefOptions = NonNullable<CreativeBrief["options"]>;
+type OutputOption = NonNullable<BriefOptions["output_contracts"]>[number];
+type DirectionOption = NonNullable<BriefOptions["mismatch_directions"]>[number];
 
-const STRATEGIES = [
-  ["crop_reframe", "裁切／重新構圖"],
-  ["background_treatment", "背景處理（VID-27）"],
-  ["preserve_full_frame", "保留完整畫面"],
-] as const;
-
-function outputFor(orientation: string) {
-  return OUTPUTS[orientation] || OUTPUTS.landscape;
+function strategyId(framing: CreativeBriefFraming | undefined, fallback = "auto_recommended") {
+  return String(framing?.approved_strategy_id || framing?.approved_strategy || framing?.strategy_id || framing?.recommended_strategy_id || framing?.recommended_strategy || fallback);
 }
 
-function framingValue(framing: CreativeBriefFraming | undefined, fallback = "crop_reframe") {
-  return String(framing?.approved_strategy || framing?.recommended_strategy || fallback);
+function outputId(recommendation: CreativeBrief["recommendation"], options: OutputOption[]) {
+  const candidate = recommendation?.output;
+  return String(candidate?.output_contract_id || options.find((item) => item.orientation === candidate?.orientation)?.output_contract_id || options[0]?.output_contract_id || "");
+}
+
+function materializedOutput(options: OutputOption[], id: string, fallback?: NonNullable<CreativeBrief["recommendation"]>["output"]): OutputOption {
+  return options.find((item) => item.output_contract_id === id) || fallback || options[0] || {};
+}
+
+function initialFraming(directions: DirectionOption[], approved: CreativeBrief["approved"], recommendation: CreativeBrief["recommendation"]) {
+  return Object.fromEntries(directions.map((direction) => {
+    const approvedItem = approved?.framing_intent?.[direction.direction_id as keyof NonNullable<CreativeBrief["approved"]>["framing_intent"]] as CreativeBriefFraming | undefined;
+    const recommendationItem = recommendation?.framing_intent?.[direction.direction_id as keyof NonNullable<CreativeBrief["recommendation"]>["framing_intent"]] as CreativeBriefFraming | undefined;
+    return [direction.direction_id, strategyId(approvedItem || recommendationItem)];
+  }));
+}
+
+function framingPayload(directions: DirectionOption[], strategies: Record<string, string>, options: BriefOptions) {
+  return Object.fromEntries(directions.map((direction) => {
+    const selected = strategies[direction.direction_id] || "auto_recommended";
+    const version = options.framing_strategies?.find((item) => item.strategy_id === selected)?.version || "";
+    return [direction.direction_id, { approved_strategy_id: selected, approved_strategy_version: version }];
+  }));
 }
 
 export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mutationControls }: Props) {
   const brief = detail.creative_brief || {};
   const recommendation = brief.recommendation || {};
-  const recommendedOutput = recommendation.output || outputFor("landscape");
   const approved = brief.approved || {};
-  const initialOutput = approved.output || recommendedOutput;
-  const [orientation, setOrientation] = useState(String(initialOutput.orientation || "landscape"));
-  const [portraitInLandscape, setPortraitInLandscape] = useState(framingValue(approved.framing_intent?.portrait_source_in_landscape || recommendation.framing_intent?.portrait_source_in_landscape));
-  const [landscapeInPortrait, setLandscapeInPortrait] = useState(framingValue(approved.framing_intent?.landscape_source_in_portrait || recommendation.framing_intent?.landscape_source_in_portrait));
+  const options = brief.options || {};
+  const outputOptions = (options.output_contracts || []).filter((item) => item.enabled_for_round1_ui !== false);
+  const directions = options.mismatch_directions || [];
+  const recommendedOutputId = outputId(recommendation, outputOptions);
+  const [outputContractId, setOutputContractId] = useState(String(approved.output?.output_contract_id || recommendedOutputId));
+  const [strategies, setStrategies] = useState<Record<string, string>>(() => initialFraming(directions, approved, recommendation));
   const [busy, setBusy] = useState("");
-  const output = useMemo(() => outputFor(orientation), [orientation]);
+  const selectedOutput = useMemo(() => materializedOutput(outputOptions, outputContractId, approved.output || recommendation.output), [approved.output, outputContractId, outputOptions, recommendation.output]);
   const counts = recommendation.source_orientation_summary || brief.source_geometry?.orientation_counts || {};
   const approvedState = brief.status === "approved";
 
   useEffect(() => {
-    const nextApproved = brief.approved || {};
-    const nextRecommendation = brief.recommendation || {};
-    const nextOutput = nextApproved.output || nextRecommendation.output || outputFor("landscape");
-    setOrientation(String(nextOutput.orientation || "landscape"));
-    setPortraitInLandscape(framingValue(nextApproved.framing_intent?.portrait_source_in_landscape || nextRecommendation.framing_intent?.portrait_source_in_landscape));
-    setLandscapeInPortrait(framingValue(nextApproved.framing_intent?.landscape_source_in_portrait || nextRecommendation.framing_intent?.landscape_source_in_portrait));
-  }, [brief.brief_version, brief.status]);
+    setOutputContractId(String(approved.output?.output_contract_id || recommendedOutputId));
+    setStrategies(initialFraming(directions, approved, recommendation));
+  }, [brief.brief_version, brief.status, options.registry_hash]);
 
   async function refreshRecommendation() {
     const mutation = mutationControls.beginProjectMutation(detail.project.id, "story");
@@ -71,21 +82,22 @@ export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mu
     }
   }
 
-  async function save(approvalSource: "recommendation" | "human_override", values?: { orientation: string; portraitInLandscape: string; landscapeInPortrait: string }) {
+  async function save(approvalSource: "recommendation" | "human_override", values?: { outputContractId: string; strategies: Record<string, string> }) {
     const mutation = mutationControls.beginProjectMutation(detail.project.id, "story");
     if (!mutation) return;
+    const nextOutputId = values?.outputContractId || outputContractId;
+    const nextOutput = materializedOutput(outputOptions, nextOutputId, recommendation.output);
+    if (!nextOutput.output_contract_id) {
+      setMessage("Creative Brief registry 尚未提供可核准的 output contract。");
+      mutationControls.finishProjectMutation(mutation);
+      return;
+    }
     setBusy("save");
     try {
-      const nextOrientation = values?.orientation || orientation;
-      const nextOutput = outputFor(nextOrientation);
-      const nextPortraitInLandscape = values?.portraitInLandscape || portraitInLandscape;
-      const nextLandscapeInPortrait = values?.landscapeInPortrait || landscapeInPortrait;
+      const nextStrategies = values?.strategies || strategies;
       const result = await api.saveCreativeBrief(detail.project.id, {
         output: nextOutput,
-        framing_intent: {
-          portrait_source_in_landscape: { approved_strategy: nextPortraitInLandscape },
-          landscape_source_in_portrait: { approved_strategy: nextLandscapeInPortrait },
-        },
+        framing_intent: framingPayload(directions, nextStrategies, options),
       }, approvalSource, detail.project_revision);
       if (!result.ok || !result.creative_brief) throw new Error(result.error || "Creative Brief 儲存失敗");
       await refreshProject({ forceFresh: true });
@@ -98,6 +110,10 @@ export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mu
     }
   }
 
+  function strategiesFor(directionId: string) {
+    return (options.framing_strategies || []).filter((item) => item.supported_direction_ids.includes(directionId));
+  }
+
   return <section className="creative-brief card" aria-label="Creative Brief checkpoint">
     <div className="creative-brief-heading">
       <div><span className="eyebrow">CREATIVE BRIEF CHECKPOINT</span><h3>先確認最終影片方向</h3><p>這是 Story generation 前的 project-level visual contract；實際 smart crop、背景處理與預覽屬於 VID-27。</p></div>
@@ -108,21 +124,19 @@ export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mu
       <button type="button" disabled={Boolean(busy)} onClick={() => void refreshRecommendation()}>{busy === "recommend" ? "分析中…" : "重新分析素材方向"}</button>
     </div>
     <div className="creative-brief-recommendation">
-      <strong>AI 建議：{String(recommendedOutput.orientation === "portrait" ? "直向 9:16" : "橫向 16:9")}</strong>
+      <strong>AI 建議：{String(recommendation.output?.aspect_ratio || "尚未解析")}</strong>
       <span>{recommendation.reason || "尚無建議理由"}</span>
     </div>
     <div className="creative-brief-controls">
       <fieldset><legend>最終影片方向</legend>
-        <label><input type="radio" name={`brief-orientation-${detail.project.id}`} checked={orientation === "landscape"} disabled={Boolean(busy)} onChange={() => setOrientation("landscape")} />橫向 16:9（1920×1080）</label>
-        <label><input type="radio" name={`brief-orientation-${detail.project.id}`} checked={orientation === "portrait"} disabled={Boolean(busy)} onChange={() => setOrientation("portrait")} />直向 9:16（1080×1920）</label>
+        {outputOptions.map((option) => <label key={option.output_contract_id}><input type="radio" name={`brief-output-${detail.project.id}`} checked={outputContractId === option.output_contract_id} disabled={Boolean(busy)} onChange={() => setOutputContractId(String(option.output_contract_id))} />{option.label || option.aspect_ratio}（{option.width}×{option.height}）</label>)}
       </fieldset>
-      <div className="creative-brief-output"><span>目前選擇</span><strong>{output.width}×{output.height}</strong><code>{output.render_profile_id}</code></div>
-      <label>橫向輸出 + 直向素材<select value={portraitInLandscape} disabled={Boolean(busy)} onChange={(event) => setPortraitInLandscape(event.target.value)}>{STRATEGIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-      <label>直向輸出 + 橫向素材<select value={landscapeInPortrait} disabled={Boolean(busy)} onChange={(event) => setLandscapeInPortrait(event.target.value)}>{STRATEGIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+      <div className="creative-brief-output"><span>目前選擇</span><strong>{selectedOutput.width}×{selectedOutput.height}</strong><code>{selectedOutput.render_profile_id || "unknown-profile"}</code></div>
+      {directions.map((direction) => <label key={direction.direction_id}>{direction.label}<select value={strategies[direction.direction_id] || ""} disabled={Boolean(busy)} onChange={(event) => setStrategies((current) => ({ ...current, [direction.direction_id]: event.target.value }))}>{strategiesFor(direction.direction_id).map((strategy) => <option key={strategy.strategy_id} value={strategy.strategy_id}>{strategy.label}</option>)}</select></label>)}
     </div>
     <div className="creative-brief-actions">
-      <button type="button" className="primary" disabled={Boolean(busy)} onClick={() => { const nextOrientation = String(recommendedOutput.orientation || "landscape"); const nextPortrait = framingValue(recommendation.framing_intent?.portrait_source_in_landscape); const nextLandscape = framingValue(recommendation.framing_intent?.landscape_source_in_portrait); setOrientation(nextOrientation); setPortraitInLandscape(nextPortrait); setLandscapeInPortrait(nextLandscape); void save("recommendation", { orientation: nextOrientation, portraitInLandscape: nextPortrait, landscapeInPortrait: nextLandscape }); }}>{busy === "save" ? "儲存中…" : "採用 AI 建議並核准"}</button>
-      <button type="button" disabled={Boolean(busy)} onClick={() => void save("human_override")}>儲存並核准手動覆寫</button>
+      <button type="button" className="primary" disabled={Boolean(busy) || !recommendedOutputId} onClick={() => { const nextStrategies = initialFraming(directions, {}, recommendation); setOutputContractId(recommendedOutputId); setStrategies(nextStrategies); void save("recommendation", { outputContractId: recommendedOutputId, strategies: nextStrategies }); }}>{busy === "save" ? "儲存中…" : "採用 AI 建議並核准"}</button>
+      <button type="button" disabled={Boolean(busy) || !outputContractId} onClick={() => void save("human_override")}>儲存並核准手動覆寫</button>
     </div>
     {approvedState && <p className="creative-brief-approved" role="status">已核准值會由 Render / VID-27 讀取；visual-only 變更不會讓既有 StoryInput 無謂 stale。</p>}
   </section>;
