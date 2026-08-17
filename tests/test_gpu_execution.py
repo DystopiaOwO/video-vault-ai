@@ -1,4 +1,5 @@
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 
 from video_vault.gpu_execution import GPU_EXECUTION_CONTRACT_VERSION, GPUExecutionRegistry, execution_contract_hash, gpu_execution_cache_identity
@@ -68,6 +69,139 @@ def test_unsupported_source_gets_explicit_cpu_fallback(monkeypatch):
     assert pixel_contract["fallback_reason"] == "unsupported_source_pixel_format:yuv444p10le"
 
 
+def test_rotated_display_geometry_falls_back_before_cuda_scale(monkeypatch):
+    _capability_pass(monkeypatch)
+    rotated = replace(
+        _probe(),
+        coded_width=3840,
+        coded_height=2176,
+        display_aspect_ratio="9:16",
+        display_ratio=9 / 16,
+        display_width=2160,
+        display_height=3840,
+        rotation_degrees=-90,
+        display_matrix="matrix -90",
+        display_geometry_source="display_matrix",
+    )
+    contract = GPUExecutionRegistry({"ffmpeg_path": "ffmpeg"}).resolve(_manifest(), _segment(), rotated, _encoder())
+    assert contract["implementation"] == "cpu"
+    assert contract["fallback_reason"] == "requires_cpu_display_matrix_transform"
+    assert contract["display_geometry"]["display_aspect_ratio"] == "9:16"
+
+    manifest = {**_manifest(), "settings": {**_manifest()["settings"], "gpu_execution_contract": contract}}
+    command = build_segment_ffmpeg_command({"ffmpeg_path": "ffmpeg"}, manifest, _segment(), rotated, output="out.mp4", encoder="h264_nvenc")
+    text = " ".join(command)
+    assert "setsar=1" in text
+    assert "scale=1920:1080:force_original_aspect_ratio=decrease" in text
+    assert "scale_cuda=1920:1080" not in text
+
+
+def test_non_square_sar_is_normalized_before_composition(monkeypatch):
+    _capability_pass(monkeypatch)
+    sar_probe = replace(
+        _probe(),
+        width=720,
+        height=480,
+        coded_width=720,
+        coded_height=480,
+        sample_aspect_ratio="4:3",
+        display_aspect_ratio="2:1",
+        display_ratio=2.0,
+        display_width=960,
+        display_height=480,
+    )
+    contract = GPUExecutionRegistry({"ffmpeg_path": "ffmpeg"}).resolve(_manifest(), _segment(), sar_probe, _encoder())
+    assert contract["implementation"] == "cpu"
+    assert contract["fallback_reason"] == "requires_cpu_sample_aspect_normalization"
+    assert contract["display_geometry"]["sar_normalization"] == "display_pixel_width_before_composition"
+
+    manifest = {**_manifest(), "settings": {**_manifest()["settings"], "gpu_execution_contract": contract}}
+    command = build_segment_ffmpeg_command({"ffmpeg_path": "ffmpeg"}, manifest, _segment(), sar_probe, output="out.mp4", encoder="libx264")
+    text = " ".join(command)
+    normalization = "scale=ceil(iw*4/3/2)*2:ih:eval=init,setsar=1"
+    assert normalization in text
+    assert text.index(normalization) < text.index("scale=1920:1080:force_original_aspect_ratio=decrease")
+    assert text.count("setsar=1") == 2
+
+
+def test_non_square_sar_crop_to_fill_uses_canonical_display_geometry(monkeypatch):
+    _capability_pass(monkeypatch)
+    sar_probe = replace(
+        _probe(),
+        width=720,
+        height=480,
+        coded_width=720,
+        coded_height=480,
+        sample_aspect_ratio="4:3",
+        display_aspect_ratio="2:1",
+        display_ratio=2.0,
+        display_width=960,
+        display_height=480,
+    )
+    manifest = {**_manifest(), "settings": {**_manifest()["settings"], "display_geometry_policy": "crop_to_fill"}}
+    contract = GPUExecutionRegistry({"ffmpeg_path": "ffmpeg"}).resolve(manifest, _segment(), sar_probe, _encoder())
+    command_manifest = {**manifest, "settings": {**manifest["settings"], "gpu_execution_contract": contract}}
+    text = " ".join(build_segment_ffmpeg_command({"ffmpeg_path": "ffmpeg"}, command_manifest, _segment(), sar_probe, output="out.mp4", encoder="libx264"))
+    normalization = "scale=ceil(iw*4/3/2)*2:ih:eval=init,setsar=1"
+    assert text.index(normalization) < text.index("scale=1920:1080:force_original_aspect_ratio=increase")
+    assert text.index("scale=1920:1080:force_original_aspect_ratio=increase") < text.index("crop=1920:1080")
+
+
+def test_rotated_non_square_sar_has_deterministic_cpu_fallback(monkeypatch):
+    _capability_pass(monkeypatch)
+    rotated_sar = replace(
+        _probe(),
+        sample_aspect_ratio="4:3",
+        rotation_degrees=90,
+        display_aspect_ratio="3:8",
+        display_ratio=3 / 8,
+        display_width=2160,
+        display_height=5760,
+        display_matrix="matrix 90",
+        display_geometry_source="display_matrix",
+    )
+    contract = GPUExecutionRegistry({"ffmpeg_path": "ffmpeg"}).resolve(_manifest(), _segment(), rotated_sar, _encoder())
+    assert contract["implementation"] == "cpu"
+    assert contract["fallback_reason"] == "requires_cpu_display_matrix_transform"
+    assert contract["display_geometry"]["sample_aspect_ratio"] == "4:3"
+    manifest = {**_manifest(), "settings": {**_manifest()["settings"], "gpu_execution_contract": contract}}
+    command = build_segment_ffmpeg_command({"ffmpeg_path": "ffmpeg"}, manifest, _segment(), rotated_sar, output="out.mp4", encoder="libx264")
+    assert "scale=ceil(iw*3/4/2)*2:ih:eval=init,setsar=1" in " ".join(command)
+
+
+def test_rotated_sar_cache_identity_records_post_autorotate_axis():
+    old = {"version": "1", "implementation": "cpu", "decode_used": "cpu", "filter_used": "cpu", "hardware_api": "cpu", "display_geometry": {"sample_aspect_ratio": "4:3", "rotation_degrees": 90}}
+    current = {**old, "display_geometry": {**old["display_geometry"], "sar_normalization_axis": "post_autorotate"}}
+    assert execution_contract_hash(old) != execution_contract_hash(current)
+
+
+def test_display_geometry_changes_segment_cache_identity(tmp_path):
+    source = tmp_path / "coffee.mkv"
+    source.write_bytes(b"source")
+    segment = {**_segment(), "source_file": str(source)}
+    base = _manifest()
+    first = {"version": "1", "implementation": "cpu", "decode_used": "cpu", "filter_used": "cpu", "hardware_api": "cpu", "display_geometry": {"display_aspect_ratio": "16:9", "rotation_degrees": 0}}
+    second = {**first, "display_geometry": {"display_aspect_ratio": "9:16", "rotation_degrees": -90}}
+    manifest_a = {**base, "settings": {**base["settings"], "gpu_execution_contract": first}}
+    manifest_b = {**base, "settings": {**base["settings"], "gpu_execution_contract": second}}
+    assert build_segment_cache_key(manifest_a, segment) != build_segment_cache_key(manifest_b, segment)
+
+
+def test_display_geometry_policy_is_explicit_and_deterministic(monkeypatch):
+    _capability_pass(monkeypatch)
+    rotated = replace(_probe(), rotation_degrees=90, display_ratio=9 / 16, display_aspect_ratio="9:16")
+    manifest = {**_manifest(), "settings": {**_manifest()["settings"], "display_geometry_policy": "crop_to_fill"}}
+    contract = GPUExecutionRegistry({"ffmpeg_path": "ffmpeg"}).resolve(manifest, _segment(), rotated, _encoder())
+    assert contract["display_geometry"]["composition_policy"] == "crop_to_fill"
+    assert contract["display_geometry"]["composition_policy_source"] == "manifest.settings"
+
+    command_manifest = {**manifest, "settings": {**manifest["settings"], "gpu_execution_contract": contract}}
+    command = build_segment_ffmpeg_command({"ffmpeg_path": "ffmpeg"}, command_manifest, _segment(), rotated, output="out.mp4", encoder="h264_nvenc")
+    text = " ".join(command)
+    assert "force_original_aspect_ratio=increase" in text
+    assert "crop=1920:1080" in text
+
+
 def test_gpu_execution_cache_identity_differs_from_cpu_and_ignores_diagnostics():
     gpu = {"version": "1", "implementation": "nvdec_cuda", "decode_used": "nvdec", "filter_used": "cuda", "hardware_api": "cuda", "filter_chain": ["scale_cuda=1920:1080:format=yuv420p"], "capability_probe": {"stderr_tail": "first"}}
     gpu2 = {**gpu, "capability_probe": {"stderr_tail": "different"}}
@@ -75,6 +209,24 @@ def test_gpu_execution_cache_identity_differs_from_cpu_and_ignores_diagnostics()
     assert execution_contract_hash(gpu) == execution_contract_hash(gpu2)
     assert gpu_execution_cache_identity(gpu)["hash"] == gpu_execution_cache_identity(gpu2)["hash"]
     assert gpu_execution_cache_identity(gpu)["hash"] != gpu_execution_cache_identity(cpu)["hash"]
+
+
+def test_sar_normalization_contract_invalidates_old_geometry_cache():
+    old = {
+        "version": "1",
+        "implementation": "cpu",
+        "decode_used": "cpu",
+        "filter_used": "cpu",
+        "hardware_api": "cpu",
+        "filter_chain": ["autorotate", "setsar", "scale", "pad", "fps", "format", "setsar", "setparams"],
+        "display_geometry": {"sample_aspect_ratio": "4:3", "display_ratio": 2.0},
+    }
+    current = {
+        **old,
+        "filter_chain": ["autorotate", "display_geometry_normalize", "setsar", "scale", "pad", "fps", "format", "setsar", "setparams"],
+        "display_geometry": {**old["display_geometry"], "contract_version": "2", "sar_normalization": "display_pixel_width_before_composition"},
+    }
+    assert execution_contract_hash(old) != execution_contract_hash(current)
 
 
 def test_gpu_contract_does_not_change_approval_provenance():

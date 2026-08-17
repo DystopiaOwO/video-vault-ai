@@ -84,6 +84,70 @@ def test_fast_metadata_probe_omits_counting_flags(monkeypatch, tmp_path: Path):
     assert "-count_packets" not in commands[0]
 
 
+def test_probe_preserves_display_matrix_and_normalizes_display_geometry(monkeypatch, tmp_path: Path):
+    source = tmp_path / "rotated.mp4"
+    source.write_bytes(b"source")
+    payload = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "width": 3840,
+                "height": 2160,
+                "coded_width": 3840,
+                "coded_height": 2176,
+                "sample_aspect_ratio": "1:1",
+                "avg_frame_rate": "60/1",
+                "pix_fmt": "yuv420p10le",
+                "codec_name": "hevc",
+                "side_data_list": [
+                    {
+                        "side_data_type": "Display Matrix",
+                        "displaymatrix": "matrix -90",
+                        "rotation": -90,
+                    }
+                ],
+            }
+        ],
+        "format": {"duration": "2.5"},
+    }
+    monkeypatch.setattr("video_vault.media_probe.subprocess.run", lambda *args, **kwargs: _result(payload))
+    result = probe_media_metadata("ffprobe", source)
+    assert result.coded_width == 3840
+    assert result.coded_height == 2176
+    assert result.sample_aspect_ratio == "1:1"
+    assert result.display_aspect_ratio == "9:16"
+    assert result.display_ratio == pytest.approx(9 / 16)
+    assert (result.display_width, result.display_height) == (2160, 3840)
+    assert result.rotation_degrees == -90
+    assert result.display_matrix == "matrix -90"
+    assert result.display_geometry_source == "display_matrix"
+
+
+def test_probe_uses_rotate_tag_when_display_matrix_is_missing(monkeypatch, tmp_path: Path):
+    source = tmp_path / "tag-rotated.mp4"
+    source.write_bytes(b"source")
+    payload = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "width": 1920,
+                "height": 1080,
+                "sample_aspect_ratio": "4:3",
+                "avg_frame_rate": "30/1",
+                "pix_fmt": "yuv420p",
+                "codec_name": "h264",
+                "tags": {"rotate": "90"},
+            }
+        ],
+        "format": {"duration": "1"},
+    }
+    monkeypatch.setattr("video_vault.media_probe.subprocess.run", lambda *args, **kwargs: _result(payload))
+    result = probe_media_metadata("ffprobe", source)
+    assert result.rotation_degrees == 90
+    assert result.display_aspect_ratio == "27:64"
+    assert result.display_ratio == pytest.approx(27 / 64)
+
+
 def test_deep_probe_retains_frame_and_packet_counting(monkeypatch, tmp_path: Path):
     source = tmp_path / "clip.mp4"
     source.write_bytes(b"source")

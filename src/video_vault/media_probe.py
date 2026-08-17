@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 import json
 from pathlib import Path
 import subprocess
@@ -41,6 +42,20 @@ class MediaProbe:
     audio_end_seconds: float = 0.0
     video_stream_index: int = -1
     audio_stream_index: int = -1
+    # ``width``/``height`` remain the visible coded dimensions for backwards
+    # compatibility.  The fields below make the source display transform
+    # explicit so renderers do not confuse coded geometry with what a normal
+    # player displays.
+    coded_width: int = 0
+    coded_height: int = 0
+    sample_aspect_ratio: str = "1:1"
+    display_aspect_ratio: str = ""
+    display_ratio: float = 0.0
+    display_width: int = 0
+    display_height: int = 0
+    rotation_degrees: int = 0
+    display_matrix: str = ""
+    display_geometry_source: str = ""
 
 
 MediaProbeResult = MediaProbe
@@ -266,6 +281,7 @@ def _parse(source: Path, raw: dict[str, Any], *, include_frame_count: bool = Tru
     audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
     fps_num, fps_den = _video_frame_rate(video)
     duration = _number((raw.get("format") or {}).get("duration")) or _number(video.get("duration")) or 0.0
+    geometry = _display_geometry(video)
     return MediaProbe(
         source_file=source,
         duration_seconds=duration,
@@ -292,7 +308,92 @@ def _parse(source: Path, raw: dict[str, Any], *, include_frame_count: bool = Tru
         audio_end_seconds=((_number(audio.get("start_time")) or 0.0) + (_number(audio.get("duration")) or duration)) if audio else 0.0,
         video_stream_index=_integer(video.get("index")),
         audio_stream_index=_integer(audio.get("index")) if audio else -1,
+        coded_width=_integer(video.get("coded_width") or video.get("width")),
+        coded_height=_integer(video.get("coded_height") or video.get("height")),
+        sample_aspect_ratio=geometry["sample_aspect_ratio"],
+        display_aspect_ratio=geometry["display_aspect_ratio"],
+        display_ratio=geometry["display_ratio"],
+        display_width=geometry["display_width"],
+        display_height=geometry["display_height"],
+        rotation_degrees=geometry["rotation_degrees"],
+        display_matrix=geometry["display_matrix"],
+        display_geometry_source=geometry["display_geometry_source"],
     )
+
+
+def _display_geometry(video: Mapping[str, Any]) -> dict[str, Any]:
+    width = _integer(video.get("width"))
+    height = _integer(video.get("height"))
+    if width <= 0 or height <= 0:
+        # Keep the historical parser permissive for mocked/header-incomplete
+        # probes.  Render-time callers still reject invalid dimensions through
+        # their existing media/QC contracts; unknown display geometry must not
+        # be mistaken for a verified transform.
+        return {
+            "sample_aspect_ratio": "1:1",
+            "display_aspect_ratio": "",
+            "display_ratio": 0.0,
+            "display_width": width,
+            "display_height": height,
+            "rotation_degrees": 0,
+            "display_matrix": "",
+            "display_geometry_source": "unknown",
+        }
+
+    sar = _parse_ratio(video.get("sample_aspect_ratio"), default=Fraction(1, 1))
+    rotation, matrix = _display_rotation(video)
+    coded_ratio = Fraction(width * sar.numerator, height * sar.denominator)
+    displayed = (Fraction(1, 1) / coded_ratio) if abs(rotation) % 180 == 90 else coded_ratio
+    displayed = displayed.limit_denominator(100000)
+    if abs(rotation) % 180 == 90:
+        display_width, display_height = height, width
+    else:
+        display_width, display_height = width, height
+    return {
+        "sample_aspect_ratio": f"{sar.numerator}:{sar.denominator}",
+        "display_aspect_ratio": f"{displayed.numerator}:{displayed.denominator}",
+        "display_ratio": float(displayed),
+        "display_width": display_width,
+        "display_height": display_height,
+        "rotation_degrees": rotation,
+        "display_matrix": matrix,
+        "display_geometry_source": "display_matrix" if matrix else "sample_aspect_ratio",
+    }
+
+
+def _display_rotation(video: Mapping[str, Any]) -> tuple[int, str]:
+    side_data = video.get("side_data_list") or []
+    for item in side_data:
+        if not isinstance(item, Mapping) or str(item.get("side_data_type") or "").lower() != "display matrix":
+            continue
+        rotation = _integer(item.get("rotation"))
+        matrix = str(item.get("displaymatrix") or "")
+        return _normalize_rotation(rotation), matrix
+    tags = video.get("tags") if isinstance(video.get("tags"), Mapping) else {}
+    return _normalize_rotation(_integer(tags.get("rotate"))), ""
+
+
+def _normalize_rotation(value: int) -> int:
+    normalized = int(value) % 360
+    return normalized - 360 if normalized > 180 else normalized
+
+
+def _parse_ratio(value: Any, *, default: Fraction | None = None) -> Fraction:
+    text = str(value or "").strip()
+    if not text or text.upper() in {"N/A", "0:0", "0/0"}:
+        if default is not None:
+            return default
+        raise MediaProbeError(f"invalid aspect ratio: {value!r}")
+    separator = ":" if ":" in text else "/"
+    try:
+        numerator, denominator = (int(part) for part in text.split(separator, 1))
+        if numerator <= 0 or denominator <= 0:
+            raise ValueError
+        return Fraction(numerator, denominator)
+    except (TypeError, ValueError):
+        if default is not None:
+            return default
+        raise MediaProbeError(f"invalid aspect ratio: {value!r}")
 
 
 def _fraction(value: Any) -> tuple[int, int]:

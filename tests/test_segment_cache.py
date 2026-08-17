@@ -122,7 +122,7 @@ def test_segment_cache_binds_resolved_encoder_contract_and_bumps_version(tmp_pat
     cpu_manifest = {**raw_manifest, "settings": {**raw_manifest["settings"], "encoder_contract": _resolved_encoder_contract("libx264", "cpu-hash")}}
     nvenc_manifest = {**raw_manifest, "settings": {**raw_manifest["settings"], "encoder_contract": _resolved_encoder_contract("h264_nvenc", "nvenc-hash")}}
 
-    assert SEGMENT_RENDERER_CONTRACT_VERSION == 5
+    assert SEGMENT_RENDERER_CONTRACT_VERSION == 6
     assert build_segment_cache_key(raw_manifest, segment) != build_segment_cache_key(cpu_manifest, segment)
     assert build_segment_cache_key(cpu_manifest, segment) != build_segment_cache_key(nvenc_manifest, segment)
     assert cache_key_payload(nvenc_manifest, segment)["encoder_cache_identity"] == {
