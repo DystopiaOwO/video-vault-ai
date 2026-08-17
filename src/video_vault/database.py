@@ -145,6 +145,18 @@ create table if not exists creative_briefs (
   approved_at text,
   updated_at text default current_timestamp
 );
+create table if not exists visual_style_states (
+  project_id integer primary key,
+  schema_version integer not null default 1,
+  status text not null default 'needs_confirmation',
+  recommendation_json text not null default '{}',
+  approved_json text not null default '{}',
+  source_provenance_json text not null default '{}',
+  creative_brief_revision integer not null default 0,
+  creative_brief_hash text not null default '',
+  preview_revision integer not null default 0,
+  updated_at text default current_timestamp
+);
 create table if not exists project_videos (
   project_id integer not null,
   video_id integer not null,

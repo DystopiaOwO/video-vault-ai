@@ -173,11 +173,12 @@ def resolve_visual_timeline(
     return resolved
 
 
-def visual_cache_key(item: Mapping[str, Any], profile: Mapping[str, Any]) -> str:
+def visual_cache_key(item: Mapping[str, Any], profile: Mapping[str, Any], visual_style_hash: str = "") -> str:
     payload = {
         "version": VISUAL_COMPOSITION_VERSION,
         "renderer_cache_version": VISUAL_RENDER_CACHE_VERSION,
         "item": dict(item),
+        "visual_style_hash": str(visual_style_hash or item.get("visual_style_hash") or ""),
         "profile": {key: profile.get(key) for key in ("profile_id", "width", "height", "fps", "video_codec", "pixel_format", "audio_codec", "audio_sample_rate", "audio_channels")},
     }
     return _hash(payload)
@@ -216,7 +217,8 @@ def render_visual_cards(
         if item["type"] == "lower_third":
             overlays.append(item)
             continue
-        key = visual_cache_key(item, profile)
+        visual_style_hash = str(timeline.get("visual_style_hash") or "")
+        key = visual_cache_key(item, profile, visual_style_hash)
         output = cache_root / f"{key}.mp4"
         metadata = cache_root / f"{key}.json"
         cache_hit = False
@@ -260,6 +262,7 @@ def render_visual_cards(
             "cache_key": key,
             "cache_hit": cache_hit,
             "asset_fingerprints": item.get("asset_fingerprints", []),
+            "visual_style_hash": visual_style_hash,
         })
     overlays = [dict(item) for item in timeline.get("resolved_items") or [] if item.get("type") == "lower_third"]
     evidence.extend({
@@ -272,11 +275,12 @@ def render_visual_cards(
         "animation_id": item["animation_id"],
         "font_path": item["font_path"],
         "font_sha256": item["font_sha256"],
-        "cache_key": visual_cache_key(item, profile),
+        "cache_key": visual_cache_key(item, profile, str(timeline.get("visual_style_hash") or "")),
         "cache_hit": False,
         "cache_miss_reason": "overlay_applied",
         "asset_fingerprints": item.get("asset_fingerprints", []),
         "composition": "overlay",
+        "visual_style_hash": str(timeline.get("visual_style_hash") or ""),
     } for item in overlays)
     return paths, evidence, overlays
 

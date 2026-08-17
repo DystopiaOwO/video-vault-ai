@@ -67,6 +67,16 @@ export type CreativeBrief = {
   };
 };
 
+export type VisualStyleState = {
+  project_id?: number;
+  status?: "needs_confirmation" | "approved" | string;
+  preview_revision?: number;
+  recommendation?: Record<string, unknown>;
+  approved?: Record<string, unknown>;
+  source_provenance?: Array<Record<string, unknown>>;
+  options?: { styles?: Array<Record<string, unknown>>; title_styles?: Array<Record<string, unknown>>; [key: string]: unknown };
+};
+
 export type PerceptionWindowResult = {
   window_uuid: string;
   segment_uuid?: string;
@@ -484,6 +494,7 @@ export type ProjectDetail = {
   storyboard: StoryboardState;
   story?: StoryDetail;
   creative_brief?: CreativeBrief;
+  visual_style?: VisualStyleState;
   delivery_qa?: DeliveryQAState;
 };
 
@@ -794,6 +805,12 @@ export const api = {
     json<{ ok: boolean; creative_brief?: CreativeBrief; project_revision?: number; error?: string; code?: string }>("/api/project/creative-brief/recommend", post({ project_id: projectId, base_revision: baseRevision })),
   saveCreativeBrief: (projectId: number, brief: Record<string, unknown>, approvalSource: "recommendation" | "human_override", baseRevision?: number) =>
     json<{ ok: boolean; creative_brief?: CreativeBrief; project_revision?: number; error?: string; code?: string }>("/api/project/creative-brief", post({ project_id: projectId, brief, approval_source: approvalSource, base_revision: baseRevision })),
+  visualStyle: (projectId: number) => json<VisualStyleState>(`/api/project/visual-style?project_id=${projectId}`),
+  visualStyleOptions: () => json<NonNullable<VisualStyleState["options"]>>("/api/project/visual-style/options"),
+  previewVisualStyles: (projectId: number, force = false) =>
+    json<{ ok: boolean; status?: string; code?: string; error?: string; recommendation?: Record<string, unknown>; variants?: Array<Record<string, unknown>> }>("/api/project/visual-style/preview", post({ project_id: projectId, force })),
+  approveVisualStyle: (projectId: number, visualStyleId: string, baseRevision?: number) =>
+    json<{ ok: boolean; visual_style?: VisualStyleState; project_revision?: number; error?: string; code?: string }>("/api/project/visual-style", post({ project_id: projectId, visual_style_id: visualStyleId, base_revision: baseRevision })),
   generateStory: (projectId: number, force = false, provider?: string, baseRevision?: number) =>
     json<{ ok: boolean; generation?: StoryGeneration; story?: StoryDetail; error?: string; code?: string }>("/api/project/story/generate", post({ project_id: projectId, force, provider, base_revision: baseRevision })),
   updateStoryReview: (projectId: number, storyGenerationUuid: string, review: Record<string, unknown>, baseRevision?: number) =>

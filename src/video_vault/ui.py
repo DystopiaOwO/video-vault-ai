@@ -29,6 +29,7 @@ from .color import render_color_preview
 from .color_consistency import ColorReferenceError, analyze_project_color, color_state_for_api, preview_file_path, reference_file_path, render_project_color_previews, set_color_reference, update_color_state
 from .color_pipeline import ColorPipelineError
 from .creative_brief import creative_brief_api_payload, creative_brief_options, ensure_creative_brief, recommend_creative_brief, save_approved_creative_brief
+from .visual_style import VisualStyleError, ensure_visual_style_state, preview_visual_styles, save_visual_style_approval, visual_style_api_payload, visual_style_options, visual_style_preview_path
 from .cloud_review import CloudReviewError, add_review_usage, build_review_plan, empty_review_usage, execute_review_plan
 from .cloud_review_ledger import finalize_attempt as finalize_cloud_review_attempt, reserve_attempt as reserve_cloud_review_attempt, usage_for_scope as cloud_review_usage_for_scope
 from .database import add_frame, add_project_bgm, bgm_tracks as db_bgm_tracks, connect, frames as db_frames, init_db, project as db_project, project_bgm_tracks, project_videos, set_project_videos, set_video_status, update_video_summary, upsert_video, videos
@@ -589,6 +590,10 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json(creative_brief_api_payload(ensure_creative_brief(cfg, db, int(query.get("project_id", ["0"])[0] or 0))))
             elif parsed.path == "/api/project/creative-brief/options":
                 self._json(creative_brief_options())
+            elif parsed.path == "/api/project/visual-style":
+                self._json(visual_style_api_payload(ensure_visual_style_state(cfg, db, int(query.get("project_id", ["0"])[0] or 0))))
+            elif parsed.path == "/api/project/visual-style/options":
+                self._json(visual_style_options())
             elif parsed.path == "/api/creator-profile":
                 self._json(load_creator_profile(cfg))
             elif parsed.path == "/api/project/story/calibration":
@@ -680,6 +685,12 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     path = storyboard_preview_path(cfg, int(query.get("project_id", ["0"])[0] or 0), query.get("file", [""])[0])
                     self._file(path)
                 except (FileNotFoundError, ValueError):
+                    self.send_error(404)
+            elif parsed.path == "/api/project/visual-style-preview-file":
+                try:
+                    path = visual_style_preview_path(cfg, int(query.get("project_id", ["0"])[0] or 0), query.get("file", [""])[0])
+                    self._file(path)
+                except (FileNotFoundError, ValueError, VisualStyleError):
                     self.send_error(404)
             elif parsed.path == "/api/project/color-reference-file":
                 try:
@@ -1024,6 +1035,27 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     self._json({"ok": True, "creative_brief": creative_brief_api_payload(result), "project_revision": current_revision(db, project_id)})
                 except (OSError, TypeError, ValueError) as exc:
                     self._json({"ok": False, "code": "invalid_creative_brief", "error": str(exc)})
+            elif path == "/api/project/visual-style/preview":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    result = preview_visual_styles(cfg, db, project_id, force=bool(data.get("force")))
+                    for variant in result.get("variants", []):
+                        filename = Path(str(variant.get("file") or "")).name
+                        variant["file"] = filename
+                        variant["url"] = f"/api/project/visual-style-preview-file?project_id={project_id}&file={filename}"
+                    if result.get("file"):
+                        result["file"] = Path(str(result["file"])).name
+                    self._json(result)
+                except (OSError, TypeError, ValueError, VisualStyleError) as exc:
+                    self._json({"ok": False, "code": getattr(exc, "code", "visual_style_preview_failed"), "error": str(exc)})
+            elif path == "/api/project/visual-style":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    payload = data.get("visual_style") if isinstance(data.get("visual_style"), dict) else data
+                    result = save_visual_style_approval(cfg, db, project_id, payload, base_revision=_base_revision(data))
+                    self._json({"ok": True, "visual_style": visual_style_api_payload(result), "project_revision": current_revision(db, project_id)})
+                except (OSError, TypeError, ValueError, VisualStyleError) as exc:
+                    self._json({"ok": False, "code": getattr(exc, "code", "invalid_visual_style"), "error": str(exc)})
             elif path == "/api/creator-profile":
                 try:
                     profile = data.get("profile") if isinstance(data.get("profile"), dict) else data

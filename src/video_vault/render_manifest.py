@@ -33,6 +33,7 @@ from .visual_timeline import (
     validate_visual_timeline,
 )
 from .visual_compositor import resolve_visual_timeline, stable_visual_hash
+from .visual_style import ensure_visual_style_state, validate_materialized_visual_style
 
 
 ALLOWED_AUDIO_ROLES = {"keep_original", "lower_original", "mute", "keep", "lower", "bgm_only"}
@@ -174,6 +175,17 @@ def build_render_manifest(
     if approved_brief:
         manifest["creative_brief"] = creative_brief
         manifest["approved_creative_brief"] = approved_brief
+    visual_style_state = ensure_visual_style_state(cfg, db, project_id)
+    if str(visual_style_state.get("status") or "") == "approved":
+        visual_style = visual_style_state.get("approved") or {}
+        visual_style_validation = validate_materialized_visual_style(visual_style)
+        if not visual_style_validation["ok"]:
+            raise ValueError("invalid approved visual style: " + "; ".join(visual_style_validation["errors"]))
+        manifest["visual_style"] = visual_style
+        manifest["visual_style_hash"] = visual_style.get("resolved_hash", "")
+        manifest["visual_timeline"]["visual_style_hash"] = visual_style.get("resolved_hash", "")
+        manifest["visual_timeline"]["approved_visual_style"] = visual_style
+        manifest["visual_timeline"]["resolution_hash"] = stable_visual_hash(manifest["visual_timeline"])
     manifest["manifest_hash"] = manifest_hash(manifest)
     validation = validate_render_manifest(manifest)
     if validation["errors"]:
