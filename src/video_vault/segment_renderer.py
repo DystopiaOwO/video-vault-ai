@@ -307,6 +307,13 @@ def _display_geometry_normalization_filter(probe: MediaProbe) -> str:
         numerator, denominator = 1, 1
     if numerator <= 0 or denominator <= 0:
         numerator, denominator = 1, 1
+    # FFmpeg's default autorotate inserts the display transform before this
+    # user filter graph.  A quarter-turn swaps the pixel axes and FFmpeg
+    # correspondingly exposes the reciprocal SAR on the rotated frame.
+    # Normalize that post-autorotate SAR, rather than applying the original
+    # probe value to the swapped dimensions.
+    if abs(int(probe.rotation_degrees or 0)) % 180 == 90:
+        numerator, denominator = denominator, numerator
     if numerator == denominator:
         return "setsar=1"
     return f"scale=ceil(iw*{numerator}/{denominator}/2)*2:ih:eval=init,setsar=1"

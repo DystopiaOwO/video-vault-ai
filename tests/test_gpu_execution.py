@@ -166,7 +166,13 @@ def test_rotated_non_square_sar_has_deterministic_cpu_fallback(monkeypatch):
     assert contract["display_geometry"]["sample_aspect_ratio"] == "4:3"
     manifest = {**_manifest(), "settings": {**_manifest()["settings"], "gpu_execution_contract": contract}}
     command = build_segment_ffmpeg_command({"ffmpeg_path": "ffmpeg"}, manifest, _segment(), rotated_sar, output="out.mp4", encoder="libx264")
-    assert "scale=ceil(iw*4/3/2)*2:ih:eval=init,setsar=1" in " ".join(command)
+    assert "scale=ceil(iw*3/4/2)*2:ih:eval=init,setsar=1" in " ".join(command)
+
+
+def test_rotated_sar_cache_identity_records_post_autorotate_axis():
+    old = {"version": "1", "implementation": "cpu", "decode_used": "cpu", "filter_used": "cpu", "hardware_api": "cpu", "display_geometry": {"sample_aspect_ratio": "4:3", "rotation_degrees": 90}}
+    current = {**old, "display_geometry": {**old["display_geometry"], "sar_normalization_axis": "post_autorotate"}}
+    assert execution_contract_hash(old) != execution_contract_hash(current)
 
 
 def test_display_geometry_changes_segment_cache_identity(tmp_path):

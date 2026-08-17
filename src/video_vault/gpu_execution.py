@@ -273,9 +273,11 @@ def _display_geometry_contract(settings: Mapping[str, Any], probe: MediaProbe, p
     target_width = int(profile.get("width") or 0)
     target_height = int(profile.get("height") or 0)
     target_ratio = target_width / target_height if target_height else 0.0
+    sar_axis = "post_autorotate" if abs(int(probe.rotation_degrees or 0)) % 180 == 90 else "coded"
     return {
         "contract_version": DISPLAY_GEOMETRY_CONTRACT_VERSION,
         "sar_normalization": "display_pixel_width_before_composition",
+        "sar_normalization_axis": sar_axis,
         "coded_width": int(probe.coded_width or probe.width),
         "coded_height": int(probe.coded_height or probe.height),
         "sample_aspect_ratio": str(probe.sample_aspect_ratio or "1:1"),
