@@ -86,6 +86,19 @@ def build_render_manifest(
     profile = get_render_profile(str(settings["profile_id"]))
 
     from .storyboard import apply_storyboard_state, load_storyboard, storyboard_render_state
+    from .creative_brief import approved_creative_brief, load_creative_brief
+
+    creative_brief = load_creative_brief(db, int(project_id))
+    approved_brief = approved_creative_brief(db, int(project_id))
+    if approved_brief:
+        approved_profile_id = str((approved_brief.get("output") or {}).get("render_profile_id") or "")
+        if not approved_profile_id:
+            raise ValueError("approved Creative Brief 缺少 render_profile_id")
+        if profile_id is not None and str(profile_id) != approved_profile_id:
+            raise ValueError("render profile 必須遵循 approved Creative Brief output contract")
+        settings = {**settings, "profile_id": approved_profile_id}
+        profile_id = approved_profile_id
+    profile = get_render_profile(str(settings["profile_id"]))
 
     raw_segments = project_segments(cfg, project_id, plan, apply_storyboard=False)
     storyboard_state = storyboard_state_override if storyboard_state_override is not None else (load_storyboard(cfg, project_id) or {})
@@ -153,6 +166,14 @@ def build_render_manifest(
         "manifest_hash": "",
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    # A migrated/legacy project remains render-current until a human approves
+    # the new visual contract.  Do not change its historical manifest hash just
+    # because an unapproved Creative Brief row now exists.  Once approved, the
+    # brief becomes the explicit Render/VID-27 source of truth and therefore is
+    # intentionally part of the new manifest identity.
+    if approved_brief:
+        manifest["creative_brief"] = creative_brief
+        manifest["approved_creative_brief"] = approved_brief
     manifest["manifest_hash"] = manifest_hash(manifest)
     validation = validate_render_manifest(manifest)
     if validation["errors"]:

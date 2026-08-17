@@ -25,6 +25,7 @@ import { StoryboardWorkspaceController } from "./workspaces/storyboard/Storyboar
 import { StorageWorkspace } from "./workspaces/storage/StorageWorkspace";
 import { StoryUnderstandingWorkspace } from "./workspaces/story/StoryUnderstandingWorkspace";
 import { DeliveryQAWorkspace } from "./workspaces/delivery/DeliveryQAWorkspace";
+import { CreativeBriefCheckpoint } from "./workspaces/creative/CreativeBriefCheckpoint";
 import { SystemStatusPage } from "./pages/SystemStatusPage";
 import "./project-detail-polish.css";
 
@@ -474,8 +475,9 @@ function ProjectView({ detail, jobs, bgmTracks, notes, setNotes, setMessage, ref
     </div>
 
     <div className="workspace-section" id="workspace-storyboard" tabIndex={-1}>
+      <CreativeBriefCheckpoint detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} mutationControls={mutationControls} />
       <StoryboardWorkspaceController detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} mutationControls={mutationControls} />
-      <StoryUnderstandingWorkspace detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} mutationControls={mutationControls} />
+      <StoryUnderstandingWorkspace detail={detail} setMessage={setMessage} refreshProject={refreshCurrentProject} mutationControls={mutationControls} creativeBriefApproved={!detail.creative_brief || detail.creative_brief.status === "approved"} />
     </div>
 
     <div className="workspace-section" id="workspace-review" tabIndex={-1}>

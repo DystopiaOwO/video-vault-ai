@@ -28,6 +28,7 @@ from .bgm import import_bgm, list_bgm
 from .color import render_color_preview
 from .color_consistency import ColorReferenceError, analyze_project_color, color_state_for_api, preview_file_path, reference_file_path, render_project_color_previews, set_color_reference, update_color_state
 from .color_pipeline import ColorPipelineError
+from .creative_brief import creative_brief_api_payload, creative_brief_options, ensure_creative_brief, recommend_creative_brief, save_approved_creative_brief
 from .cloud_review import CloudReviewError, add_review_usage, build_review_plan, empty_review_usage, execute_review_plan
 from .cloud_review_ledger import finalize_attempt as finalize_cloud_review_attempt, reserve_attempt as reserve_cloud_review_attempt, usage_for_scope as cloud_review_usage_for_scope
 from .database import add_frame, add_project_bgm, bgm_tracks as db_bgm_tracks, connect, frames as db_frames, init_db, project as db_project, project_bgm_tracks, project_videos, set_project_videos, set_video_status, update_video_summary, upsert_video, videos
@@ -584,6 +585,10 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json(storyboard_for_api(cfg, db, int(query.get("project_id", ["0"])[0] or 0)))
             elif parsed.path == "/api/project/story":
                 self._json(_project_detail_for_api(cfg, project_detail(cfg, db, int(query.get("project_id", ["0"])[0] or 0))).get("story", {}))
+            elif parsed.path == "/api/project/creative-brief":
+                self._json(creative_brief_api_payload(ensure_creative_brief(cfg, db, int(query.get("project_id", ["0"])[0] or 0))))
+            elif parsed.path == "/api/project/creative-brief/options":
+                self._json(creative_brief_options())
             elif parsed.path == "/api/creator-profile":
                 self._json(load_creator_profile(cfg))
             elif parsed.path == "/api/project/story/calibration":
@@ -1003,6 +1008,22 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     self._json({"ok": True, "settings": settings, "profile_version": settings.get("profile_version"), "project_revision": current_revision(db, project_id)})
                 except (OSError, TypeError, ValueError) as exc:
                     self._json({"ok": False, "code": "invalid_story_settings", "error": str(exc)})
+            elif path == "/api/project/creative-brief/recommend":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    result = recommend_creative_brief(cfg, db, project_id, base_revision=_base_revision(data))
+                    self._json({"ok": True, "creative_brief": creative_brief_api_payload(result), "project_revision": current_revision(db, project_id)})
+                except (OSError, TypeError, ValueError) as exc:
+                    self._json({"ok": False, "code": "creative_brief_recommendation_failed", "error": str(exc)})
+            elif path == "/api/project/creative-brief":
+                try:
+                    project_id = int(data.get("project_id", 0))
+                    brief = data.get("brief") if isinstance(data.get("brief"), dict) else data
+                    approval_source = str(data.get("approval_source") or "human_override")
+                    result = save_approved_creative_brief(cfg, db, project_id, brief, base_revision=_base_revision(data), approval_source=approval_source)
+                    self._json({"ok": True, "creative_brief": creative_brief_api_payload(result), "project_revision": current_revision(db, project_id)})
+                except (OSError, TypeError, ValueError) as exc:
+                    self._json({"ok": False, "code": "invalid_creative_brief", "error": str(exc)})
             elif path == "/api/creator-profile":
                 try:
                     profile = data.get("profile") if isinstance(data.get("profile"), dict) else data
@@ -1016,6 +1037,15 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif path == "/api/project/story/generate":
                 try:
                     project_id = int(data.get("project_id", 0))
+                    creative_brief = ensure_creative_brief(cfg, db, project_id)
+                    if creative_brief.get("status") != "approved":
+                        self._json({
+                            "ok": False,
+                            "code": "creative_brief_required",
+                            "error": "請先在人工作業 checkpoint 核准 Creative Brief，再生成 Story",
+                            "creative_brief": creative_brief_api_payload(creative_brief),
+                        }, status=409)
+                        return
                     result = generate_project_story(cfg, db, project_id, base_revision=_base_revision(data), provider_override=str(data.get("provider") or "") or None, force=bool(data.get("force")))
                     self._json({"ok": True, "generation": result, "story": project_story_detail(cfg, db, project_id)})
                 except ProjectRevisionConflict:

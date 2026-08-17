@@ -31,6 +31,10 @@ def _canonical(value: Any) -> str:
 def story_input_hash(snapshot: Mapping[str, Any]) -> str:
     payload = dict(snapshot)
     payload.pop("input_hash", None)
+    # Creative Brief output/framing is visual/render-only in VID-26.  Keep the
+    # approved contract in the auditable snapshot, but do not make a visual
+    # choice alone stale an otherwise unchanged StoryInput.
+    payload.pop("creative_brief", None)
     return hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
 
 
@@ -342,6 +346,8 @@ def build_story_input_snapshot(cfg: Mapping[str, Any], db: Path, project_id: int
         "segments": effective_segments,
         "ordered_segment_uuids": [item["segment_uuid"] for item in effective_segments],
     }
+    from .creative_brief import load_creative_brief
+    snapshot["creative_brief"] = load_creative_brief(db, int(project_id))
     snapshot["input_hash"] = story_input_hash(snapshot)
     errors = validate_story_input_snapshot(snapshot)
     if errors:

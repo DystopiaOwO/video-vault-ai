@@ -1,0 +1,15 @@
+.creative-brief { display: grid; gap: 16px; }
+.creative-brief-heading, .creative-brief-summary, .creative-brief-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.creative-brief-heading h3 { margin: 4px 0; }
+.brief-status { border: 1px solid #c88d38; color: #8b5e16; border-radius: 999px; padding: 4px 10px; font-size: .85rem; }
+.brief-status.approved { border-color: #2e8b57; color: #1f6b42; }
+.creative-brief-summary { color: var(--muted, #657181); font-size: .9rem; }
+.creative-brief-recommendation { display: grid; gap: 4px; padding: 12px 14px; border-left: 3px solid #6f7ee8; background: rgba(111,126,232,.08); }
+.creative-brief-controls { display: grid; grid-template-columns: 1.2fr .7fr 1fr 1fr; gap: 12px; align-items: end; }
+.creative-brief-controls fieldset { display: grid; gap: 8px; border: 1px solid #d8dde5; border-radius: 8px; padding: 10px 12px; }
+.creative-brief-controls label { display: grid; gap: 6px; }
+.creative-brief-output { display: grid; gap: 4px; align-content: center; }
+.creative-brief-output code { color: var(--muted, #657181); }
+.creative-brief-approved { margin: 0; color: #1f6b42; }
+@media (max-width: 1000px) { .creative-brief-controls { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 620px) { .creative-brief-controls { grid-template-columns: 1fr; } }
