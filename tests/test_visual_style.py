@@ -14,6 +14,8 @@ from video_vault.visual_style import (
     ensure_visual_style_state,
     materialize_visual_style,
     render_true_frame_preview,
+    resolve_visual_render_plan,
+    _select_representative_frames,
     validate_materialized_visual_style,
     visual_style_options,
 )
@@ -91,6 +93,62 @@ def test_preview_filter_has_display_safe_framing_actual_grading_and_title():
     assert "setsar=1" in graph
     assert "eq=brightness=" in graph
     assert "drawtext=" in graph
+
+
+def test_shared_render_plan_changes_pixel_contract_for_framing_and_title_tokens():
+    snapshot = materialize_visual_style("diary_natural", _brief())
+    first = resolve_visual_render_plan(snapshot, width=1920, height=1080, title_text="A")
+    changed = dict(snapshot)
+    changed["framing"] = {**snapshot["framing"], "strategy_id": "crop_reframe"}
+    changed["title_style"] = {**snapshot["title_style"], "responsive": {**snapshot["title_style"]["responsive"], "landscape": {"anchor": "top-left", "size_ratio": 0.08}}}
+    changed["resolved_hash"] = __import__("hashlib").sha256(__import__("json").dumps({key: value for key, value in changed.items() if key != "resolved_hash"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    second = resolve_visual_render_plan(changed, width=1920, height=1080, title_text="B")
+    assert first["resolved_hash"] != second["resolved_hash"]
+    assert first["framing"]["strategy_id"] != second["framing"]["strategy_id"]
+    assert "x=w*0.050000" in first["title"]["filter"]
+    assert "y=h*0.060000" in second["title"]["filter"]
+
+
+def test_background_treatment_is_not_preserve_full_frame():
+    background = materialize_visual_style("diary_natural", _brief())
+    preserve_brief = _brief()
+    preserve_brief["approved"]["framing_intent"]["portrait_source_in_landscape"]["approved_strategy_id"] = "preserve_full_frame"
+    preserve = materialize_visual_style("diary_natural", preserve_brief)
+    assert resolve_visual_render_plan(background, width=1920, height=1080)["framing"]["filter"] != resolve_visual_render_plan(preserve, width=1920, height=1080)["framing"]["filter"]
+
+
+def test_dji_lut_missing_resource_fails_closed(tmp_path: Path):
+    snapshot = materialize_visual_style("cinematic", _brief())
+    with pytest.raises(Exception, match="LUT file does not exist"):
+        resolve_visual_render_plan(snapshot, width=1920, height=1080, color_settings={"mode": "dji_dlog_m", "lut_path": str(tmp_path / "missing.cube")})
+
+
+def test_dji_lut_uses_existing_color_pipeline_as_separate_technical_transform(tmp_path: Path):
+    lut = tmp_path / "coffee.cube"
+    lut.write_text("LUT_3D_SIZE 2\n", encoding="utf-8")
+    snapshot = materialize_visual_style("cinematic", _brief())
+    plan = resolve_visual_render_plan(snapshot, width=1920, height=1080, color_settings={"mode": "dji_dlog_m", "lut_path": str(lut), "source_colorspace": "dji_dlog_m"})
+    assert plan["technical_transform"]["mode"] == "dji_dlog_m"
+    assert plan["technical_transform"]["applied_once"] is True
+    assert "lut3d=file=" in plan["color_filter"]
+    assert plan["creative_look"]["contrast"] != 1.0
+
+
+def test_representative_selector_uses_real_media_candidates_and_returns_bright_dark_pair(monkeypatch, tmp_path: Path):
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+    first.write_bytes(b"real-media-a")
+    second.write_bytes(b"real-media-b")
+    levels = iter([0.15, 0.85, 0.42, 0.55])
+    monkeypatch.setattr("video_vault.visual_style._measure_source_luma", lambda *args: next(levels))
+    sources = [
+        {"project_media_uuid": "pm-a", "path": str(first), "duration_seconds": 10, "display_geometry": {"display_ratio": 1.78}},
+        {"project_media_uuid": "pm-b", "path": str(second), "duration_seconds": 10, "display_geometry": {"display_ratio": 1.78}},
+    ]
+    frames = _select_representative_frames({"ffmpeg_path": "ffmpeg"}, sources)
+    assert len(frames) == 2
+    assert {item["selection_reason"] for item in frames} == {"bright_high_luma_representative", "dark_complex_low_luma_representative"}
+    assert all(item["source"]["project_media_uuid"] in {"pm-a", "pm-b"} for item in frames)
 
 
 def test_visual_style_changes_render_artifact_cache_identity_not_approval_contract():

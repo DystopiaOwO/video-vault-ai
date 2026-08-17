@@ -19,10 +19,12 @@ import os
 from typing import Any, Mapping
 
 from .creative_brief import approved_creative_brief
+from .color_pipeline import build_color_filter, color_mode_contract, validate_lut_resource
 from .database import connect, init_db
 from .paths import root
 from .project import project_dir
 from .source_fingerprint import parse_source_fingerprint, persisted_fingerprint_for_stat
+from .media_probe import probe_media_metadata
 
 
 VISUAL_STYLE_SCHEMA_VERSION = "visual-style-v1"
@@ -30,6 +32,7 @@ VISUAL_STYLE_REGISTRY_VERSION = "visual-style-registry-v1"
 TITLE_STYLE_SCHEMA_VERSION = "title-style-v1"
 TITLE_STYLE_REGISTRY_VERSION = "title-style-registry-v1"
 VISUAL_STYLE_STATE_SCHEMA_VERSION = 1
+VISUAL_RENDER_CONTRACT_VERSION = "visual-render-v1"
 
 
 class VisualStyleError(ValueError):
@@ -141,6 +144,7 @@ def materialize_visual_style(
     title_style_version: str | int | None = None,
     title_role: str = "chapter_title",
     capabilities: Mapping[str, bool] | None = None,
+    color_settings: Mapping[str, Any] | None = None,
     registry: VisualStyleRegistry | None = None,
     title_registry: TitleStyleRegistry | None = None,
 ) -> dict[str, Any]:
@@ -175,6 +179,8 @@ def materialize_visual_style(
         "composition": style["composition"],
         "palette": deepcopy(style["palette"]),
         "grading": deepcopy(style["grading"]),
+        "creative_look": deepcopy(style["grading"]),
+        "technical_transform": _technical_transform_snapshot(color_settings),
         "framing": framing,
         "title_style": {
             "schema_version": TITLE_STYLE_SCHEMA_VERSION,
@@ -275,7 +281,9 @@ def save_visual_style_approval(cfg: Mapping[str, Any], db: Path, project_id: int
     if not brief or brief.get("status") != "approved":
         raise VisualStyleError("creative_brief_required", "Creative Brief 尚未由 human 核准，不能核准 Visual Style")
     style_id = str(payload.get("visual_style_id") or "")
-    snapshot = materialize_visual_style(style_id, brief, style_version=payload.get("visual_style_version"), title_style_id=payload.get("title_style_id"), title_style_version=payload.get("title_style_version"), title_role=str(payload.get("title_role") or "chapter_title"))
+    from .color_consistency import effective_color_settings, load_project_color_state
+    project_color = effective_color_settings(load_project_color_state(dict(cfg), project_id))
+    snapshot = materialize_visual_style(style_id, brief, style_version=payload.get("visual_style_version"), title_style_id=payload.get("title_style_id"), title_style_version=payload.get("title_style_version"), title_role=str(payload.get("title_role") or "chapter_title"), color_settings=project_color)
     current = load_visual_style_state(db, project_id)
     preview_revision = int(current.get("preview_revision") or 0) + 1
     source = _source_provenance(db, project_id)
@@ -288,34 +296,159 @@ def save_visual_style_approval(cfg: Mapping[str, Any], db: Path, project_id: int
 
 
 def build_preview_filter(snapshot: Mapping[str, Any], *, width: int, height: int, title_text: str = "") -> str:
-    """Resolve display-safe framing and the actual creative grading transform."""
-    framing = snapshot.get("framing") or {}
+    """Return the exact filter graph used by the shared render resolver."""
+    return resolve_visual_render_plan(snapshot, width=width, height=height, title_text=title_text)["filter_graph"]
+
+
+def resolve_visual_render_plan(
+    snapshot: Mapping[str, Any],
+    *,
+    width: int,
+    height: int,
+    title_text: str = "",
+    color_settings: Mapping[str, Any] | None = None,
+    source_display_ratio: float | None = None,
+    title_enable: str = "",
+) -> dict[str, Any]:
+    """Resolve one immutable, renderer-ready Visual Style contract.
+
+    Preview and formal segment rendering both consume this structure.  The
+    semantic snapshot remains the approval input; this function is the only
+    place that turns it into pixel-affecting filters.  In particular, DJI/LUT
+    technical transforms are delegated to ``color_pipeline`` and are never
+    represented as a generic EQ look.
+    """
+    missing = [field for field in ("resolved_hash", "output", "framing", "grading", "title_style", "palette") if not snapshot.get(field)]
+    expected_snapshot_hash = _hash({key: value for key, value in snapshot.items() if key != "resolved_hash"})
+    if missing or str(snapshot.get("resolved_hash") or "") != expected_snapshot_hash:
+        raise VisualStyleError("visual_render_contract_invalid", "materialized visual style snapshot is incomplete or tampered")
+    width = int(width)
+    height = int(height)
+    if width <= 0 or height <= 0:
+        raise VisualStyleError("visual_render_dimensions_invalid", "visual render dimensions must be positive")
+    framing = dict(snapshot.get("framing") or {})
     strategy = str(framing.get("strategy_id") or "preserve_full_frame")
     if strategy == "crop_reframe":
-        geometry = f"scale={int(width)}:{int(height)}:force_original_aspect_ratio=increase,crop={int(width)}:{int(height)}"
+        framing_filter = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}"
     elif strategy == "background_treatment":
-        geometry = f"scale={int(width)}:{int(height)}:force_original_aspect_ratio=decrease,pad={int(width)}:{int(height)}:(ow-iw)/2:(oh-ih)/2:color=0x20242a"
+        # This single-input plan is portable in both ``-vf`` preview and the
+        # formal segment graph.  It keeps the foreground aspect-safe, while
+        # the dimmed treatment visibly differs from preserve_full_frame.
+        framing_filter = (
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=0x20242a,"
+            "drawbox=x=0:y=0:w=iw:h=ih:color=0x20242a@0.30:t=fill,setsar=1"
+        )
     elif strategy == "preserve_full_frame":
-        geometry = f"scale={int(width)}:{int(height)}:force_original_aspect_ratio=decrease,pad={int(width)}:{int(height)}:(ow-iw)/2:(oh-ih)/2:color=0x20242a"
+        framing_filter = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=0x20242a,setsar=1"
     else:
         raise VisualStyleError("framing_unknown", f"unknown framing strategy: {strategy}")
-    grading = snapshot.get("grading") or {}
-    brightness = float(grading.get("brightness") or 0)
-    contrast = float(grading.get("contrast") or 1)
-    saturation = float(grading.get("saturation") or 1)
-    grade = f"eq=brightness={brightness:.5f}:contrast={contrast:.5f}:saturation={saturation:.5f}"
-    graph = f"{geometry},setsar=1,{grade}"
-    if title_text:
-        title = str(title_text).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-        title_style = snapshot.get("title_style") or {}
-        responsive = title_style.get("responsive") or {}
-        size_ratio = float(responsive.get("size_ratio") or 0.052)
-        color = str((snapshot.get("palette") or {}).get("text_primary") or "#FFFFFF").lstrip("#")[:6]
-        shadow = str((snapshot.get("palette") or {}).get("shadow") or "#00000099").lstrip("#")[:6]
-        font_path = _system_font_path(title_style.get("fallback_chain"))
-        font_option = f":fontfile='{_escape_filter_path(font_path)}'" if font_path else ""
-        graph += f",drawtext=text='{title}'{font_option}:fontcolor=0x{color}:fontsize={max(20, int(height * size_ratio))}:x=w*0.06:y=h*0.82:shadowcolor=0x{shadow}:shadowx=2:shadowy=2"
-    return graph
+
+    grading = dict(snapshot.get("grading") or {})
+    actual_color = dict(color_settings or {})
+    technical_mode = str(actual_color.get("mode") or "none")
+    technical_filter = build_color_filter(actual_color)
+    if technical_mode in {"dji_lut", "dji_dlog", "dji_dlog_m"}:
+        # validate_lut_resource also enforces user-managed .cube existence;
+        # the formal path must not silently fall back to a fake grade.
+        lut = validate_lut_resource(actual_color)
+        lut_identity = {"sha256": _file_hash(lut), "size": lut.stat().st_size, "mtime_ns": lut.stat().st_mtime_ns}
+    else:
+        lut_identity = {}
+    creative_settings = {
+        "mode": "manual",
+        "exposure": float(grading.get("brightness") or 0.0) / 0.12,
+        "contrast": float(grading.get("contrast") or 1.0),
+        "saturation": float(grading.get("saturation") or 1.0),
+        "temperature": float(grading.get("temperature") or 0.0),
+        "tint": float(grading.get("tint") or 0.0),
+        "gamma": float(grading.get("gamma") or 1.0),
+        "highlights": float(grading.get("highlights") or 0.0),
+        "shadows": float(grading.get("shadows") or 0.0),
+    }
+    creative_filter = build_color_filter(creative_settings)
+    color_filter = ",".join(value for value in (technical_filter, creative_filter) if value)
+    title_plan = _resolve_title_plan(snapshot, width, height, title_text, title_enable=title_enable)
+    filter_parts = [framing_filter]
+    if color_filter:
+        filter_parts.append(color_filter)
+    if title_plan["filter"]:
+        filter_parts.append(title_plan["filter"])
+    if str(snapshot.get("composition") or "overlay") == "standalone":
+        palette = str((snapshot.get("palette") or {}).get("surface_overlay_strong") or "#20242a").lstrip("#")[:6]
+        filter_parts.insert(0, f"drawbox=x=0:y=0:w=iw:h=ih:color=0x{palette}@0.82:t=fill")
+    plan = {
+        "contract_version": VISUAL_RENDER_CONTRACT_VERSION,
+        "visual_style_hash": str(snapshot.get("resolved_hash") or ""),
+        "width": width,
+        "height": height,
+        "source_display_ratio": source_display_ratio,
+        "framing": {**framing, "filter": framing_filter},
+        "technical_transform": {
+            **color_mode_contract(technical_mode),
+            "source_colorspace": str(actual_color.get("source_colorspace") or grading.get("source_colorspace") or "unknown"),
+            "lut_identity": lut_identity,
+            "applied_once": technical_mode in {"dji_lut", "dji_dlog", "dji_dlog_m"},
+        },
+        "creative_look": {key: value for key, value in creative_settings.items() if key != "mode"},
+        "color_filter": color_filter,
+        "title": title_plan,
+        "composition": str(snapshot.get("composition") or "overlay"),
+        "motion": deepcopy((snapshot.get("title_style") or {}).get("motion") or {}),
+        "filter_graph": ",".join(filter_parts),
+        "execution_mode": "mixed_cpu_visual_filters" if (color_filter or title_plan["filter"]) else "native_renderer_filters",
+    }
+    plan["resolved_hash"] = _hash({key: value for key, value in plan.items() if key != "resolved_hash"})
+    return plan
+
+
+def _resolve_title_plan(snapshot: Mapping[str, Any], width: int, height: int, title_text: str, *, title_enable: str = "") -> dict[str, Any]:
+    title_style = dict(snapshot.get("title_style") or {})
+    responsive = title_style.get("responsive") or {}
+    aspect = str((snapshot.get("output") or {}).get("orientation") or "landscape")
+    responsive = dict(responsive.get(aspect) or responsive.get("landscape") or responsive)
+    safe = dict(title_style.get("safe_zone") or {})
+    anchor = str(responsive.get("anchor") or "bottom-left")
+    size_ratio = float(responsive.get("size_ratio") or 0.052)
+    left = float(safe.get("left") or 0.05)
+    right = float(safe.get("right") or 0.05)
+    top = float(safe.get("top") or 0.06)
+    bottom = float(safe.get("bottom") or 0.08)
+    if anchor == "top-left":
+        x, y = f"w*{left:.6f}", f"h*{top:.6f}"
+    elif anchor == "top-right":
+        x, y = f"w*(1-{right:.6f})-text_w", f"h*{top:.6f}"
+    elif anchor == "center":
+        x, y = "(w-text_w)/2", "(h-text_h)/2"
+    elif anchor == "bottom-right":
+        x, y = f"w*(1-{right:.6f})-text_w", f"h*(1-{bottom:.6f})-text_h"
+    else:
+        x, y = f"w*{left:.6f}", f"h*(1-{bottom:.6f})-text_h"
+    palette = dict(snapshot.get("palette") or {})
+    text_token = str(title_style.get("text_color_token") or "text_primary")
+    color = str(palette.get(text_token) or palette.get("text_primary") or "#FFFFFF").lstrip("#")[:6]
+    shadow = str(palette.get("shadow") or "#00000099").lstrip("#")[:6]
+    font_path = _system_font_path(title_style.get("fallback_chain"), int(title_style.get("weight") or 500))
+    font_option = f":fontfile='{_escape_filter_path(font_path)}'" if font_path else ""
+    escaped = str(title_text).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+    readability = dict(title_style.get("readability") or {})
+    options = [f"text='{escaped}'", font_option.lstrip(":"), f"fontcolor=0x{color}", f"fontsize={max(20, int(height * size_ratio))}", f"x={x}", f"y={y}", f"text_align={str(title_style.get('alignment') or 'left')}", f"line_spacing={int(float(title_style.get('line_height') or 1.18) * 10)}", "fix_bounds=1"]
+    if bool(readability.get("shadow", True)):
+        options.extend([f"shadowcolor=0x{shadow}", "shadowx=2", "shadowy=2"])
+    outline = int(readability.get("outline") or 0)
+    if outline:
+        options.extend(["borderw=" + str(outline), f"bordercolor=0x{shadow}"])
+    if str(readability.get("surface") or "") in {"translucent", "solid"}:
+        surface = str(palette.get("surface_overlay") or "#00000099").lstrip("#")[:8]
+        options.extend(["box=1", f"boxcolor=0x{surface}", "boxborderw=18"])
+    motion = dict(title_style.get("motion") or {})
+    preset = str(motion.get("preset") or "none")
+    if preset != "none":
+        options.append("alpha=if(lt(t\\,0.28)\\,t/0.28\\,1)")
+    if title_enable:
+        options.append(f"enable='{title_enable}'")
+    drawtext = "drawtext=" + ":".join(option for option in options if option)
+    return {"role": title_style.get("role"), "text": str(title_text), "anchor": anchor, "safe_zone": safe, "max_width_ratio": float(title_style.get("max_width_ratio") or 0.78), "font_path": str(font_path or ""), "weight": int(title_style.get("weight") or 500), "font_size": max(20, int(height * size_ratio)), "filter": drawtext if title_text else "", "motion": motion}
 
 
 def render_true_frame_preview(
@@ -327,19 +460,22 @@ def render_true_frame_preview(
     output: Path,
     *,
     runner: Any | None = None,
+    color_settings: Mapping[str, Any] | None = None,
+    source_display_ratio: float | None = None,
 ) -> dict[str, Any]:
     """Render one real source frame through the same semantic filter resolver."""
     output.parent.mkdir(parents=True, exist_ok=True)
     width = int((snapshot.get("output") or {}).get("width") or 1920)
     height = int((snapshot.get("output") or {}).get("height") or 1080)
-    filter_graph = build_preview_filter(snapshot, width=width, height=height, title_text="咖啡日記 / Coffee Diary")
+    plan = resolve_visual_render_plan(snapshot, width=width, height=height, title_text="咖啡日記 / Coffee Diary", color_settings=color_settings, source_display_ratio=source_display_ratio)
+    filter_graph = plan["filter_graph"]
     command = [str(cfg["ffmpeg_path"]), "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-ss", f"{float(timestamp_seconds):.6f}", "-i", str(source), "-frames:v", "1", "-vf", filter_graph, "-frames:v", "1", str(output)]
     result = runner(command) if runner else subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False)
     returncode = int(getattr(result, "returncode", 0))
     if returncode != 0 or not output.is_file() or output.stat().st_size <= 0:
         stderr = str(getattr(result, "stderr", ""))[-1200:]
         raise VisualStyleError("preview_render_failed", f"true-frame preview failed: {stderr}")
-    return {"file": str(output), "sha256": _file_hash(output), "timestamp_seconds": float(timestamp_seconds), "width": width, "height": height, "filter_contract": filter_graph, "visual_style_hash": snapshot.get("resolved_hash"), "title_text": "咖啡日記 / Coffee Diary"}
+    return {"file": str(output), "sha256": _file_hash(output), "timestamp_seconds": float(timestamp_seconds), "width": width, "height": height, "filter_contract": filter_graph, "visual_render_plan": plan, "visual_style_hash": snapshot.get("resolved_hash"), "title_text": "咖啡日記 / Coffee Diary"}
 
 
 def visual_style_preview_path(cfg: Mapping[str, Any], project_id: int, filename: str) -> Path:
@@ -356,24 +492,87 @@ def preview_visual_styles(cfg: Mapping[str, Any], db: Path, project_id: int, *, 
     if not brief or brief.get("status") != "approved":
         return {"ok": False, "status": "needs_confirmation", "code": "creative_brief_required", "recommendation": state.get("recommendation") or {}, "visual_style": visual_style_api_payload(state)}
     sources = _source_provenance(db, project_id)
-    source = next((item for item in sources if Path(str(item.get("path") or "")).is_file()), None)
-    if not source:
+    representative_frames = _select_representative_frames(cfg, sources)
+    if not representative_frames:
         raise VisualStyleError("preview_source_missing", "找不到可用的 approved source")
-    timestamp = 0.5
     variants: list[dict[str, Any]] = []
-    for style in VISUAL_STYLES.list(include_internal=False):
-        snapshot = materialize_visual_style(str(style["style_id"]), brief)
-        token = _hash({"source": source, "timestamp": timestamp, "style": snapshot["resolved_hash"]})[:20]
-        output = visual_style_preview_path(cfg, project_id, f"{style['style_id']}-{token}.png")
-        if force:
-            output.unlink(missing_ok=True)
-        if output.is_file() and output.stat().st_size > 0:
-            item = {"file": str(output), "sha256": _file_hash(output), "cache_hit": True, "visual_style": snapshot, "source": _public_source(source), "timestamp_seconds": timestamp}
-        else:
-            item = render_true_frame_preview(cfg, project_id, Path(str(source["path"])), timestamp, snapshot, output)
-            item.update({"cache_hit": False, "visual_style": snapshot, "source": _public_source(source)})
-        variants.append(item)
-    return {"ok": True, "status": "ready", "preview_revision": int(state.get("preview_revision") or 0), "source": _public_source(source), "variants": variants}
+    from .color_consistency import effective_color_settings, load_project_color_state
+    color_settings = effective_color_settings(load_project_color_state(dict(cfg), project_id))
+    # Four variants are intentionally generated for each deterministic frame:
+    # the three public looks plus the standalone card comparison surface.
+    styles = [item for item in VISUAL_STYLES.list(include_internal=True) if item.get("style_id") in {"diary_natural", "clean_minimal", "cinematic", "standalone_card_compare"}]
+    for frame in representative_frames:
+        source = frame["source"]
+        timestamp = float(frame["timestamp_seconds"])
+        for style in styles:
+            snapshot = materialize_visual_style(str(style["style_id"]), brief)
+            token = _hash({"source": source, "timestamp": timestamp, "style": snapshot["resolved_hash"], "frame": frame["selection_reason"]})[:20]
+            output = visual_style_preview_path(cfg, project_id, f"{style['style_id']}-{token}.png")
+            if force:
+                output.unlink(missing_ok=True)
+            if output.is_file() and output.stat().st_size > 0:
+                item = {"file": str(output), "sha256": _file_hash(output), "cache_hit": True, "visual_style": snapshot, "source": _public_source(source), "timestamp_seconds": timestamp}
+            else:
+                item = render_true_frame_preview(cfg, project_id, Path(str(source["path"])), timestamp, snapshot, output, color_settings=color_settings, source_display_ratio=float((frame.get("display_geometry") or {}).get("display_ratio") or 0.0) or None)
+                item.update({"cache_hit": False, "visual_style": snapshot, "source": _public_source(source)})
+            item["representative_frame"] = {key: value for key, value in frame.items() if key != "source"}
+            variants.append(item)
+    return {"ok": True, "status": "ready", "preview_revision": int(state.get("preview_revision") or 0), "source": _public_source(representative_frames[0]["source"]), "representative_frames": [{key: value for key, value in frame.items() if key != "source"} for frame in representative_frames], "variants": variants}
+
+
+def _select_representative_frames(cfg: Mapping[str, Any], sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Select stable bright and dark/complex frames from real project media."""
+    candidates: list[dict[str, Any]] = []
+    for source in sources:
+        path = Path(str(source.get("path") or ""))
+        if not path.is_file():
+            continue
+        if not source.get("duration_seconds") or not source.get("display_geometry"):
+            try:
+                probe = probe_media_metadata(str(cfg.get("ffprobe_path") or "ffprobe"), path)
+                source = {**source, "duration_seconds": probe.duration_seconds, "display_geometry": {
+                    "coded_width": probe.coded_width or probe.width,
+                    "coded_height": probe.coded_height or probe.height,
+                    "sample_aspect_ratio": probe.sample_aspect_ratio,
+                    "display_aspect_ratio": probe.display_aspect_ratio,
+                    "display_ratio": probe.display_ratio,
+                    "rotation_degrees": probe.rotation_degrees,
+                    "display_matrix": probe.display_matrix,
+                }}
+            except Exception:
+                continue
+        # Avoid a fixed first-frame bias.  The endpoints are only candidate
+        # timestamps; luma is measured from the real media and selection is
+        # deterministic across reruns.
+        duration = float(source.get("duration_seconds") or 0.0)
+        timestamps = [max(0.0, duration * 0.2), max(0.0, duration * 0.7)] if duration > 0 else [0.5, 1.5]
+        for timestamp in timestamps:
+            metric = _measure_source_luma(str(cfg.get("ffmpeg_path") or "ffmpeg"), path, timestamp)
+            if metric is None:
+                continue
+            candidates.append({"source": source, "timestamp_seconds": round(timestamp, 6), "luma": round(metric, 6), "display_geometry": dict(source.get("display_geometry") or {}), "selection_reason": "bright_high_luma_candidate" if metric >= 0.5 else "dark_complex_low_luma_candidate"})
+    if not candidates:
+        return []
+    bright = max(candidates, key=lambda item: (float(item["luma"]), str(item["source"].get("project_media_uuid") or ""), -float(item["timestamp_seconds"])))
+    dark_pool = [item for item in candidates if item is not bright]
+    dark = min(dark_pool or candidates, key=lambda item: (float(item["luma"]), str(item["source"].get("project_media_uuid") or ""), float(item["timestamp_seconds"])))
+    bright["selection_reason"] = "bright_high_luma_representative"
+    dark["selection_reason"] = "dark_complex_low_luma_representative"
+    result = [bright]
+    if dark is not bright:
+        result.append(dark)
+    return result
+
+
+def _measure_source_luma(ffmpeg_path: str, source: Path, timestamp: float) -> float | None:
+    command = [ffmpeg_path, "-hide_banner", "-loglevel", "error", "-nostdin", "-ss", f"{timestamp:.6f}", "-i", str(source), "-vf", "scale=32:32,format=gray", "-frames:v", "1", "-f", "rawvideo", "-"]
+    try:
+        result = subprocess.run(command, capture_output=True, check=False, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not result.stdout:
+        return None
+    return sum(result.stdout) / (255.0 * len(result.stdout))
 
 
 def _DEFAULT_VISUAL_STYLE_DATA() -> dict[str, dict[str, Any]]:
@@ -452,6 +651,21 @@ def _approved_contract(brief: Mapping[str, Any]) -> dict[str, Any]:
     return approved
 
 
+def _technical_transform_snapshot(color_settings: Mapping[str, Any] | None) -> dict[str, Any]:
+    data = dict(color_settings or {})
+    mode = str(data.get("mode") or "none")
+    identity: dict[str, Any] = {}
+    if mode in {"dji_lut", "dji_dlog", "dji_dlog_m"}:
+        lut = validate_lut_resource(data)
+        identity = {"sha256": _file_hash(lut), "size": lut.stat().st_size, "mtime_ns": lut.stat().st_mtime_ns}
+    return {
+        **color_mode_contract(mode),
+        "source_colorspace": str(data.get("source_colorspace") or "unknown"),
+        "lut_identity": identity,
+        "applied_once": mode in {"dji_lut", "dji_dlog", "dji_dlog_m"},
+    }
+
+
 def _state_row(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
     result = dict(row)
     for target, source in (("recommendation", "recommendation_json"), ("approved", "approved_json"), ("source_provenance", "source_provenance_json")):
@@ -492,10 +706,12 @@ def _file_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _system_font_path(fallback_chain: Any = None) -> Path | None:
+def _system_font_path(fallback_chain: Any = None, weight: int = 500) -> Path | None:
     """Resolve only installed system fonts; never download or bundle assets."""
     candidates: list[Path] = []
     windows_fonts = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+    if int(weight or 500) >= 600:
+        candidates.extend([windows_fonts / "msyhbd.ttc", windows_fonts / "segoeuib.ttf", windows_fonts / "arialbd.ttf"])
     candidates.extend([windows_fonts / "msyh.ttc", windows_fonts / "msjh.ttc", windows_fonts / "segoeui.ttf", windows_fonts / "arial.ttf"])
     candidates.extend([Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"), Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")])
     for path in candidates:
@@ -519,5 +735,5 @@ def _now() -> str:
 
 
 __all__ = [
-    "TITLE_STYLES", "TITLE_STYLE_REGISTRY_VERSION", "TITLE_STYLE_SCHEMA_VERSION", "VISUAL_STYLES", "VISUAL_STYLE_REGISTRY_VERSION", "VISUAL_STYLE_SCHEMA_VERSION", "VisualStyleError", "build_preview_filter", "ensure_visual_style_state", "load_visual_style_state", "materialize_visual_style", "preview_visual_styles", "render_true_frame_preview", "save_visual_style_approval", "validate_materialized_visual_style", "visual_style_api_payload", "visual_style_options", "visual_style_preview_path",
+    "TITLE_STYLES", "TITLE_STYLE_REGISTRY_VERSION", "TITLE_STYLE_SCHEMA_VERSION", "VISUAL_STYLES", "VISUAL_STYLE_REGISTRY_VERSION", "VISUAL_STYLE_SCHEMA_VERSION", "VISUAL_RENDER_CONTRACT_VERSION", "VisualStyleError", "build_preview_filter", "ensure_visual_style_state", "load_visual_style_state", "materialize_visual_style", "preview_visual_styles", "render_true_frame_preview", "resolve_visual_render_plan", "save_visual_style_approval", "validate_materialized_visual_style", "visual_style_api_payload", "visual_style_options", "visual_style_preview_path",
 ]

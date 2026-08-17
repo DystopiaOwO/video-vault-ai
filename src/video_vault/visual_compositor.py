@@ -17,6 +17,8 @@ import subprocess
 import tempfile
 from typing import Any, Mapping, Sequence
 
+from .visual_style import resolve_visual_render_plan
+
 
 VISUAL_COMPOSITION_VERSION = "visual-composition-v1"
 # This version applies only to rendered visual artifacts.  Keep it separate
@@ -196,6 +198,7 @@ def render_visual_cards(
     profile: Mapping[str, Any],
     ffmpeg_path: str,
     runner: Any | None = None,
+    visual_style_snapshot: Mapping[str, Any] | None = None,
 ) -> tuple[list[Path], list[dict[str, Any]], list[dict[str, Any]]]:
     """Return concat sequence, report evidence and lower-third items."""
 
@@ -204,6 +207,7 @@ def render_visual_cards(
     paths: list[Path] = []
     evidence: list[dict[str, Any]] = []
     overlays: list[dict[str, Any]] = []
+    approved_visual_style = visual_style_snapshot or (timeline.get("approved_visual_style") if isinstance(timeline.get("approved_visual_style"), Mapping) else None)
     for entry in timeline.get("sequence") or []:
         if entry.get("kind") == "segment":
             path = segment_paths.get(str(entry.get("stable_id") or ""))
@@ -218,6 +222,7 @@ def render_visual_cards(
             overlays.append(item)
             continue
         visual_style_hash = str(timeline.get("visual_style_hash") or "")
+        visual_plan = resolve_visual_render_plan(approved_visual_style, width=int(profile["width"]), height=int(profile["height"]), title_text=str(item.get("text") or "")) if approved_visual_style else None
         key = visual_cache_key(item, profile, visual_style_hash)
         output = cache_root / f"{key}.mp4"
         metadata = cache_root / f"{key}.json"
@@ -237,7 +242,7 @@ def render_visual_cards(
             partial = output.with_name(f".{output.stem}.partial.mp4")
             metadata_partial = metadata.with_name(f".{metadata.name}.partial")
             try:
-                _render_card(ffmpeg_path, item, partial, work_dir, profile, runner=runner)
+                _render_card(ffmpeg_path, item, partial, work_dir, profile, runner=runner, visual_style_snapshot=approved_visual_style)
                 digest = _file_hash(partial)
                 metadata_partial.write_text(json.dumps({"cache_key": key, "stable_id": item["stable_id"], "sha256": digest, "size": partial.stat().st_size}, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
                 partial.replace(output)
@@ -263,6 +268,8 @@ def render_visual_cards(
             "cache_hit": cache_hit,
             "asset_fingerprints": item.get("asset_fingerprints", []),
             "visual_style_hash": visual_style_hash,
+            "visual_render_plan_hash": str((visual_plan or {}).get("resolved_hash") or ""),
+            "visual_render_execution_mode": str((visual_plan or {}).get("execution_mode") or ""),
         })
     overlays = [dict(item) for item in timeline.get("resolved_items") or [] if item.get("type") == "lower_third"]
     evidence.extend({
@@ -281,6 +288,7 @@ def render_visual_cards(
         "asset_fingerprints": item.get("asset_fingerprints", []),
         "composition": "overlay",
         "visual_style_hash": str(timeline.get("visual_style_hash") or ""),
+        "visual_render_plan_hash": str((resolve_visual_render_plan(approved_visual_style, width=int(profile["width"]), height=int(profile["height"]), title_text=str(item.get("text") or "")) if approved_visual_style else {}).get("resolved_hash") or ""),
     } for item in overlays)
     return paths, evidence, overlays
 
@@ -294,6 +302,7 @@ def apply_lower_thirds(
     work_dir: Path,
     duration_seconds: float | None = None,
     runner: Any | None = None,
+    visual_style_snapshot: Mapping[str, Any] | None = None,
 ) -> None:
     if not overlays:
         shutil.copy2(source, output)
@@ -305,7 +314,11 @@ def apply_lower_thirds(
         textfiles.append(textfile)
         style = STYLE_CONTRACTS[str(item["style_id"])]
         enable = f"between(t\\,{float(item['resolved_start_seconds']):.6f}\\,{float(item['resolved_start_seconds']) + float(item['duration_seconds']):.6f})"
-        filters.append(_drawtext(item, style, textfile, enable))
+        if visual_style_snapshot:
+            plan = resolve_visual_render_plan(visual_style_snapshot, width=int(profile["width"]), height=int(profile["height"]), title_text=str(item.get("text") or ""), title_enable=enable)
+            filters.append(str((plan.get("title") or {}).get("filter") or ""))
+        else:
+            filters.append(_drawtext(item, style, textfile, enable))
     # Keep an .mp4 suffix so FFmpeg selects the muxer; the leading dot still
     # makes the intermediate unpublishable to normal artifact discovery.
     temp = output.with_name(f".{output.stem}.tmp.mp4")
@@ -396,11 +409,15 @@ def _normalize_visual_item(item: Mapping[str, Any], index: int, segment_starts: 
     return result
 
 
-def _render_card(ffmpeg_path: str, item: Mapping[str, Any], output: Path, work_dir: Path, profile: Mapping[str, Any], *, runner: Any | None = None) -> None:
+def _render_card(ffmpeg_path: str, item: Mapping[str, Any], output: Path, work_dir: Path, profile: Mapping[str, Any], *, runner: Any | None = None, visual_style_snapshot: Mapping[str, Any] | None = None) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     textfile = _write_filter_text(str(item.get("text") or ""), "vv-visual-card-")
     style = STYLE_CONTRACTS[str(item["style_id"])]
-    drawtext = _drawtext(item, style, textfile, "1")
+    if visual_style_snapshot:
+        plan = resolve_visual_render_plan(visual_style_snapshot, width=int(profile["width"]), height=int(profile["height"]), title_text=str(item.get("text") or ""))
+        drawtext = str((plan.get("title") or {}).get("filter") or "")
+    else:
+        drawtext = _drawtext(item, style, textfile, "1")
     duration = float(item["duration_seconds"])
     video_filter = f"[0:v]{_setparams_filter(profile)},{drawtext}"
     if str(item.get("animation_id") or "static") == "fade-in-out":

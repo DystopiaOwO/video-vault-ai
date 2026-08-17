@@ -155,6 +155,7 @@ def render_project(
             "resolved_duration_seconds": base_duration,
         }
         visual_timeline["resolution_hash"] = stable_visual_hash(visual_timeline)
+    approved_visual_style = manifest.get("visual_style") if isinstance(manifest.get("visual_style"), Mapping) else visual_timeline.get("approved_visual_style")
     _execution_check(execution)
     _execution_update(execution, stage="validating", percent=5, message="核准與 Manifest 驗證完成")
     segments = sorted(manifest["segments"], key=lambda item: int(item["order"]))
@@ -293,7 +294,7 @@ def render_project(
                 force=True,
             )
             _execution_begin_ffmpeg(execution, "segments", segment_start, segment_span, segment_duration, f"正在輸出片段 {index}/{len(segments)}")
-            segment_results.append(render_segment(cfg, manifest, segment, runner=runner, source_probe_registry=source_probes, gpu_execution_registry=gpu_execution))
+            segment_results.append(render_segment(cfg, manifest, segment, runner=runner, source_probe_registry=source_probes, gpu_execution_registry=gpu_execution, visual_style_snapshot=approved_visual_style))
             completed_segment_duration += segment_duration
             _execution_check(execution)
             _execution_update(execution, stage="segments", percent=5 + 70 * (completed_segment_duration / total_segment_duration), message=f"已完成片段 {index}/{len(segments)}", current_segment_id=str(segment.get("segment_id") or ""), current_segment_index=index)
@@ -317,6 +318,7 @@ def render_project(
             manifest["profile"],
             ffmpeg_path,
             runner=runner or getattr(execution, "runner", None),
+            visual_style_snapshot=approved_visual_style,
         )
         concat_path = build_concat_file(sequence_paths, concat_path)
         _execution_check(execution)
@@ -358,7 +360,7 @@ def render_project(
         assembly_elapsed = time.perf_counter() - assembly_started
         if visual_overlays:
             visual_partial = partial.with_name(f".{partial.stem}.visual.mp4")
-            apply_lower_thirds(ffmpeg_path, partial, visual_partial, visual_overlays, manifest["profile"], work_dir, expected, runner=runner or getattr(execution, "runner", None))
+            apply_lower_thirds(ffmpeg_path, partial, visual_partial, visual_overlays, manifest["profile"], work_dir, expected, runner=runner or getattr(execution, "runner", None), visual_style_snapshot=approved_visual_style)
             visual_partial.replace(partial)
         if normalization.get("enabled"):
             _execution_check(execution)
@@ -643,6 +645,12 @@ def build_render_report(
             "item_ids": [str(item.get("stable_id") or "") for item in (visual_evidence or manifest.get("visual_items") or []) if isinstance(item, Mapping)],
             "composed": bool(visual_evidence or manifest.get("visual_items")),
         },
+        "visual_render_contract": {
+            "version": "visual-render-v1" if manifest.get("visual_style") else "none",
+            "approved_visual_style_hash": str(manifest.get("visual_style_hash") or ""),
+            "formal_segment_consumers": bool(manifest.get("visual_style")),
+            "segment_plan_hashes": [str((item.visual_render_plan or {}).get("resolved_hash") or "") for item in segment_results],
+        },
         "qc_schema_version": 2,
         "cache": {
             "qc_policy_version": 2,
@@ -710,6 +718,8 @@ def build_render_report(
                 "render_elapsed_seconds": item.elapsed_seconds,
                 "approval_provenance_version": provenance["version"],
                 "approval_provenance_hash": provenance["hash"],
+                "visual_render_plan_hash": str((item.visual_render_plan or {}).get("resolved_hash") or ""),
+                "visual_render_plan": dict(item.visual_render_plan or {}),
                 "warnings": list(item.warnings),
             }
             for item, (_, provenance) in zip(segment_results, segment_provenance)

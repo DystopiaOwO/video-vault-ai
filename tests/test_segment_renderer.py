@@ -9,6 +9,7 @@ from video_vault.media_probe import MediaProbe
 from video_vault.render_errors import SegmentRenderError, is_encoder_fallback_error
 from video_vault.segment_cache import build_segment_cache_key, cache_key_payload, cache_paths, write_cache_metadata
 from video_vault.segment_renderer import build_segment_ffmpeg_command, map_encoder, render_segment
+from video_vault.visual_style import materialize_visual_style
 
 
 def _probe(has_audio=True):
@@ -37,6 +38,31 @@ def test_command_uses_filter_trim_normalization_and_audio():
     assert "fps=30" in text and "format=yuv420p" in text
     assert "-c copy" not in text
     assert "-map [vout] -map [aout]" in text
+
+
+def test_formal_segment_command_consumes_shared_visual_render_plan():
+    brief = {
+        "status": "approved", "brief_version": 1, "visual_contract_hash": "brief",
+        "approved": {
+            "output": {"output_contract_id": "landscape_16_9", "output_contract_version": "1", "orientation": "landscape", "aspect_ratio": "16:9", "width": 1920, "height": 1080, "render_profile_id": "accurate_preview_1080p"},
+            "framing_intent": {
+                "portrait_source_in_landscape": {"approved_strategy_id": "background_treatment"},
+                "landscape_source_in_portrait": {"approved_strategy_id": "crop_reframe"},
+            },
+        },
+    }
+    snapshot = materialize_visual_style("cinematic", brief)
+    command = build_segment_ffmpeg_command(
+        {"ffmpeg_path": "ffmpeg"},
+        {"profile": {"profile_id": "accurate_preview_1080p"}, "settings": {"encoder": "cpu", "color": {"mode": "none"}, "audio": {}}},
+        {"source_file": "source.mp4", "source_in_seconds": 0, "source_out_seconds": 1, "speed": 1, "audio_role": "keep_original", "title_text": "Coffee"},
+        _probe(), output="out.mp4", encoder="libx264",
+        visual_render_plan=__import__("video_vault.visual_style", fromlist=["resolve_visual_render_plan"]).resolve_visual_render_plan(snapshot, width=1920, height=1080, title_text="Coffee"),
+    )
+    text = " ".join(command)
+    assert "drawtext=" in text
+    assert "eq=brightness=" in text
+    assert "background_treatment" not in text or "drawbox=" in text
 
 
 def test_no_audio_source_gets_silence_input():
