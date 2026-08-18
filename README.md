@@ -81,7 +81,7 @@ Phase 4 cloud review 維持 local-first：只有低信心、規則衝突或使�
 
 ## BGM Library
 
-BGM 要先登錄到本地資料庫，保留來源和授權。WebUI 總覽在 `http://127.0.0.1:8765/bgm`，舊版上傳頁在 `http://127.0.0.1:8765/classic-bgm`。
+BGM 要先登錄到本地資料庫，保留來源和授權。WebUI 總覽在 `http://127.0.0.1:8765/bgm`；舊版 HTML 工作台與上傳頁已移除。
 
 ```powershell
 python -m video_vault add-bgm D:/music/song.mp3 `
@@ -126,7 +126,7 @@ npm run build
 - Windows 10/11 是主要支援平台；Linux 可用於 CI 與無頭測試。
 - Python 需符合 `pyproject.toml` 的 `requires-python`，目前為 `>=3.11`。
 - FFmpeg 與 FFprobe 必須可由 `config.yaml` 的 `ffmpeg_path` / `ffprobe_path` 執行。
-- Node.js 與 npm 只在開發 React WebUI 時需要；classic UI 與後端不依賴 Node.js。
+- Node.js 與 npm 只在開發 React WebUI 時需要；正式 WebUI 由 Python server 提供打包後的 frontend。
 
 先執行唯讀環境健檢：
 

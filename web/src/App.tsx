@@ -361,8 +361,6 @@ export function App() {
       <nav className="sidebar-links" aria-label="主要導覽">
         <a className="nav" href="/system-status">系統狀態</a>
         <a className="nav" href="/bgm">BGM 資料庫</a>
-        <a className="nav" href="/classic-bgm">舊版 BGM 上傳</a>
-        <a className="nav" href="/classic">舊版工作台</a>
       </nav>
       <div className="new-project">
         <label htmlFor="new-project-name">建立專案</label>
@@ -407,7 +405,6 @@ function BgmPage() {
     <aside>
       <h1>BGM 資料庫</h1>
       <a className="nav" href="/">專案工作台</a>
-      <a className="nav" href="/classic-bgm">上傳 BGM</a>
     </aside>
     <section>
       <div className="hero"><div><h2>本地 BGM 總覽</h2><p>{tracks.length} 首可用音樂</p></div></div>

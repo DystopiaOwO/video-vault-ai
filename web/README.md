@@ -19,4 +19,4 @@ cd ..
 python -m video_vault ui
 ```
 
-若 `web/dist` 不存在，Python server 會 fallback 到舊版 UI；舊版也可從 `/classic` 開啟。
+若 `web/dist` 不存在，Python server 會回報 WebUI build unavailable；舊版 HTML UI 不再提供。

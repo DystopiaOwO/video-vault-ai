@@ -155,16 +155,18 @@ def test_static_file_serving_stays_inside_web_dist():
     assert _static_file("/../config.yaml") is None
 
 
-def test_classic_forms_receive_valid_csrf_hidden_input(monkeypatch, tmp_path):
-    monkeypatch.setattr(ui, "FORM_CSRF_TOKEN", "test-token")
-    from video_vault.database import init_db
+def test_legacy_html_ui_routes_and_navigation_are_removed():
+    ui_source = (REPO_ROOT / "src" / "video_vault" / "ui.py").read_text(encoding="utf-8")
+    app_source = APP_SOURCE.read_text(encoding="utf-8")
+    bgm_source = (WEB_SRC / "pages" / "BgmLibraryPage.tsx").read_text(encoding="utf-8")
 
-    db = tmp_path / "db.sqlite3"
-    init_db(db)
-    html = ui.render_bgm_page(db)
-    assert "<form <input" not in html
-    assert '<form method="post"' in html
-    assert '<input type="hidden" name="csrf_token" value="test-token">' in html
+    assert 'parsed.path == "/classic"' not in ui_source
+    assert '"/classic-bgm"' in ui_source  # direct requests are explicitly rejected
+    assert 'href="/classic"' not in app_source
+    assert 'href="/classic-bgm"' not in app_source
+    assert 'href="/classic-bgm"' not in bgm_source
+    assert "render_page(" not in ui_source
+    assert "render_bgm_page(" not in ui_source
 
 
 def test_project_jobs_tracks_percent_and_stop(monkeypatch):

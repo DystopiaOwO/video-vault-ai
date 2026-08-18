@@ -122,7 +122,6 @@ export function BgmLibraryPage() {
       <h1>BGM 資料庫</h1>
       <nav className="sidebar-links" aria-label="BGM 導覽">
         <a className="nav" href="/">專案工作台</a>
-        <a className="nav" href="/classic-bgm">上傳 BGM</a>
       </nav>
       <div className="bgm-sidebar-summary">
         <div><span>曲目</span><b>{tracks.length}</b></div>
@@ -143,7 +142,6 @@ export function BgmLibraryPage() {
         </div>
         <div className="bgm-hero-actions">
           <button type="button" disabled={loading} onClick={() => void loadTracks()}>{loading ? "更新中…" : "重新整理"}</button>
-          <a className="nav" href="/classic-bgm">新增曲目</a>
         </div>
       </header>
 
@@ -191,7 +189,7 @@ export function BgmLibraryPage() {
       {!error && loading && <div className="workspace-state" role="status"><span className="workspace-spinner" aria-hidden="true" /><div><h2>正在載入 BGM</h2><p>取得曲目、時長與授權資訊…</p></div></div>}
       {!error && !loading && tracks.length === 0 && <div className="workspace-state empty">
         <span className="workspace-empty-icon" aria-hidden="true">♫</span>
-        <div><h2>尚無 BGM</h2><p>先登錄本機音樂與授權資訊，再回到專案音訊工作區使用。</p><a className="nav" href="/classic-bgm">新增第一首曲目</a></div>
+        <div><h2>尚無 BGM</h2><p>目前沒有可用的本地音樂；請使用正式 BGM 匯入流程後，再回到專案音訊工作區使用。</p></div>
       </div>}
       {!error && !loading && tracks.length > 0 && visibleTracks.length === 0 && <div className="workspace-state empty">
         <span className="workspace-empty-icon" aria-hidden="true">⌕</span>

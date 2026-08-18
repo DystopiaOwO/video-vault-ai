@@ -564,13 +564,12 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                 self._json({"ok": True, "csrf_token": FORM_CSRF_TOKEN})
             elif parsed.path in {"/", "/system-status"} and _web_dist().exists():
                 self._file(_web_dist() / "index.html")
-            elif parsed.path == "/classic" or (parsed.path == "/" and not _web_dist().exists()):
-                project_id = int(query.get("project_id", ["0"])[0] or 0)
-                self._html(render_page(cfg, db, project_id, query.get("message", [""])[0], render_manager))
+            elif parsed.path in {"/classic", "/classic-bgm"}:
+                self.send_error(404)
             elif parsed.path == "/bgm" and _web_dist().exists():
                 self._file(_web_dist() / "index.html")
-            elif parsed.path in {"/bgm", "/classic-bgm"}:
-                self._html(render_bgm_page(db, query.get("message", [""])[0]))
+            elif parsed.path in {"/", "/bgm"}:
+                self.send_error(503, "WebUI build is unavailable")
             elif parsed.path == "/api/projects":
                 self._json(list_projects(db))
             elif parsed.path == "/api/project":
@@ -1661,74 +1660,6 @@ def _static_file(url_path: str) -> Path | None:
     dist = _web_dist().resolve()
     path = (dist / url_path.lstrip("/")).resolve()
     return path if path.exists() and path.is_file() and dist in path.parents else None
-
-
-def render_page(cfg: dict, db: Path, project_id: int = 0, message: str = "", render_manager: RenderJobManager | None = None) -> str:
-    projects = list_projects(db)
-    if not project_id and projects:
-        project_id = int(projects[0]["id"])
-    detail = project_detail(cfg, db, project_id) if project_id else {}
-    bgm = list_bgm(db)
-    jobs = project_jobs(project_id, render_manager, db) if project_id else []
-    refresh = '<meta http-equiv="refresh" content="3">' if any(j.get("status") in {"running", "queued"} for j in jobs) else ""
-    html = f"""<!doctype html>
-<html lang="zh-Hant">
-<head>
-  <meta charset="utf-8">
-  {refresh}
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>video-vault-ai</title>
-  <style>{_css()}</style>
-</head>
-<body>
-  <header>video-vault-ai 專案工作台</header>
-  <main>
-    <aside>{_nav()}{_create_project_form()}{_project_list(projects, project_id)}</aside>
-    <section>
-      {f'<div class="card"><b>{h(message)}</b></div>' if message else ''}
-      {_jobs_panel(jobs)}
-      {_project_panel(detail)}
-      {_hyperframes_panel(detail)}
-      <div class="grid">{_clips_panel(detail)}{_project_bgm_panel(project_id, detail, bgm)}</div>
-      {_script_panel(detail)}
-    </section>
-  </main>
-</body>
-</html>"""
-    return _inject_csrf_fields(html)
-
-
-def render_bgm_page(db: Path, message: str = "") -> str:
-    return _inject_csrf_fields(f"""<!doctype html>
-<html lang="zh-Hant">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>BGM 資料庫</title>
-  <style>{_css()}</style>
-</head>
-<body>
-  <header>video-vault-ai BGM 資料庫</header>
-  <main>
-    <aside>{_nav()}</aside>
-    <section>
-      {f'<div class="card"><b>{h(message)}</b></div>' if message else ''}
-      {_bgm_library_panel(list_bgm(db))}
-    </section>
-  </main>
-</body>
-</html>""")
-
-
-def _inject_csrf_fields(html: str) -> str:
-    if not FORM_CSRF_TOKEN:
-        return html
-    hidden = f'<input type="hidden" name="csrf_token" value="{h(FORM_CSRF_TOKEN)}">'
-    return re.sub(r"(<form\b[^>]*>)", rf"\1{hidden}", html)
-
-
-def _nav() -> str:
-    return '<div class="card"><h3>導覽</h3><a class="item" href="/">專案工作台</a><a class="item" href="/bgm">BGM 資料庫</a></div>'
 
 
 def _enqueue_legacy_job(db: Path, project_id: int, kind: str, label: str, capabilities: set[str], resources: set[str], base_revision: int | None = None):
