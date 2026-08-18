@@ -309,3 +309,24 @@
   #root > main > section .workspace-nav { margin-right: -4px; margin-left: -4px; border-radius: 11px; }
   #root > main > section .workspace-state { align-items: flex-start; flex-direction: column; }
 }
+
+/* Readability scale: keep the sidebar compact, but give the active workspace
+   enough size for comfortable reading at normal desktop zoom. */
+#root > main > section { font-size: 13px; }
+#root > main > section .hero p { font-size: 12px; }
+#root > main > section .project-metrics span { font-size: 10px; }
+#root > main > section .project-metrics b { font-size: 18px; }
+#root > main > section .workspace-nav a { min-height: 38px; font-size: 12px; }
+#root > main > section .card h3,
+#root > main > section .render-job-panel h3 { font-size: 16px; }
+#root > main > section button,
+#root > main > section .nav { font-size: 12px; }
+#root > main > section .item { font-size: 12px; }
+#root > main > section .item span,
+#root > main > section .muted { font-size: 11px; }
+#root > main > section .status-dot { font-size: 10px; }
+#root > main > section .audio-grid label,
+#root > main > section .color-grid label,
+#root > main > section .adjustment-grid label { font-size: 11px; }
+#root > main > section .inline-empty { font-size: 11px; }
+#root > main > section .workspace-state p { font-size: 12px; }
