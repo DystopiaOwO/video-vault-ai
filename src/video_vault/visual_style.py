@@ -196,6 +196,22 @@ class TitleStyleRegistry:
     def list(self) -> list[dict[str, Any]]:
         return [deepcopy(item) for item in self._entries.values()]
 
+    def resolved_metadata(self) -> list[dict[str, Any]]:
+        """Return capability metadata from fully resolved title contracts."""
+        result = []
+        for style_id, item in self._entries.items():
+            resolved, chain = self._resolve_inheritance(style_id, item.get("version"), [])
+            if resolved is None:
+                raise VisualStyleError("title_style_parent_unknown", f"unknown title style: {style_id}")
+            _validate_title_definition(resolved)
+            result.append({
+                "title_style_id": str(style_id),
+                "version": str(resolved.get("version") or ""),
+                "supported_roles": [str(role) for role in resolved.get("supported_roles") or ()],
+                "resolved_parent_chain": chain,
+            })
+        return result
+
     def hash(self) -> str:
         return _hash(self._entries)
 
@@ -322,7 +338,8 @@ def visual_style_control_defaults(
     resolved_aspect = str(aspect or output.get("orientation") or "landscape")
     styles = (registry or VISUAL_STYLES).list(include_internal=True)
     styles = [item for item in styles if item.get("style_id") != "test_soft_panel" and (style_id is None or str(item.get("style_id")) == str(style_id))]
-    titles = (title_registry or TITLE_STYLES).list()
+    title_resolver = title_registry or TITLE_STYLES
+    titles = title_resolver.resolved_metadata()
     titles = [item for item in titles if title_style_id is None or str(item.get("title_style_id")) == str(title_style_id)]
     result: list[dict[str, Any]] = []
     for style in styles:
@@ -331,7 +348,7 @@ def visual_style_control_defaults(
             title_id = str(title.get("title_style_id") or "")
             supported_roles = [str(value) for value in title.get("supported_roles") or ()]
             for role in ([str(title_role)] if title_role else supported_roles):
-                resolved_title = (title_registry or TITLE_STYLES).resolve(title_id, title.get("version"), role=role, aspect=resolved_aspect)
+                resolved_title = title_resolver.resolve(title_id, title.get("version"), role=role, aspect=resolved_aspect)
                 responsive = dict(resolved_title.get("responsive") or {})
                 palette = _apply_palette_override(resolved_style.get("palette") or {}, {"palette_variant": "default"})
                 result.append({
@@ -356,12 +373,12 @@ def visual_style_control_defaults(
                     "palette": palette,
                     "capability": {"letter_spacing_supported": False, "installed_font_resolution": True},
                     "registry_version": TITLE_STYLE_REGISTRY_VERSION,
-                    "registry_hash": (title_registry or TITLE_STYLES).hash(),
+                    "registry_hash": title_resolver.hash(),
                 })
     return result
 
 
-def visual_style_options() -> dict[str, Any]:
+def visual_style_options(*, registry: VisualStyleRegistry | None = None, title_registry: TitleStyleRegistry | None = None) -> dict[str, Any]:
     def options(values: Any, labels: Mapping[str, str], *, stringify: bool = False) -> list[dict[str, Any]]:
         result = []
         for value in values:
@@ -369,15 +386,17 @@ def visual_style_options() -> dict[str, Any]:
             result.append({"id": identifier, "label": labels.get(str(identifier), str(identifier)), "enabled": True, "capability": {}})
         return result
 
+    style_resolver = registry or VISUAL_STYLES
+    title_resolver = title_registry or TITLE_STYLES
     return {
         "schema_version": VISUAL_STYLE_SCHEMA_VERSION,
         "registry_version": VISUAL_STYLE_REGISTRY_VERSION,
-        "registry_hash": VISUAL_STYLES.hash(),
+        "registry_hash": style_resolver.hash(),
         # Standalone is a deliberate human comparison option.  Test-only
         # entries remain hidden from the product surface.
-        "styles": [item for item in VISUAL_STYLES.list(include_internal=True) if item.get("style_id") != "test_soft_panel"],
-        "title_styles": TITLE_STYLES.list(),
-        "title_roles": options(sorted({role for item in TITLE_STYLES.list() for role in item["supported_roles"]}), TITLE_ROLE_LABELS),
+        "styles": [item for item in style_resolver.list(include_internal=True) if item.get("style_id") != "test_soft_panel"],
+        "title_styles": title_resolver.list(),
+        "title_roles": options(sorted({role for item in title_resolver.resolved_metadata() for role in item["supported_roles"]}), TITLE_ROLE_LABELS),
         "title_anchors": options(TITLE_ANCHORS, TITLE_ANCHOR_LABELS),
         "title_motion_presets": options(TITLE_MOTION_PRESETS, TITLE_MOTION_LABELS),
         "title_easing": options(("linear", "ease-out"), {"linear": "Linear", "ease-out": "Ease-out"}),
@@ -392,7 +411,13 @@ def visual_style_options() -> dict[str, Any]:
     }
 
 
-def visual_style_api_payload(state: Mapping[str, Any] | None, *, approved_brief: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def visual_style_api_payload(
+    state: Mapping[str, Any] | None,
+    *,
+    approved_brief: Mapping[str, Any] | None = None,
+    registry: VisualStyleRegistry | None = None,
+    title_registry: TitleStyleRegistry | None = None,
+) -> dict[str, Any]:
     current = dict(state or {})
     for field in ("recommendation", "approved", "source_provenance"):
         if isinstance(current.get(field), str):
@@ -402,8 +427,8 @@ def visual_style_api_payload(state: Mapping[str, Any] | None, *, approved_brief:
                 current[field] = {}
     if isinstance(current.get("source_provenance"), list):
         current["source_provenance"] = [_public_source(item) for item in current["source_provenance"]]
-    current["options"] = visual_style_options()
-    current["options"]["control_defaults"] = visual_style_control_defaults(approved_brief) if approved_brief else []
+    current["options"] = visual_style_options(registry=registry, title_registry=title_registry)
+    current["options"]["control_defaults"] = visual_style_control_defaults(approved_brief, registry=registry, title_registry=title_registry) if approved_brief else []
     return current
 
 

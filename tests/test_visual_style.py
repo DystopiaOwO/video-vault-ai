@@ -432,6 +432,32 @@ def test_control_defaults_are_resolved_by_backend_for_role_and_sparse_child():
     assert child_defaults[0]["motion"]["preset"] == "fade_rise"
 
 
+def test_unfiltered_sparse_child_defaults_use_inherited_roles_and_api_payload():
+    styles = VisualStyleRegistry(VISUAL_STYLES.list())
+    titles = TitleStyleRegistry(TITLE_STYLES.list())
+    parent = next(item for item in titles.list() if item["title_style_id"] == "test_soft_panel")
+    parent["title_style_id"] = "base_title"
+    titles.register("base_title", parent)
+    titles.register("child_title", {"title_style_id": "child_title", "version": "1", "extends": {"title_style_id": "base_title", "version": "1"}, "label": "Child", "overrides": {"motion": {"preset": "fade_rise"}}})
+    visual = styles.resolve("test_soft_panel")
+    visual.update({"style_id": "test_inherited_visual", "label": "Inherited Visual", "default_title_style_id": "child_title", "enabled_for_round1_ui": True})
+    styles.register("test_inherited_visual", visual)
+
+    defaults = visual_style_control_defaults(_brief(), registry=styles, title_registry=titles)
+    child = [item for item in defaults if item["visual_style_id"] == "test_inherited_visual" and item["title_style_id"] == "child_title"]
+    assert {item["role"] for item in child} >= {"chapter_title", "location_title", "lower_third"}
+    location = next(item for item in child if item["role"] == "location_title")
+    assert location["font_family"] == parent["font_family"]
+    assert location["weight"] == parent["weight"]
+    assert location["anchor"] == "top-left"
+    assert location["readability"]["surface"] == parent["readability"]["surface"]
+    assert location["motion"]["preset"] == "fade_rise"
+
+    payload = visual_style_api_payload({"project_id": 1, "status": "approved", "approved": {}}, approved_brief=_brief(), registry=styles, title_registry=titles)
+    payload_child = [item for item in payload["options"]["control_defaults"] if item["visual_style_id"] == "test_inherited_visual" and item["title_style_id"] == "child_title"]
+    assert {item["role"] for item in payload_child} >= {"chapter_title", "location_title", "lower_third"}
+
+
 def test_visual_style_api_payload_exposes_resolved_control_defaults():
     payload = visual_style_api_payload({"project_id": 1, "status": "approved", "approved": {}}, approved_brief=_brief())
     defaults = payload["options"]["control_defaults"]

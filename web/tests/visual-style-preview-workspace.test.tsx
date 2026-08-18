@@ -25,10 +25,10 @@ function detail(): ProjectDetail {
           { visual_style_id: "diary_natural", title_style_id: "diary_natural_overlay", is_default_title_style: true, role: "chapter_title", aspect: "landscape", font_family: "Noto Sans CJK TC", weight: 600, size_preset: "normal", anchor: "bottom-left", composition: "overlay", readability: { surface: "translucent" }, motion: { preset: "fade" } },
           { visual_style_id: "cinematic", title_style_id: "cinematic_overlay", is_default_title_style: true, role: "chapter_title", aspect: "landscape", font_family: "Segoe UI", weight: 700, size_preset: "normal", anchor: "top-right", composition: "overlay", readability: { surface: "solid" }, motion: { preset: "fade_rise" } },
         ],
-        title_font_families: [option("Noto Sans CJK TC")],
-        title_weight_values: [option("600")],
+        title_font_families: [option("Noto Sans CJK TC"), option("Segoe UI")],
+        title_weight_values: [option("600"), option("700")],
         title_size_presets: [option("normal", "標準")],
-        title_anchors: [option("bottom-left", "左下"), option("top-center", "上中"), option("top-right", "右上")],
+        title_anchors: [option("bottom-left", "左下"), option("top-center", "上中"), option("top-right", "右上"), option("top-left", "左上")],
         compositions: [option("overlay")],
         readability_surfaces: [option("translucent", "半透明"), option("solid", "實色")],
         title_motion_presets: [option("fade"), option("fade_rise"), option("slide_fade")],
@@ -75,5 +75,25 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
     expect(anchor.value).toBe("top-center");
     fireEvent.change(anchor, { target: { value: "top-right" } });
     expect(anchor.value).toBe("top-right");
+  });
+
+  it("renders sparse inherited child defaults from API without a child-specific UI branch", async () => {
+    const input = detail();
+    input.visual_style = {
+      ...input.visual_style,
+      options: {
+        ...input.visual_style?.options,
+        styles: [{ style_id: "test_inherited_visual", default_title_style_id: "child_title", enabled_for_round1_ui: true }],
+        control_defaults: [{ visual_style_id: "test_inherited_visual", title_style_id: "child_title", is_default_title_style: true, role: "chapter_title", aspect: "landscape", font_family: "Segoe UI", weight: 700, size_preset: "normal", anchor: "top-left", composition: "overlay", readability: { surface: "solid" }, motion: { preset: "fade_rise" } }],
+      },
+    };
+    const preview = vi.spyOn(api, "previewVisualStyles").mockResolvedValue({ ok: true, variants: [] });
+    render(<VisualStylePreviewWorkspace detail={input} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+    expect((screen.getByLabelText("字型") as HTMLSelectElement).value).toBe("Segoe UI");
+    expect((screen.getByLabelText("字重") as HTMLSelectElement).value).toBe("700");
+    expect((screen.getByLabelText("位置") as HTMLSelectElement).value).toBe("top-left");
+    expect((screen.getByLabelText("動畫") as HTMLSelectElement).value).toBe("fade_rise");
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    await waitFor(() => expect(preview).toHaveBeenCalledWith(1, false, {}));
   });
 });
