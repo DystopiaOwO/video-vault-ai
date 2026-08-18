@@ -124,15 +124,21 @@ export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mu
       <button type="button" disabled={Boolean(busy)} onClick={() => void refreshRecommendation()}>{busy === "recommend" ? "分析中…" : "重新分析素材方向"}</button>
     </div>
     <div className="creative-brief-recommendation">
-      <strong>AI 建議：{String(recommendation.output?.aspect_ratio || "尚未解析")}</strong>
+      <div className="creative-brief-recommendation-heading"><span className="creative-brief-label">AI 建議</span><strong>{String(recommendation.output?.aspect_ratio || "尚未解析")}</strong></div>
       <span>{recommendation.reason || "尚無建議理由"}</span>
     </div>
     <div className="creative-brief-controls">
-      <fieldset><legend>最終影片方向</legend>
-        {outputOptions.map((option) => <label key={option.output_contract_id}><input type="radio" name={`brief-output-${detail.project.id}`} checked={outputContractId === option.output_contract_id} disabled={Boolean(busy)} onChange={() => setOutputContractId(String(option.output_contract_id))} />{option.label || option.aspect_ratio}（{option.width}×{option.height}）</label>)}
+      <fieldset className="creative-brief-output-selector"><legend>最終影片方向</legend>
+        <div className="creative-brief-option-grid">
+          {outputOptions.map((option) => <label className={`creative-brief-option ${option.orientation}`} key={option.output_contract_id}>
+            <input type="radio" name={`brief-output-${detail.project.id}`} checked={outputContractId === option.output_contract_id} disabled={Boolean(busy)} onChange={() => setOutputContractId(String(option.output_contract_id))} />
+            <span className="creative-brief-option-mark" aria-hidden="true" />
+            <span className="creative-brief-option-copy"><strong>{option.label || option.aspect_ratio}</strong><small>{option.width} × {option.height}</small></span>
+          </label>)}
+        </div>
       </fieldset>
-      <div className="creative-brief-output"><span>目前選擇</span><strong>{selectedOutput.width}×{selectedOutput.height}</strong><code>{selectedOutput.render_profile_id || "unknown-profile"}</code></div>
-      {directions.map((direction) => <label key={direction.direction_id}>{direction.label}<select value={strategies[direction.direction_id] || ""} disabled={Boolean(busy)} onChange={(event) => setStrategies((current) => ({ ...current, [direction.direction_id]: event.target.value }))}>{strategiesFor(direction.direction_id).map((strategy) => <option key={strategy.strategy_id} value={strategy.strategy_id}>{strategy.label}</option>)}</select></label>)}
+      <div className="creative-brief-output"><span className="creative-brief-label">目前選擇</span><strong>{selectedOutput.width} × {selectedOutput.height}</strong><span className="creative-brief-output-aspect">{selectedOutput.aspect_ratio || "未知比例"}</span><code>{selectedOutput.render_profile_id || "unknown-profile"}</code></div>
+      {directions.map((direction) => <label className="creative-brief-direction" key={direction.direction_id}><span className="creative-brief-direction-title">{direction.label}</span><span className="creative-brief-direction-hint">建議先裁切／重新構圖，不適合時再考慮背景處理</span><select value={strategies[direction.direction_id] || ""} disabled={Boolean(busy)} onChange={(event) => setStrategies((current) => ({ ...current, [direction.direction_id]: event.target.value }))}>{strategiesFor(direction.direction_id).map((strategy) => <option key={strategy.strategy_id} value={strategy.strategy_id}>{strategy.label}</option>)}</select></label>)}
     </div>
     <div className="creative-brief-actions">
       <button type="button" className="primary" disabled={Boolean(busy) || !recommendedOutputId} onClick={() => { const nextStrategies = initialFraming(directions, {}, recommendation); setOutputContractId(recommendedOutputId); setStrategies(nextStrategies); void save("recommendation", { outputContractId: recommendedOutputId, strategies: nextStrategies }); }}>{busy === "save" ? "儲存中…" : "採用 AI 建議並核准"}</button>
