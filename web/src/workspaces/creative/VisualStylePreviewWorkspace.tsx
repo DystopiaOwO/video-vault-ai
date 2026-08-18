@@ -32,27 +32,14 @@ export function VisualStylePreviewWorkspace({ detail, setMessage, refreshProject
   const [busy, setBusy] = useState(false);
   const approvedBrief = detail.creative_brief?.status === "approved";
   const optionData = (state.options || {}) as Record<string, unknown>;
-  const titleStyles = (Array.isArray(optionData.title_styles) ? optionData.title_styles : []) as Array<Record<string, unknown>>;
   const selectedStyle = styles.find((item) => String(item.style_id || "") === selected) || styles[0] || {};
-  const selectedTitleStyle = titleStyles.find((item) => String(item.title_style_id || "") === String(selectedStyle.default_title_style_id || "")) || {};
-  const roleTokens = mapValue(selectedTitleStyle.role_tokens);
-  const roleToken = mapValue(roleTokens[selectedTitleRole]);
   const approvedOutput = mapValue(mapValue(detail.creative_brief?.approved).output);
   const aspect = String(approvedOutput.orientation || "landscape");
-  const responsiveTokens = mapValue(roleToken.responsive);
-  const responsive = mapValue(responsiveTokens[aspect] || responsiveTokens.landscape || roleToken.responsive || selectedTitleStyle.responsive);
-  const selectedTitleMotion = mapValue(roleToken.motion || selectedTitleStyle.motion);
-  const selectedReadability = mapValue(roleToken.readability || selectedTitleStyle.readability);
-  const effectiveDefaults: Record<string, unknown> = {
-    font_family: selectedTitleStyle.font_family || "system-sans",
-    weight: selectedTitleStyle.weight || 500,
-    size_preset: "normal",
-    anchor: responsive.anchor || "bottom-left",
-    composition: selectedStyle.composition || "overlay",
-    readability_surface: selectedReadability.surface || "translucent",
-    motion_preset: selectedTitleMotion.preset || "none",
-  };
-  const effective = (key: string) => overrides[key] ?? effectiveDefaults[key] ?? "";
+  const controlDefaults = (Array.isArray(optionData.control_defaults) ? optionData.control_defaults : []) as Array<Record<string, unknown>>;
+  const resolvedDefaults = controlDefaults.find((item) => item.visual_style_id === selectedStyle.style_id && item.is_default_title_style === true && item.role === selectedTitleRole && item.aspect === aspect);
+  const defaultsAvailable = Boolean(resolvedDefaults);
+  const effective = (key: string) => overrides[key] ?? resolvedDefaults?.[key] ?? "";
+  const effectiveNested = (container: string, key: string) => mapValue(overrides[container])[key] ?? mapValue(resolvedDefaults?.[container])[key] ?? "";
 
   function invalidatePreview() { setSelectedPreviewPlanHash(""); setSelectedPreviewVariantId(""); }
   function patchOverride(key: string, value: unknown) { setOverrides((old) => ({ ...old, [key]: value })); invalidatePreview(); }
@@ -91,13 +78,14 @@ export function VisualStylePreviewWorkspace({ detail, setMessage, refreshProject
     {!approvedBrief && <div className="visual-style-blocked">目前只顯示 AI 建議：{String((state.recommendation?.label as string) || "Diary Natural")}。Creative Brief 仍是 needs_confirmation，不能自動核准或產生 authoritative Coffee preview。</div>}
     <div className="visual-style-actions"><button type="button" disabled={!approvedBrief || busy} onClick={() => void preview()}>{busy ? "處理中…" : "產生真實畫面預覽"}</button>{approvedBrief && <><select value={selected} disabled={busy} onChange={(event) => { setSelected(event.target.value); const match = variants.find((item) => String((item.visual_style as Record<string, unknown> | undefined)?.visual_style_id || "") === event.target.value); setSelectedPreviewPlanHash(String(match?.preview_plan_hash || "")); setSelectedPreviewVariantId(String(match?.preview_variant_id || "")); setSelectedTitleRole(String(match?.title_role || "chapter_title")); }}>{styles.map((style) => <option key={String(style.style_id)} value={String(style.style_id)}>{String(style.label || style.style_id)}</option>)}</select><button type="button" className="primary" disabled={busy || !selected || !selectedPreviewPlanHash || !selectedPreviewVariantId} onClick={() => void approve()}>核准選定 Visual Style</button></>}</div>
     {approvedBrief && <div className="visual-style-overrides" aria-label="bounded visual style overrides">
-      <label>字型<select value={String(effective("font_family"))} disabled={busy} onChange={(event) => patchOverride("font_family", event.target.value)}>{registryOptions(optionData.title_font_families).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-      <label>字重<select value={String(effective("weight"))} disabled={busy} onChange={(event) => patchOverride("weight", Number(event.target.value))}>{registryOptions(optionData.title_weight_values).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-      <label>尺寸<select value={String(effective("size_preset"))} disabled={busy} onChange={(event) => patchOverride("size_preset", event.target.value)}>{registryOptions(optionData.title_size_presets).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-      <label>位置<select value={String(effective("anchor"))} disabled={busy} onChange={(event) => patchOverride("anchor", event.target.value)}>{registryOptions(optionData.title_anchors).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-      <label>組成<select value={String(effective("composition"))} disabled={busy} onChange={(event) => patchOverride("composition", event.target.value)}>{registryOptions(optionData.compositions).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-      <label>可讀性<select value={String(effective("readability_surface"))} disabled={busy} onChange={(event) => patchNestedOverride("readability", { surface: event.target.value })}>{registryOptions(optionData.readability_surfaces).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-      <label>動畫<select value={String(effective("motion_preset"))} disabled={busy} onChange={(event) => patchNestedOverride("motion", { preset: event.target.value })}>{registryOptions(optionData.title_motion_presets).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+      {!defaultsAvailable && <div className="visual-style-blocked">目前選定的 style/role 沒有 backend resolved control defaults，控制項已停用。</div>}
+      <label>字型<select value={String(effective("font_family"))} disabled={busy || !defaultsAvailable} onChange={(event) => patchOverride("font_family", event.target.value)}>{registryOptions(optionData.title_font_families).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+      <label>字重<select value={String(effective("weight"))} disabled={busy || !defaultsAvailable} onChange={(event) => patchOverride("weight", Number(event.target.value))}>{registryOptions(optionData.title_weight_values).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+      <label>尺寸<select value={String(effective("size_preset"))} disabled={busy || !defaultsAvailable} onChange={(event) => patchOverride("size_preset", event.target.value)}>{registryOptions(optionData.title_size_presets).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+      <label>位置<select value={String(effective("anchor"))} disabled={busy || !defaultsAvailable} onChange={(event) => patchOverride("anchor", event.target.value)}>{registryOptions(optionData.title_anchors).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+      <label>組成<select value={String(effective("composition"))} disabled={busy || !defaultsAvailable} onChange={(event) => patchOverride("composition", event.target.value)}>{registryOptions(optionData.compositions).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+      <label>可讀性<select value={String(effectiveNested("readability", "surface"))} disabled={busy || !defaultsAvailable} onChange={(event) => patchNestedOverride("readability", { surface: event.target.value })}>{registryOptions(optionData.readability_surfaces).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+      <label>動畫<select value={String(effectiveNested("motion", "preset"))} disabled={busy || !defaultsAvailable} onChange={(event) => patchNestedOverride("motion", { preset: event.target.value })}>{registryOptions(optionData.title_motion_presets).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
       <button type="button" disabled={!approvedBrief || busy} onClick={() => void preview()}>以這組設定重新預覽</button>
     </div>}
     {variants.length > 0 && <div className="visual-style-grid">{variants.map((variant, index) => { const style = (variant.visual_style || {}) as Record<string, unknown>; const source = (variant.source || {}) as Record<string, unknown>; const frame = (variant.representative_frame || {}) as Record<string, unknown>; const animated = String(variant.preview_kind || frame.preview_kind || "static") === "animated"; return <article key={`${String(variant.preview_variant_id || style.visual_style_id)}-${String(frame.title_role || "chapter_title")}-${String(variant.timestamp_seconds || index)}-${String(variant.preview_kind || "static")}`} onClick={() => { setSelected(String(style.visual_style_id || selected)); setSelectedPreviewPlanHash(String(variant.preview_plan_hash || "")); setSelectedPreviewVariantId(String(variant.preview_variant_id || "")); setSelectedTitleRole(String(variant.title_role || frame.title_role || "chapter_title")); }}><div className="visual-style-preview-media">{animated ? <video src={String(variant.url || "")} controls muted loop playsInline /> : <img src={String(variant.url || "")} alt={`${String(style.label || style.visual_style_id)} ${String(frame.role_label || frame.selection_reason || "representative")} frame preview`} />}</div><h4>{String(style.label || style.visual_style_id)} · {String(variant.role_label || frame.role_label || "Chapter")}{animated ? " · 動畫" : ""}</h4><p>{String(style.composition || "overlay")} · grading {String((style.grading as Record<string, unknown>)?.look_id || "unknown")} · source {String(source.project_media_uuid || "")} · {String(frame.selection_reason || "representative")}</p><code>{String(variant.preview_plan_hash || style.semantic_hash || style.resolved_hash || "").slice(0, 16)}</code></article>; })}</div>}

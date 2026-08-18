@@ -299,6 +299,68 @@ def validate_materialized_visual_style(snapshot: Mapping[str, Any]) -> dict[str,
     return {"ok": not errors, "errors": errors}
 
 
+def visual_style_control_defaults(
+    approved_brief: Mapping[str, Any],
+    *,
+    style_id: str | None = None,
+    title_style_id: str | None = None,
+    title_role: str | None = None,
+    aspect: str | None = None,
+    registry: VisualStyleRegistry | None = None,
+    title_registry: TitleStyleRegistry | None = None,
+) -> list[dict[str, Any]]:
+    """Expose control defaults from the same registries used by rendering.
+
+    The client receives resolved values only.  It must not reconstruct title
+    inheritance, role tokens, aspect responsive values, or palette semantics.
+    """
+
+    brief = _approved_contract(approved_brief) if "approved" in approved_brief and "output" not in approved_brief else dict(approved_brief)
+    if str(brief.get("status") or "approved") != "approved":
+        return []
+    output = dict(brief.get("output") or {})
+    resolved_aspect = str(aspect or output.get("orientation") or "landscape")
+    styles = (registry or VISUAL_STYLES).list(include_internal=True)
+    styles = [item for item in styles if item.get("style_id") != "test_soft_panel" and (style_id is None or str(item.get("style_id")) == str(style_id))]
+    titles = (title_registry or TITLE_STYLES).list()
+    titles = [item for item in titles if title_style_id is None or str(item.get("title_style_id")) == str(title_style_id)]
+    result: list[dict[str, Any]] = []
+    for style in styles:
+        resolved_style = (registry or VISUAL_STYLES).resolve(str(style["style_id"]), style.get("version"))
+        for title in titles:
+            title_id = str(title.get("title_style_id") or "")
+            supported_roles = [str(value) for value in title.get("supported_roles") or ()]
+            for role in ([str(title_role)] if title_role else supported_roles):
+                resolved_title = (title_registry or TITLE_STYLES).resolve(title_id, title.get("version"), role=role, aspect=resolved_aspect)
+                responsive = dict(resolved_title.get("responsive") or {})
+                palette = _apply_palette_override(resolved_style.get("palette") or {}, {"palette_variant": "default"})
+                result.append({
+                    "key": f"{resolved_style['style_id']}:{title_id}:{role}:{resolved_aspect}",
+                    "visual_style_id": str(resolved_style["style_id"]),
+                    "visual_style_version": str(resolved_style["version"]),
+                    "title_style_id": title_id,
+                    "title_style_version": str(resolved_title["version"]),
+                    "is_default_title_style": title_id == str(resolved_style.get("default_title_style_id") or ""),
+                    "role": role,
+                    "aspect": resolved_aspect,
+                    "font_family": str(resolved_title.get("font_family") or ""),
+                    "weight": int(resolved_title.get("weight") or 0),
+                    "size_ratio": float(responsive.get("size_ratio") or 0.0),
+                    "size_preset": "normal",
+                    "anchor": str(responsive.get("anchor") or ""),
+                    "max_width_ratio": float(resolved_title.get("max_width_ratio") or 0.0),
+                    "composition": str(resolved_style.get("composition") or ""),
+                    "readability": deepcopy(resolved_title.get("readability") or {}),
+                    "motion": deepcopy(resolved_title.get("motion") or {}),
+                    "palette_variant": "default",
+                    "palette": palette,
+                    "capability": {"letter_spacing_supported": False, "installed_font_resolution": True},
+                    "registry_version": TITLE_STYLE_REGISTRY_VERSION,
+                    "registry_hash": (title_registry or TITLE_STYLES).hash(),
+                })
+    return result
+
+
 def visual_style_options() -> dict[str, Any]:
     def options(values: Any, labels: Mapping[str, str], *, stringify: bool = False) -> list[dict[str, Any]]:
         result = []
@@ -330,7 +392,7 @@ def visual_style_options() -> dict[str, Any]:
     }
 
 
-def visual_style_api_payload(state: Mapping[str, Any] | None) -> dict[str, Any]:
+def visual_style_api_payload(state: Mapping[str, Any] | None, *, approved_brief: Mapping[str, Any] | None = None) -> dict[str, Any]:
     current = dict(state or {})
     for field in ("recommendation", "approved", "source_provenance"):
         if isinstance(current.get(field), str):
@@ -341,6 +403,7 @@ def visual_style_api_payload(state: Mapping[str, Any] | None) -> dict[str, Any]:
     if isinstance(current.get("source_provenance"), list):
         current["source_provenance"] = [_public_source(item) for item in current["source_provenance"]]
     current["options"] = visual_style_options()
+    current["options"]["control_defaults"] = visual_style_control_defaults(approved_brief) if approved_brief else []
     return current
 
 
@@ -1450,5 +1513,5 @@ def _now() -> str:
 
 
 __all__ = [
-    "TITLE_ANCHORS", "TITLE_MOTION_PRESETS", "TITLE_STYLES", "TITLE_STYLE_REGISTRY_VERSION", "TITLE_STYLE_SCHEMA_VERSION", "VISUAL_STYLES", "VISUAL_STYLE_REGISTRY_VERSION", "VISUAL_STYLE_SCHEMA_VERSION", "VISUAL_RENDER_CONTRACT_VERSION", "VisualStyleError", "build_preview_filter", "ensure_visual_style_state", "load_visual_style_state", "materialize_visual_graph", "materialize_visual_style", "preview_visual_styles", "render_animated_title_preview", "render_true_frame_preview", "resolve_visual_render_plan", "save_visual_style_approval", "validate_materialized_visual_style", "visual_style_api_payload", "visual_style_options", "visual_style_preview_path",
+    "TITLE_ANCHORS", "TITLE_MOTION_PRESETS", "TITLE_STYLES", "TITLE_STYLE_REGISTRY_VERSION", "TITLE_STYLE_SCHEMA_VERSION", "VISUAL_STYLES", "VISUAL_STYLE_REGISTRY_VERSION", "VISUAL_STYLE_SCHEMA_VERSION", "VISUAL_RENDER_CONTRACT_VERSION", "VisualStyleError", "build_preview_filter", "ensure_visual_style_state", "load_visual_style_state", "materialize_visual_graph", "materialize_visual_style", "preview_visual_styles", "render_animated_title_preview", "render_true_frame_preview", "resolve_visual_render_plan", "save_visual_style_approval", "validate_materialized_visual_style", "visual_style_api_payload", "visual_style_control_defaults", "visual_style_options", "visual_style_preview_path",
 ]

@@ -591,7 +591,9 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif parsed.path == "/api/project/creative-brief/options":
                 self._json(creative_brief_options())
             elif parsed.path == "/api/project/visual-style":
-                self._json(visual_style_api_payload(ensure_visual_style_state(cfg, db, int(query.get("project_id", ["0"])[0] or 0))))
+                project_id = int(query.get("project_id", ["0"])[0] or 0)
+                brief = ensure_creative_brief(cfg, db, project_id)
+                self._json(visual_style_api_payload(ensure_visual_style_state(cfg, db, project_id), approved_brief=brief))
             elif parsed.path == "/api/project/visual-style/options":
                 self._json(visual_style_options())
             elif parsed.path == "/api/creator-profile":
@@ -1053,7 +1055,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     project_id = int(data.get("project_id", 0))
                     payload = data.get("visual_style") if isinstance(data.get("visual_style"), dict) else data
                     result = save_visual_style_approval(cfg, db, project_id, payload, base_revision=_base_revision(data))
-                    self._json({"ok": True, "visual_style": visual_style_api_payload(result), "project_revision": current_revision(db, project_id)})
+                    self._json({"ok": True, "visual_style": visual_style_api_payload(result, approved_brief=ensure_creative_brief(cfg, db, project_id)), "project_revision": current_revision(db, project_id)})
                 except ProjectRevisionConflict:
                     raise
                 except (OSError, TypeError, ValueError, VisualStyleError) as exc:

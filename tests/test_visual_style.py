@@ -26,7 +26,9 @@ from video_vault.visual_style import (
     _select_representative_frames,
     _validate_preview_evidence,
     validate_materialized_visual_style,
+    visual_style_control_defaults,
     visual_style_options,
+    visual_style_api_payload,
 )
 from video_vault.visual_compositor import visual_cache_key
 
@@ -407,6 +409,34 @@ def test_visual_style_options_are_registry_metadata_not_raw_capability_lists():
     options = visual_style_options()
     for key in ("title_roles", "title_anchors", "title_motion_presets", "title_weight_values", "title_size_presets", "palette_variants", "readability_surfaces", "title_font_families"):
         assert options[key] and all(set(item) >= {"id", "label", "enabled", "capability"} for item in options[key])
+
+
+def test_control_defaults_are_resolved_by_backend_for_role_and_sparse_child():
+    defaults = visual_style_control_defaults(_brief(), style_id="diary_natural", title_style_id="diary_natural_overlay", title_role="location_title", aspect="landscape")
+    assert len(defaults) == 1
+    assert defaults[0]["anchor"] == "top-left"
+    assert defaults[0]["max_width_ratio"] == 0.68
+    assert defaults[0]["readability"]["surface"] == "translucent"
+    assert defaults[0]["motion"]["preset"] == "fade"
+    assert defaults[0]["is_default_title_style"] is True
+
+    titles = TitleStyleRegistry(TITLE_STYLES.list())
+    parent = next(item for item in titles.list() if item["title_style_id"] == "test_soft_panel")
+    parent["title_style_id"] = "base_title"
+    titles.register("base_title", parent)
+    titles.register("child_title", {"title_style_id": "child_title", "version": "1", "extends": {"title_style_id": "base_title", "version": "1"}, "label": "Child", "overrides": {"motion": {"preset": "fade_rise"}}})
+    child_defaults = visual_style_control_defaults(_brief(), style_id="diary_natural", title_style_id="child_title", title_role="location_title", aspect="landscape", title_registry=titles)
+    assert child_defaults[0]["font_family"] == parent["font_family"]
+    assert child_defaults[0]["weight"] == parent["weight"]
+    assert child_defaults[0]["anchor"] == "top-left"
+    assert child_defaults[0]["motion"]["preset"] == "fade_rise"
+
+
+def test_visual_style_api_payload_exposes_resolved_control_defaults():
+    payload = visual_style_api_payload({"project_id": 1, "status": "approved", "approved": {}}, approved_brief=_brief())
+    defaults = payload["options"]["control_defaults"]
+    assert defaults
+    assert all(item.get("font_family") and item.get("anchor") and item.get("readability") and item.get("motion") for item in defaults)
 
 
 def test_title_capability_contract_exposes_all_anchors_and_rejects_unrendered_spacing():

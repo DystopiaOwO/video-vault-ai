@@ -74,7 +74,32 @@ export type VisualStyleState = {
   recommendation?: Record<string, unknown>;
   approved?: Record<string, unknown>;
   source_provenance?: Array<Record<string, unknown>>;
-  options?: { styles?: Array<Record<string, unknown>>; title_styles?: Array<Record<string, unknown>>; [key: string]: unknown };
+  options?: {
+    styles?: Array<Record<string, unknown>>;
+    title_styles?: Array<Record<string, unknown>>;
+    control_defaults?: Array<{
+      key?: string;
+      visual_style_id?: string;
+      title_style_id?: string;
+      is_default_title_style?: boolean;
+      role?: string;
+      aspect?: string;
+      font_family?: string;
+      weight?: number;
+      size_ratio?: number;
+      size_preset?: string;
+      anchor?: string;
+      max_width_ratio?: number;
+      composition?: string;
+      readability?: Record<string, unknown>;
+      motion?: Record<string, unknown>;
+      palette_variant?: string;
+      palette?: Record<string, unknown>;
+      capability?: Record<string, unknown>;
+      [key: string]: unknown;
+    }>;
+    [key: string]: unknown;
+  };
 };
 
 export type PerceptionWindowResult = {
