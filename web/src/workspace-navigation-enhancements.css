@@ -10,7 +10,10 @@
 #root .workspace-nav a[aria-current="location"] {
   border-color: color-mix(in srgb, var(--accent, #7c9cff) 72%, transparent);
   background: color-mix(in srgb, var(--accent, #7c9cff) 16%, transparent);
-  color: var(--text, #f6f8ff);
+  /* The selected tab is on a light surface; do not inherit the dark-theme
+     text token here or the label becomes nearly invisible. */
+  color: #17336b;
+  font-weight: 800;
   box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--accent, #7c9cff) 88%, transparent);
 }
 

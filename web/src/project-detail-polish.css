@@ -220,6 +220,7 @@
   border: 1px solid color-mix(in srgb, var(--border, #2d3548) 86%, transparent);
   border-radius: 12px;
   background: color-mix(in srgb, var(--panel, #151a25) 72%, transparent);
+  color: #eef4ff;
 }
 
 #root .workflow-diagnostics > summary {
@@ -235,6 +236,22 @@
 
 #root .workflow-diagnostics .workflow-grid {
   padding: 12px;
+}
+
+#root .workflow-diagnostics .workflow-card {
+  border-color: #8e9aab;
+  color: #eef4ff;
+  background: rgba(15, 23, 42, .18);
+}
+
+#root .workflow-diagnostics .workflow-card b,
+#root .workflow-diagnostics .workflow-card details summary {
+  color: #f5f8ff;
+}
+
+#root .workflow-diagnostics .workflow-card small,
+#root .workflow-diagnostics .workflow-card code {
+  color: #d6dfec;
 }
 
 #root .workflow-card details {

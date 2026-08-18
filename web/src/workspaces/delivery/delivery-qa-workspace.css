@@ -1,6 +1,6 @@
-.delivery-qa-workspace { margin: 18px 0; padding: 20px; border: 1px solid #26364b; border-radius: 16px; background: #0f1824; }
+.delivery-qa-workspace { margin: 18px 0; padding: 20px; border: 1px solid #26364b; border-radius: 16px; background: #0f1824; color: #e8f0fb; }
 .delivery-qa-heading { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
-.delivery-qa-heading h3 { margin: 0 0 6px; }
+.delivery-qa-heading h3 { margin: 0 0 6px; color: #f5f8ff; }
 .delivery-qa-heading p { margin: 0; color: #9fb0c5; }
 .qa-state, .qa-check-status { border-radius: 999px; padding: 5px 10px; font-size: 12px; white-space: nowrap; }
 .qa-state.needs_qa, .qa-state.qa_needs_review { background: #3b3117; color: #ffd98a; }
@@ -8,7 +8,7 @@
 .qa-state.deliverable_ready, .qa-check-status.pass { background: #173d31; color: #9af0ce; }
 .qa-check-status.warning { background: #493919; color: #ffdc8b; }
 .qa-check-status.skipped { background: #303744; color: #c4cedb; }
-.delivery-qa-empty { margin-top: 16px; border: 1px dashed #3b4a5d; border-radius: 12px; padding: 18px; color: #a9b8ca; }
+.delivery-qa-empty { margin-top: 16px; border: 1px dashed #718198; border-radius: 12px; padding: 18px; color: #d2dce9; }
 .qa-counts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 16px 0; }
 .qa-counts span { display: flex; justify-content: space-between; border-radius: 10px; padding: 10px 12px; background: #151f2d; }
 .qa-counts .blocked { color: #ffabb9; }
@@ -26,6 +26,7 @@
 .qa-check.skipped { border-left-color: #7e8999; }
 .qa-check header { display: flex; justify-content: space-between; gap: 12px; }
 .qa-check header div { display: grid; gap: 5px; }
+.qa-check header b { color: #f1f5fb; }
 .qa-check header span { color: #c3cfdd; }
 .qa-timecode { margin: 10px 0; }
 .qa-check details pre { max-height: 280px; overflow: auto; white-space: pre-wrap; }
