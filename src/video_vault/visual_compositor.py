@@ -17,6 +17,8 @@ import subprocess
 import tempfile
 from typing import Any, Mapping, Sequence
 
+from .visual_style import resolve_visual_render_plan
+
 
 VISUAL_COMPOSITION_VERSION = "visual-composition-v1"
 # This version applies only to rendered visual artifacts.  Keep it separate
@@ -74,6 +76,7 @@ def resolve_visual_timeline(
     profile: Mapping[str, Any],
     *,
     require_assets: bool = True,
+    chapter_composition: str | None = None,
 ) -> dict[str, Any]:
     """Resolve insertion points and final duration from one approved contract."""
 
@@ -106,11 +109,19 @@ def resolve_visual_timeline(
         )
     ]
 
+    approved_style = timeline.get("approved_visual_style") if isinstance(timeline.get("approved_visual_style"), Mapping) else {}
+    composition = str(chapter_composition or approved_style.get("composition") or timeline.get("chapter_treatment") or "standalone")
+    if composition not in {"overlay", "standalone"}:
+        raise VisualCompositionError("chapter_composition_unknown", f"unsupported chapter composition: {composition}", action="重新核准 Visual Style")
     normalized: list[dict[str, Any]] = []
     for index, item in enumerate(items, 1):
-        normalized.append(_normalize_visual_item(item, index, segment_base_starts, group_base_starts, base_duration, profile, require_assets=require_assets))
-    insertions = [item for item in normalized if item["type"] in {"intro", "outro", "chapter_card"}]
-    overlays = [item for item in normalized if item["type"] == "lower_third"]
+        resolved_item = _normalize_visual_item(item, index, segment_base_starts, group_base_starts, base_duration, profile, require_assets=require_assets)
+        if resolved_item["type"] == "chapter_card":
+            resolved_item["composition"] = composition
+            resolved_item["title_role"] = "chapter_title"
+        normalized.append(resolved_item)
+    insertions = [item for item in normalized if item["type"] in {"intro", "outro"} or (item["type"] == "chapter_card" and composition == "standalone")]
+    overlays = [item for item in normalized if item["type"] == "lower_third" or (item["type"] == "chapter_card" and composition == "overlay")]
     for item in insertions:
         start = float(item["start_seconds"])
         if not any(abs(start - boundary) <= 0.001 for boundary, _ in boundaries):
@@ -144,7 +155,19 @@ def resolve_visual_timeline(
         final_cursor += float(item["duration_seconds"])
         insertion_index += 1
     for item in overlays:
-        if item.get("segment_id"):
+        if item.get("type") == "chapter_card":
+            group_id = str(item.get("group_id") or "")
+            target_segment = next((segment for segment in base_segments if str(segment.get("group_id") or segment.get("group") or "") == group_id), None)
+            if target_segment is None:
+                raise VisualCompositionError("visual_segment_missing", f"chapter overlay 找不到 group：{group_id}", action="重新產生 visual timeline")
+            target_id = str(target_segment.get("segment_id") or "")
+            segment_start = next((entry["start_seconds"] for entry in sequence if entry["kind"] == "segment" and entry["stable_id"] == target_id), None)
+            if segment_start is None:
+                raise VisualCompositionError("visual_segment_missing", f"chapter overlay 找不到 segment：{target_id}", action="重新產生 visual timeline")
+            item["overlay_segment_id"] = target_id
+            item["resolved_start_seconds"] = round(float(segment_start), 6)
+            item["duration_seconds"] = round(min(float(item["duration_seconds"]), sum(float(segment.get("timeline_duration_seconds") or 0) for segment in base_segments if str(segment.get("group_id") or segment.get("group") or "") == group_id)), 6)
+        elif item.get("segment_id"):
             segment_start = next((entry["start_seconds"] for entry in sequence if entry["kind"] == "segment" and entry["stable_id"] == item["segment_id"]), None)
             if segment_start is None:
                 raise VisualCompositionError("visual_segment_missing", f"lower third 找不到 segment：{item['segment_id']}", action="重新產生 visual timeline")
@@ -168,16 +191,19 @@ def resolve_visual_timeline(
         "resolved_items": resolved_items,
         "sequence": sequence,
         "resolved_duration_seconds": round(final_cursor, 6),
+        "chapter_treatment": composition,
     }
     resolved["resolution_hash"] = stable_visual_hash(resolved)
     return resolved
 
 
-def visual_cache_key(item: Mapping[str, Any], profile: Mapping[str, Any]) -> str:
+def visual_cache_key(item: Mapping[str, Any], profile: Mapping[str, Any], visual_style_hash: str = "", visual_render_plan_hash: str = "") -> str:
     payload = {
         "version": VISUAL_COMPOSITION_VERSION,
         "renderer_cache_version": VISUAL_RENDER_CACHE_VERSION,
         "item": dict(item),
+        "visual_style_hash": str(visual_style_hash or item.get("visual_style_hash") or ""),
+        "visual_render_plan_hash": str(visual_render_plan_hash or item.get("visual_render_plan_hash") or ""),
         "profile": {key: profile.get(key) for key in ("profile_id", "width", "height", "fps", "video_codec", "pixel_format", "audio_codec", "audio_sample_rate", "audio_channels")},
     }
     return _hash(payload)
@@ -195,6 +221,7 @@ def render_visual_cards(
     profile: Mapping[str, Any],
     ffmpeg_path: str,
     runner: Any | None = None,
+    visual_style_snapshot: Mapping[str, Any] | None = None,
 ) -> tuple[list[Path], list[dict[str, Any]], list[dict[str, Any]]]:
     """Return concat sequence, report evidence and lower-third items."""
 
@@ -203,6 +230,7 @@ def render_visual_cards(
     paths: list[Path] = []
     evidence: list[dict[str, Any]] = []
     overlays: list[dict[str, Any]] = []
+    approved_visual_style = visual_style_snapshot or (timeline.get("approved_visual_style") if isinstance(timeline.get("approved_visual_style"), Mapping) else None)
     for entry in timeline.get("sequence") or []:
         if entry.get("kind") == "segment":
             path = segment_paths.get(str(entry.get("stable_id") or ""))
@@ -216,7 +244,9 @@ def render_visual_cards(
         if item["type"] == "lower_third":
             overlays.append(item)
             continue
-        key = visual_cache_key(item, profile)
+        visual_style_hash = str(timeline.get("visual_style_hash") or "")
+        visual_plan = resolve_visual_render_plan(approved_visual_style, width=int(profile["width"]), height=int(profile["height"]), title_text=str(item.get("text") or ""), title_role="chapter_title" if item.get("type") == "chapter_card" else "section_title", title_duration_seconds=float(item.get("duration_seconds") or 0.0) or None) if approved_visual_style else None
+        key = visual_cache_key(item, profile, visual_style_hash, str((visual_plan or {}).get("resolved_hash") or ""))
         output = cache_root / f"{key}.mp4"
         metadata = cache_root / f"{key}.json"
         cache_hit = False
@@ -235,7 +265,7 @@ def render_visual_cards(
             partial = output.with_name(f".{output.stem}.partial.mp4")
             metadata_partial = metadata.with_name(f".{metadata.name}.partial")
             try:
-                _render_card(ffmpeg_path, item, partial, work_dir, profile, runner=runner)
+                _render_card(ffmpeg_path, item, partial, work_dir, profile, runner=runner, visual_style_snapshot=approved_visual_style)
                 digest = _file_hash(partial)
                 metadata_partial.write_text(json.dumps({"cache_key": key, "stable_id": item["stable_id"], "sha256": digest, "size": partial.stat().st_size}, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
                 partial.replace(output)
@@ -260,24 +290,42 @@ def render_visual_cards(
             "cache_key": key,
             "cache_hit": cache_hit,
             "asset_fingerprints": item.get("asset_fingerprints", []),
+            "visual_style_hash": visual_style_hash,
+            "visual_render_plan_hash": str((visual_plan or {}).get("resolved_hash") or ""),
+            "visual_render_execution_mode": str((visual_plan or {}).get("execution_mode") or ""),
         })
-    overlays = [dict(item) for item in timeline.get("resolved_items") or [] if item.get("type") == "lower_third"]
-    evidence.extend({
-        "stable_id": item["stable_id"],
-        "type": item["type"],
-        "resolved_start_seconds": item["resolved_start_seconds"],
-        "duration_seconds": item["duration_seconds"],
-        "style_id": item["style_id"],
-        "style_version": item["style_version"],
-        "animation_id": item["animation_id"],
-        "font_path": item["font_path"],
-        "font_sha256": item["font_sha256"],
-        "cache_key": visual_cache_key(item, profile),
-        "cache_hit": False,
-        "cache_miss_reason": "overlay_applied",
-        "asset_fingerprints": item.get("asset_fingerprints", []),
-        "composition": "overlay",
-    } for item in overlays)
+    overlays = [dict(item) for item in timeline.get("resolved_items") or [] if item.get("type") == "lower_third" or (item.get("type") == "chapter_card" and str(item.get("composition") or "") == "overlay")]
+    overlay_evidence: list[dict[str, Any]] = []
+    for item in overlays:
+        role = str(item.get("title_role") or ("chapter_title" if item.get("type") == "chapter_card" else "lower_third"))
+        visual_plan = resolve_visual_render_plan(
+            approved_visual_style,
+            width=int(profile["width"]),
+            height=int(profile["height"]),
+            title_text=str(item.get("text") or ""),
+            title_role=role,
+            title_duration_seconds=float(item.get("duration_seconds") or 0.0) or None,
+        ) if approved_visual_style else None
+        overlay_evidence.append({
+            "stable_id": item["stable_id"],
+            "type": item["type"],
+            "resolved_start_seconds": item["resolved_start_seconds"],
+            "duration_seconds": item["duration_seconds"],
+            "style_id": item["style_id"],
+            "style_version": item["style_version"],
+            "animation_id": item["animation_id"],
+            "font_path": item["font_path"],
+            "font_sha256": item["font_sha256"],
+            "cache_key": visual_cache_key(item, profile, str(timeline.get("visual_style_hash") or ""), str((visual_plan or {}).get("resolved_hash") or "")),
+            "cache_hit": False,
+            "cache_miss_reason": "overlay_applied",
+            "asset_fingerprints": item.get("asset_fingerprints", []),
+            "composition": "overlay",
+            "title_role": role,
+            "visual_style_hash": str(timeline.get("visual_style_hash") or ""),
+            "visual_render_plan_hash": str((visual_plan or {}).get("resolved_hash") or ""),
+        })
+    evidence.extend(overlay_evidence)
     return paths, evidence, overlays
 
 
@@ -290,6 +338,7 @@ def apply_lower_thirds(
     work_dir: Path,
     duration_seconds: float | None = None,
     runner: Any | None = None,
+    visual_style_snapshot: Mapping[str, Any] | None = None,
 ) -> None:
     if not overlays:
         shutil.copy2(source, output)
@@ -301,7 +350,12 @@ def apply_lower_thirds(
         textfiles.append(textfile)
         style = STYLE_CONTRACTS[str(item["style_id"])]
         enable = f"between(t\\,{float(item['resolved_start_seconds']):.6f}\\,{float(item['resolved_start_seconds']) + float(item['duration_seconds']):.6f})"
-        filters.append(_drawtext(item, style, textfile, enable))
+        if visual_style_snapshot:
+            role = str(item.get("title_role") or ("chapter_title" if item.get("type") == "chapter_card" else "lower_third"))
+            plan = resolve_visual_render_plan(visual_style_snapshot, width=int(profile["width"]), height=int(profile["height"]), title_text=str(item.get("text") or ""), title_enable=enable, title_role=role, title_duration_seconds=float(item.get("duration_seconds") or 0.0) or None)
+            filters.append(str((plan.get("title") or {}).get("filter") or ""))
+        else:
+            filters.append(_drawtext(item, style, textfile, enable))
     # Keep an .mp4 suffix so FFmpeg selects the muxer; the leading dot still
     # makes the intermediate unpublishable to normal artifact discovery.
     temp = output.with_name(f".{output.stem}.tmp.mp4")
@@ -392,12 +446,25 @@ def _normalize_visual_item(item: Mapping[str, Any], index: int, segment_starts: 
     return result
 
 
-def _render_card(ffmpeg_path: str, item: Mapping[str, Any], output: Path, work_dir: Path, profile: Mapping[str, Any], *, runner: Any | None = None) -> None:
+def _render_card(ffmpeg_path: str, item: Mapping[str, Any], output: Path, work_dir: Path, profile: Mapping[str, Any], *, runner: Any | None = None, visual_style_snapshot: Mapping[str, Any] | None = None) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     textfile = _write_filter_text(str(item.get("text") or ""), "vv-visual-card-")
     style = STYLE_CONTRACTS[str(item["style_id"])]
-    drawtext = _drawtext(item, style, textfile, "1")
     duration = float(item["duration_seconds"])
+    if visual_style_snapshot:
+        target_orientation = str((visual_style_snapshot.get("output") or {}).get("orientation") or "landscape")
+        plan = resolve_visual_render_plan(
+            visual_style_snapshot,
+            width=int(profile["width"]),
+            height=int(profile["height"]),
+            title_text=str(item.get("text") or ""),
+            title_role="chapter_title",
+            title_duration_seconds=duration,
+            source_geometry={"display_ratio": int(profile["width"]) / max(1, int(profile["height"])), "source_orientation": target_orientation, "sample_aspect_ratio": "1:1"},
+        )
+        drawtext = str((plan.get("title") or {}).get("filter") or "")
+    else:
+        drawtext = _drawtext(item, style, textfile, "1")
     video_filter = f"[0:v]{_setparams_filter(profile)},{drawtext}"
     if str(item.get("animation_id") or "static") == "fade-in-out":
         fade = min(0.2, duration / 2.0)

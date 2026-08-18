@@ -49,6 +49,9 @@ def cache_key_payload(
     lut = Path(str(color.get("lut_path"))).expanduser().resolve() if color.get("lut_path") else None
     lut_stat = lut.stat() if lut and lut.exists() else None
     gpu_contract = settings.get("gpu_execution_contract") if isinstance(settings.get("gpu_execution_contract"), Mapping) else {}
+    visual_style = manifest.get("visual_style") if isinstance(manifest.get("visual_style"), Mapping) else {}
+    visual_timeline = manifest.get("visual_timeline") if isinstance(manifest.get("visual_timeline"), Mapping) else {}
+    visual_style_hash = str(manifest.get("visual_style_hash") or visual_timeline.get("visual_style_hash") or visual_style.get("resolved_hash") or "")
     return {
         "contract_version": SEGMENT_RENDERER_CONTRACT_VERSION,
         "source_file": str(source),
@@ -74,6 +77,10 @@ def cache_key_payload(
         "encoder": settings.get("encoder", "auto"),
         "encoder_cache_identity": encoder_cache_identity(settings),
         "gpu_execution_identity": gpu_execution_cache_identity(gpu_contract),
+        "visual_render_contract_version": "visual-render-v1" if visual_style_hash else "none",
+        "visual_style_hash": visual_style_hash,
+        "visual_render_plan_hash": str(manifest.get("visual_render_plan_hash") or ""),
+        "visual_title_text": str(segment.get("title_text") or segment.get("title") or ""),
         "display_geometry": dict(gpu_contract.get("display_geometry") or {}),
         "audio_codec": profile.get("audio_codec"),
         "audio_sample_rate": profile.get("audio_sample_rate"),

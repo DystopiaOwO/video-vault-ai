@@ -13,6 +13,7 @@ from video_vault.visual_compositor import (
     stable_visual_hash,
     visual_cache_key,
 )
+from video_vault.visual_style import materialize_visual_style
 
 
 PROFILE = {
@@ -102,6 +103,51 @@ def test_lower_third_negative_offset_fails_closed():
     }
     with pytest.raises(VisualCompositionError, match="visual range"):
         resolve_visual_timeline(timeline, _segments(), PROFILE, require_assets=False)
+
+
+def _approved_overlay_style(composition: str = "overlay"):
+    brief = {
+        "status": "approved", "brief_version": 1, "visual_contract_hash": "brief",
+        "approved": {
+            "output": {"output_contract_id": "landscape_16_9", "output_contract_version": "1", "orientation": "landscape", "aspect_ratio": "16:9", "width": 1920, "height": 1080, "render_profile_id": "final_1080p"},
+            "framing_intent": {"portrait_source_in_landscape": {"approved_strategy_id": "background_treatment"}, "landscape_source_in_portrait": {"approved_strategy_id": "crop_reframe"}},
+        },
+    }
+    snapshot = materialize_visual_style("diary_natural", brief)
+    snapshot["composition"] = composition
+    snapshot.pop("semantic_hash", None)
+    snapshot["resolved_hash"] = __import__("hashlib").sha256(__import__("json").dumps({key: value for key, value in snapshot.items() if key != "resolved_hash"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return snapshot
+
+
+def test_overlay_chapter_treatment_does_not_extend_concat_duration():
+    timeline = {"items": [{"stable_id": "chapter", "type": "chapter_card", "group_id": "morning", "duration_seconds": 1.5, "text": "Morning", "style_id": "location-lower-left", "animation_id": "static"}]}
+    resolved = resolve_visual_timeline(timeline, _segments(), PROFILE, require_assets=False, chapter_composition="overlay")
+    assert all(entry["kind"] == "segment" for entry in resolved["sequence"])
+    assert resolved["resolved_duration_seconds"] == 5.0
+    chapter = next(item for item in resolved["resolved_items"] if item["type"] == "chapter_card")
+    assert chapter["composition"] == "overlay" and chapter["title_role"] == "chapter_title"
+
+
+def test_standalone_chapter_treatment_remains_concat_insertion():
+    timeline = {"items": [{"stable_id": "chapter", "type": "chapter_card", "group_id": "morning", "duration_seconds": 1.5, "text": "Morning", "style_id": "location-lower-left", "animation_id": "static"}]}
+    resolved = resolve_visual_timeline(timeline, _segments(), PROFILE, require_assets=False, chapter_composition="standalone")
+    assert resolved["sequence"][0]["kind"] == "visual"
+    assert resolved["resolved_duration_seconds"] == 6.5
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required for styled standalone card smoke")
+def test_styled_standalone_card_real_render_succeeds(tmp_path: Path):
+    timeline = resolve_visual_timeline(
+        {"items": [{"stable_id": "chapter", "type": "chapter_card", "duration_seconds": 0.8, "text": "Standalone", "style_id": "location-lower-left", "animation_id": "static"}]},
+        _segments(), PROFILE, require_assets=True, chapter_composition="standalone",
+    )
+    paths, evidence, _ = render_visual_cards(
+        {**timeline, "sequence": [entry for entry in timeline["sequence"] if entry["kind"] == "visual"]},
+        {}, tmp_path / "cache", tmp_path / "work", PROFILE, "ffmpeg", visual_style_snapshot=_approved_overlay_style("standalone"),
+    )
+    assert paths and paths[0].is_file() and paths[0].stat().st_size > 0
+    assert evidence[0]["composition"] if "composition" in evidence[0] else True
 
 
 def test_missing_runtime_asset_fails_closed(tmp_path: Path):

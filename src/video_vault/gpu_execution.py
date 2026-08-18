@@ -118,6 +118,38 @@ def gpu_execution_cache_identity(contract: Mapping[str, Any] | None) -> dict[str
     }
 
 
+def apply_visual_execution_contract(
+    contract: Mapping[str, Any] | None,
+    visual_plan: Mapping[str, Any] | None,
+    *,
+    encoder: str,
+) -> dict[str, Any]:
+    """Return the truthful runtime contract after the visual graph is known.
+
+    NVDEC/CUDA can still be used for decode while approved LUT, framing,
+    blur, and title filters run on CPU.  The old ``filter_used=cuda`` value
+    was false for that command and also polluted artifact identity.
+    """
+
+    result = dict(contract or {})
+    if str(result.get("implementation") or "") != "nvdec_cuda" or not visual_plan:
+        return result
+    result.update(
+        {
+            "implementation": "nvdec_cpu_visual_nvenc",
+            "decode_used": "nvdec",
+            "filter_requested": "cpu_visual",
+            "filter_used": "cpu",
+            "hardware_api": "cuda",
+            "encode_used": str(encoder or ""),
+            "execution_mode": "nvdec_cpu_visual_nvenc",
+            "filter_chain": list(result.get("filter_chain") or []) + ["hwdownload", "format=yuv420p", "approved_visual_graph"],
+            "fallback_reason": "",
+        }
+    )
+    return _finalize(result)
+
+
 def execution_contract_hash(contract: Mapping[str, Any] | None) -> str:
     semantic = _semantic_contract(contract or {})
     return hashlib.sha256(json.dumps(semantic, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
@@ -352,5 +384,6 @@ __all__ = [
     "GPUExecutionRegistry",
     "execution_contract_hash",
     "gpu_execution_cache_identity",
+    "apply_visual_execution_contract",
     "probe_cuda_capability",
 ]

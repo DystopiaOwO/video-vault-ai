@@ -33,6 +33,7 @@ from .visual_timeline import (
     validate_visual_timeline,
 )
 from .visual_compositor import resolve_visual_timeline, stable_visual_hash
+from .visual_style import ensure_visual_style_state, validate_materialized_visual_style
 
 
 ALLOWED_AUDIO_ROLES = {"keep_original", "lower_original", "mute", "keep", "lower", "bgm_only"}
@@ -135,6 +136,10 @@ def build_render_manifest(
     ]
     visual_source = plan.get("visual_timeline") or build_visual_timeline(plan.get("groups") or [])
     visual_timeline_input_hash = stable_visual_hash(visual_source) if isinstance(visual_source, Mapping) else ""
+    visual_style_state = ensure_visual_style_state(cfg, db, project_id)
+    if str(visual_style_state.get("status") or "") == "stale" and visual_style_state.get("approved"):
+        raise ValueError("approved Visual Style is stale; re-preview and re-approve before Render: " + str(visual_style_state.get("stale_reason") or "currentity_changed"))
+    approved_visual_style = visual_style_state.get("approved") if str(visual_style_state.get("status") or "") == "approved" else None
     visual_plan = align_visual_timeline_to_segments(
         resolve_visual_runtime_assets(
             reconcile_visual_timeline_with_segments(
@@ -146,7 +151,13 @@ def build_render_manifest(
         segments,
     )
     visual_timeline = visual_plan
-    visual_timeline = resolve_visual_timeline(visual_timeline, segments, profile, require_assets=True)
+    visual_timeline = resolve_visual_timeline(
+        visual_timeline,
+        segments,
+        profile,
+        require_assets=True,
+        chapter_composition=str((approved_visual_style or {}).get("composition") or "standalone"),
+    )
     manifest: dict[str, Any] = {
         "schema_version": "2.0",
         "project_id": int(project_id),
@@ -174,6 +185,16 @@ def build_render_manifest(
     if approved_brief:
         manifest["creative_brief"] = creative_brief
         manifest["approved_creative_brief"] = approved_brief
+    if str(visual_style_state.get("status") or "") == "approved":
+        visual_style = visual_style_state.get("approved") or {}
+        visual_style_validation = validate_materialized_visual_style(visual_style)
+        if not visual_style_validation["ok"]:
+            raise ValueError("invalid approved visual style: " + "; ".join(visual_style_validation["errors"]))
+        manifest["visual_style"] = visual_style
+        manifest["visual_style_hash"] = visual_style.get("resolved_hash", "")
+        manifest["visual_timeline"]["visual_style_hash"] = visual_style.get("resolved_hash", "")
+        manifest["visual_timeline"]["approved_visual_style"] = visual_style
+        manifest["visual_timeline"]["resolution_hash"] = stable_visual_hash(manifest["visual_timeline"])
     manifest["manifest_hash"] = manifest_hash(manifest)
     validation = validate_render_manifest(manifest)
     if validation["errors"]:

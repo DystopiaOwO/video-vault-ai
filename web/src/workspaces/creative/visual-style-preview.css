@@ -1,0 +1,13 @@
+.visual-style-preview { display: grid; gap: 16px; }
+.visual-style-heading, .visual-style-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.visual-style-heading h3 { margin: 4px 0; }
+.visual-style-blocked { padding: 12px 14px; border-left: 3px solid #c88d38; background: rgba(200,141,56,.1); }
+.visual-style-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.visual-style-grid article { border: 1px solid #d8dde5; border-radius: 8px; padding: 10px; background: #fff; }
+.visual-style-overrides { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; padding: 12px; border: 1px solid #d8dde5; border-radius: 8px; background: #f7f9fb; }
+.visual-style-overrides label { display: grid; gap: 4px; font-size: .84rem; color: var(--muted, #657181); }
+.visual-style-overrides select { min-width: 100px; }
+.visual-style-grid img, .visual-style-grid video { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 5px; background: #20242a; }
+.visual-style-grid h4 { margin: 8px 0 4px; }
+.visual-style-grid p { color: var(--muted, #657181); font-size: .86rem; }
+@media (max-width: 900px) { .visual-style-grid { grid-template-columns: 1fr; } }

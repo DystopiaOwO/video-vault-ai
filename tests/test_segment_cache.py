@@ -49,6 +49,17 @@ def test_cache_key_is_deterministic_and_tracks_source_and_settings(tmp_path: Pat
     assert build_segment_cache_key(manifest, segment) != first
 
 
+def test_approved_visual_render_contract_binds_segment_artifact_cache(tmp_path: Path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    manifest, segment = _inputs(source)
+    old = build_segment_cache_key(manifest, segment)
+    styled = {**manifest, "visual_style": {"resolved_hash": "style-v1"}, "visual_style_hash": "style-v1"}
+    assert build_segment_cache_key(styled, segment) != old
+    changed_title = {**segment, "title_text": "不同標題"}
+    assert build_segment_cache_key(styled, changed_title) != build_segment_cache_key(styled, segment)
+
+
 def test_cache_key_tracks_source_content_even_when_size_and_mtime_match(tmp_path: Path):
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source-a")

@@ -19,7 +19,7 @@ from .artifact_retention import (
     ensure_render_free_space,
 )
 from .final_qc import FinalQCResult, sha256_file, validate_final_output
-from .gpu_execution import GPU_EXECUTION_CONTRACT_VERSION, GPUExecutionRegistry
+from .gpu_execution import GPU_EXECUTION_CONTRACT_VERSION, GPUExecutionRegistry, apply_visual_execution_contract
 from .loudness import LoudnessError, build_second_pass_command, measure_loudness
 from .media_probe import SourceProbeRegistry
 from .project import can_project_render, project_dir
@@ -34,6 +34,7 @@ from .visual_renderer import (
     prepare_visual_filter,
 )
 from .visual_compositor import VisualCompositionError, apply_lower_thirds, render_visual_cards, resolve_visual_timeline, stable_visual_hash
+from .visual_style import resolve_visual_render_plan
 
 
 class ProjectRenderError(RuntimeError):
@@ -134,7 +135,14 @@ def render_project(
     raw_visual_timeline = manifest.get("visual_timeline") if isinstance(manifest.get("visual_timeline"), Mapping) else {}
     if raw_visual_timeline.get("items"):
         try:
-            visual_timeline = resolve_visual_timeline(raw_visual_timeline, manifest["segments"], manifest["profile"], require_assets=True)
+            approved_style_for_timeline = manifest.get("visual_style") if isinstance(manifest.get("visual_style"), Mapping) else raw_visual_timeline.get("approved_visual_style")
+            visual_timeline = resolve_visual_timeline(
+                raw_visual_timeline,
+                manifest["segments"],
+                manifest["profile"],
+                require_assets=True,
+                chapter_composition=str((approved_style_for_timeline or {}).get("composition") or "standalone"),
+            )
         except VisualCompositionError as exc:
             raise ProjectRenderError(f"visual composition 被擋下：{exc.message}") from exc
         if raw_visual_timeline.get("resolution_hash") != visual_timeline.get("resolution_hash"):
@@ -155,6 +163,7 @@ def render_project(
             "resolved_duration_seconds": base_duration,
         }
         visual_timeline["resolution_hash"] = stable_visual_hash(visual_timeline)
+    approved_visual_style = manifest.get("visual_style") if isinstance(manifest.get("visual_style"), Mapping) else visual_timeline.get("approved_visual_style")
     _execution_check(execution)
     _execution_update(execution, stage="validating", percent=5, message="核准與 Manifest 驗證完成")
     segments = sorted(manifest["segments"], key=lambda item: int(item["order"]))
@@ -202,6 +211,7 @@ def render_project(
         gpu_execution_requested=gpu_execution_requested,
         source_probe_registry=source_probes,
         gpu_execution_registry=gpu_execution,
+        approved_visual_style=approved_visual_style,
     )
     output = paths.output
     report_path = paths.report
@@ -293,7 +303,7 @@ def render_project(
                 force=True,
             )
             _execution_begin_ffmpeg(execution, "segments", segment_start, segment_span, segment_duration, f"正在輸出片段 {index}/{len(segments)}")
-            segment_results.append(render_segment(cfg, manifest, segment, runner=runner, source_probe_registry=source_probes, gpu_execution_registry=gpu_execution))
+            segment_results.append(render_segment(cfg, manifest, segment, runner=runner, source_probe_registry=source_probes, gpu_execution_registry=gpu_execution, visual_style_snapshot=approved_visual_style))
             completed_segment_duration += segment_duration
             _execution_check(execution)
             _execution_update(execution, stage="segments", percent=5 + 70 * (completed_segment_duration / total_segment_duration), message=f"已完成片段 {index}/{len(segments)}", current_segment_id=str(segment.get("segment_id") or ""), current_segment_index=index)
@@ -317,6 +327,7 @@ def render_project(
             manifest["profile"],
             ffmpeg_path,
             runner=runner or getattr(execution, "runner", None),
+            visual_style_snapshot=approved_visual_style,
         )
         concat_path = build_concat_file(sequence_paths, concat_path)
         _execution_check(execution)
@@ -358,7 +369,7 @@ def render_project(
         assembly_elapsed = time.perf_counter() - assembly_started
         if visual_overlays:
             visual_partial = partial.with_name(f".{partial.stem}.visual.mp4")
-            apply_lower_thirds(ffmpeg_path, partial, visual_partial, visual_overlays, manifest["profile"], work_dir, expected, runner=runner or getattr(execution, "runner", None))
+            apply_lower_thirds(ffmpeg_path, partial, visual_partial, visual_overlays, manifest["profile"], work_dir, expected, runner=runner or getattr(execution, "runner", None), visual_style_snapshot=approved_visual_style)
             visual_partial.replace(partial)
         if normalization.get("enabled"):
             _execution_check(execution)
@@ -490,6 +501,7 @@ def prepare_final_output_paths(
     gpu_execution_requested: str = "auto",
     source_probe_registry: SourceProbeRegistry | None = None,
     gpu_execution_registry: GPUExecutionRegistry | None = None,
+    approved_visual_style: Mapping[str, Any] | None = None,
 ) -> FinalOutputPaths:
     renders = (Path(folder) / "renders").expanduser().resolve()
     managed = output_path is None
@@ -509,6 +521,7 @@ def prepare_final_output_paths(
                 encoder_contract,
                 source_probe_registry,
                 gpu_execution_registry,
+                approved_visual_style=approved_visual_style,
             )
         except Exception:
             # A cache candidate whose current source/GPU contract cannot be
@@ -643,6 +656,12 @@ def build_render_report(
             "item_ids": [str(item.get("stable_id") or "") for item in (visual_evidence or manifest.get("visual_items") or []) if isinstance(item, Mapping)],
             "composed": bool(visual_evidence or manifest.get("visual_items")),
         },
+        "visual_render_contract": {
+            "version": "visual-render-v1" if manifest.get("visual_style") else "none",
+            "approved_visual_style_hash": str(manifest.get("visual_style_hash") or ""),
+            "formal_segment_consumers": bool(manifest.get("visual_style")),
+            "segment_plan_hashes": [str((item.visual_render_plan or {}).get("resolved_hash") or "") for item in segment_results],
+        },
         "qc_schema_version": 2,
         "cache": {
             "qc_policy_version": 2,
@@ -666,6 +685,8 @@ def build_render_report(
                 "decode_used": str((item.gpu_execution_contract or {}).get("decode_used") or ""),
                 "filter_requested": str((item.gpu_execution_contract or {}).get("filter_requested") or ""),
                 "filter_used": str((item.gpu_execution_contract or {}).get("filter_used") or ""),
+                "execution_mode": str((item.gpu_execution_contract or {}).get("execution_mode") or ""),
+                "encode_used": str((item.gpu_execution_contract or {}).get("encode_used") or item.encoder_used or ""),
                 "hardware_api": str((item.gpu_execution_contract or {}).get("hardware_api") or ""),
                 "hardware_device": str((item.gpu_execution_contract or {}).get("hardware_device") or ""),
                 "filter_chain": list((item.gpu_execution_contract or {}).get("filter_chain") or []),
@@ -700,6 +721,8 @@ def build_render_report(
                 "decode_used": str((item.gpu_execution_contract or {}).get("decode_used") or ""),
                 "filter_requested": str((item.gpu_execution_contract or {}).get("filter_requested") or ""),
                 "filter_used": str((item.gpu_execution_contract or {}).get("filter_used") or ""),
+                "execution_mode": str((item.gpu_execution_contract or {}).get("execution_mode") or ""),
+                "encode_used": str((item.gpu_execution_contract or {}).get("encode_used") or item.encoder_used or ""),
                 "hardware_api": str((item.gpu_execution_contract or {}).get("hardware_api") or ""),
                 "hardware_device": str((item.gpu_execution_contract or {}).get("hardware_device") or ""),
                 "filter_chain": list((item.gpu_execution_contract or {}).get("filter_chain") or []),
@@ -710,6 +733,8 @@ def build_render_report(
                 "render_elapsed_seconds": item.elapsed_seconds,
                 "approval_provenance_version": provenance["version"],
                 "approval_provenance_hash": provenance["hash"],
+                "visual_render_plan_hash": str((item.visual_render_plan or {}).get("resolved_hash") or ""),
+                "visual_render_plan": dict(item.visual_render_plan or {}),
                 "warnings": list(item.warnings),
             }
             for item, (_, provenance) in zip(segment_results, segment_provenance)
@@ -752,6 +777,8 @@ def _resolve_current_gpu_execution(
     encoder_contract: Mapping[str, Any] | None,
     source_probe_registry: SourceProbeRegistry,
     gpu_execution_registry: GPUExecutionRegistry,
+    *,
+    approved_visual_style: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve current ordered GPU contracts and artifact keys for cache checks."""
 
@@ -762,8 +789,32 @@ def _resolve_current_gpu_execution(
         source = Path(str(segment.get("source_file") or "")).expanduser().resolve()
         probe = source_probe_registry.probe(source)
         gpu_contract = gpu_execution_registry.resolve(manifest, segment, probe, encoder_contract)
+        visual_plan = None
+        if isinstance(approved_visual_style, Mapping):
+            color = segment.get("color") if isinstance(segment.get("color"), Mapping) else (manifest.get("settings") or {}).get("color")
+            visual_plan = resolve_visual_render_plan(
+                approved_visual_style,
+                width=int((manifest.get("profile") or {}).get("width") or 0),
+                height=int((manifest.get("profile") or {}).get("height") or 0),
+                title_text=str(segment.get("title_text") or segment.get("title") or ""),
+                color_settings=dict(color or {}),
+                source_display_ratio=float(probe.display_ratio or 0.0),
+                source_geometry={
+                    "sample_aspect_ratio": probe.sample_aspect_ratio,
+                    "display_aspect_ratio": probe.display_aspect_ratio,
+                    "display_ratio": probe.display_ratio,
+                    "rotation_degrees": probe.rotation_degrees,
+                    "display_matrix": probe.display_matrix,
+                    "source_orientation": "portrait" if probe.display_ratio and probe.display_ratio < 1 else "landscape" if probe.display_ratio else "unknown",
+                },
+                title_role=str(segment.get("title_role") or "chapter_title"),
+                title_duration_seconds=float(segment.get("timeline_duration_seconds") or 0.0) or None,
+            )
+            gpu_contract = apply_visual_execution_contract(gpu_contract, visual_plan, encoder=str((encoder_contract or {}).get("implementation") or ""))
         effective_manifest = deepcopy(manifest)
         effective_manifest.setdefault("settings", {})["gpu_execution_contract"] = dict(gpu_contract)
+        if visual_plan:
+            effective_manifest["visual_render_plan_hash"] = str(visual_plan.get("resolved_hash") or "")
         source_fingerprint = source_probe_registry.fingerprint(source)
         cache_key = build_segment_cache_key(effective_manifest, segment, source_fingerprint=source_fingerprint)
         contracts.append(

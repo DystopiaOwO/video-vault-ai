@@ -13,7 +13,8 @@ from typing import Any, Callable, Mapping
 from .audio_pipeline import atempo_filter, build_audio_filter, build_silence_filter, normalize_audio_role
 from .color_pipeline import build_color_filter
 from .encoder_contract import encoder_arguments, validate_encoder_contract
-from .gpu_execution import GPUExecutionRegistry
+from .gpu_execution import GPUExecutionRegistry, apply_visual_execution_contract
+from .visual_style import materialize_visual_graph, resolve_visual_render_plan
 from .media_probe import MediaProbe, SourceProbeRegistry, probe_media
 from .render_errors import SegmentRenderError, is_encoder_fallback_error
 from .render_job_models import RenderCancelled
@@ -49,6 +50,7 @@ class SegmentRenderResult:
     warnings: tuple[str, ...] = ()
     gpu_execution_contract: dict[str, Any] | None = None
     elapsed_seconds: float = 0.0
+    visual_render_plan: dict[str, Any] | None = None
 
 
 def render_segment(
@@ -61,6 +63,7 @@ def render_segment(
     source_probe: MediaProbe | None = None,
     source_probe_registry: SourceProbeRegistry | None = None,
     gpu_execution_registry: GPUExecutionRegistry | None = None,
+    visual_style_snapshot: Mapping[str, Any] | None = None,
 ) -> SegmentRenderResult:
     source = Path(str(segment.get("source_file") or "")).expanduser().resolve()
     if not source.is_file():
@@ -97,6 +100,11 @@ def render_segment(
     gpu_contract = gpu_registry.resolve(manifest, segment, probe, contract if isinstance(contract, Mapping) else None)
     effective_manifest = deepcopy(manifest)
     effective_manifest.setdefault("settings", {})["gpu_execution_contract"] = dict(gpu_contract)
+    visual_plan = _resolve_visual_plan(visual_style_snapshot, profile, segment, settings, probe)
+    gpu_contract = apply_visual_execution_contract(gpu_contract, visual_plan, encoder=encoder)
+    effective_manifest.setdefault("settings", {})["gpu_execution_contract"] = dict(gpu_contract)
+    if visual_plan:
+        effective_manifest["visual_render_plan_hash"] = str(visual_plan.get("resolved_hash") or "")
     settings = dict(effective_manifest.get("settings") or {})
     contract = settings.get("encoder_contract")
     root = cache_root or Path(str(cfg.get("library_root") or ".")) / "08_projects" / f"project_{manifest.get('project_id')}" / "cache" / "segments"
@@ -123,6 +131,7 @@ def render_segment(
             tuple(metadata.get("warnings") or []),
             dict(metadata.get("gpu_execution_contract") or gpu_contract),
             float(metadata.get("elapsed_seconds") or 0.0),
+            dict(metadata.get("visual_render_plan") or visual_plan or {}) or None,
         )
     _remove_invalid_cache(paths)
 
@@ -135,7 +144,7 @@ def render_segment(
     try:
         if probe.duration_seconds > 0 and end > probe.duration_seconds + 0.001:
             raise SegmentRenderError(f"segment end {end} exceeds source duration {probe.duration_seconds}")
-        command = build_segment_ffmpeg_command(cfg, effective_manifest, segment, probe, output=paths["partial"], encoder=encoder)
+        command = build_segment_ffmpeg_command(cfg, effective_manifest, segment, probe, output=paths["partial"], encoder=encoder, visual_render_plan=visual_plan)
         result, used = _run_with_fallback(command, encoder, requested, runner, warnings, attempts, expected, allow_fallback=not isinstance(contract, Mapping))
         qc = validate_segment_output(paths["partial"], profile, expected, str(cfg.get("ffprobe_path") or "ffprobe"))
         qc_errors = qc.errors
@@ -162,6 +171,7 @@ def render_segment(
             duration_seconds=qc.duration_seconds,
             elapsed_seconds=round(time.perf_counter() - started, 6),
             warnings=warnings,
+            visual_render_plan=visual_plan,
         )
         publish_cache_atomically(paths["partial"], paths["output"], paths["metadata_temp"], paths["metadata"])
     except RenderCancelled:
@@ -178,6 +188,7 @@ def render_segment(
     return SegmentRenderResult(
         str(segment["segment_id"]), paths["output"], key, False, requested, used, qc.duration_seconds,
         tuple(warnings), dict(gpu_contract), round(time.perf_counter() - started, 6),
+        visual_plan,
     )
 
 
@@ -189,6 +200,7 @@ def build_segment_ffmpeg_command(
     *,
     output: str | Path,
     encoder: str | None = None,
+    visual_render_plan: Mapping[str, Any] | None = None,
 ) -> list[str]:
     profile = get_render_profile(str((manifest.get("profile") or {}).get("profile_id")))
     settings = dict(manifest.get("settings") or {})
@@ -199,12 +211,18 @@ def build_segment_ffmpeg_command(
     speed = float(segment["speed"])
     duration = end - start
     timeline = duration / speed
-    color = build_color_filter(dict(segment.get("color") or settings.get("color") or {}))
+    color = "" if visual_render_plan else build_color_filter(dict(segment.get("color") or settings.get("color") or {}))
+    visual_filter = str((visual_render_plan or {}).get("color_filter") or "")
+    visual_title_filter = str(((visual_render_plan or {}).get("title") or {}).get("filter") or "")
     audio = _effective_segment_audio(manifest, segment)
     normalize_audio_role(audio["role"])
     video_filters = [f"trim=start={start:.6f}:end={end:.6f}", "setpts=PTS-STARTPTS", f"setpts=PTS/{speed:g}"]
-    gpu_path = str(gpu_contract.get("implementation") or "") == "nvdec_cuda"
-    if gpu_path:
+    gpu_path = str(gpu_contract.get("decode_used") or "") == "nvdec" and str(gpu_contract.get("hardware_api") or "") == "cuda"
+    if gpu_path and visual_render_plan:
+        # The effective contract is nvdec_cpu_visual_nvenc, so the approved
+        # visual graph is explicitly evaluated after the CUDA->CPU boundary.
+        video_filters.extend(["hwdownload", "format=yuv420p"])
+    elif gpu_path:
         video_filters.append(f"scale_cuda={profile['width']}:{profile['height']}:format={profile['pixel_format']}")
         video_filters.append(
             "setparams="
@@ -213,13 +231,17 @@ def build_segment_ffmpeg_command(
             f"color_trc={str(profile.get('color_transfer') or 'bt709')}:"
             f"range={'limited' if str(profile.get('color_range') or 'tv') == 'tv' else 'full'}"
         )
+        if color:
+            video_filters.extend(["hwdownload", "format=yuv420p", color])
     else:
         if color:
             video_filters.append(color)
         geometry = gpu_contract.get("display_geometry") if isinstance(gpu_contract.get("display_geometry"), Mapping) else {}
         policy = str(geometry.get("composition_policy") or settings.get("display_geometry_policy") or "preserve_aspect_pad")
         geometry_normalization = _display_geometry_normalization_filter(probe)
-        if policy == "crop_to_fill":
+        if visual_render_plan:
+            geometry_filters = [] if str(visual_render_plan.get("graph_type") or "linear") == "split_background_overlay" else [str(visual_render_plan.get("filter_graph") or "")]
+        elif policy == "crop_to_fill":
             geometry_filters = [
                 geometry_normalization,
                 f"scale={profile['width']}:{profile['height']}:force_original_aspect_ratio=increase",
@@ -233,6 +255,10 @@ def build_segment_ffmpeg_command(
                 f"pad={profile['width']}:{profile['height']}:(ow-iw)/2:(oh-ih)/2:color={background}",
             ]
         video_filters.extend([*geometry_filters, f"fps={profile['fps']}", f"format={profile['pixel_format']}", "setsar=1"])
+        if visual_filter and not visual_render_plan:
+            video_filters.append(visual_filter)
+        if visual_title_filter and not visual_render_plan:
+            video_filters.append(visual_title_filter)
         video_filters.append(
             "setparams="
             f"colorspace={str(profile.get('color_matrix') or 'bt709')}:"
@@ -240,7 +266,38 @@ def build_segment_ffmpeg_command(
             f"color_trc={str(profile.get('color_transfer') or 'bt709')}:"
             f"range={'limited' if str(profile.get('color_range') or 'tv') == 'tv' else 'full'}"
         )
-    graph = [f"[0:v]{','.join(video_filters)}[vout]"]
+    graph: list[str] = []
+    if visual_render_plan and str(visual_render_plan.get("graph_type") or "linear") == "split_background_overlay":
+        graph.append(f"[0:v]{','.join(video_filters)}[visual_in]")
+        # Background graph already includes its color/title tail so it is not
+        # accidentally applied twice at this boundary.
+        suffix = ""
+        post_label = "[visual_post]" if gpu_path else "[vout]"
+        visual_graph = materialize_visual_graph(visual_render_plan, input_label="[visual_in]", output_label=post_label)
+        if suffix:
+            visual_graph = visual_graph + f",{suffix}"
+        graph.append(visual_graph)
+        if gpu_path:
+            graph.append(
+                f"[visual_post],fps={profile['fps']},format={profile['pixel_format']},setsar=1,setparams="
+                f"colorspace={str(profile.get('color_matrix') or 'bt709')}:color_primaries={str(profile.get('color_primaries') or 'bt709')}:"
+                f"color_trc={str(profile.get('color_transfer') or 'bt709')}:range={'limited' if str(profile.get('color_range') or 'tv') == 'tv' else 'full'}[vout]"
+            )
+    else:
+        if visual_render_plan and gpu_path:
+            # GPU mixed path needs the same linear visual plan as Preview.
+            video_filters.append(str(visual_render_plan.get("filter_graph") or ""))
+            video_filters.extend([
+                f"fps={profile['fps']}",
+                f"format={profile['pixel_format']}",
+                "setsar=1",
+                "setparams="
+                f"colorspace={str(profile.get('color_matrix') or 'bt709')}:"
+                f"color_primaries={str(profile.get('color_primaries') or 'bt709')}:"
+                f"color_trc={str(profile.get('color_transfer') or 'bt709')}:"
+                f"range={'limited' if str(profile.get('color_range') or 'tv') == 'tv' else 'full'}",
+            ])
+        graph.append(f"[0:v]{','.join(video_filters)}[vout]")
     args = [str(cfg.get("ffmpeg_path") or "ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
     if gpu_path:
         args.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
@@ -287,6 +344,41 @@ def build_segment_ffmpeg_command(
         "-movflags", "+faststart", "-f", "mp4", str(output),
     ])
     return args
+
+
+def _resolve_visual_plan(snapshot: Mapping[str, Any] | None, profile: Mapping[str, Any], segment: Mapping[str, Any], settings: Mapping[str, Any], probe: MediaProbe | None = None) -> dict[str, Any] | None:
+    if not isinstance(snapshot, Mapping):
+        return None
+    color = segment.get("color") if isinstance(segment.get("color"), Mapping) else settings.get("color")
+    return resolve_visual_render_plan(
+        snapshot,
+        width=int(profile["width"]),
+        height=int(profile["height"]),
+        title_text=str(segment.get("title_text") or segment.get("title") or ""),
+        color_settings=dict(color or {}),
+        source_display_ratio=float(probe.display_ratio or 0.0) if probe is not None else None,
+        source_geometry=_probe_geometry(probe),
+        title_role=str(segment.get("title_role") or "chapter_title"),
+        title_duration_seconds=float(segment.get("timeline_duration_seconds") or 0.0) or None,
+    )
+
+
+def _probe_geometry(probe: MediaProbe | None) -> dict[str, Any]:
+    if probe is None:
+        return {}
+    return {
+        "coded_width": int(probe.coded_width or probe.width),
+        "coded_height": int(probe.coded_height or probe.height),
+        "sample_aspect_ratio": str(probe.sample_aspect_ratio or "1:1"),
+        "display_aspect_ratio": str(probe.display_aspect_ratio or ""),
+        "display_ratio": float(probe.display_ratio or 0.0),
+        "display_width": int(probe.display_width or probe.width),
+        "display_height": int(probe.display_height or probe.height),
+        "rotation_degrees": int(probe.rotation_degrees or 0),
+        "display_matrix": str(probe.display_matrix or ""),
+        "source_orientation": "portrait" if float(probe.display_ratio or 0.0) < 1 else "landscape" if float(probe.display_ratio or 0.0) else "unknown",
+        "provenance": str(probe.display_geometry_source or "unknown"),
+    }
 
 
 def _display_geometry_normalization_filter(probe: MediaProbe) -> str:
