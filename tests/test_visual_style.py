@@ -7,7 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from video_vault.database import init_db
+from video_vault.project_lifecycle import ProjectRevisionConflict
 from video_vault.visual_style import (
+    TITLE_ANCHORS,
+    TITLE_MOTION_PRESETS,
     TITLE_STYLES,
     VISUAL_STYLES,
     TitleStyleRegistry,
@@ -16,6 +19,7 @@ from video_vault.visual_style import (
     build_preview_filter,
     ensure_visual_style_state,
     materialize_visual_style,
+    render_animated_title_preview,
     render_true_frame_preview,
     resolve_visual_render_plan,
     _refresh_visual_style_currentity,
@@ -52,7 +56,7 @@ def _brief(orientation="landscape"):
 
 def test_round1_styles_are_distinct_and_registry_lists_only_public_variants():
     options = visual_style_options()
-    assert {item["style_id"] for item in options["styles"]} == {"diary_natural", "clean_minimal", "cinematic"}
+    assert {item["style_id"] for item in options["styles"]} == {"diary_natural", "clean_minimal", "cinematic", "standalone_card_compare"}
     snapshots = [materialize_visual_style(style_id, _brief()) for style_id in sorted({"diary_natural", "clean_minimal", "cinematic"})]
     assert len({item["resolved_hash"] for item in snapshots}) == 3
     assert {item["grading"]["look_id"] for item in snapshots} == {"diary-warm-neutral", "clean-neutral", "cinematic-teal-gold"}
@@ -106,6 +110,7 @@ def test_shared_render_plan_changes_pixel_contract_for_framing_and_title_tokens(
     changed = dict(snapshot)
     changed["framing"] = {**snapshot["framing"], "strategy_id": "crop_reframe"}
     changed["title_style"] = {**snapshot["title_style"], "responsive": {**snapshot["title_style"]["responsive"], "landscape": {"anchor": "top-left", "size_ratio": 0.08}}}
+    changed.pop("semantic_hash", None)
     changed["resolved_hash"] = __import__("hashlib").sha256(__import__("json").dumps({key: value for key, value in changed.items() if key != "resolved_hash"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     second = resolve_visual_render_plan(changed, width=1920, height=1080, title_text="B")
     assert first["resolved_hash"] != second["resolved_hash"]
@@ -120,6 +125,7 @@ def test_title_motion_and_roles_are_real_resolved_semantics():
     none_title = dict(snapshot["title_style"])
     none_title["motion"] = {**none_title["motion"], "preset": "none"}
     none_style["title_style"] = none_title
+    none_style.pop("semantic_hash", None)
     none_style["resolved_hash"] = __import__("hashlib").sha256(__import__("json").dumps({key: value for key, value in none_style.items() if key != "resolved_hash"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     rise = resolve_visual_render_plan(snapshot, width=1920, height=1080, title_text="A", title_role="chapter_title")
     lower = resolve_visual_render_plan(snapshot, width=1920, height=1080, title_text="A", title_role="lower_third")
@@ -316,6 +322,7 @@ def test_title_anchors_wrap_and_supported_motion_real_ffmpeg(tmp_path: Path):
         title = deepcopy(snapshot["title_style"])
         title["motion"] = {**title["motion"], "preset": preset}
         snapshot["title_style"] = title
+        snapshot.pop("semantic_hash", None)
         snapshot["resolved_hash"] = __import__("hashlib").sha256(__import__("json").dumps({key: value for key, value in snapshot.items() if key != "resolved_hash"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         plan = resolve_visual_render_plan(snapshot, width=1920, height=1080, title_text="這是一個很長的繁體中文標題 Traditional English mixed title", title_role="caption_subtitle", title_duration_seconds=0.8)
         plans.append(plan)
@@ -329,6 +336,147 @@ def test_title_anchors_wrap_and_supported_motion_real_ffmpeg(tmp_path: Path):
     unsupported_title = deepcopy(unsupported["title_style"])
     unsupported_title["motion"] = {**unsupported_title["motion"], "preset": "bounce"}
     unsupported["title_style"] = unsupported_title
+    unsupported.pop("semantic_hash", None)
     unsupported["resolved_hash"] = __import__("hashlib").sha256(__import__("json").dumps({key: value for key, value in unsupported.items() if key != "resolved_hash"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     with pytest.raises(VisualStyleError, match="unsupported title motion"):
         resolve_visual_render_plan(unsupported, width=1920, height=1080, title_text="Unsupported")
+
+
+def test_approval_envelope_does_not_mutate_pixel_semantic_snapshot():
+    snapshot = materialize_visual_style("diary_natural", _brief())
+    semantic_before = snapshot["semantic_hash"]
+    plan_before = resolve_visual_render_plan(snapshot, width=1920, height=1080, title_text="Coffee", title_role="chapter_title")
+    approved = deepcopy(snapshot)
+    approved.update({
+        "approved_preview_variant_id": "variant-1",
+        "approved_preview_plan_hash": "plan-1",
+        "approved_preview_evidence_identity": {"preview_image_sha256": "pixels"},
+        "approval_envelope": {"schema_version": "visual-style-approval-v1", "approved_at": "now"},
+    })
+    assert approved["semantic_hash"] == semantic_before
+    plan_after = resolve_visual_render_plan(approved, width=1920, height=1080, title_text="Coffee", title_role="chapter_title")
+    assert plan_after["visual_style_hash"] == plan_before["visual_style_hash"] == semantic_before
+    assert plan_after["filter_graph"] == plan_before["filter_graph"]
+    assert plan_after["resolved_hash"] == plan_before["resolved_hash"]
+
+
+def test_title_registry_inheritance_materializes_and_fails_closed():
+    titles = TitleStyleRegistry(TITLE_STYLES.list())
+    parent = next(item for item in titles.list() if item["title_style_id"] == "test_soft_panel")
+    parent["title_style_id"] = "base_test_style"
+    parent["version"] = "1"
+    child = {"title_style_id": "child_test_style", "version": "1", "extends": {"title_style_id": "base_test_style", "version": "1"}, "label": "Child", "responsive": {"landscape": {"anchor": "top-center", "size_ratio": 0.04}}}
+    titles.register("base_test_style", parent)
+    titles.register("child_test_style", {**child, "supported_roles": parent["supported_roles"], "fallback_chain": parent["fallback_chain"], "weight": parent["weight"], "safe_zone": parent["safe_zone"], "readability": parent["readability"], "motion": parent["motion"]})
+    resolved = titles.resolve("child_test_style", role="chapter_title", aspect="landscape")
+    assert resolved["responsive"]["anchor"] == "top-center"
+    assert resolved["resolved_parent_chain"][-1]["title_style_id"] == "child_test_style"
+    titles.register("cycle_a", {**parent, "title_style_id": "cycle_a", "extends": {"title_style_id": "cycle_b", "version": "1"}})
+    titles.register("cycle_b", {**parent, "title_style_id": "cycle_b", "extends": {"title_style_id": "cycle_a", "version": "1"}})
+    with pytest.raises(VisualStyleError, match="cycle"):
+        titles.resolve("cycle_a")
+    with pytest.raises(VisualStyleError, match="parent"):
+        titles.register("missing_parent", {**parent, "title_style_id": "missing_parent", "extends": {"title_style_id": "absent", "version": "1"}})
+        titles.resolve("missing_parent")
+
+
+def test_title_capability_contract_exposes_all_anchors_and_rejects_unrendered_spacing():
+    assert set(TITLE_ANCHORS) == {"top-left", "top-center", "top-right", "center", "bottom-left", "bottom-center", "bottom-right"}
+    assert set(TITLE_MOTION_PRESETS) == {"none", "fade", "fade_rise", "slide_fade"}
+    snapshot = materialize_visual_style("diary_natural", _brief())
+    title = deepcopy(snapshot["title_style"])
+    title["letter_spacing"] = 1
+    invalid = {**snapshot, "title_style": title}
+    invalid.pop("semantic_hash", None)
+    invalid["resolved_hash"] = __import__("hashlib").sha256(__import__("json").dumps({key: value for key, value in invalid.items() if key != "resolved_hash"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    with pytest.raises(VisualStyleError, match="letter_spacing"):
+        resolve_visual_render_plan(invalid, width=1920, height=1080, title_text="Unsupported")
+    top_center = deepcopy(snapshot["title_style"])
+    top_center["responsive"] = {**top_center["responsive"], "anchor": "top-center"}
+    centered = {**snapshot, "title_style": top_center}
+    centered.pop("semantic_hash", None)
+    centered["resolved_hash"] = __import__("hashlib").sha256(__import__("json").dumps({key: value for key, value in centered.items() if key != "resolved_hash"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    assert "(w-text_w)/2" in resolve_visual_render_plan(centered, width=1920, height=1080, title_text="Top") ["title"]["filter"]
+
+
+def test_bounded_visual_overrides_are_materialized_and_unknown_values_fail_closed():
+    snapshot = materialize_visual_style("diary_natural", _brief(), overrides={"composition": "standalone", "anchor": "top-center", "weight": 700, "size_preset": "large", "palette_variant": "high_contrast", "motion": {"preset": "slide_fade"}})
+    assert snapshot["composition"] == "standalone"
+    assert snapshot["overrides"]["size_preset"] == "large"
+    assert snapshot["title_style"]["weight"] == 700
+    assert snapshot["title_style"]["motion"]["preset"] == "slide_fade"
+    with pytest.raises(VisualStyleError, match="unknown visual override"):
+        materialize_visual_style("diary_natural", _brief(), overrides={"raw_ffmpeg": "drawtext=text=unsafe"})
+    with pytest.raises(VisualStyleError, match="unsupported title anchor"):
+        materialize_visual_style("diary_natural", _brief(), overrides={"anchor": "diagonal"})
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required for animated preview smoke")
+def test_animated_preview_uses_shared_motion_plan_and_is_bounded(tmp_path: Path):
+    source = tmp_path / "animated-source.mp4"
+    output = tmp_path / "animated-preview.mp4"
+    generated = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=10", "-t", "0.8", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source)], capture_output=True, text=True, encoding="utf-8", check=False)
+    assert generated.returncode == 0, generated.stderr
+    snapshot = materialize_visual_style("diary_natural", _brief(), overrides={"motion": {"preset": "fade_rise"}})
+    result = render_animated_title_preview({"ffmpeg_path": "ffmpeg"}, 1, source, 0, snapshot, output, title_role="location_title", duration_seconds=4)
+    assert result["preview_kind"] == "animated"
+    assert result["duration_seconds"] == 2.5
+    assert output.is_file() and result["visual_render_plan"]["title"]["role"] == "location_title"
+
+
+def test_visual_style_approval_enforces_base_revision_without_advancing_story_revision(tmp_path: Path, monkeypatch):
+    from video_vault.visual_style import save_visual_style_approval
+    from video_vault.database import connect
+
+    db = tmp_path / "approval.sqlite3"
+    init_db(db)
+    with connect(db) as con:
+        con.execute("insert into projects(id, name, project_revision) values(1, 'Visual', 1)")
+        con.execute("insert into visual_style_states(project_id, status, recommendation_json, approved_json) values(1, 'needs_confirmation', '{}', '{}')")
+    monkeypatch.setattr("video_vault.visual_style._load_brief", lambda *_args: _brief())
+    monkeypatch.setattr("video_vault.visual_style._load_preview_evidence", lambda *_args: {"preview_image_sha256": "pixels", "source_media_uuid": "media", "generated_at": "now"})
+    monkeypatch.setattr("video_vault.visual_style._validate_preview_evidence", lambda *args, **kwargs: None)
+    monkeypatch.setattr("video_vault.visual_style._source_provenance", lambda *_args: [])
+    monkeypatch.setattr("video_vault.color_consistency.load_project_color_state", lambda *_args: {})
+    monkeypatch.setattr("video_vault.color_consistency.effective_color_settings", lambda *_args: {})
+    saved = save_visual_style_approval({"library_root": str(tmp_path)}, db, 1, {"visual_style_id": "diary_natural", "preview_variant_id": "v1", "preview_plan_hash": "p1"}, base_revision=1)
+    assert saved["status"] == "approved"
+    with connect(db) as con:
+        assert int(con.execute("select project_revision from projects where id=1").fetchone()[0]) == 1
+    with pytest.raises(ProjectRevisionConflict):
+        save_visual_style_approval({"library_root": str(tmp_path)}, db, 1, {"visual_style_id": "diary_natural", "preview_variant_id": "v2", "preview_plan_hash": "p2"}, base_revision=0)
+
+
+def test_preview_surface_contains_roles_and_bounded_animation_evidence(tmp_path: Path, monkeypatch):
+    from video_vault.visual_style import preview_visual_styles
+    from video_vault.database import connect
+
+    db = tmp_path / "preview.sqlite3"
+    init_db(db)
+    with connect(db) as con:
+        con.execute("insert into projects(id, name, project_revision) values(1, 'Preview', 1)")
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"fixture")
+    source_data = {"project_media_uuid": "media-1", "path": str(source), "fingerprint": {"sha256": "source"}, "duration_seconds": 10.0, "display_geometry": {"display_ratio": 16 / 9, "source_orientation": "landscape", "sample_aspect_ratio": "1:1"}}
+    monkeypatch.setattr("video_vault.visual_style._load_brief", lambda *_args: _brief())
+    monkeypatch.setattr("video_vault.visual_style.ensure_visual_style_state", lambda *_args: {"project_id": 1, "status": "approved", "preview_revision": 1})
+    monkeypatch.setattr("video_vault.visual_style._source_provenance", lambda *_args: [source_data])
+    monkeypatch.setattr("video_vault.visual_style._measure_source_luma", lambda *_args: 0.8)
+
+    def fake_static(_cfg, _project_id, _source, _timestamp, _snapshot, output, **_kwargs):
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"png")
+        return {"file": str(output), "sha256": __import__("hashlib").sha256(b"png").hexdigest()}
+
+    def fake_animated(_cfg, _project_id, _source, _timestamp, _snapshot, output, **_kwargs):
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"mp4")
+        return {"file": str(output), "sha256": __import__("hashlib").sha256(b"mp4").hexdigest(), "duration_seconds": 2.0, "preview_kind": "animated"}
+
+    monkeypatch.setattr("video_vault.visual_style.render_true_frame_preview", fake_static)
+    monkeypatch.setattr("video_vault.visual_style.render_animated_title_preview", fake_animated)
+    result = preview_visual_styles({"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe", "library_root": str(tmp_path)}, db, 1, force=True, overrides={"anchor": "top-center"})
+    assert result["ok"] is True
+    assert {str(item["title_role"]) for item in result["variants"] if item.get("preview_kind") == "static"} == {"chapter_title", "location_title"}
+    assert any(item.get("preview_kind") == "animated" for item in result["variants"])
+    assert all(item.get("preview_plan_hash") for item in result["variants"])

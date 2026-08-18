@@ -24,6 +24,7 @@ from .color_pipeline import build_color_filter, color_mode_contract, validate_lu
 from .database import connect, init_db
 from .paths import root
 from .project import project_dir
+from .project_lifecycle import project_commit
 from .source_fingerprint import parse_source_fingerprint, persisted_fingerprint_for_stat
 from .media_probe import probe_media_metadata
 
@@ -34,6 +35,17 @@ TITLE_STYLE_SCHEMA_VERSION = "title-style-v1"
 TITLE_STYLE_REGISTRY_VERSION = "title-style-registry-v1"
 VISUAL_STYLE_STATE_SCHEMA_VERSION = 1
 VISUAL_RENDER_CONTRACT_VERSION = "visual-render-v1"
+TITLE_ANCHORS = ("top-left", "top-center", "top-right", "center", "bottom-left", "bottom-center", "bottom-right")
+TITLE_MOTION_PRESETS = ("none", "fade", "fade_rise", "slide_fade")
+TITLE_SIZE_PRESETS = {"small": 0.85, "normal": 1.0, "large": 1.2}
+TITLE_WEIGHT_VALUES = (400, 500, 600, 700)
+TITLE_FONT_FAMILIES = ("system-sans", "Noto Sans CJK TC", "Segoe UI", "Arial")
+_APPROVAL_FIELDS = {
+    "approved_preview_variant_id",
+    "approved_preview_plan_hash",
+    "approved_preview_evidence_identity",
+    "approval_envelope",
+}
 
 
 class VisualStyleError(ValueError):
@@ -114,20 +126,43 @@ class TitleStyleRegistry:
         self._entries[style_id] = item
 
     def resolve(self, style_id: str, version: str | int | None = None, *, role: str = "chapter_title", aspect: str = "landscape") -> dict[str, Any]:
-        item = self._entries.get(str(style_id))
-        if item is None:
+        resolved, chain = self._resolve_inheritance(str(style_id), version, [])
+        if resolved is None:
             raise VisualStyleError("title_style_unknown", f"unknown title style: {style_id}")
-        expected = str(version or item["version"])
-        if str(item["version"]) != expected:
-            raise VisualStyleError("title_style_version_unsupported", f"unsupported title style version: {style_id}@{expected}")
+        item = resolved
         if role not in item["supported_roles"]:
             raise VisualStyleError("title_role_unsupported", f"title style {style_id} does not support role {role}")
         _validate_title_definition(item)
         resolved = deepcopy(item)
         resolved["role"] = role
+        resolved["resolved_parent_chain"] = chain
         responsive = item["responsive"]
         resolved["responsive"] = deepcopy(responsive if "anchor" in responsive else responsive.get(aspect, responsive.get("landscape", {})))
         return resolved
+
+    def _resolve_inheritance(self, style_id: str, version: str | int | None, stack: list[str]) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
+        if style_id in stack:
+            raise VisualStyleError("title_style_inheritance_cycle", "title style inheritance cycle: " + " -> ".join([*stack, style_id]))
+        item = self._entries.get(style_id)
+        if item is None:
+            raise VisualStyleError("title_style_parent_unknown", f"unknown title style parent: {style_id}")
+        expected = str(version or item.get("version") or "")
+        if str(item.get("version") or "") != expected:
+            raise VisualStyleError("title_style_version_unsupported", f"unsupported title style version: {style_id}@{expected}")
+        parent_spec = item.get("extends")
+        if not parent_spec:
+            return deepcopy(item), [{"title_style_id": style_id, "version": expected}]
+        if not isinstance(parent_spec, Mapping):
+            raise VisualStyleError("title_style_inheritance_invalid", f"invalid parent for title style: {style_id}")
+        parent_id = str(parent_spec.get("title_style_id") or parent_spec.get("id") or "")
+        parent_version = str(parent_spec.get("version") or "")
+        if not parent_id or not parent_version:
+            raise VisualStyleError("title_style_inheritance_invalid", f"parent id/version missing for title style: {style_id}")
+        parent, chain = self._resolve_inheritance(parent_id, parent_version, [*stack, style_id])
+        if parent is None:
+            raise VisualStyleError("title_style_parent_unknown", f"unknown title style parent: {parent_id}")
+        merged = _deep_merge(parent, {key: value for key, value in item.items() if key != "extends"})
+        return merged, [*chain, {"title_style_id": style_id, "version": expected}]
 
     def list(self) -> list[dict[str, Any]]:
         return [deepcopy(item) for item in self._entries.values()]
@@ -148,6 +183,7 @@ def materialize_visual_style(
     color_settings: Mapping[str, Any] | None = None,
     registry: VisualStyleRegistry | None = None,
     title_registry: TitleStyleRegistry | None = None,
+    overrides: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve a complete immutable semantic snapshot from an approved brief."""
 
@@ -163,8 +199,18 @@ def materialize_visual_style(
     style_registry = registry or VISUAL_STYLES
     resolved_title_registry = title_registry or TITLE_STYLES
     style = style_registry.resolve(style_id, style_version)
-    title_id = title_style_id or str(style["default_title_style_id"])
-    title = resolved_title_registry.resolve(title_id, title_style_version, role=title_role, aspect=aspect)
+    normalized_overrides = _normalize_visual_overrides(overrides)
+    title_id = str(normalized_overrides.get("title_style_id") or title_style_id or style["default_title_style_id"])
+    title_version = normalized_overrides.get("title_style_version") or title_style_version
+    title = resolved_title_registry.resolve(title_id, title_version, role=title_role, aspect=aspect)
+    if normalized_overrides.get("title_role"):
+        title_role = str(normalized_overrides["title_role"])
+        title = resolved_title_registry.resolve(title_id, title_version, role=title_role, aspect=aspect)
+    title = _apply_title_overrides(title, normalized_overrides, aspect)
+    composition = str(normalized_overrides.get("composition") or style["composition"])
+    if composition not in {"overlay", "standalone"}:
+        raise VisualStyleError("visual_override_invalid", "composition must be overlay or standalone")
+    palette = _apply_palette_override(style["palette"], normalized_overrides)
     required_caps = style.get("required_capabilities") or {}
     for capability, required in required_caps.items():
         if required and capabilities is not None and not capabilities.get(capability, False):
@@ -177,8 +223,8 @@ def materialize_visual_style(
         "visual_style_id": style["style_id"],
         "visual_style_version": str(style["version"]),
         "label": style["label"],
-        "composition": style["composition"],
-        "palette": deepcopy(style["palette"]),
+        "composition": composition,
+        "palette": palette,
         "grading": deepcopy(style["grading"]),
         "creative_look": deepcopy(style["grading"]),
         "technical_transform": _technical_transform_snapshot(color_settings),
@@ -200,8 +246,10 @@ def materialize_visual_style(
         },
         "creative_brief_revision": int(approved_brief.get("brief_version") or 1),
         "creative_brief_hash": str(approved_brief.get("visual_contract_hash") or _hash(approved_brief)),
+        "overrides": normalized_overrides,
     }
-    snapshot["resolved_hash"] = _hash(snapshot)
+    snapshot["semantic_hash"] = _semantic_hash(snapshot)
+    snapshot["resolved_hash"] = snapshot["semantic_hash"]
     return snapshot
 
 
@@ -216,9 +264,9 @@ def validate_materialized_visual_style(snapshot: Mapping[str, Any]) -> dict[str,
         TITLE_STYLES.resolve(str(title.get("title_style_id")), title.get("version"), role=str(title.get("role") or "chapter_title"), aspect=str((snapshot.get("output") or {}).get("orientation") or "landscape"))
     except VisualStyleError as exc:
         errors.append(str(exc))
-    expected_hash = _hash({key: value for key, value in snapshot.items() if key != "resolved_hash"})
-    if snapshot.get("resolved_hash") != expected_hash:
-        errors.append("resolved_hash mismatch")
+    expected_hash = _semantic_hash(snapshot)
+    if snapshot.get("resolved_hash") != expected_hash or snapshot.get("semantic_hash", expected_hash) != expected_hash:
+        errors.append("semantic hash mismatch")
     return {"ok": not errors, "errors": errors}
 
 
@@ -227,9 +275,20 @@ def visual_style_options() -> dict[str, Any]:
         "schema_version": VISUAL_STYLE_SCHEMA_VERSION,
         "registry_version": VISUAL_STYLE_REGISTRY_VERSION,
         "registry_hash": VISUAL_STYLES.hash(),
-        "styles": VISUAL_STYLES.list(include_internal=False),
+        # Standalone is a deliberate human comparison option.  Test-only
+        # entries remain hidden from the product surface.
+        "styles": [item for item in VISUAL_STYLES.list(include_internal=True) if item.get("style_id") != "test_soft_panel"],
         "title_styles": TITLE_STYLES.list(),
         "title_roles": sorted({role for item in TITLE_STYLES.list() for role in item["supported_roles"]}),
+        "title_anchors": list(TITLE_ANCHORS),
+        "title_motion_presets": list(TITLE_MOTION_PRESETS),
+        "title_easing": ["linear", "ease-out"],
+        "title_letter_spacing": {"supported": False, "fixed_value": 0},
+        "title_weight_values": list(TITLE_WEIGHT_VALUES),
+        "title_size_presets": sorted(TITLE_SIZE_PRESETS),
+        "palette_variants": ["default", "muted", "high_contrast"],
+        "readability_surfaces": ["none", "translucent", "solid"],
+        "override_schema_version": "visual-style-override-v1",
     }
 
 
@@ -314,7 +373,7 @@ def save_visual_style_approval(cfg: Mapping[str, Any], db: Path, project_id: int
     style_id = str(payload.get("visual_style_id") or "")
     from .color_consistency import effective_color_settings, load_project_color_state
     project_color = effective_color_settings(load_project_color_state(dict(cfg), project_id))
-    snapshot = materialize_visual_style(style_id, brief, style_version=payload.get("visual_style_version"), title_style_id=payload.get("title_style_id"), title_style_version=payload.get("title_style_version"), title_role=str(payload.get("title_role") or "chapter_title"), color_settings=project_color)
+    snapshot = materialize_visual_style(style_id, brief, style_version=payload.get("visual_style_version"), title_style_id=payload.get("title_style_id"), title_style_version=payload.get("title_style_version"), title_role=str(payload.get("title_role") or "chapter_title"), color_settings=project_color, overrides=payload.get("overrides") if isinstance(payload.get("overrides"), Mapping) else None)
     preview_variant_id = str(payload.get("preview_variant_id") or "").strip()
     preview_plan_hash = str(payload.get("preview_plan_hash") or "").strip()
     current = load_visual_style_state(db, project_id)
@@ -322,22 +381,39 @@ def save_visual_style_approval(cfg: Mapping[str, Any], db: Path, project_id: int
         raise VisualStyleError("visual_style_preview_required", "必須選取目前真實 preview variant，不能只提交任意 hash")
     evidence = _load_preview_evidence(db, project_id, preview_variant_id)
     _validate_preview_evidence(cfg, db, project_id, evidence, snapshot, brief, project_color, preview_plan_hash)
-    snapshot["approved_preview_variant_id"] = preview_variant_id
-    snapshot["approved_preview_plan_hash"] = preview_plan_hash
-    snapshot["approved_preview_evidence_identity"] = {
+    approval_identity = {
         "preview_variant_id": preview_variant_id,
         "preview_image_sha256": str(evidence["preview_image_sha256"]),
         "source_media_uuid": str(evidence["source_media_uuid"]),
         "generated_at": str(evidence["generated_at"]),
     }
-    snapshot["resolved_hash"] = _hash({key: value for key, value in snapshot.items() if key != "resolved_hash"})
+    snapshot["approval_envelope"] = {
+        "schema_version": "visual-style-approval-v1",
+        "preview_variant_id": preview_variant_id,
+        "preview_plan_hash": preview_plan_hash,
+        "evidence_identity": approval_identity,
+        "approved_at": _now(),
+    }
+    # These compatibility fields are audit-only.  They are deliberately
+    # excluded from semantic_hash/resolved_hash so approval cannot change the
+    # pixels or cache identity the human reviewed.
+    snapshot["approved_preview_variant_id"] = preview_variant_id
+    snapshot["approved_preview_plan_hash"] = preview_plan_hash
+    snapshot["approved_preview_evidence_identity"] = approval_identity
     preview_revision = int(current.get("preview_revision") or 0) + 1
     source = _source_provenance(db, project_id)
-    with connect(db) as con:
-        con.execute(
-            "update visual_style_states set status='approved', approved_json=?, source_provenance_json=?, creative_brief_revision=?, creative_brief_hash=?, preview_revision=?, updated_at=? where project_id=?",
-            (json.dumps(snapshot, ensure_ascii=False, sort_keys=True), json.dumps(source, ensure_ascii=False, sort_keys=True), int(brief.get("brief_version") or 1), str(brief.get("visual_contract_hash") or ""), preview_revision, _now(), int(project_id)),
-        )
+    # Visual Style is render-only state.  The write still participates in the
+    # project optimistic-concurrency boundary, but does not advance Story or
+    # Perception semantics.
+    with project_commit(db, project_id, base_revision) as commit:
+        with connect(db) as con:
+            updated = con.execute(
+                "update visual_style_states set status='approved', approved_json=?, source_provenance_json=?, creative_brief_revision=?, creative_brief_hash=?, preview_revision=?, updated_at=? where project_id=?",
+                (json.dumps(snapshot, ensure_ascii=False, sort_keys=True), json.dumps(source, ensure_ascii=False, sort_keys=True), int(brief.get("brief_version") or 1), str(brief.get("visual_contract_hash") or ""), preview_revision, _now(), int(project_id)),
+            )
+            if updated.rowcount != 1:
+                raise VisualStyleError("visual_style_state_missing", "visual style state is missing")
+        commit.record_changed(False)
     return load_visual_style_state(db, project_id)
 
 
@@ -370,7 +446,7 @@ def _validate_preview_evidence(
         raise VisualStyleError("visual_style_preview_stale", "preview plan hash 與 variant evidence 不一致")
     if str(evidence.get("visual_style_id") or "") != str(snapshot.get("visual_style_id") or "") or str(evidence.get("visual_style_version") or "") != str(snapshot.get("visual_style_version") or ""):
         raise VisualStyleError("visual_style_preview_stale", "preview variant 的 visual style 不符合目前核准選項")
-    if str(evidence.get("visual_style_hash") or "") != str(snapshot.get("resolved_hash") or ""):
+    if str(evidence.get("visual_style_hash") or "") != str(snapshot.get("semantic_hash") or snapshot.get("resolved_hash") or ""):
         raise VisualStyleError("visual_style_preview_stale", "preview variant 的 style snapshot 已過期")
     if str(evidence.get("creative_brief_hash") or "") != str(brief.get("visual_contract_hash") or ""):
         raise VisualStyleError("visual_style_preview_stale", "Creative Brief visual contract 已過期")
@@ -437,8 +513,8 @@ def resolve_visual_render_plan(
     represented as a generic EQ look.
     """
     missing = [field for field in ("resolved_hash", "output", "framing", "grading", "title_style", "palette") if not snapshot.get(field)]
-    expected_snapshot_hash = _hash({key: value for key, value in snapshot.items() if key != "resolved_hash"})
-    if missing or str(snapshot.get("resolved_hash") or "") != expected_snapshot_hash:
+    expected_snapshot_hash = _semantic_hash(snapshot)
+    if missing or str(snapshot.get("semantic_hash") or snapshot.get("resolved_hash") or "") != expected_snapshot_hash:
         raise VisualStyleError("visual_render_contract_invalid", "materialized visual style snapshot is incomplete or tampered")
     width = int(width)
     height = int(height)
@@ -514,7 +590,7 @@ def resolve_visual_render_plan(
         filter_complex = filter_complex + "[[VV_OUTPUT]]"
     plan = {
         "contract_version": VISUAL_RENDER_CONTRACT_VERSION,
-        "visual_style_hash": str(snapshot.get("resolved_hash") or ""),
+        "visual_style_hash": str(snapshot.get("semantic_hash") or snapshot.get("resolved_hash") or ""),
         "width": width,
         "height": height,
         "source_display_ratio": float((framing.get("source_display_ratio") or source_display_ratio or 0.0) or 0.0),
@@ -537,7 +613,8 @@ def resolve_visual_render_plan(
         "graph_contract": ({"version": "visual-graph-v1", "graph_type": graph_type, "input_port": "video_in", "output_port": "video_out", "template": filter_complex} if graph_type != "linear" else {}),
         "execution_mode": "mixed_cpu_visual_filters" if (color_filter or title_plan["filter"] or graph_type != "linear") else "native_renderer_filters",
     }
-    plan["resolved_hash"] = _hash({key: value for key, value in plan.items() if key != "resolved_hash"})
+    plan["semantic_hash"] = _hash({key: value for key, value in plan.items() if key not in {"resolved_hash", "semantic_hash"}})
+    plan["resolved_hash"] = plan["semantic_hash"]
     return plan
 
 
@@ -630,6 +707,8 @@ def _resolve_title_plan(
     responsive = dict(responsive.get(aspect) or responsive.get("landscape") or responsive)
     safe = dict(title_style.get("safe_zone") or {})
     anchor = str(responsive.get("anchor") or "bottom-left")
+    if anchor not in TITLE_ANCHORS:
+        raise VisualStyleError("title_anchor_unsupported", f"unsupported title anchor: {anchor}")
     size_ratio = float(responsive.get("size_ratio") or 0.052)
     left = float(safe.get("left") or 0.05)
     right = float(safe.get("right") or 0.05)
@@ -637,6 +716,8 @@ def _resolve_title_plan(
     bottom = float(safe.get("bottom") or 0.08)
     if anchor == "top-left":
         x, y = f"w*{left:.6f}", f"h*{top:.6f}"
+    elif anchor == "top-center":
+        x, y = "(w-text_w)/2", f"h*{top:.6f}"
     elif anchor == "top-right":
         x, y = f"w*(1-{right:.6f})-text_w", f"h*{top:.6f}"
     elif anchor == "center":
@@ -653,7 +734,10 @@ def _resolve_title_plan(
     text_token = str(title_style.get("text_color_token") or "text_primary")
     color = str(palette.get(text_token) or palette.get("text_primary") or "#FFFFFF").lstrip("#")[:6]
     shadow = str(palette.get("shadow") or "#00000099").lstrip("#")[:6]
-    font_path = _system_font_path(title_style.get("fallback_chain"), int(title_style.get("weight") or 500))
+    font_identity = _resolve_font([title_style.get("font_family"), *(title_style.get("fallback_chain") or [])], int(title_style.get("weight") or 500))
+    font_path = font_identity["path"]
+    if font_path is None:
+        raise VisualStyleError("title_font_unresolved", "declared title font and fallback chain are not installed")
     font_option = f":fontfile='{_escape_filter_path(font_path)}'" if font_path else ""
     readability = dict(title_style.get("readability") or {})
     max_width_ratio = min(0.95, max(0.2, float(title_style.get("max_width_ratio") or 0.78)))
@@ -661,6 +745,11 @@ def _resolve_title_plan(
     font_size = max(20, int(height * size_ratio))
     wrapped_text, wrap_lines = _wrap_title_text(str(title_text), max_width_pixels, font_size)
     escaped = wrapped_text.replace("\\", "\\\\").replace("\n", "\\n").replace(":", "\\:").replace("'", "\\'")
+    letter_spacing = float(title_style.get("letter_spacing") or 0.0)
+    if abs(letter_spacing) > 0.001:
+        # Current supported FFmpeg drawtext builds expose line_spacing but not
+        # letter_spacing.  Do not advertise a token that pixels cannot consume.
+        raise VisualStyleError("title_letter_spacing_unsupported", "non-zero letter_spacing is not supported by the active FFmpeg drawtext contract")
     options = [f"text='{escaped}'", font_option.lstrip(":"), f"fontcolor=0x{color}", f"fontsize={font_size}", f"x={x}", f"y={y}", f"text_align={str(title_style.get('alignment') or 'left')}", f"line_spacing={int(float(title_style.get('line_height') or 1.18) * 10)}", f"boxw={max_width_pixels}", "fix_bounds=1"]
     if bool(readability.get("shadow", True)):
         options.extend([f"shadowcolor=0x{shadow}", "shadowx=2", "shadowy=2"])
@@ -674,10 +763,18 @@ def _resolve_title_plan(
     preset = str(motion.get("preset") or "none")
     if preset not in {"none", "fade", "fade_rise", "slide_fade"}:
         raise VisualStyleError("title_motion_unsupported", f"unsupported title motion preset: {preset}")
+    easing = str(motion.get("easing") or "ease-out")
+    if easing not in {"linear", "ease-out"}:
+        raise VisualStyleError("title_easing_unsupported", f"unsupported title easing: {easing}")
     enter = max(0.001, float(motion.get("enter_seconds") or 0.28))
     exit_seconds = max(0.001, float(motion.get("exit_seconds") or 0.22))
     duration = max(enter + exit_seconds, float(duration_seconds or 1.0))
-    alpha = f"if(lt(t\\,{enter:.6f})\\,t/{enter:.6f}\\,if(lt(t\\,{max(enter, duration-exit_seconds):.6f})\\,1\\,max(0\\,({duration:.6f}-t)/{exit_seconds:.6f})))"
+    enter_progress = f"min(t/{enter:.6f}\\,1)"
+    exit_progress = f"min(max(0\\,({duration:.6f}-t)/{exit_seconds:.6f})\\,1)"
+    if easing == "ease-out":
+        enter_progress = f"(1-pow(1-{enter_progress}\\,2))"
+        exit_progress = f"pow({exit_progress}\\,2)"
+    alpha = f"if(lt(t\\,{enter:.6f})\\,{enter_progress}\\,if(lt(t\\,{max(enter, duration-exit_seconds):.6f})\\,1\\,{exit_progress}))"
     if preset in {"fade", "fade_rise", "slide_fade"}:
         options.append(f"alpha={alpha}")
     if preset == "fade_rise":
@@ -687,7 +784,7 @@ def _resolve_title_plan(
     if title_enable:
         options.append(f"enable='{title_enable}'")
     drawtext = "drawtext=" + ":".join(option for option in options if option)
-    return {"role": role, "text": str(title_text), "wrapped_text": wrapped_text, "wrap_lines": wrap_lines, "anchor": anchor, "safe_zone": safe, "max_width_ratio": max_width_ratio, "max_width_pixels": max_width_pixels, "max_width_enforced": True, "font_path": str(font_path or ""), "weight": int(title_style.get("weight") or 500), "font_size": font_size, "filter": drawtext if title_text else "", "motion": {**motion, "resolved_enter_seconds": enter, "resolved_exit_seconds": exit_seconds, "resolved_duration_seconds": duration}}
+    return {"role": role, "text": str(title_text), "wrapped_text": wrapped_text, "wrap_lines": wrap_lines, "anchor": anchor, "safe_zone": safe, "max_width_ratio": max_width_ratio, "max_width_pixels": max_width_pixels, "max_width_enforced": True, "font_path": str(font_path or ""), "font_identity": {key: value for key, value in font_identity.items() if key != "path"}, "font_family": str(title_style.get("font_family") or "system-sans"), "letter_spacing": letter_spacing, "weight": int(title_style.get("weight") or 500), "font_size": font_size, "filter": drawtext if title_text else "", "motion": {**motion, "easing": easing, "resolved_enter_seconds": enter, "resolved_exit_seconds": exit_seconds, "resolved_duration_seconds": duration}}
 
 
 def _wrap_title_text(text: str, max_width_pixels: int, font_size: int, *, max_lines: int = 3) -> tuple[str, int]:
@@ -759,7 +856,41 @@ def render_true_frame_preview(
     if returncode != 0 or not output.is_file() or output.stat().st_size <= 0:
         stderr = str(getattr(result, "stderr", ""))[-1200:]
         raise VisualStyleError("preview_render_failed", f"true-frame preview failed: {stderr}")
-    return {"file": str(output), "sha256": _file_hash(output), "timestamp_seconds": float(timestamp_seconds), "width": width, "height": height, "filter_contract": filter_graph, "visual_render_plan": plan, "visual_style_hash": snapshot.get("resolved_hash"), "title_text": title_text}
+    return {"file": str(output), "sha256": _file_hash(output), "timestamp_seconds": float(timestamp_seconds), "width": width, "height": height, "filter_contract": filter_graph, "visual_render_plan": plan, "visual_style_hash": snapshot.get("semantic_hash") or snapshot.get("resolved_hash"), "title_text": title_text}
+
+
+def render_animated_title_preview(
+    cfg: Mapping[str, Any],
+    project_id: int,
+    source: Path,
+    timestamp_seconds: float,
+    snapshot: Mapping[str, Any],
+    output: Path,
+    *,
+    runner: Any | None = None,
+    color_settings: Mapping[str, Any] | None = None,
+    source_geometry: Mapping[str, Any] | None = None,
+    title_text: str = "咖啡日記 / Coffee Diary",
+    title_role: str = "chapter_title",
+    duration_seconds: float = 2.0,
+) -> dict[str, Any]:
+    """Render a bounded MP4 title preview through the exact shared plan."""
+    duration = min(2.5, max(1.5, float(duration_seconds)))
+    width = int((snapshot.get("output") or {}).get("width") or 1920)
+    height = int((snapshot.get("output") or {}).get("height") or 1080)
+    plan = resolve_visual_render_plan(snapshot, width=width, height=height, title_text=title_text, color_settings=color_settings, source_geometry=source_geometry, title_role=title_role, title_duration_seconds=duration)
+    command = [str(cfg["ffmpeg_path"]), "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(source), "-ss", f"{float(timestamp_seconds):.6f}"]
+    if str(plan.get("graph_type") or "linear") == "split_background_overlay":
+        command.extend(["-filter_complex", materialize_visual_graph(plan, input_label="[0:v]", output_label="[vout]"), "-map", "[vout]"])
+    else:
+        command.extend(["-vf", str(plan.get("filter_graph") or "")])
+    command.extend(["-t", f"{duration:.3f}", "-an", "-r", "24", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output)])
+    output.parent.mkdir(parents=True, exist_ok=True)
+    result = runner(command) if runner else subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False)
+    if int(getattr(result, "returncode", 0)) != 0 or not output.is_file() or output.stat().st_size <= 0:
+        stderr = str(getattr(result, "stderr", ""))[-1200:]
+        raise VisualStyleError("preview_render_failed", f"animated title preview failed: {stderr}")
+    return {"file": str(output), "sha256": _file_hash(output), "timestamp_seconds": float(timestamp_seconds), "width": width, "height": height, "duration_seconds": duration, "filter_contract": str(plan.get("filter_graph") or plan.get("filter_complex") or ""), "visual_render_plan": plan, "visual_style_hash": snapshot.get("semantic_hash") or snapshot.get("resolved_hash"), "title_text": title_text, "preview_kind": "animated"}
 
 
 def visual_style_preview_path(cfg: Mapping[str, Any], project_id: int, filename: str) -> Path:
@@ -769,7 +900,7 @@ def visual_style_preview_path(cfg: Mapping[str, Any], project_id: int, filename:
     return project_dir(dict(cfg), int(project_id)) / "output" / "visual_style_previews" / token
 
 
-def preview_visual_styles(cfg: Mapping[str, Any], db: Path, project_id: int, *, force: bool = False) -> dict[str, Any]:
+def preview_visual_styles(cfg: Mapping[str, Any], db: Path, project_id: int, *, force: bool = False, overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Generate bounded true-frame variants only after Creative Brief approval."""
     brief = _load_brief(db, project_id)
     state = ensure_visual_style_state(cfg, db, project_id)
@@ -785,32 +916,59 @@ def preview_visual_styles(cfg: Mapping[str, Any], db: Path, project_id: int, *, 
     # Four variants are intentionally generated for each deterministic frame:
     # the three public looks plus the standalone card comparison surface.
     styles = [item for item in VISUAL_STYLES.list(include_internal=True) if item.get("style_id") in {"diary_natural", "clean_minimal", "cinematic", "standalone_card_compare"}]
+    roles = (("chapter_title", "Chapter"), ("location_title", "Location / Lower Third"))
     for frame in representative_frames:
         source = frame["source"]
         timestamp = float(frame["timestamp_seconds"])
         for style in styles:
-            snapshot = materialize_visual_style(str(style["style_id"]), brief, color_settings=color_settings)
-            preview_plan = resolve_visual_render_plan(snapshot, width=int((snapshot.get("output") or {}).get("width") or 1920), height=int((snapshot.get("output") or {}).get("height") or 1080), title_text="咖啡日記 / Coffee Diary", color_settings=color_settings, source_geometry=frame.get("display_geometry") if isinstance(frame.get("display_geometry"), Mapping) else None)
-            token = _hash({"source": source, "timestamp": timestamp, "style": snapshot["resolved_hash"], "plan": preview_plan["resolved_hash"], "creative_brief_hash": brief.get("visual_contract_hash"), "frame": frame["selection_reason"]})[:20]
-            output = visual_style_preview_path(cfg, project_id, f"{style['style_id']}-{token}.png")
-            if force:
-                output.unlink(missing_ok=True)
-            if output.is_file() and output.stat().st_size > 0:
-                item = {"file": str(output), "sha256": _file_hash(output), "cache_hit": True, "visual_style": snapshot, "source": _public_source(source), "timestamp_seconds": timestamp}
-            else:
-                item = render_true_frame_preview(cfg, project_id, Path(str(source["path"])), timestamp, snapshot, output, color_settings=color_settings, source_display_ratio=float((frame.get("display_geometry") or {}).get("display_ratio") or 0.0) or None, source_geometry=frame.get("display_geometry") if isinstance(frame.get("display_geometry"), Mapping) else None)
-                item.update({"cache_hit": False, "visual_style": snapshot, "source": _public_source(source)})
-            item["preview_plan_hash"] = str(preview_plan.get("resolved_hash") or "")
-            item["technical_transform"] = dict(preview_plan.get("technical_transform") or {})
-            item["representative_frame"] = {key: value for key, value in frame.items() if key != "source"}
-            item["preview_variant_id"] = _hash({"project_id": project_id, "style": snapshot.get("resolved_hash"), "plan": item["preview_plan_hash"], "source": source.get("project_media_uuid"), "timestamp": timestamp, "frame": frame.get("selection_reason")})[:32]
-            item["title_style_identity"] = _hash(snapshot.get("title_style") or {})
-            item["creative_brief_hash"] = str(brief.get("visual_contract_hash") or "")
-            item["source_media_uuid"] = str(source.get("project_media_uuid") or "")
-            item["source_fingerprint"] = dict(source.get("fingerprint") or {})
-            item["generated_at"] = _now()
-            _persist_preview_evidence(db, project_id, state, item, snapshot)
-            variants.append(item)
+            for title_role, role_label in roles:
+                role_text = "咖啡日記 / Coffee Diary" if title_role == "chapter_title" else "台北 · Coffee Shop"
+                snapshot = materialize_visual_style(str(style["style_id"]), brief, color_settings=color_settings, title_role=title_role, overrides=overrides)
+                preview_plan = resolve_visual_render_plan(snapshot, width=int((snapshot.get("output") or {}).get("width") or 1920), height=int((snapshot.get("output") or {}).get("height") or 1080), title_text=role_text, color_settings=color_settings, source_geometry=frame.get("display_geometry") if isinstance(frame.get("display_geometry"), Mapping) else None, title_role=title_role)
+                token = _hash({"source": source, "timestamp": timestamp, "style": snapshot["semantic_hash"], "plan": preview_plan["semantic_hash"], "role": title_role, "overrides": snapshot.get("overrides"), "creative_brief_hash": brief.get("visual_contract_hash"), "frame": frame["selection_reason"]})[:20]
+                output = visual_style_preview_path(cfg, project_id, f"{style['style_id']}-{title_role}-{token}.png")
+                if force:
+                    output.unlink(missing_ok=True)
+                if output.is_file() and output.stat().st_size > 0:
+                    item = {"file": str(output), "sha256": _file_hash(output), "cache_hit": True, "visual_style": snapshot, "source": _public_source(source), "timestamp_seconds": timestamp, "title_role": title_role, "role_label": role_label, "preview_kind": "static"}
+                else:
+                    item = render_true_frame_preview(cfg, project_id, Path(str(source["path"])), timestamp, snapshot, output, color_settings=color_settings, source_display_ratio=float((frame.get("display_geometry") or {}).get("display_ratio") or 0.0) or None, source_geometry=frame.get("display_geometry") if isinstance(frame.get("display_geometry"), Mapping) else None, title_text=role_text, title_role=title_role)
+                    item.update({"cache_hit": False, "visual_style": snapshot, "source": _public_source(source), "title_role": title_role, "role_label": role_label, "preview_kind": "static"})
+                item["preview_plan_hash"] = str(preview_plan.get("semantic_hash") or preview_plan.get("resolved_hash") or "")
+                item["technical_transform"] = dict(preview_plan.get("technical_transform") or {})
+                item["representative_frame"] = {**{key: value for key, value in frame.items() if key != "source"}, "title_role": title_role, "role_label": role_label, "preview_kind": "static"}
+                item["preview_variant_id"] = _hash({"project_id": project_id, "style": snapshot.get("semantic_hash"), "plan": item["preview_plan_hash"], "source": source.get("project_media_uuid"), "timestamp": timestamp, "role": title_role, "kind": "static", "overrides": snapshot.get("overrides"), "frame": frame.get("selection_reason")})[:32]
+                item["title_style_identity"] = _hash(snapshot.get("title_style") or {})
+                item["creative_brief_hash"] = str(brief.get("visual_contract_hash") or "")
+                item["source_media_uuid"] = str(source.get("project_media_uuid") or "")
+                item["source_fingerprint"] = dict(source.get("fingerprint") or {})
+                item["generated_at"] = _now()
+                _persist_preview_evidence(db, project_id, state, item, snapshot)
+                variants.append(item)
+                # One short animated artifact per style is enough for a human
+                # to judge the selected motion; it remains exact-plan bound.
+                if frame is representative_frames[0] and title_role == "chapter_title":
+                    animated_plan = resolve_visual_render_plan(snapshot, width=int((snapshot.get("output") or {}).get("width") or 1920), height=int((snapshot.get("output") or {}).get("height") or 1080), title_text=role_text, color_settings=color_settings, source_geometry=frame.get("display_geometry") if isinstance(frame.get("display_geometry"), Mapping) else None, title_role=title_role, title_duration_seconds=2.0)
+                    animated_token = _hash({"source": source, "timestamp": timestamp, "style": snapshot["semantic_hash"], "plan": animated_plan["semantic_hash"], "role": title_role, "kind": "animated", "overrides": snapshot.get("overrides")})[:20]
+                    animated_output = visual_style_preview_path(cfg, project_id, f"{style['style_id']}-{title_role}-{animated_token}.mp4")
+                    if force:
+                        animated_output.unlink(missing_ok=True)
+                    if animated_output.is_file() and animated_output.stat().st_size > 0:
+                        animated = {"file": str(animated_output), "sha256": _file_hash(animated_output), "cache_hit": True, "visual_style": snapshot, "source": _public_source(source), "timestamp_seconds": timestamp, "title_role": title_role, "role_label": role_label, "preview_kind": "animated", "duration_seconds": 2.0}
+                    else:
+                        animated = render_animated_title_preview(cfg, project_id, Path(str(source["path"])), timestamp, snapshot, animated_output, color_settings=color_settings, source_geometry=frame.get("display_geometry") if isinstance(frame.get("display_geometry"), Mapping) else None, title_text=role_text, title_role=title_role, duration_seconds=2.0)
+                        animated.update({"cache_hit": False, "visual_style": snapshot, "source": _public_source(source), "title_role": title_role, "role_label": role_label})
+                    animated["preview_plan_hash"] = str(animated_plan.get("semantic_hash") or animated_plan.get("resolved_hash") or "")
+                    animated["technical_transform"] = dict(animated_plan.get("technical_transform") or {})
+                    animated["representative_frame"] = {**{key: value for key, value in frame.items() if key != "source"}, "title_role": title_role, "role_label": role_label, "preview_kind": "animated", "duration_seconds": 2.0}
+                    animated["preview_variant_id"] = _hash({"project_id": project_id, "style": snapshot.get("semantic_hash"), "plan": animated["preview_plan_hash"], "source": source.get("project_media_uuid"), "timestamp": timestamp, "role": title_role, "kind": "animated", "overrides": snapshot.get("overrides")})[:32]
+                    animated["title_style_identity"] = _hash(snapshot.get("title_style") or {})
+                    animated["creative_brief_hash"] = str(brief.get("visual_contract_hash") or "")
+                    animated["source_media_uuid"] = str(source.get("project_media_uuid") or "")
+                    animated["source_fingerprint"] = dict(source.get("fingerprint") or {})
+                    animated["generated_at"] = _now()
+                    _persist_preview_evidence(db, project_id, state, animated, snapshot)
+                    variants.append(animated)
     return {"ok": True, "status": "ready", "preview_revision": int(state.get("preview_revision") or 0), "source": _public_source(representative_frames[0]["source"]), "representative_frames": [{key: value for key, value in frame.items() if key != "source"} for frame in representative_frames], "variants": variants}
 
 
@@ -884,7 +1042,7 @@ def _DEFAULT_VISUAL_STYLE_DATA() -> dict[str, dict[str, Any]]:
         "diary_natural": {"version": "1", "label": "Diary Natural", "composition": "overlay", "default_title_style_id": "diary_natural_overlay", "palette": {"text_primary": "#FFF8EE", "text_secondary": "#E8DED0", "accent": "#E1A46A", "surface_overlay": "#241B14CC", "surface_overlay_strong": "#17110DEE", "shadow": "#00000099"}, "grading": {"look_id": "diary-warm-neutral", "look_version": "1", "source_colorspace": "bt709", "brightness": 0.015, "contrast": 1.03, "saturation": 1.04}, "supported_aspects": ["landscape", "portrait"], "enabled_for_round1_ui": True, "required_capabilities": {}},
         "clean_minimal": {"version": "1", "label": "Clean Minimal", "composition": "overlay", "default_title_style_id": "clean_minimal_overlay", "palette": {"text_primary": "#FFFFFF", "text_secondary": "#E7E7E7", "accent": "#9ED8FF", "surface_overlay": "#111111B8", "surface_overlay_strong": "#111111DD", "shadow": "#00000080"}, "grading": {"look_id": "clean-neutral", "look_version": "1", "source_colorspace": "bt709", "brightness": 0.0, "contrast": 1.0, "saturation": 0.96}, "supported_aspects": ["landscape", "portrait"], "enabled_for_round1_ui": True, "required_capabilities": {}},
         "cinematic": {"version": "1", "label": "Cinematic", "composition": "overlay", "default_title_style_id": "cinematic_overlay", "palette": {"text_primary": "#FFF7DD", "text_secondary": "#E0D4B8", "accent": "#D6A85C", "surface_overlay": "#0B1820C7", "surface_overlay_strong": "#071016E6", "shadow": "#000000AA"}, "grading": {"look_id": "cinematic-teal-gold", "look_version": "1", "source_colorspace": "bt709", "brightness": -0.015, "contrast": 1.08, "saturation": 1.08}, "supported_aspects": ["landscape", "portrait"], "enabled_for_round1_ui": True, "required_capabilities": {}},
-        "standalone_card_compare": {"version": "1", "label": "Standalone Card Compare", "composition": "standalone", "default_title_style_id": "standalone_card", "palette": {"text_primary": "#FFF8EE", "text_secondary": "#D9D9D9", "accent": "#E1A46A", "surface_overlay": "#20242AFF", "surface_overlay_strong": "#20242AFF", "shadow": "#000000AA"}, "grading": {"look_id": "card-neutral", "look_version": "1", "source_colorspace": "bt709", "brightness": 0.0, "contrast": 1.0, "saturation": 1.0}, "supported_aspects": ["landscape", "portrait"], "enabled_for_round1_ui": False, "required_capabilities": {}},
+        "standalone_card_compare": {"version": "1", "label": "Standalone Card Compare", "composition": "standalone", "default_title_style_id": "standalone_card", "palette": {"text_primary": "#FFF8EE", "text_secondary": "#D9D9D9", "accent": "#E1A46A", "surface_overlay": "#20242AFF", "surface_overlay_strong": "#20242AFF", "shadow": "#000000AA"}, "grading": {"look_id": "card-neutral", "look_version": "1", "source_colorspace": "bt709", "brightness": 0.0, "contrast": 1.0, "saturation": 1.0}, "supported_aspects": ["landscape", "portrait"], "enabled_for_round1_ui": True, "required_capabilities": {}},
         "test_soft_panel": {"version": "1", "label": "Test Soft Panel", "composition": "overlay", "default_title_style_id": "test_soft_panel", "palette": {"text_primary": "#FFFFFF", "text_secondary": "#E8F4FF", "accent": "#7BDFF2", "surface_overlay": "#153047CC", "surface_overlay_strong": "#102033E6", "shadow": "#00000088"}, "grading": {"look_id": "test-soft-panel", "look_version": "1", "source_colorspace": "bt709", "brightness": 0.02, "contrast": 1.01, "saturation": 1.02}, "supported_aspects": ["landscape", "portrait"], "enabled_for_round1_ui": False, "required_capabilities": {}}
     }
 
@@ -1032,17 +1190,147 @@ def _file_hash(path: Path) -> str:
 
 
 def _system_font_path(fallback_chain: Any = None, weight: int = 500) -> Path | None:
-    """Resolve only installed system fonts; never download or bundle assets."""
-    candidates: list[Path] = []
+    return _resolve_font(fallback_chain, weight)["path"]
+
+
+def _resolve_font(fallback_chain: Any = None, weight: int = 500) -> dict[str, Any]:
+    """Resolve the declared family/fallback contract to installed files only."""
     windows_fonts = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+    family_names = [str(value).strip() for value in (fallback_chain if isinstance(fallback_chain, (list, tuple)) else [fallback_chain]) if str(value or "").strip()]
+    if not family_names:
+        family_names = ["system-sans"]
+    candidates: list[tuple[str, Path]] = []
+    file_map = {
+        "system-sans": [("Segoe UI", windows_fonts / "segoeui.ttf"), ("Arial", windows_fonts / "arial.ttf"), ("DejaVu Sans", Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"))],
+        "noto sans cjk tc": [("Noto Sans CJK TC", Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")), ("Noto Sans CJK TC", Path("/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf"))],
+        "noto sans cjk jp": [("Noto Sans CJK JP", Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"))],
+        "segoe ui": [("Segoe UI", windows_fonts / ("segoeuib.ttf" if int(weight or 500) >= 600 else "segoeui.ttf"))],
+        "arial": [("Arial", windows_fonts / ("arialbd.ttf" if int(weight or 500) >= 600 else "arial.ttf"))],
+        "sans-serif": [("DejaVu Sans", Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"))],
+    }
+    for family in family_names:
+        normalized = family.casefold()
+        if normalized == "system-sans":
+            candidates.extend(file_map["system-sans"])
+        elif normalized in file_map:
+            candidates.extend(file_map[normalized])
+        elif normalized == "noto sans cjk tc":
+            candidates.extend(file_map["noto sans cjk tc"])
+    # Traditional Chinese Windows faces are a deterministic family fallback,
+    # but remain installed-only and are never downloaded or bundled.
     if int(weight or 500) >= 600:
-        candidates.extend([windows_fonts / "msyhbd.ttc", windows_fonts / "segoeuib.ttf", windows_fonts / "arialbd.ttf"])
-    candidates.extend([windows_fonts / "msyh.ttc", windows_fonts / "msjh.ttc", windows_fonts / "segoeui.ttf", windows_fonts / "arial.ttf"])
-    candidates.extend([Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"), Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")])
-    for path in candidates:
+        candidates.extend([("Microsoft JhengHei", windows_fonts / "msjhbd.ttc"), ("Microsoft YaHei", windows_fonts / "msyhbd.ttc")])
+    candidates.extend([("Microsoft JhengHei", windows_fonts / "msjh.ttc"), ("Microsoft YaHei", windows_fonts / "msyh.ttc")])
+    seen: set[str] = set()
+    for index, (resolved_family, path) in enumerate(candidates):
+        if str(path) in seen:
+            continue
+        seen.add(str(path))
         if path.is_file():
-            return path
-    return None
+            return {"path": path, "resolved_family": resolved_family, "resolved_weight": int(weight or 500), "fallback_index": index, "reason": "preferred_installed" if index == 0 else "fallback_installed", "sha256": _file_hash(path)}
+    return {"path": None, "resolved_family": "unresolved", "resolved_weight": int(weight or 500), "fallback_index": -1, "reason": "no_allowed_installed_font", "sha256": ""}
+
+
+def _deep_merge(parent: Mapping[str, Any], child: Mapping[str, Any]) -> dict[str, Any]:
+    result = deepcopy(dict(parent))
+    for key, value in child.items():
+        if isinstance(result.get(key), Mapping) and isinstance(value, Mapping):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = deepcopy(value)
+    return result
+
+
+def _semantic_hash(snapshot: Mapping[str, Any]) -> str:
+    return _hash({key: value for key, value in snapshot.items() if key not in {"resolved_hash", "semantic_hash", *_APPROVAL_FIELDS}})
+
+
+def _normalize_visual_overrides(overrides: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not overrides:
+        return {}
+    raw = dict(overrides)
+    allowed = {"title_style_id", "title_style_version", "title_role", "font_family", "fallback_chain", "weight", "size_preset", "palette_variant", "accent_token", "composition", "anchor", "readability", "motion"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise VisualStyleError("visual_override_unknown", "unknown visual override: " + ", ".join(unknown))
+    result = {key: deepcopy(value) for key, value in raw.items()}
+    if "weight" in result and int(result["weight"]) not in TITLE_WEIGHT_VALUES:
+        raise VisualStyleError("visual_override_invalid", "unsupported title weight")
+    if "size_preset" in result and str(result["size_preset"]) not in TITLE_SIZE_PRESETS:
+        raise VisualStyleError("visual_override_invalid", "unsupported title size preset")
+    if "anchor" in result and str(result["anchor"]) not in TITLE_ANCHORS:
+        raise VisualStyleError("title_anchor_unsupported", f"unsupported title anchor: {result['anchor']}")
+    if "font_family" in result and str(result["font_family"]) not in TITLE_FONT_FAMILIES:
+        raise VisualStyleError("visual_override_invalid", "unsupported title font family")
+    if "composition" in result and str(result["composition"]) not in {"overlay", "standalone"}:
+        raise VisualStyleError("visual_override_invalid", "unsupported composition")
+    if "motion" in result:
+        motion = dict(result["motion"] or {})
+        if str(motion.get("preset") or "none") not in TITLE_MOTION_PRESETS:
+            raise VisualStyleError("title_motion_unsupported", "unsupported title motion preset")
+        if str(motion.get("easing") or "ease-out") not in {"linear", "ease-out"}:
+            raise VisualStyleError("title_easing_unsupported", "unsupported title easing")
+        result["motion"] = motion
+    if "readability" in result:
+        readability = dict(result["readability"] or {})
+        if str(readability.get("surface") or "translucent") not in {"none", "translucent", "solid"}:
+            raise VisualStyleError("visual_override_invalid", "unsupported readability surface")
+        result["readability"] = readability
+    return result
+
+
+def _apply_title_overrides(title: Mapping[str, Any], overrides: Mapping[str, Any], aspect: str) -> dict[str, Any]:
+    result = deepcopy(dict(title))
+    if "font_family" in overrides:
+        result["font_family"] = str(overrides["font_family"])
+    if "fallback_chain" in overrides:
+        chain = overrides["fallback_chain"]
+        if not isinstance(chain, list) or not chain or len(chain) > 5 or not all(isinstance(item, str) and item.strip() for item in chain):
+            raise VisualStyleError("visual_override_invalid", "fallback_chain must be 1-5 non-empty family names")
+        result["fallback_chain"] = list(chain)
+    if "weight" in overrides:
+        result["weight"] = int(overrides["weight"])
+    if "readability" in overrides:
+        result["readability"] = _deep_merge(result.get("readability") or {}, overrides["readability"])
+    if "motion" in overrides:
+        result["motion"] = _deep_merge(result.get("motion") or {}, overrides["motion"])
+    if "anchor" in overrides:
+        responsive = deepcopy(result.get("responsive") or {})
+        current = dict(responsive.get(aspect) or responsive.get("landscape") or responsive)
+        current["anchor"] = str(overrides["anchor"])
+        if aspect in {"landscape", "portrait"}:
+            responsive[aspect] = current
+        else:
+            responsive = current
+        result["responsive"] = responsive
+    if "size_preset" in overrides:
+        scale = TITLE_SIZE_PRESETS[str(overrides["size_preset"])]
+        responsive = deepcopy(result.get("responsive") or {})
+        if "anchor" in responsive:
+            responsive["size_ratio"] = float(responsive.get("size_ratio") or 0.05) * scale
+        else:
+            for key, value in responsive.items():
+                if isinstance(value, Mapping):
+                    value["size_ratio"] = float(value.get("size_ratio") or 0.05) * scale
+        result["responsive"] = responsive
+    return result
+
+
+def _apply_palette_override(palette: Mapping[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
+    result = deepcopy(dict(palette))
+    variant = str(overrides.get("palette_variant") or "default")
+    if variant == "high_contrast":
+        result.update({"text_primary": "#FFFFFF", "text_secondary": "#FFFFFF", "shadow": "#000000CC", "surface_overlay": "#000000CC"})
+    elif variant not in {"default", "muted"}:
+        raise VisualStyleError("visual_override_invalid", "unsupported palette variant")
+    if variant == "muted":
+        result["accent"] = "#C7C7C7"
+    accent_token = str(overrides.get("accent_token") or "")
+    if accent_token:
+        if accent_token not in result:
+            raise VisualStyleError("visual_override_invalid", "unknown accent token")
+        result["accent"] = result[accent_token]
+    return result
 
 
 def _escape_filter_path(path: Path | None) -> str:
@@ -1060,5 +1348,5 @@ def _now() -> str:
 
 
 __all__ = [
-    "TITLE_STYLES", "TITLE_STYLE_REGISTRY_VERSION", "TITLE_STYLE_SCHEMA_VERSION", "VISUAL_STYLES", "VISUAL_STYLE_REGISTRY_VERSION", "VISUAL_STYLE_SCHEMA_VERSION", "VISUAL_RENDER_CONTRACT_VERSION", "VisualStyleError", "build_preview_filter", "ensure_visual_style_state", "load_visual_style_state", "materialize_visual_graph", "materialize_visual_style", "preview_visual_styles", "render_true_frame_preview", "resolve_visual_render_plan", "save_visual_style_approval", "validate_materialized_visual_style", "visual_style_api_payload", "visual_style_options", "visual_style_preview_path",
+    "TITLE_ANCHORS", "TITLE_MOTION_PRESETS", "TITLE_STYLES", "TITLE_STYLE_REGISTRY_VERSION", "TITLE_STYLE_SCHEMA_VERSION", "VISUAL_STYLES", "VISUAL_STYLE_REGISTRY_VERSION", "VISUAL_STYLE_SCHEMA_VERSION", "VISUAL_RENDER_CONTRACT_VERSION", "VisualStyleError", "build_preview_filter", "ensure_visual_style_state", "load_visual_style_state", "materialize_visual_graph", "materialize_visual_style", "preview_visual_styles", "render_animated_title_preview", "render_true_frame_preview", "resolve_visual_render_plan", "save_visual_style_approval", "validate_materialized_visual_style", "visual_style_api_payload", "visual_style_options", "visual_style_preview_path",
 ]

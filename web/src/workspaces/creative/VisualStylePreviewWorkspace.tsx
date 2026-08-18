@@ -14,19 +14,26 @@ export function VisualStylePreviewWorkspace({ detail, setMessage, refreshProject
   const [selected, setSelected] = useState(String((state.approved?.visual_style_id as string) || "diary_natural"));
   const [selectedPreviewPlanHash, setSelectedPreviewPlanHash] = useState("");
   const [selectedPreviewVariantId, setSelectedPreviewVariantId] = useState("");
+  const [selectedTitleRole, setSelectedTitleRole] = useState("chapter_title");
+  const [overrides, setOverrides] = useState<Record<string, unknown>>({});
   const [busy, setBusy] = useState(false);
   const approvedBrief = detail.creative_brief?.status === "approved";
+
+  function invalidatePreview() { setSelectedPreviewPlanHash(""); setSelectedPreviewVariantId(""); }
+  function patchOverride(key: string, value: unknown) { setOverrides((old) => ({ ...old, [key]: value })); invalidatePreview(); }
+  function patchNestedOverride(key: string, value: Record<string, unknown>) { setOverrides((old) => ({ ...old, [key]: { ...(old[key] as Record<string, unknown> || {}), ...value } })); invalidatePreview(); }
 
   async function preview() {
     setBusy(true);
     try {
-      const result = await api.previewVisualStyles(detail.project.id, false);
+      const result = await api.previewVisualStyles(detail.project.id, false, overrides);
       if (!result.ok) { setMessage(result.error || "Creative Brief 尚未核准，不能產生 authoritative visual preview。"); return; }
       const nextVariants = result.variants || [];
       setVariants(nextVariants);
       const first = nextVariants.find((item) => String((item.visual_style as Record<string, unknown> | undefined)?.visual_style_id || "") === selected);
       setSelectedPreviewPlanHash(String(first?.preview_plan_hash || ""));
       setSelectedPreviewVariantId(String(first?.preview_variant_id || ""));
+      setSelectedTitleRole(String(first?.title_role || "chapter_title"));
     } catch (error) { setMessage(`Visual Style preview 失敗：${formatApiError(error)}`); }
     finally { setBusy(false); }
   }
@@ -36,7 +43,7 @@ export function VisualStylePreviewWorkspace({ detail, setMessage, refreshProject
     if (!mutation) return;
     setBusy(true);
     try {
-      const result = await api.approveVisualStyle(detail.project.id, selected, detail.project_revision, selectedPreviewPlanHash, selectedPreviewVariantId);
+      const result = await api.approveVisualStyle(detail.project.id, selected, detail.project_revision, selectedPreviewPlanHash, selectedPreviewVariantId, selectedTitleRole, overrides);
       if (!result.ok) throw new Error(result.error || "Visual Style 核准失敗");
       await refreshProject({ forceFresh: true });
       setMessage("Visual Style 已保存為 resolved approved snapshot；Render 將使用同一份語意 contract。");
@@ -47,7 +54,17 @@ export function VisualStylePreviewWorkspace({ detail, setMessage, refreshProject
   return <section className="visual-style-preview card" aria-label="Visual Style Preview">
     <div className="visual-style-heading"><div><span className="eyebrow">VISUAL STYLE PREVIEW</span><h3>先用真實畫面確認字幕與視覺方向</h3><p>預覽使用 approved Creative Brief、真實 source frame 與可稽核的 grading/framing contract；不會修改素材。</p></div><span className={approvedBrief ? "brief-status approved" : "brief-status"}>{approvedBrief ? "可產生正式預覽" : "先核准 Creative Brief"}</span></div>
     {!approvedBrief && <div className="visual-style-blocked">目前只顯示 AI 建議：{String((state.recommendation?.label as string) || "Diary Natural")}。Creative Brief 仍是 needs_confirmation，不能自動核准或產生 authoritative Coffee preview。</div>}
-    <div className="visual-style-actions"><button type="button" disabled={!approvedBrief || busy} onClick={() => void preview()}>{busy ? "處理中…" : "產生真實畫面預覽"}</button>{approvedBrief && <><select value={selected} disabled={busy} onChange={(event) => { setSelected(event.target.value); const match = variants.find((item) => String((item.visual_style as Record<string, unknown> | undefined)?.visual_style_id || "") === event.target.value); setSelectedPreviewPlanHash(String(match?.preview_plan_hash || "")); setSelectedPreviewVariantId(String(match?.preview_variant_id || "")); }}>{styles.map((style) => <option key={String(style.style_id)} value={String(style.style_id)}>{String(style.label || style.style_id)}</option>)}</select><button type="button" className="primary" disabled={busy || !selected || !selectedPreviewPlanHash || !selectedPreviewVariantId} onClick={() => void approve()}>核准選定 Visual Style</button></>}</div>
-    {variants.length > 0 && <div className="visual-style-grid">{variants.map((variant, index) => { const style = (variant.visual_style || {}) as Record<string, unknown>; const source = (variant.source || {}) as Record<string, unknown>; const frame = (variant.representative_frame || {}) as Record<string, unknown>; return <article key={`${String(style.visual_style_id)}-${String(frame.selection_reason || "frame")}-${String(variant.timestamp_seconds || index)}`} onClick={() => { setSelected(String(style.visual_style_id || selected)); setSelectedPreviewPlanHash(String(variant.preview_plan_hash || "")); setSelectedPreviewVariantId(String(variant.preview_variant_id || "")); }}><img src={String(variant.url || "")} alt={`${String(style.label || style.visual_style_id)} ${String(frame.selection_reason || "representative")} frame preview`} /><h4>{String(style.label || style.visual_style_id)}</h4><p>{String(style.composition || "overlay")} · grading {String((style.grading as Record<string, unknown>)?.look_id || "unknown")} · source {String(source.project_media_uuid || "")} · {String(frame.selection_reason || "representative")}</p><code>{String(variant.preview_plan_hash || style.resolved_hash || "").slice(0, 16)}</code></article>; })}</div>}
+    <div className="visual-style-actions"><button type="button" disabled={!approvedBrief || busy} onClick={() => void preview()}>{busy ? "處理中…" : "產生真實畫面預覽"}</button>{approvedBrief && <><select value={selected} disabled={busy} onChange={(event) => { setSelected(event.target.value); const match = variants.find((item) => String((item.visual_style as Record<string, unknown> | undefined)?.visual_style_id || "") === event.target.value); setSelectedPreviewPlanHash(String(match?.preview_plan_hash || "")); setSelectedPreviewVariantId(String(match?.preview_variant_id || "")); setSelectedTitleRole(String(match?.title_role || "chapter_title")); }}>{styles.map((style) => <option key={String(style.style_id)} value={String(style.style_id)}>{String(style.label || style.style_id)}</option>)}</select><button type="button" className="primary" disabled={busy || !selected || !selectedPreviewPlanHash || !selectedPreviewVariantId} onClick={() => void approve()}>核准選定 Visual Style</button></>}</div>
+    {approvedBrief && <div className="visual-style-overrides" aria-label="bounded visual style overrides">
+      <label>字型<select value={String(overrides.font_family || "system-sans")} disabled={busy} onChange={(event) => patchOverride("font_family", event.target.value)}><option value="system-sans">System Sans</option><option value="Noto Sans CJK TC">Noto Sans CJK TC</option><option value="Segoe UI">Segoe UI</option><option value="Arial">Arial</option></select></label>
+      <label>字重<select value={String(overrides.weight || 600)} disabled={busy} onChange={(event) => patchOverride("weight", Number(event.target.value))}><option value="400">400</option><option value="500">500</option><option value="600">600</option><option value="700">700</option></select></label>
+      <label>尺寸<select value={String(overrides.size_preset || "normal")} disabled={busy} onChange={(event) => patchOverride("size_preset", event.target.value)}><option value="small">小</option><option value="normal">標準</option><option value="large">大</option></select></label>
+      <label>位置<select value={String(overrides.anchor || "bottom-left")} disabled={busy} onChange={(event) => patchOverride("anchor", event.target.value)}><option value="top-left">左上</option><option value="top-center">上中</option><option value="top-right">右上</option><option value="center">中央</option><option value="bottom-left">左下</option><option value="bottom-center">下中</option><option value="bottom-right">右下</option></select></label>
+      <label>組成<select value={String(overrides.composition || "overlay")} disabled={busy} onChange={(event) => patchOverride("composition", event.target.value)}><option value="overlay">Overlay</option><option value="standalone">Standalone</option></select></label>
+      <label>可讀性<select value={String((overrides.readability as Record<string, unknown> | undefined)?.surface || "translucent")} disabled={busy} onChange={(event) => patchNestedOverride("readability", { surface: event.target.value })}><option value="none">無表面</option><option value="translucent">半透明</option><option value="solid">實色</option></select></label>
+      <label>動畫<select value={String((overrides.motion as Record<string, unknown> | undefined)?.preset || "fade")} disabled={busy} onChange={(event) => patchNestedOverride("motion", { preset: event.target.value })}><option value="none">None</option><option value="fade">Fade</option><option value="fade_rise">Fade rise</option><option value="slide_fade">Slide fade</option></select></label>
+      <button type="button" disabled={!approvedBrief || busy} onClick={() => void preview()}>以這組設定重新預覽</button>
+    </div>}
+    {variants.length > 0 && <div className="visual-style-grid">{variants.map((variant, index) => { const style = (variant.visual_style || {}) as Record<string, unknown>; const source = (variant.source || {}) as Record<string, unknown>; const frame = (variant.representative_frame || {}) as Record<string, unknown>; const animated = String(variant.preview_kind || frame.preview_kind || "static") === "animated"; return <article key={`${String(variant.preview_variant_id || style.visual_style_id)}-${String(frame.title_role || "chapter_title")}-${String(variant.timestamp_seconds || index)}-${String(variant.preview_kind || "static")}`} onClick={() => { setSelected(String(style.visual_style_id || selected)); setSelectedPreviewPlanHash(String(variant.preview_plan_hash || "")); setSelectedPreviewVariantId(String(variant.preview_variant_id || "")); setSelectedTitleRole(String(variant.title_role || frame.title_role || "chapter_title")); }}><div className="visual-style-preview-media">{animated ? <video src={String(variant.url || "")} controls muted loop playsInline /> : <img src={String(variant.url || "")} alt={`${String(style.label || style.visual_style_id)} ${String(frame.role_label || frame.selection_reason || "representative")} frame preview`} />}</div><h4>{String(style.label || style.visual_style_id)} · {String(variant.role_label || frame.role_label || "Chapter")}{animated ? " · 動畫" : ""}</h4><p>{String(style.composition || "overlay")} · grading {String((style.grading as Record<string, unknown>)?.look_id || "unknown")} · source {String(source.project_media_uuid || "")} · {String(frame.selection_reason || "representative")}</p><code>{String(variant.preview_plan_hash || style.semantic_hash || style.resolved_hash || "").slice(0, 16)}</code></article>; })}</div>}
   </section>;
 }

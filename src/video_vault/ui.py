@@ -1038,7 +1038,7 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif path == "/api/project/visual-style/preview":
                 try:
                     project_id = int(data.get("project_id", 0))
-                    result = preview_visual_styles(cfg, db, project_id, force=bool(data.get("force")))
+                    result = preview_visual_styles(cfg, db, project_id, force=bool(data.get("force")), overrides=data.get("overrides") if isinstance(data.get("overrides"), dict) else None)
                     for variant in result.get("variants", []):
                         filename = Path(str(variant.get("file") or "")).name
                         variant["file"] = filename
@@ -1054,6 +1054,8 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
                     payload = data.get("visual_style") if isinstance(data.get("visual_style"), dict) else data
                     result = save_visual_style_approval(cfg, db, project_id, payload, base_revision=_base_revision(data))
                     self._json({"ok": True, "visual_style": visual_style_api_payload(result), "project_revision": current_revision(db, project_id)})
+                except ProjectRevisionConflict:
+                    raise
                 except (OSError, TypeError, ValueError, VisualStyleError) as exc:
                     self._json({"ok": False, "code": getattr(exc, "code", "invalid_visual_style"), "error": str(exc)})
             elif path == "/api/creator-profile":

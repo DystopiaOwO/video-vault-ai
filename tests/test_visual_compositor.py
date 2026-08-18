@@ -115,6 +115,7 @@ def _approved_overlay_style(composition: str = "overlay"):
     }
     snapshot = materialize_visual_style("diary_natural", brief)
     snapshot["composition"] = composition
+    snapshot.pop("semantic_hash", None)
     snapshot["resolved_hash"] = __import__("hashlib").sha256(__import__("json").dumps({key: value for key, value in snapshot.items() if key != "resolved_hash"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return snapshot
 
