@@ -76,6 +76,7 @@ def resolve_visual_timeline(
     profile: Mapping[str, Any],
     *,
     require_assets: bool = True,
+    chapter_composition: str | None = None,
 ) -> dict[str, Any]:
     """Resolve insertion points and final duration from one approved contract."""
 
@@ -108,11 +109,19 @@ def resolve_visual_timeline(
         )
     ]
 
+    approved_style = timeline.get("approved_visual_style") if isinstance(timeline.get("approved_visual_style"), Mapping) else {}
+    composition = str(chapter_composition or approved_style.get("composition") or timeline.get("chapter_treatment") or "standalone")
+    if composition not in {"overlay", "standalone"}:
+        raise VisualCompositionError("chapter_composition_unknown", f"unsupported chapter composition: {composition}", action="重新核准 Visual Style")
     normalized: list[dict[str, Any]] = []
     for index, item in enumerate(items, 1):
-        normalized.append(_normalize_visual_item(item, index, segment_base_starts, group_base_starts, base_duration, profile, require_assets=require_assets))
-    insertions = [item for item in normalized if item["type"] in {"intro", "outro", "chapter_card"}]
-    overlays = [item for item in normalized if item["type"] == "lower_third"]
+        resolved_item = _normalize_visual_item(item, index, segment_base_starts, group_base_starts, base_duration, profile, require_assets=require_assets)
+        if resolved_item["type"] == "chapter_card":
+            resolved_item["composition"] = composition
+            resolved_item["title_role"] = "chapter_title"
+        normalized.append(resolved_item)
+    insertions = [item for item in normalized if item["type"] in {"intro", "outro"} or (item["type"] == "chapter_card" and composition == "standalone")]
+    overlays = [item for item in normalized if item["type"] == "lower_third" or (item["type"] == "chapter_card" and composition == "overlay")]
     for item in insertions:
         start = float(item["start_seconds"])
         if not any(abs(start - boundary) <= 0.001 for boundary, _ in boundaries):
@@ -146,7 +155,19 @@ def resolve_visual_timeline(
         final_cursor += float(item["duration_seconds"])
         insertion_index += 1
     for item in overlays:
-        if item.get("segment_id"):
+        if item.get("type") == "chapter_card":
+            group_id = str(item.get("group_id") or "")
+            target_segment = next((segment for segment in base_segments if str(segment.get("group_id") or segment.get("group") or "") == group_id), None)
+            if target_segment is None:
+                raise VisualCompositionError("visual_segment_missing", f"chapter overlay 找不到 group：{group_id}", action="重新產生 visual timeline")
+            target_id = str(target_segment.get("segment_id") or "")
+            segment_start = next((entry["start_seconds"] for entry in sequence if entry["kind"] == "segment" and entry["stable_id"] == target_id), None)
+            if segment_start is None:
+                raise VisualCompositionError("visual_segment_missing", f"chapter overlay 找不到 segment：{target_id}", action="重新產生 visual timeline")
+            item["overlay_segment_id"] = target_id
+            item["resolved_start_seconds"] = round(float(segment_start), 6)
+            item["duration_seconds"] = round(min(float(item["duration_seconds"]), sum(float(segment.get("timeline_duration_seconds") or 0) for segment in base_segments if str(segment.get("group_id") or segment.get("group") or "") == group_id)), 6)
+        elif item.get("segment_id"):
             segment_start = next((entry["start_seconds"] for entry in sequence if entry["kind"] == "segment" and entry["stable_id"] == item["segment_id"]), None)
             if segment_start is None:
                 raise VisualCompositionError("visual_segment_missing", f"lower third 找不到 segment：{item['segment_id']}", action="重新產生 visual timeline")
@@ -170,6 +191,7 @@ def resolve_visual_timeline(
         "resolved_items": resolved_items,
         "sequence": sequence,
         "resolved_duration_seconds": round(final_cursor, 6),
+        "chapter_treatment": composition,
     }
     resolved["resolution_hash"] = stable_visual_hash(resolved)
     return resolved
@@ -272,25 +294,38 @@ def render_visual_cards(
             "visual_render_plan_hash": str((visual_plan or {}).get("resolved_hash") or ""),
             "visual_render_execution_mode": str((visual_plan or {}).get("execution_mode") or ""),
         })
-    overlays = [dict(item) for item in timeline.get("resolved_items") or [] if item.get("type") == "lower_third"]
-    evidence.extend({
-        "stable_id": item["stable_id"],
-        "type": item["type"],
-        "resolved_start_seconds": item["resolved_start_seconds"],
-        "duration_seconds": item["duration_seconds"],
-        "style_id": item["style_id"],
-        "style_version": item["style_version"],
-        "animation_id": item["animation_id"],
-        "font_path": item["font_path"],
-        "font_sha256": item["font_sha256"],
-        "cache_key": visual_cache_key(item, profile, str(timeline.get("visual_style_hash") or ""), str((resolve_visual_render_plan(approved_visual_style, width=int(profile["width"]), height=int(profile["height"]), title_text=str(item.get("text") or ""), title_role="lower_third", title_duration_seconds=float(item.get("duration_seconds") or 0.0) or None) if approved_visual_style else {}).get("resolved_hash") or "")),
-        "cache_hit": False,
-        "cache_miss_reason": "overlay_applied",
-        "asset_fingerprints": item.get("asset_fingerprints", []),
-        "composition": "overlay",
-        "visual_style_hash": str(timeline.get("visual_style_hash") or ""),
-        "visual_render_plan_hash": str((resolve_visual_render_plan(approved_visual_style, width=int(profile["width"]), height=int(profile["height"]), title_text=str(item.get("text") or "")) if approved_visual_style else {}).get("resolved_hash") or ""),
-    } for item in overlays)
+    overlays = [dict(item) for item in timeline.get("resolved_items") or [] if item.get("type") == "lower_third" or (item.get("type") == "chapter_card" and str(item.get("composition") or "") == "overlay")]
+    overlay_evidence: list[dict[str, Any]] = []
+    for item in overlays:
+        role = str(item.get("title_role") or ("chapter_title" if item.get("type") == "chapter_card" else "lower_third"))
+        visual_plan = resolve_visual_render_plan(
+            approved_visual_style,
+            width=int(profile["width"]),
+            height=int(profile["height"]),
+            title_text=str(item.get("text") or ""),
+            title_role=role,
+            title_duration_seconds=float(item.get("duration_seconds") or 0.0) or None,
+        ) if approved_visual_style else None
+        overlay_evidence.append({
+            "stable_id": item["stable_id"],
+            "type": item["type"],
+            "resolved_start_seconds": item["resolved_start_seconds"],
+            "duration_seconds": item["duration_seconds"],
+            "style_id": item["style_id"],
+            "style_version": item["style_version"],
+            "animation_id": item["animation_id"],
+            "font_path": item["font_path"],
+            "font_sha256": item["font_sha256"],
+            "cache_key": visual_cache_key(item, profile, str(timeline.get("visual_style_hash") or ""), str((visual_plan or {}).get("resolved_hash") or "")),
+            "cache_hit": False,
+            "cache_miss_reason": "overlay_applied",
+            "asset_fingerprints": item.get("asset_fingerprints", []),
+            "composition": "overlay",
+            "title_role": role,
+            "visual_style_hash": str(timeline.get("visual_style_hash") or ""),
+            "visual_render_plan_hash": str((visual_plan or {}).get("resolved_hash") or ""),
+        })
+    evidence.extend(overlay_evidence)
     return paths, evidence, overlays
 
 
@@ -316,7 +351,8 @@ def apply_lower_thirds(
         style = STYLE_CONTRACTS[str(item["style_id"])]
         enable = f"between(t\\,{float(item['resolved_start_seconds']):.6f}\\,{float(item['resolved_start_seconds']) + float(item['duration_seconds']):.6f})"
         if visual_style_snapshot:
-            plan = resolve_visual_render_plan(visual_style_snapshot, width=int(profile["width"]), height=int(profile["height"]), title_text=str(item.get("text") or ""), title_enable=enable, title_role="lower_third", title_duration_seconds=float(item.get("duration_seconds") or 0.0) or None)
+            role = str(item.get("title_role") or ("chapter_title" if item.get("type") == "chapter_card" else "lower_third"))
+            plan = resolve_visual_render_plan(visual_style_snapshot, width=int(profile["width"]), height=int(profile["height"]), title_text=str(item.get("text") or ""), title_enable=enable, title_role=role, title_duration_seconds=float(item.get("duration_seconds") or 0.0) or None)
             filters.append(str((plan.get("title") or {}).get("filter") or ""))
         else:
             filters.append(_drawtext(item, style, textfile, enable))
@@ -414,12 +450,21 @@ def _render_card(ffmpeg_path: str, item: Mapping[str, Any], output: Path, work_d
     output.parent.mkdir(parents=True, exist_ok=True)
     textfile = _write_filter_text(str(item.get("text") or ""), "vv-visual-card-")
     style = STYLE_CONTRACTS[str(item["style_id"])]
+    duration = float(item["duration_seconds"])
     if visual_style_snapshot:
-        plan = resolve_visual_render_plan(visual_style_snapshot, width=int(profile["width"]), height=int(profile["height"]), title_text=str(item.get("text") or ""), title_role="chapter_title", title_duration_seconds=duration)
+        target_orientation = str((visual_style_snapshot.get("output") or {}).get("orientation") or "landscape")
+        plan = resolve_visual_render_plan(
+            visual_style_snapshot,
+            width=int(profile["width"]),
+            height=int(profile["height"]),
+            title_text=str(item.get("text") or ""),
+            title_role="chapter_title",
+            title_duration_seconds=duration,
+            source_geometry={"display_ratio": int(profile["width"]) / max(1, int(profile["height"])), "source_orientation": target_orientation, "sample_aspect_ratio": "1:1"},
+        )
         drawtext = str((plan.get("title") or {}).get("filter") or "")
     else:
         drawtext = _drawtext(item, style, textfile, "1")
-    duration = float(item["duration_seconds"])
     video_filter = f"[0:v]{_setparams_filter(profile)},{drawtext}"
     if str(item.get("animation_id") or "static") == "fade-in-out":
         fade = min(0.2, duration / 2.0)

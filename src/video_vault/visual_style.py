@@ -16,6 +16,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import os
+import unicodedata
 from typing import Any, Mapping
 
 from .creative_brief import approved_creative_brief
@@ -314,13 +315,22 @@ def save_visual_style_approval(cfg: Mapping[str, Any], db: Path, project_id: int
     from .color_consistency import effective_color_settings, load_project_color_state
     project_color = effective_color_settings(load_project_color_state(dict(cfg), project_id))
     snapshot = materialize_visual_style(style_id, brief, style_version=payload.get("visual_style_version"), title_style_id=payload.get("title_style_id"), title_style_version=payload.get("title_style_version"), title_role=str(payload.get("title_role") or "chapter_title"), color_settings=project_color)
+    preview_variant_id = str(payload.get("preview_variant_id") or "").strip()
     preview_plan_hash = str(payload.get("preview_plan_hash") or "").strip()
-    if preview_plan_hash:
-        snapshot["approved_preview_plan_hash"] = preview_plan_hash
-        snapshot["resolved_hash"] = _hash({key: value for key, value in snapshot.items() if key != "resolved_hash"})
     current = load_visual_style_state(db, project_id)
-    if not preview_plan_hash:
-        raise VisualStyleError("visual_style_preview_required", "必須先產生並選取目前 resolved visual preview，才能核准 Visual Style")
+    if not preview_variant_id or not preview_plan_hash:
+        raise VisualStyleError("visual_style_preview_required", "必須選取目前真實 preview variant，不能只提交任意 hash")
+    evidence = _load_preview_evidence(db, project_id, preview_variant_id)
+    _validate_preview_evidence(cfg, db, project_id, evidence, snapshot, brief, project_color, preview_plan_hash)
+    snapshot["approved_preview_variant_id"] = preview_variant_id
+    snapshot["approved_preview_plan_hash"] = preview_plan_hash
+    snapshot["approved_preview_evidence_identity"] = {
+        "preview_variant_id": preview_variant_id,
+        "preview_image_sha256": str(evidence["preview_image_sha256"]),
+        "source_media_uuid": str(evidence["source_media_uuid"]),
+        "generated_at": str(evidence["generated_at"]),
+    }
+    snapshot["resolved_hash"] = _hash({key: value for key, value in snapshot.items() if key != "resolved_hash"})
     preview_revision = int(current.get("preview_revision") or 0) + 1
     source = _source_provenance(db, project_id)
     with connect(db) as con:
@@ -331,10 +341,78 @@ def save_visual_style_approval(cfg: Mapping[str, Any], db: Path, project_id: int
     return load_visual_style_state(db, project_id)
 
 
+def _load_preview_evidence(db: Path, project_id: int, preview_variant_id: str) -> dict[str, Any]:
+    init_db(db)
+    with connect(db) as con:
+        row = con.execute("select * from visual_style_preview_evidence where project_id=? and preview_variant_id=?", (int(project_id), preview_variant_id)).fetchone()
+    if not row:
+        raise VisualStyleError("visual_style_preview_stale", "preview variant 不存在或不屬於此 project")
+    result = dict(row)
+    for field in ("technical_transform_json", "source_fingerprint_json", "representative_frame_json"):
+        try:
+            result[field.removesuffix("_json")] = json.loads(result.get(field) or "{}")
+        except (TypeError, ValueError):
+            result[field.removesuffix("_json")] = {}
+    return result
+
+
+def _validate_preview_evidence(
+    cfg: Mapping[str, Any],
+    db: Path,
+    project_id: int,
+    evidence: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    brief: Mapping[str, Any],
+    project_color: Mapping[str, Any],
+    preview_plan_hash: str,
+) -> None:
+    if str(evidence.get("preview_plan_hash") or "") != preview_plan_hash:
+        raise VisualStyleError("visual_style_preview_stale", "preview plan hash 與 variant evidence 不一致")
+    if str(evidence.get("visual_style_id") or "") != str(snapshot.get("visual_style_id") or "") or str(evidence.get("visual_style_version") or "") != str(snapshot.get("visual_style_version") or ""):
+        raise VisualStyleError("visual_style_preview_stale", "preview variant 的 visual style 不符合目前核准選項")
+    if str(evidence.get("visual_style_hash") or "") != str(snapshot.get("resolved_hash") or ""):
+        raise VisualStyleError("visual_style_preview_stale", "preview variant 的 style snapshot 已過期")
+    if str(evidence.get("creative_brief_hash") or "") != str(brief.get("visual_contract_hash") or ""):
+        raise VisualStyleError("visual_style_preview_stale", "Creative Brief visual contract 已過期")
+    current_technical = _technical_transform_snapshot(project_color)
+    if dict(evidence.get("technical_transform") or {}) != current_technical:
+        raise VisualStyleError("visual_style_preview_stale", "technical/LUT transform 已變更，必須重新預覽")
+    expected_title_identity = _hash(snapshot.get("title_style") or {})
+    if str(evidence.get("title_style_identity") or "") != expected_title_identity:
+        raise VisualStyleError("visual_style_preview_stale", "title style identity 與 preview 不一致")
+    source_uuid = str(evidence.get("source_media_uuid") or "")
+    current_sources = _source_provenance(db, project_id)
+    current_source = next((item for item in current_sources if str(item.get("project_media_uuid") or "") == source_uuid), None)
+    if current_source is None or dict(current_source.get("fingerprint") or {}) != dict(evidence.get("source_fingerprint") or {}):
+        raise VisualStyleError("visual_style_preview_stale", "preview source fingerprint 已變更")
+    preview_path = visual_style_preview_path(cfg, project_id, str(evidence.get("preview_filename") or ""))
+    if not preview_path.is_file() or _file_hash(preview_path) != str(evidence.get("preview_image_sha256") or ""):
+        raise VisualStyleError("visual_style_preview_stale", "preview image evidence 不存在或已變更")
+
+
 def build_preview_filter(snapshot: Mapping[str, Any], *, width: int, height: int, title_text: str = "") -> str:
     """Return the exact filter graph used by the shared render resolver."""
     plan = resolve_visual_render_plan(snapshot, width=width, height=height, title_text=title_text)
-    return str(plan.get("filter_complex") or plan.get("filter_graph") or "")
+    if str(plan.get("graph_type") or "linear") != "linear":
+        return materialize_visual_graph(plan, input_label="[0:v]", output_label="[vout]")
+    return str(plan.get("filter_graph") or "")
+
+
+def materialize_visual_graph(plan: Mapping[str, Any], *, input_label: str, output_label: str) -> str:
+    """Materialize a validated visual graph at an explicit input/output port.
+
+    The semantic plan never assumes whether it is being attached to Preview's
+    ``[0:v]`` or Formal Render's trimmed ``[visual_in]`` stream.  Both callers
+    use this one port-aware boundary instead of guessing with string replaces.
+    """
+
+    contract = plan.get("graph_contract") if isinstance(plan.get("graph_contract"), Mapping) else {}
+    template = str(contract.get("template") or plan.get("filter_complex") or "")
+    if not template or not input_label.startswith("[") or not input_label.endswith("]") or not output_label.startswith("[") or not output_label.endswith("]"):
+        raise VisualStyleError("visual_graph_contract_invalid", "visual graph input/output ports are invalid")
+    if "[[VV_INPUT]]" not in template or "[[VV_OUTPUT]]" not in template:
+        raise VisualStyleError("visual_graph_contract_invalid", "visual graph is missing explicit input/output ports")
+    return template.replace("[[VV_INPUT]]", input_label).replace("[[VV_OUTPUT]]", output_label)
 
 
 def resolve_visual_render_plan(
@@ -379,7 +457,7 @@ def resolve_visual_render_plan(
         # Keeping this as a graph (rather than hiding it in -vf) makes the
         # Preview and Formal Render boundaries identical and auditable.
         background = (
-            f"{canonical_geometry_filter},split=2[style_bg][style_fg];"
+            f"[[VV_INPUT]]{canonical_geometry_filter}{',' if canonical_geometry_filter else ''}split=2[style_bg][style_fg];"
             f"[style_bg]scale={width}:{height}:force_original_aspect_ratio=increase,"
             f"crop={width}:{height}:(iw-ow)/2:(ih-oh)/2,boxblur=luma_radius=18:luma_power=1,"
             "eq=brightness=-0.08:saturation=0.78[style_bg_fill];"
@@ -433,6 +511,7 @@ def resolve_visual_render_plan(
         graph_suffix = ",".join(value for value in filter_parts if value)
         if graph_suffix:
             filter_complex = filter_complex + "," + graph_suffix
+        filter_complex = filter_complex + "[[VV_OUTPUT]]"
     plan = {
         "contract_version": VISUAL_RENDER_CONTRACT_VERSION,
         "visual_style_hash": str(snapshot.get("resolved_hash") or ""),
@@ -455,6 +534,7 @@ def resolve_visual_render_plan(
         "filter_graph": ",".join(filter_parts),
         "graph_type": graph_type,
         "filter_complex": filter_complex,
+        "graph_contract": ({"version": "visual-graph-v1", "graph_type": graph_type, "input_port": "video_in", "output_port": "video_out", "template": filter_complex} if graph_type != "linear" else {}),
         "execution_mode": "mixed_cpu_visual_filters" if (color_filter or title_plan["filter"] or graph_type != "linear") else "native_renderer_filters",
     }
     plan["resolved_hash"] = _hash({key: value for key, value in plan.items() if key != "resolved_hash"})
@@ -563,19 +643,25 @@ def _resolve_title_plan(
         x, y = "(w-text_w)/2", "(h-text_h)/2"
     elif anchor == "bottom-right":
         x, y = f"w*(1-{right:.6f})-text_w", f"h*(1-{bottom:.6f})-text_h"
-    else:
+    elif anchor == "bottom-center":
+        x, y = "(w-text_w)/2", f"h*(1-{bottom:.6f})-text_h"
+    elif anchor == "bottom-left":
         x, y = f"w*{left:.6f}", f"h*(1-{bottom:.6f})-text_h"
+    else:
+        raise VisualStyleError("title_anchor_unsupported", f"unsupported title anchor: {anchor}")
     palette = dict(snapshot.get("palette") or {})
     text_token = str(title_style.get("text_color_token") or "text_primary")
     color = str(palette.get(text_token) or palette.get("text_primary") or "#FFFFFF").lstrip("#")[:6]
     shadow = str(palette.get("shadow") or "#00000099").lstrip("#")[:6]
     font_path = _system_font_path(title_style.get("fallback_chain"), int(title_style.get("weight") or 500))
     font_option = f":fontfile='{_escape_filter_path(font_path)}'" if font_path else ""
-    escaped = str(title_text).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
     readability = dict(title_style.get("readability") or {})
     max_width_ratio = min(0.95, max(0.2, float(title_style.get("max_width_ratio") or 0.78)))
     max_width_pixels = max(1, int(width * max_width_ratio))
-    options = [f"text='{escaped}'", font_option.lstrip(":"), f"fontcolor=0x{color}", f"fontsize={max(20, int(height * size_ratio))}", f"x={x}", f"y={y}", f"text_align={str(title_style.get('alignment') or 'left')}", f"line_spacing={int(float(title_style.get('line_height') or 1.18) * 10)}", f"boxw={max_width_pixels}", "fix_bounds=1"]
+    font_size = max(20, int(height * size_ratio))
+    wrapped_text, wrap_lines = _wrap_title_text(str(title_text), max_width_pixels, font_size)
+    escaped = wrapped_text.replace("\\", "\\\\").replace("\n", "\\n").replace(":", "\\:").replace("'", "\\'")
+    options = [f"text='{escaped}'", font_option.lstrip(":"), f"fontcolor=0x{color}", f"fontsize={font_size}", f"x={x}", f"y={y}", f"text_align={str(title_style.get('alignment') or 'left')}", f"line_spacing={int(float(title_style.get('line_height') or 1.18) * 10)}", f"boxw={max_width_pixels}", "fix_bounds=1"]
     if bool(readability.get("shadow", True)):
         options.extend([f"shadowcolor=0x{shadow}", "shadowx=2", "shadowy=2"])
     outline = int(readability.get("outline") or 0)
@@ -601,7 +687,41 @@ def _resolve_title_plan(
     if title_enable:
         options.append(f"enable='{title_enable}'")
     drawtext = "drawtext=" + ":".join(option for option in options if option)
-    return {"role": role, "text": str(title_text), "anchor": anchor, "safe_zone": safe, "max_width_ratio": max_width_ratio, "max_width_pixels": max_width_pixels, "max_width_enforced": True, "font_path": str(font_path or ""), "weight": int(title_style.get("weight") or 500), "font_size": max(20, int(height * size_ratio)), "filter": drawtext if title_text else "", "motion": {**motion, "resolved_enter_seconds": enter, "resolved_exit_seconds": exit_seconds, "resolved_duration_seconds": duration}}
+    return {"role": role, "text": str(title_text), "wrapped_text": wrapped_text, "wrap_lines": wrap_lines, "anchor": anchor, "safe_zone": safe, "max_width_ratio": max_width_ratio, "max_width_pixels": max_width_pixels, "max_width_enforced": True, "font_path": str(font_path or ""), "weight": int(title_style.get("weight") or 500), "font_size": font_size, "filter": drawtext if title_text else "", "motion": {**motion, "resolved_enter_seconds": enter, "resolved_exit_seconds": exit_seconds, "resolved_duration_seconds": duration}}
+
+
+def _wrap_title_text(text: str, max_width_pixels: int, font_size: int, *, max_lines: int = 3) -> tuple[str, int]:
+    """Wrap and bound titles before FFmpeg drawtext sees them.
+
+    FFmpeg's ``boxw`` bounds the box, but does not make the title text itself
+    wrap.  This deterministic display-unit wrapper is shared by Preview and
+    Formal Render through the resolved title plan and clamps overlong content
+    to the approved safe width instead of allowing silent clipping.
+    """
+
+    limit = max(4, int(max_width_pixels / max(1.0, float(font_size) * 0.92)))
+    lines: list[str] = []
+    current = ""
+    units = 0
+    for char in str(text):
+        if char == "\n":
+            lines.append(current.rstrip())
+            current, units = "", 0
+            continue
+        width = 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+        if current and units + width > limit:
+            lines.append(current.rstrip())
+            current, units = "", 0
+        current += char
+        units += width
+    if current or not lines:
+        lines.append(current.rstrip())
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        last = lines[-1].rstrip()
+        if not last.endswith("…"):
+            lines[-1] = (last[:-1] if last else "") + "…"
+    return "\n".join(lines), len(lines)
 
 
 def render_true_frame_preview(
@@ -616,18 +736,21 @@ def render_true_frame_preview(
     color_settings: Mapping[str, Any] | None = None,
     source_display_ratio: float | None = None,
     source_geometry: Mapping[str, Any] | None = None,
+    title_text: str = "咖啡日記 / Coffee Diary",
+    title_role: str = "chapter_title",
+    title_duration_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Render one real source frame through the same semantic filter resolver."""
     output.parent.mkdir(parents=True, exist_ok=True)
     width = int((snapshot.get("output") or {}).get("width") or 1920)
     height = int((snapshot.get("output") or {}).get("height") or 1080)
-    plan = resolve_visual_render_plan(snapshot, width=width, height=height, title_text="咖啡日記 / Coffee Diary", color_settings=color_settings, source_display_ratio=source_display_ratio, source_geometry=source_geometry)
+    plan = resolve_visual_render_plan(snapshot, width=width, height=height, title_text=title_text, color_settings=color_settings, source_display_ratio=source_display_ratio, source_geometry=source_geometry, title_role=title_role, title_duration_seconds=title_duration_seconds)
     filter_graph = plan["filter_graph"]
     # Place the seek after the input so synthetic/short-GOP fixtures still
     # yield a decoded representative frame instead of an empty image stream.
     command = [str(cfg["ffmpeg_path"]), "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(source), "-ss", f"{float(timestamp_seconds):.6f}"]
     if str(plan.get("graph_type") or "linear") == "split_background_overlay":
-        command.extend(["-filter_complex", f"[0:v]{plan['filter_complex']}[vout]", "-map", "[vout]"])
+        command.extend(["-filter_complex", materialize_visual_graph(plan, input_label="[0:v]", output_label="[vout]"), "-map", "[vout]"])
     else:
         command.extend(["-vf", filter_graph])
     command.extend(["-frames:v", "1", str(output)])
@@ -636,7 +759,7 @@ def render_true_frame_preview(
     if returncode != 0 or not output.is_file() or output.stat().st_size <= 0:
         stderr = str(getattr(result, "stderr", ""))[-1200:]
         raise VisualStyleError("preview_render_failed", f"true-frame preview failed: {stderr}")
-    return {"file": str(output), "sha256": _file_hash(output), "timestamp_seconds": float(timestamp_seconds), "width": width, "height": height, "filter_contract": filter_graph, "visual_render_plan": plan, "visual_style_hash": snapshot.get("resolved_hash"), "title_text": "咖啡日記 / Coffee Diary"}
+    return {"file": str(output), "sha256": _file_hash(output), "timestamp_seconds": float(timestamp_seconds), "width": width, "height": height, "filter_contract": filter_graph, "visual_render_plan": plan, "visual_style_hash": snapshot.get("resolved_hash"), "title_text": title_text}
 
 
 def visual_style_preview_path(cfg: Mapping[str, Any], project_id: int, filename: str) -> Path:
@@ -680,8 +803,25 @@ def preview_visual_styles(cfg: Mapping[str, Any], db: Path, project_id: int, *, 
             item["preview_plan_hash"] = str(preview_plan.get("resolved_hash") or "")
             item["technical_transform"] = dict(preview_plan.get("technical_transform") or {})
             item["representative_frame"] = {key: value for key, value in frame.items() if key != "source"}
+            item["preview_variant_id"] = _hash({"project_id": project_id, "style": snapshot.get("resolved_hash"), "plan": item["preview_plan_hash"], "source": source.get("project_media_uuid"), "timestamp": timestamp, "frame": frame.get("selection_reason")})[:32]
+            item["title_style_identity"] = _hash(snapshot.get("title_style") or {})
+            item["creative_brief_hash"] = str(brief.get("visual_contract_hash") or "")
+            item["source_media_uuid"] = str(source.get("project_media_uuid") or "")
+            item["source_fingerprint"] = dict(source.get("fingerprint") or {})
+            item["generated_at"] = _now()
+            _persist_preview_evidence(db, project_id, state, item, snapshot)
             variants.append(item)
     return {"ok": True, "status": "ready", "preview_revision": int(state.get("preview_revision") or 0), "source": _public_source(representative_frames[0]["source"]), "representative_frames": [{key: value for key, value in frame.items() if key != "source"} for frame in representative_frames], "variants": variants}
+
+
+def _persist_preview_evidence(db: Path, project_id: int, state: Mapping[str, Any], item: Mapping[str, Any], snapshot: Mapping[str, Any]) -> None:
+    with connect(db) as con:
+        con.execute(
+            "insert or replace into visual_style_preview_evidence(preview_variant_id, project_id, preview_revision, preview_plan_hash, visual_style_id, visual_style_version, visual_style_hash, title_style_identity, creative_brief_hash, technical_transform_json, source_media_uuid, source_fingerprint_json, timestamp_seconds, representative_frame_json, preview_filename, preview_image_sha256, generated_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                str(item["preview_variant_id"]), int(project_id), int(state.get("preview_revision") or 0), str(item["preview_plan_hash"]), str(snapshot.get("visual_style_id") or ""), str(snapshot.get("visual_style_version") or ""), str(snapshot.get("resolved_hash") or ""), str(item["title_style_identity"]), str(item["creative_brief_hash"]), json.dumps(item.get("technical_transform") or {}, ensure_ascii=False, sort_keys=True), str(item["source_media_uuid"]), json.dumps(item.get("source_fingerprint") or {}, ensure_ascii=False, sort_keys=True), float(item.get("timestamp_seconds") or 0), json.dumps(item.get("representative_frame") or {}, ensure_ascii=False, sort_keys=True), Path(str(item.get("file") or "")).name, str(item["sha256"]), str(item["generated_at"]),
+            ),
+        )
 
 
 def _select_representative_frames(cfg: Mapping[str, Any], sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -920,5 +1060,5 @@ def _now() -> str:
 
 
 __all__ = [
-    "TITLE_STYLES", "TITLE_STYLE_REGISTRY_VERSION", "TITLE_STYLE_SCHEMA_VERSION", "VISUAL_STYLES", "VISUAL_STYLE_REGISTRY_VERSION", "VISUAL_STYLE_SCHEMA_VERSION", "VISUAL_RENDER_CONTRACT_VERSION", "VisualStyleError", "build_preview_filter", "ensure_visual_style_state", "load_visual_style_state", "materialize_visual_style", "preview_visual_styles", "render_true_frame_preview", "resolve_visual_render_plan", "save_visual_style_approval", "validate_materialized_visual_style", "visual_style_api_payload", "visual_style_options", "visual_style_preview_path",
+    "TITLE_STYLES", "TITLE_STYLE_REGISTRY_VERSION", "TITLE_STYLE_SCHEMA_VERSION", "VISUAL_STYLES", "VISUAL_STYLE_REGISTRY_VERSION", "VISUAL_STYLE_SCHEMA_VERSION", "VISUAL_RENDER_CONTRACT_VERSION", "VisualStyleError", "build_preview_filter", "ensure_visual_style_state", "load_visual_style_state", "materialize_visual_graph", "materialize_visual_style", "preview_visual_styles", "render_true_frame_preview", "resolve_visual_render_plan", "save_visual_style_approval", "validate_materialized_visual_style", "visual_style_api_payload", "visual_style_options", "visual_style_preview_path",
 ]

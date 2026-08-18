@@ -157,6 +157,27 @@ create table if not exists visual_style_states (
   preview_revision integer not null default 0,
   updated_at text default current_timestamp
 );
+create table if not exists visual_style_preview_evidence (
+  preview_variant_id text primary key,
+  project_id integer not null,
+  preview_revision integer not null,
+  preview_plan_hash text not null,
+  visual_style_id text not null,
+  visual_style_version text not null,
+  visual_style_hash text not null,
+  title_style_identity text not null default '',
+  creative_brief_hash text not null,
+  technical_transform_json text not null default '{}',
+  source_media_uuid text not null,
+  source_fingerprint_json text not null default '{}',
+  timestamp_seconds real not null,
+  representative_frame_json text not null default '{}',
+  preview_filename text not null,
+  preview_image_sha256 text not null,
+  generated_at text not null,
+  foreign key(project_id) references projects(id)
+);
+create index if not exists idx_visual_preview_project on visual_style_preview_evidence(project_id, preview_revision);
 create table if not exists project_videos (
   project_id integer not null,
   video_id integer not null,

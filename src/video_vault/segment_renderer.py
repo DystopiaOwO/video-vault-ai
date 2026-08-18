@@ -14,7 +14,7 @@ from .audio_pipeline import atempo_filter, build_audio_filter, build_silence_fil
 from .color_pipeline import build_color_filter
 from .encoder_contract import encoder_arguments, validate_encoder_contract
 from .gpu_execution import GPUExecutionRegistry, apply_visual_execution_contract
-from .visual_style import resolve_visual_render_plan
+from .visual_style import materialize_visual_graph, resolve_visual_render_plan
 from .media_probe import MediaProbe, SourceProbeRegistry, probe_media
 from .render_errors import SegmentRenderError, is_encoder_fallback_error
 from .render_job_models import RenderCancelled
@@ -272,12 +272,17 @@ def build_segment_ffmpeg_command(
         # Background graph already includes its color/title tail so it is not
         # accidentally applied twice at this boundary.
         suffix = ""
-        visual_graph = str(visual_render_plan.get("filter_complex") or "").replace("[0:v]", "[visual_in]", 1)
+        post_label = "[visual_post]" if gpu_path else "[vout]"
+        visual_graph = materialize_visual_graph(visual_render_plan, input_label="[visual_in]", output_label=post_label)
         if suffix:
             visual_graph = visual_graph + f",{suffix}"
+        graph.append(visual_graph)
         if gpu_path:
-            visual_graph += ",".join(["", f"fps={profile['fps']}", f"format={profile['pixel_format']}", "setsar=1", "setparams=" f"colorspace={str(profile.get('color_matrix') or 'bt709')}:color_primaries={str(profile.get('color_primaries') or 'bt709')}:color_trc={str(profile.get('color_transfer') or 'bt709')}:range={'limited' if str(profile.get('color_range') or 'tv') == 'tv' else 'full'}"])
-        graph.append(visual_graph + "[vout]")
+            graph.append(
+                f"[visual_post],fps={profile['fps']},format={profile['pixel_format']},setsar=1,setparams="
+                f"colorspace={str(profile.get('color_matrix') or 'bt709')}:color_primaries={str(profile.get('color_primaries') or 'bt709')}:"
+                f"color_trc={str(profile.get('color_transfer') or 'bt709')}:range={'limited' if str(profile.get('color_range') or 'tv') == 'tv' else 'full'}[vout]"
+            )
     else:
         if visual_render_plan and gpu_path:
             # GPU mixed path needs the same linear visual plan as Preview.

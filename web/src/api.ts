@@ -809,8 +809,8 @@ export const api = {
   visualStyleOptions: () => json<NonNullable<VisualStyleState["options"]>>("/api/project/visual-style/options"),
   previewVisualStyles: (projectId: number, force = false) =>
     json<{ ok: boolean; status?: string; code?: string; error?: string; recommendation?: Record<string, unknown>; variants?: Array<Record<string, unknown>> }>("/api/project/visual-style/preview", post({ project_id: projectId, force })),
-  approveVisualStyle: (projectId: number, visualStyleId: string, baseRevision?: number, previewPlanHash?: string) =>
-    json<{ ok: boolean; visual_style?: VisualStyleState; project_revision?: number; error?: string; code?: string }>("/api/project/visual-style", post({ project_id: projectId, visual_style_id: visualStyleId, preview_plan_hash: previewPlanHash, base_revision: baseRevision })),
+  approveVisualStyle: (projectId: number, visualStyleId: string, baseRevision?: number, previewPlanHash?: string, previewVariantId?: string) =>
+    json<{ ok: boolean; visual_style?: VisualStyleState; project_revision?: number; error?: string; code?: string }>("/api/project/visual-style", post({ project_id: projectId, visual_style_id: visualStyleId, preview_plan_hash: previewPlanHash, preview_variant_id: previewVariantId, base_revision: baseRevision })),
   generateStory: (projectId: number, force = false, provider?: string, baseRevision?: number) =>
     json<{ ok: boolean; generation?: StoryGeneration; story?: StoryDetail; error?: string; code?: string }>("/api/project/story/generate", post({ project_id: projectId, force, provider, base_revision: baseRevision })),
   updateStoryReview: (projectId: number, storyGenerationUuid: string, review: Record<string, unknown>, baseRevision?: number) =>

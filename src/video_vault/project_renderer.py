@@ -135,7 +135,14 @@ def render_project(
     raw_visual_timeline = manifest.get("visual_timeline") if isinstance(manifest.get("visual_timeline"), Mapping) else {}
     if raw_visual_timeline.get("items"):
         try:
-            visual_timeline = resolve_visual_timeline(raw_visual_timeline, manifest["segments"], manifest["profile"], require_assets=True)
+            approved_style_for_timeline = manifest.get("visual_style") if isinstance(manifest.get("visual_style"), Mapping) else raw_visual_timeline.get("approved_visual_style")
+            visual_timeline = resolve_visual_timeline(
+                raw_visual_timeline,
+                manifest["segments"],
+                manifest["profile"],
+                require_assets=True,
+                chapter_composition=str((approved_style_for_timeline or {}).get("composition") or "standalone"),
+            )
         except VisualCompositionError as exc:
             raise ProjectRenderError(f"visual composition 被擋下：{exc.message}") from exc
         if raw_visual_timeline.get("resolution_hash") != visual_timeline.get("resolution_hash"):

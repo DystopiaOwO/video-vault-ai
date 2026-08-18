@@ -1,6 +1,7 @@
 from pathlib import Path
 import shutil
 import subprocess
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,7 @@ from video_vault.visual_style import (
     resolve_visual_render_plan,
     _refresh_visual_style_currentity,
     _select_representative_frames,
+    _validate_preview_evidence,
     validate_materialized_visual_style,
     visual_style_options,
 )
@@ -268,3 +270,65 @@ def test_creative_brief_visual_hash_change_stales_approved_style_but_recommendat
     stale = _refresh_visual_style_currentity({"library_root": str(tmp_path)}, db, 7, state)
     assert stale["status"] == "stale"
     assert stale["stale_reason"] == "creative_brief_visual_contract_changed"
+
+
+def test_preview_evidence_rejects_arbitrary_plan_hash_and_stale_variants(tmp_path: Path, monkeypatch):
+    from video_vault.visual_style import _technical_transform_snapshot
+
+    preview = tmp_path / "preview.png"
+    preview.write_bytes(b"preview-pixels")
+    brief = _brief()
+    snapshot = materialize_visual_style("diary_natural", brief)
+    evidence = {
+        "preview_plan_hash": "plan-current",
+        "visual_style_id": snapshot["visual_style_id"],
+        "visual_style_version": snapshot["visual_style_version"],
+        "visual_style_hash": snapshot["resolved_hash"],
+        "title_style_identity": __import__("hashlib").sha256(__import__("json").dumps(snapshot["title_style"], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        "creative_brief_hash": brief["visual_contract_hash"],
+        "technical_transform": _technical_transform_snapshot({}),
+        "source_media_uuid": "media-1",
+        "source_fingerprint": {"sha256": "source-sha"},
+        "preview_filename": preview.name,
+        "preview_image_sha256": __import__("hashlib").sha256(preview.read_bytes()).hexdigest(),
+        "generated_at": "2026-08-18T00:00:00+00:00",
+    }
+    monkeypatch.setattr("video_vault.visual_style.visual_style_preview_path", lambda *_args: preview)
+    monkeypatch.setattr("video_vault.visual_style._source_provenance", lambda *_args: [{"project_media_uuid": "media-1", "fingerprint": {"sha256": "source-sha"}}])
+    _validate_preview_evidence({"ffmpeg_path": "ffmpeg"}, tmp_path / "db.sqlite3", 1, evidence, snapshot, brief, {}, "plan-current")
+    with pytest.raises(VisualStyleError, match="preview plan hash"):
+        _validate_preview_evidence({"ffmpeg_path": "ffmpeg"}, tmp_path / "db.sqlite3", 1, evidence, snapshot, brief, {}, "arbitrary-plan")
+    with pytest.raises(VisualStyleError, match="visual style"):
+        _validate_preview_evidence({"ffmpeg_path": "ffmpeg"}, tmp_path / "db.sqlite3", 1, {**evidence, "visual_style_id": "clean_minimal"}, snapshot, brief, {}, "plan-current")
+    with pytest.raises(VisualStyleError, match="Creative Brief"):
+        _validate_preview_evidence({"ffmpeg_path": "ffmpeg"}, tmp_path / "db.sqlite3", 1, evidence, snapshot, {**brief, "visual_contract_hash": "old-brief"}, {}, "plan-current")
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required for title motion smoke")
+def test_title_anchors_wrap_and_supported_motion_real_ffmpeg(tmp_path: Path):
+    source = tmp_path / "title-source.mp4"
+    generated = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=10", "-t", "0.8", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source)], capture_output=True, text=True, encoding="utf-8", check=False)
+    assert generated.returncode == 0, generated.stderr
+    base = materialize_visual_style("diary_natural", _brief())
+    plans = []
+    for preset in ("none", "fade", "fade_rise", "slide_fade"):
+        snapshot = deepcopy(base)
+        title = deepcopy(snapshot["title_style"])
+        title["motion"] = {**title["motion"], "preset": preset}
+        snapshot["title_style"] = title
+        snapshot["resolved_hash"] = __import__("hashlib").sha256(__import__("json").dumps({key: value for key, value in snapshot.items() if key != "resolved_hash"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        plan = resolve_visual_render_plan(snapshot, width=1920, height=1080, title_text="這是一個很長的繁體中文標題 Traditional English mixed title", title_role="caption_subtitle", title_duration_seconds=0.8)
+        plans.append(plan)
+        output = tmp_path / f"{preset}.png"
+        rendered = render_true_frame_preview({"ffmpeg_path": "ffmpeg"}, 1, source, 0.0, snapshot, output, runner=None, title_text="這是一個很長的繁體中文標題 Traditional English mixed title", title_role="caption_subtitle", title_duration_seconds=0.8)
+        assert output.is_file() and rendered["visual_render_plan"]["title"]["motion"]["preset"] == preset
+        assert rendered["visual_render_plan"]["title"]["anchor"] == "bottom-center"
+        assert rendered["visual_render_plan"]["title"]["wrap_lines"] <= 3
+    assert len({plan["title"]["filter"] for plan in plans}) == 4
+    unsupported = deepcopy(base)
+    unsupported_title = deepcopy(unsupported["title_style"])
+    unsupported_title["motion"] = {**unsupported_title["motion"], "preset": "bounce"}
+    unsupported["title_style"] = unsupported_title
+    unsupported["resolved_hash"] = __import__("hashlib").sha256(__import__("json").dumps({key: value for key, value in unsupported.items() if key != "resolved_hash"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    with pytest.raises(VisualStyleError, match="unsupported title motion"):
+        resolve_visual_render_plan(unsupported, width=1920, height=1080, title_text="Unsupported")

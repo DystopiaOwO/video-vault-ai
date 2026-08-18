@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+import shutil
+import subprocess
 from types import SimpleNamespace
 from dataclasses import replace
 
@@ -63,6 +65,42 @@ def test_formal_segment_command_consumes_shared_visual_render_plan():
     assert "drawtext=" in text
     assert "eq=brightness=" in text
     assert "background_treatment" not in text or "drawbox=" in text
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required for formal visual graph smoke")
+def test_real_formal_render_segment_background_treatment_is_connected(tmp_path: Path):
+    source = tmp_path / "portrait.mp4"
+    output_root = tmp_path / "cache"
+    generated = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-f", "lavfi", "-i", "testsrc=size=180x320:rate=12",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+            "-t", "0.8", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(source),
+        ], capture_output=True, text=True, encoding="utf-8", check=False,
+    )
+    assert generated.returncode == 0, generated.stderr
+    brief = {
+        "status": "approved", "brief_version": 1, "visual_contract_hash": "brief",
+        "approved": {
+            "output": {"output_contract_id": "landscape_16_9", "output_contract_version": "1", "orientation": "landscape", "aspect_ratio": "16:9", "width": 1920, "height": 1080, "render_profile_id": "accurate_preview_1080p"},
+            "framing_intent": {"portrait_source_in_landscape": {"approved_strategy_id": "background_treatment"}, "landscape_source_in_portrait": {"approved_strategy_id": "crop_reframe"}},
+        },
+    }
+    snapshot = materialize_visual_style("diary_natural", brief)
+    manifest = {"project_id": 1, "profile": {"profile_id": "accurate_preview_1080p"}, "settings": {"encoder": "cpu", "color": {"mode": "none"}, "audio": {}}}
+    result = render_segment(
+        {"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe", "library_root": str(tmp_path)},
+        manifest,
+        {"segment_id": "portrait-1", "source_file": str(source), "source_in_seconds": 0, "source_out_seconds": 0.8, "speed": 1, "timeline_duration_seconds": 0.8, "audio_role": "keep_original", "title_text": "咖啡日記 / Coffee Diary"},
+        cache_root=output_root,
+        visual_style_snapshot=snapshot,
+    )
+    assert result.output_path.is_file() and result.output_path.stat().st_size > 0
+    probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=width,height,sample_aspect_ratio,display_aspect_ratio", "-of", "json", str(result.output_path)], capture_output=True, text=True, encoding="utf-8", check=False)
+    assert probe.returncode == 0, probe.stderr
+    assert '"width": 1920' in probe.stdout and '"height": 1080' in probe.stdout
+    assert '"sample_aspect_ratio": "1:1"' in probe.stdout
 
 
 def test_no_audio_source_gets_silence_input():
