@@ -40,6 +40,16 @@ TITLE_MOTION_PRESETS = ("none", "fade", "fade_rise", "slide_fade")
 TITLE_SIZE_PRESETS = {"small": 0.85, "normal": 1.0, "large": 1.2}
 TITLE_WEIGHT_VALUES = (400, 500, 600, 700)
 TITLE_FONT_FAMILIES = ("system-sans", "Noto Sans CJK TC", "Segoe UI", "Arial")
+TITLE_ROLE_LABELS = {
+    "chapter_title": "章節標題", "section_title": "段落標題", "location_title": "地點標題",
+    "date_time_title": "日期時間", "lower_third": "下三分之一字幕", "caption_subtitle": "說明字幕",
+}
+TITLE_ANCHOR_LABELS = {"top-left": "左上", "top-center": "上中", "top-right": "右上", "center": "中央", "bottom-left": "左下", "bottom-center": "下中", "bottom-right": "右下"}
+TITLE_MOTION_LABELS = {"none": "無", "fade": "淡入淡出", "fade_rise": "淡入上移", "slide_fade": "滑入淡出"}
+TITLE_SIZE_LABELS = {"small": "小", "normal": "標準", "large": "大"}
+TITLE_PALETTE_LABELS = {"default": "預設", "muted": "低彩度", "high_contrast": "高對比"}
+TITLE_READABILITY_LABELS = {"none": "無表面", "translucent": "半透明", "solid": "實色"}
+TITLE_FONT_LABELS = {"system-sans": "System Sans", "Noto Sans CJK TC": "Noto Sans CJK TC", "Segoe UI": "Segoe UI", "Arial": "Arial"}
 _APPROVAL_FIELDS = {
     "approved_preview_variant_id",
     "approved_preview_plan_hash",
@@ -122,6 +132,22 @@ class TitleStyleRegistry:
         style_id = str(style_id).strip()
         item = deepcopy(dict(payload))
         item["title_style_id"] = style_id
+        if item.get("extends"):
+            _validate_title_inheritance_definition(item)
+            previous = self._entries.get(style_id)
+            self._entries[style_id] = item
+            try:
+                resolved, _ = self._resolve_inheritance(style_id, item.get("version"), [])
+                if resolved is None:
+                    raise VisualStyleError("title_style_parent_unknown", f"unknown title style parent: {style_id}")
+                _validate_title_definition(resolved)
+            except Exception:
+                if previous is None:
+                    self._entries.pop(style_id, None)
+                else:
+                    self._entries[style_id] = previous
+                raise
+            return
         _validate_title_definition(item)
         self._entries[style_id] = item
 
@@ -133,11 +159,8 @@ class TitleStyleRegistry:
         if role not in item["supported_roles"]:
             raise VisualStyleError("title_role_unsupported", f"title style {style_id} does not support role {role}")
         _validate_title_definition(item)
-        resolved = deepcopy(item)
-        resolved["role"] = role
+        resolved = _resolve_title_role_contract(item, role, aspect)
         resolved["resolved_parent_chain"] = chain
-        responsive = item["responsive"]
-        resolved["responsive"] = deepcopy(responsive if "anchor" in responsive else responsive.get(aspect, responsive.get("landscape", {})))
         return resolved
 
     def _resolve_inheritance(self, style_id: str, version: str | int | None, stack: list[str]) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
@@ -161,7 +184,13 @@ class TitleStyleRegistry:
         parent, chain = self._resolve_inheritance(parent_id, parent_version, [*stack, style_id])
         if parent is None:
             raise VisualStyleError("title_style_parent_unknown", f"unknown title style parent: {parent_id}")
-        merged = _deep_merge(parent, {key: value for key, value in item.items() if key != "extends"})
+        child_overrides = {key: value for key, value in item.items() if key != "extends" and key != "overrides"}
+        if isinstance(item.get("overrides"), Mapping):
+            child_overrides = _deep_merge(child_overrides, item["overrides"])
+        merged = _deep_merge(parent, child_overrides)
+        explicit = {key: value for key, value in child_overrides.items() if key not in {"title_style_id", "version", "label"}}
+        inherited_explicit = parent.get("_inherited_explicit_overrides") if isinstance(parent.get("_inherited_explicit_overrides"), Mapping) else {}
+        merged["_inherited_explicit_overrides"] = _deep_merge(inherited_explicit, explicit)
         return merged, [*chain, {"title_style_id": style_id, "version": expected}]
 
     def list(self) -> list[dict[str, Any]]:
@@ -271,6 +300,13 @@ def validate_materialized_visual_style(snapshot: Mapping[str, Any]) -> dict[str,
 
 
 def visual_style_options() -> dict[str, Any]:
+    def options(values: Any, labels: Mapping[str, str], *, stringify: bool = False) -> list[dict[str, Any]]:
+        result = []
+        for value in values:
+            identifier = str(value) if stringify else value
+            result.append({"id": identifier, "label": labels.get(str(identifier), str(identifier)), "enabled": True, "capability": {}})
+        return result
+
     return {
         "schema_version": VISUAL_STYLE_SCHEMA_VERSION,
         "registry_version": VISUAL_STYLE_REGISTRY_VERSION,
@@ -279,15 +315,17 @@ def visual_style_options() -> dict[str, Any]:
         # entries remain hidden from the product surface.
         "styles": [item for item in VISUAL_STYLES.list(include_internal=True) if item.get("style_id") != "test_soft_panel"],
         "title_styles": TITLE_STYLES.list(),
-        "title_roles": sorted({role for item in TITLE_STYLES.list() for role in item["supported_roles"]}),
-        "title_anchors": list(TITLE_ANCHORS),
-        "title_motion_presets": list(TITLE_MOTION_PRESETS),
-        "title_easing": ["linear", "ease-out"],
+        "title_roles": options(sorted({role for item in TITLE_STYLES.list() for role in item["supported_roles"]}), TITLE_ROLE_LABELS),
+        "title_anchors": options(TITLE_ANCHORS, TITLE_ANCHOR_LABELS),
+        "title_motion_presets": options(TITLE_MOTION_PRESETS, TITLE_MOTION_LABELS),
+        "title_easing": options(("linear", "ease-out"), {"linear": "Linear", "ease-out": "Ease-out"}),
         "title_letter_spacing": {"supported": False, "fixed_value": 0},
-        "title_weight_values": list(TITLE_WEIGHT_VALUES),
-        "title_size_presets": sorted(TITLE_SIZE_PRESETS),
-        "palette_variants": ["default", "muted", "high_contrast"],
-        "readability_surfaces": ["none", "translucent", "solid"],
+        "title_weight_values": options(TITLE_WEIGHT_VALUES, {str(item): str(item) for item in TITLE_WEIGHT_VALUES}, stringify=True),
+        "title_size_presets": options(sorted(TITLE_SIZE_PRESETS), TITLE_SIZE_LABELS),
+        "palette_variants": options(("default", "muted", "high_contrast"), TITLE_PALETTE_LABELS),
+        "readability_surfaces": options(("none", "translucent", "solid"), TITLE_READABILITY_LABELS),
+        "title_font_families": options(TITLE_FONT_FAMILIES, TITLE_FONT_LABELS),
+        "compositions": options(("overlay", "standalone"), {"overlay": "Overlay", "standalone": "Standalone"}),
         "override_schema_version": "visual-style-override-v1",
     }
 
@@ -695,16 +733,11 @@ def _resolve_title_plan(
     title_role: str | None = None,
     duration_seconds: float | None = None,
 ) -> dict[str, Any]:
-    title_style = dict(snapshot.get("title_style") or {})
-    original_role = str(title_style.get("role") or "chapter_title")
-    role = str(title_role or original_role)
-    role_tokens = title_style.get("role_tokens") if isinstance(title_style.get("role_tokens"), Mapping) else {}
-    role_override = dict(role_tokens.get(role) or {}) if role != original_role else {}
-    title_style = {**title_style, **role_override}
-    title_style["role"] = role
-    responsive = title_style.get("responsive") or {}
     aspect = str((snapshot.get("output") or {}).get("orientation") or "landscape")
-    responsive = dict(responsive.get(aspect) or responsive.get("landscape") or responsive)
+    title_style = dict(snapshot.get("title_style") or {})
+    role = str(title_role or title_style.get("role") or "chapter_title")
+    title_style = _resolve_title_role_contract(title_style, role, aspect)
+    responsive = dict(title_style.get("responsive") or {})
     safe = dict(title_style.get("safe_zone") or {})
     anchor = str(responsive.get("anchor") or "bottom-left")
     if anchor not in TITLE_ANCHORS:
@@ -1092,6 +1125,75 @@ def _validate_title_definition(item: Mapping[str, Any]) -> None:
     for field in ("title_style_id", "version", "label", "supported_roles", "fallback_chain", "weight", "safe_zone", "readability", "motion", "responsive"):
         if not item.get(field):
             raise VisualStyleError("title_style_contract_invalid", f"title style missing {field}")
+
+
+_TITLE_STYLE_INHERITANCE_FIELDS = {
+    "title_style_id", "version", "extends", "overrides", "label", "supported_roles",
+    "font_family", "fallback_chain", "weight", "line_height", "letter_spacing", "alignment",
+    "max_width_ratio", "safe_zone", "readability", "motion", "responsive", "role_tokens",
+    "text_color_token", "accent_color",
+}
+
+
+def _validate_title_inheritance_definition(item: Mapping[str, Any]) -> None:
+    for field in ("title_style_id", "version", "extends"):
+        if not item.get(field):
+            raise VisualStyleError("title_style_inheritance_invalid", f"inherited title style missing {field}")
+    parent = item.get("extends")
+    if not isinstance(parent, Mapping) or not str(parent.get("title_style_id") or parent.get("id") or "") or not str(parent.get("version") or ""):
+        raise VisualStyleError("title_style_inheritance_invalid", "inherited title style parent requires exact id/version")
+    unknown = sorted(set(item) - _TITLE_STYLE_INHERITANCE_FIELDS)
+    if unknown:
+        raise VisualStyleError("title_style_inheritance_invalid", "unknown inherited title override: " + ", ".join(unknown))
+    overrides = item.get("overrides")
+    if overrides is not None and not isinstance(overrides, Mapping):
+        raise VisualStyleError("title_style_inheritance_invalid", "title style overrides must be an object")
+    if isinstance(overrides, Mapping):
+        unknown_overrides = sorted(set(overrides) - (_TITLE_STYLE_INHERITANCE_FIELDS - {"title_style_id", "version", "extends", "overrides", "label"}))
+        if unknown_overrides:
+            raise VisualStyleError("title_style_inheritance_invalid", "unknown inherited title override: " + ", ".join(unknown_overrides))
+
+
+def _resolve_title_role_contract(title_style: Mapping[str, Any], role: str, aspect: str) -> dict[str, Any]:
+    """Materialize one role exactly once from the immutable title contract.
+
+    The marker is semantic evidence, not a comparison with the original role.
+    This lets a materialized snapshot be safely reused for another preview role
+    while preventing the same role token from being applied twice.
+    """
+
+    role = str(role or "chapter_title")
+    result = deepcopy(dict(title_style))
+    if role not in (result.get("supported_roles") or []):
+        raise VisualStyleError("title_role_unsupported", f"title style does not support role {role}")
+    if str(result.get("role_materialized_for") or "") != role:
+        role_tokens = result.get("role_tokens") if isinstance(result.get("role_tokens"), Mapping) else {}
+        token = role_tokens.get(role) if isinstance(role_tokens, Mapping) else None
+        if token is not None and not isinstance(token, Mapping):
+            raise VisualStyleError("title_role_contract_invalid", f"role token must be an object: {role}")
+        if isinstance(token, Mapping):
+            token = deepcopy(dict(token))
+            token_responsive = token.get("responsive")
+            if isinstance(token_responsive, Mapping):
+                if isinstance(token_responsive.get(aspect), Mapping):
+                    token["responsive"] = deepcopy(token_responsive[aspect])
+                elif "anchor" not in token_responsive:
+                    token["responsive"] = deepcopy(token_responsive.get("landscape") or {})
+            result = _deep_merge(result, token)
+            if isinstance(token.get("responsive"), Mapping):
+                result["responsive"] = deepcopy(token["responsive"])
+        explicit = result.get("_inherited_explicit_overrides")
+        if isinstance(explicit, Mapping):
+            result = _deep_merge(result, explicit)
+        result["role_materialized_for"] = role
+    responsive = result.get("responsive") or {}
+    if isinstance(responsive, Mapping):
+        if isinstance(responsive.get(aspect), Mapping):
+            result["responsive"] = deepcopy(responsive[aspect])
+        elif "anchor" not in responsive:
+            result["responsive"] = deepcopy(responsive.get("landscape") or {})
+    result["role"] = role
+    return result
 
 
 def _approved_framing(brief: Mapping[str, Any]) -> dict[str, Any]:

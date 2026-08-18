@@ -367,17 +367,46 @@ def test_title_registry_inheritance_materializes_and_fails_closed():
     parent["version"] = "1"
     child = {"title_style_id": "child_test_style", "version": "1", "extends": {"title_style_id": "base_test_style", "version": "1"}, "label": "Child", "responsive": {"landscape": {"anchor": "top-center", "size_ratio": 0.04}}}
     titles.register("base_test_style", parent)
-    titles.register("child_test_style", {**child, "supported_roles": parent["supported_roles"], "fallback_chain": parent["fallback_chain"], "weight": parent["weight"], "safe_zone": parent["safe_zone"], "readability": parent["readability"], "motion": parent["motion"]})
+    titles.register("child_test_style", child)
     resolved = titles.resolve("child_test_style", role="chapter_title", aspect="landscape")
     assert resolved["responsive"]["anchor"] == "top-center"
+    assert resolved["motion"]["preset"] == parent["motion"]["preset"]
     assert resolved["resolved_parent_chain"][-1]["title_style_id"] == "child_test_style"
-    titles.register("cycle_a", {**parent, "title_style_id": "cycle_a", "extends": {"title_style_id": "cycle_b", "version": "1"}})
-    titles.register("cycle_b", {**parent, "title_style_id": "cycle_b", "extends": {"title_style_id": "cycle_a", "version": "1"}})
-    with pytest.raises(VisualStyleError, match="cycle"):
-        titles.resolve("cycle_a")
     with pytest.raises(VisualStyleError, match="parent"):
-        titles.register("missing_parent", {**parent, "title_style_id": "missing_parent", "extends": {"title_style_id": "absent", "version": "1"}})
-        titles.resolve("missing_parent")
+        titles.register("missing_parent", {"title_style_id": "missing_parent", "version": "1", "extends": {"title_style_id": "absent", "version": "1"}, "label": "Missing"})
+    version_parent = deepcopy(parent)
+    version_parent["title_style_id"] = "version_parent"
+    version_parent["version"] = "2"
+    titles.register("version_parent", version_parent)
+    with pytest.raises(VisualStyleError, match="version"):
+        titles.register("version_child", {"title_style_id": "version_child", "version": "1", "extends": {"title_style_id": "version_parent", "version": "1"}, "label": "Version child"})
+    cycle_a = {"title_style_id": "cycle_a", "version": "1", "extends": {"title_style_id": "cycle_b", "version": "1"}}
+    cycle_b = {"title_style_id": "cycle_b", "version": "1", "extends": {"title_style_id": "cycle_a", "version": "1"}}
+    cycle_registry = TitleStyleRegistry({"cycle_a": cycle_a, "cycle_b": cycle_b})
+    with pytest.raises(VisualStyleError, match="cycle"):
+        cycle_registry.resolve("cycle_a")
+
+
+def test_role_tokens_materialize_once_and_preview_formal_share_exact_role_contract():
+    snapshots = {role: materialize_visual_style("diary_natural", _brief(), title_role=role) for role in ("chapter_title", "location_title", "lower_third")}
+    assert all(item["title_style"]["role_materialized_for"] == role for role, item in snapshots.items())
+    assert snapshots["location_title"]["title_style"]["responsive"]["anchor"] == "top-left"
+    assert snapshots["location_title"]["title_style"]["max_width_ratio"] == 0.68
+    assert snapshots["lower_third"]["title_style"]["responsive"]["anchor"] == "bottom-left"
+    assert snapshots["lower_third"]["title_style"]["responsive"]["size_ratio"] == 0.034
+    assert len({item["semantic_hash"] for item in snapshots.values()}) == 3
+    plans = {role: resolve_visual_render_plan(item, width=1920, height=1080, title_text="Coffee") for role, item in snapshots.items()}
+    assert plans["location_title"]["title"]["role"] == "location_title"
+    assert plans["location_title"]["title"]["anchor"] == "top-left"
+    assert plans["location_title"]["title"]["max_width_ratio"] == 0.68
+    assert len({plan["semantic_hash"] for plan in plans.values()}) == 3
+    assert resolve_visual_render_plan(snapshots["location_title"], width=1920, height=1080, title_text="Coffee")["title"] == plans["location_title"]["title"]
+
+
+def test_visual_style_options_are_registry_metadata_not_raw_capability_lists():
+    options = visual_style_options()
+    for key in ("title_roles", "title_anchors", "title_motion_presets", "title_weight_values", "title_size_presets", "palette_variants", "readability_surfaces", "title_font_families"):
+        assert options[key] and all(set(item) >= {"id", "label", "enabled", "capability"} for item in options[key])
 
 
 def test_title_capability_contract_exposes_all_anchors_and_rejects_unrendered_spacing():
