@@ -5,6 +5,9 @@ const WORKSPACE_SECTION_IDS = [
   "workspace-media",
   "workspace-audio",
   "workspace-script",
+  // Keep delivery as the last keyboard shortcut so the existing Alt+4..6
+  // shortcuts remain stable while the workspace is still directly navigable.
+  "workspace-delivery",
 ] as const;
 
 type WorkspaceSectionId = typeof WORKSPACE_SECTION_IDS[number];
@@ -54,11 +57,15 @@ export function navigateToWorkspace(index: number): boolean {
 }
 
 function setCurrentWorkspace(id: WorkspaceSectionId) {
+  document.getElementById("root")?.setAttribute("data-workspace-focus-mode", "true");
   for (const sectionId of WORKSPACE_SECTION_IDS) {
     const link = workspaceLink(sectionId);
-    if (!link) continue;
-    if (sectionId === id) link.setAttribute("aria-current", "location");
-    else link.removeAttribute("aria-current");
+    const section = workspaceSection(sectionId);
+    if (link) {
+      if (sectionId === id) link.setAttribute("aria-current", "location");
+      else link.removeAttribute("aria-current");
+    }
+    section?.setAttribute("data-workspace-visible", sectionId === id ? "true" : "false");
   }
 }
 
@@ -106,6 +113,10 @@ export function installWorkspaceNavigationEnhancements(): () => void {
       setCurrentWorkspace(WORKSPACE_SECTION_IDS.includes(hashId) ? hashId : WORKSPACE_SECTION_IDS[0]);
       return;
     }
+
+    const hashId = window.location.hash.slice(1) as WorkspaceSectionId;
+    if (WORKSPACE_SECTION_IDS.includes(hashId) && workspaceSection(hashId)) setCurrentWorkspace(hashId);
+    else setCurrentWorkspace(WORKSPACE_SECTION_IDS[0]);
 
     intersectionObserver = new IntersectionObserver((entries) => {
       entries.forEach((entry) => {

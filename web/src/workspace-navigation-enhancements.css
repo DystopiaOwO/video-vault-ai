@@ -41,4 +41,8 @@
   #root .workspace-section {
     scroll-behavior: auto;
   }
+
+  #root[data-workspace-focus-mode="true"] > main > section .workspace-section[data-workspace-visible="true"] {
+    animation: none;
+  }
 }

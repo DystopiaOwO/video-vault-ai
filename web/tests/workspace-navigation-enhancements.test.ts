@@ -84,6 +84,8 @@ describe("workspace navigation enhancements", () => {
     expect(search.title).toBe("搜尋專案");
     expect(mediaLink.getAttribute("aria-keyshortcuts")).toBe("Alt+4");
     expect(document.querySelector('a[href="#workspace-overview"]')?.getAttribute("aria-current")).toBe("location");
+    expect(document.getElementById("workspace-overview")?.getAttribute("data-workspace-visible")).toBe("true");
+    expect(document.getElementById("workspace-storyboard")?.getAttribute("data-workspace-visible")).toBe("false");
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true }));
     expect(document.activeElement).not.toBe(search);
@@ -91,6 +93,8 @@ describe("workspace navigation enhancements", () => {
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "4", altKey: true, bubbles: true, cancelable: true }));
     expect(document.activeElement).toBe(media);
     expect(mediaLink.getAttribute("aria-current")).toBe("location");
+    expect(media.getAttribute("data-workspace-visible")).toBe("true");
+    expect(document.getElementById("workspace-overview")?.getAttribute("data-workspace-visible")).toBe("false");
   });
 
   it("does not steal Alt shortcuts while editing a field", () => {

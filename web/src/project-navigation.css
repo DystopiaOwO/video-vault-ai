@@ -189,6 +189,19 @@
   outline: none;
 }
 
+#root[data-workspace-focus-mode="true"] > main > section .workspace-section:not([data-workspace-visible="true"]) {
+  display: none;
+}
+
+#root[data-workspace-focus-mode="true"] > main > section .workspace-section[data-workspace-visible="true"] {
+  animation: workspace-focus-in .18s ease-out;
+}
+
+@keyframes workspace-focus-in {
+  from { opacity: .72; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 #root > main > section .workspace-section:focus-visible {
   border-radius: 18px;
   box-shadow: 0 0 0 3px rgba(49, 94, 251, .13);
