@@ -66,6 +66,8 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
 
   it("uses backend defaults on style switch while preserving supported explicit overrides", () => {
     render(<VisualStylePreviewWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+    expect(screen.getByLabelText("即時 Visual Style 構圖示意")).toBeTruthy();
+    expect(screen.getByText("一段值得留下的日常")).toBeTruthy();
     const selects = screen.getAllByRole("combobox");
     const styleSelect = selects[0] as HTMLSelectElement;
     const anchor = screen.getByLabelText("位置") as HTMLSelectElement;

@@ -20,6 +20,30 @@ function mapValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? value as Record<string, unknown> : {};
 }
 
+function previewGrade(style: Record<string, unknown>): "diary" | "clean" | "cinematic" {
+  const value = `${String(style.style_id || "")} ${String(style.label || "")} ${String(mapValue(style.grading).look_id || "")}`.toLocaleLowerCase();
+  if (value.includes("cinematic") || value.includes("電影")) return "cinematic";
+  if (value.includes("clean") || value.includes("minimal") || value.includes("極簡")) return "clean";
+  return "diary";
+}
+
+function previewAnchor(value: unknown): "top-left" | "top-right" | "top-center" | "bottom-left" | "bottom-right" | "bottom-center" {
+  const anchor = String(value || "bottom-left").toLocaleLowerCase();
+  if (anchor.includes("top-right") || anchor.includes("右上")) return "top-right";
+  if (anchor.includes("top-center") || anchor.includes("上中")) return "top-center";
+  if (anchor.includes("top-left") || anchor.includes("左上")) return "top-left";
+  if (anchor.includes("bottom-right") || anchor.includes("右下")) return "bottom-right";
+  if (anchor.includes("bottom-center") || anchor.includes("下中")) return "bottom-center";
+  return "bottom-left";
+}
+
+function previewMotion(value: unknown): "fade" | "rise" | "slide" {
+  const motion = String(value || "fade").toLocaleLowerCase();
+  if (motion.includes("rise") || motion.includes("上浮")) return "rise";
+  if (motion.includes("slide") || motion.includes("滑入")) return "slide";
+  return "fade";
+}
+
 export function VisualStylePreviewWorkspace({ detail, setMessage, refreshProject, mutationControls }: Props) {
   const state = detail.visual_style || {};
   const styles = (state.options?.styles || []).filter((item) => item.enabled_for_round1_ui !== false);
@@ -40,6 +64,15 @@ export function VisualStylePreviewWorkspace({ detail, setMessage, refreshProject
   const defaultsAvailable = Boolean(resolvedDefaults);
   const effective = (key: string) => overrides[key] ?? resolvedDefaults?.[key] ?? "";
   const effectiveNested = (container: string, key: string) => mapValue(overrides[container])[key] ?? mapValue(resolvedDefaults?.[container])[key] ?? "";
+  const liveSource = detail.segments.find((segment) => segment.include !== false && segment.media_url)?.media_url || detail.clips.find((clip) => clip.media_url)?.media_url || "";
+  const liveGrade = previewGrade(selectedStyle);
+  const liveAnchor = previewAnchor(effective("anchor"));
+  const liveMotion = previewMotion(effectiveNested("motion", "preset"));
+  const liveFont = String(effective("font_family") || "Inter, Segoe UI, sans-serif");
+  const liveWeight = Number(effective("weight")) || 600;
+  const liveSize = String(effective("size_preset") || "normal").toLocaleLowerCase().includes("large") ? "large" : "normal";
+  const liveReadability = String(effectiveNested("readability", "surface") || "translucent").toLocaleLowerCase();
+  const liveTitle = String(selectedStyle.label || selected || "Visual Style");
 
   function invalidatePreview() { setSelectedPreviewPlanHash(""); setSelectedPreviewVariantId(""); }
   function patchOverride(key: string, value: unknown) { setOverrides((old) => ({ ...old, [key]: value })); invalidatePreview(); }
@@ -77,6 +110,14 @@ export function VisualStylePreviewWorkspace({ detail, setMessage, refreshProject
     <div className="visual-style-heading"><div><span className="eyebrow">VISUAL STYLE PREVIEW</span><h3>先用真實畫面確認字幕與視覺方向</h3><p>預覽使用 approved Creative Brief、真實 source frame 與可稽核的 grading/framing contract；不會修改素材。</p></div><span className={approvedBrief ? "brief-status approved" : "brief-status"}>{approvedBrief ? "可產生正式預覽" : "先核准 Creative Brief"}</span></div>
     {!approvedBrief && <div className="visual-style-blocked">目前只顯示 AI 建議：{String((state.recommendation?.label as string) || "Diary Natural")}。Creative Brief 仍是 needs_confirmation，不能自動核准或產生 authoritative Coffee preview。</div>}
     <div className="visual-style-actions"><button type="button" disabled={!approvedBrief || busy} onClick={() => void preview()}>{busy ? "處理中…" : "產生真實畫面預覽"}</button>{approvedBrief && <><select value={selected} disabled={busy} onChange={(event) => { setSelected(event.target.value); const match = variants.find((item) => String((item.visual_style as Record<string, unknown> | undefined)?.visual_style_id || "") === event.target.value); setSelectedPreviewPlanHash(String(match?.preview_plan_hash || "")); setSelectedPreviewVariantId(String(match?.preview_variant_id || "")); setSelectedTitleRole(String(match?.title_role || "chapter_title")); }}>{styles.map((style) => <option key={String(style.style_id)} value={String(style.style_id)}>{String(style.label || style.style_id)}</option>)}</select><button type="button" className="primary" disabled={busy || !selected || !selectedPreviewPlanHash || !selectedPreviewVariantId} onClick={() => void approve()}>核准選定 Visual Style</button></>}</div>
+    {approvedBrief && <div className="visual-style-live-preview" aria-label="即時 Visual Style 構圖示意">
+      <div className={`visual-style-live-canvas grade-${liveGrade} anchor-${liveAnchor} motion-${liveMotion}`}>
+        {liveSource ? <video src={liveSource} muted autoPlay loop playsInline preload="metadata" aria-label="真實素材即時構圖示意" /> : <div className="visual-style-live-placeholder"><span>LIVE PREVIEW</span><strong>尚未提供可播放的 source frame</strong><small>產生正式預覽後會顯示 backend 選定的真實畫面</small></div>}
+        <div className={`visual-style-live-title readability-${liveReadability} size-${liveSize}`} style={{ fontFamily: liveFont, fontWeight: liveWeight }}><span>{liveTitle}</span><strong>一段值得留下的日常</strong><small>{selectedTitleRole.replace(/_/g, " ")}</small></div>
+        <div className="visual-style-live-badge"><span>即時構圖示意</span><b>{String(selectedStyle.label || selected)}</b></div>
+      </div>
+      <div className="visual-style-live-caption"><span>目前只預覽視覺效果，不會修改素材或取代正式 Render</span><span>grading · {String(mapValue(selectedStyle.grading).look_id || "default")}</span></div>
+    </div>}
     {approvedBrief && <div className="visual-style-overrides" aria-label="bounded visual style overrides">
       {!defaultsAvailable && <div className="visual-style-blocked">目前選定的 style/role 沒有 backend resolved control defaults，控制項已停用。</div>}
       <label>字型<select value={String(effective("font_family"))} disabled={busy || !defaultsAvailable} onChange={(event) => patchOverride("font_family", event.target.value)}>{registryOptions(optionData.title_font_families).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
