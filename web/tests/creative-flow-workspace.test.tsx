@@ -103,7 +103,10 @@ describe("CreativeFlowWorkspace", () => {
     });
     const preview = vi.spyOn(api, "previewVisualStyles").mockResolvedValue({
       ok: true,
-      variants: [{ visual_style: { visual_style_id: "cinematic", label: "Cinematic" }, url: "cinematic.png", preview_kind: "static", preview_variant_id: "cinematic-variant", preview_plan_hash: "cinematic-plan", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } }],
+      variants: [
+        { visual_style: { visual_style_id: "diary_natural", label: "Diary Natural" }, url: "diary.png", preview_kind: "static", preview_variant_id: "diary-variant", preview_plan_hash: "diary-plan", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } },
+        { visual_style: { visual_style_id: "cinematic", label: "Cinematic" }, url: "cinematic.png", preview_kind: "static", preview_variant_id: "cinematic-variant", preview_plan_hash: "cinematic-plan", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } },
+      ],
     });
     render(<CreativeFlowWorkspace detail={value} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
 

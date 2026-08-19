@@ -35,7 +35,8 @@ function VisualStylePreviewWorkspaceInner({ detail, setMessage, refreshProject, 
   const primaryStyles = styles.filter((item) => String(item.composition || "overlay") !== "standalone");
   const [showExtraEvidence, setShowExtraEvidence] = useState(false);
   const [busy, setBusy] = useState(false);
-  const { draft, setSelectedStyle, selectVariant, setVariants, patchOverride, patchNestedOverride, invalidatePreview } = useVisualStyleDraft();
+  const { draft, setSelectedStyle, selectVariant, setVariants, patchOverride, patchNestedOverride, invalidatePreview, previewLifecycle, setPreviewLifecycle } = useVisualStyleDraft();
+  const previewBusy = previewLifecycle.status === "running";
   const { selectedStyleId: selected, variants, selectedPreviewPlanHash, selectedPreviewVariantId, selectedTitleRole, overrides } = draft;
   const approvedBrief = detail.creative_brief?.status === "approved";
   const optionData = (state.options || {}) as Record<string, unknown>;
@@ -61,18 +62,52 @@ function VisualStylePreviewWorkspaceInner({ detail, setMessage, refreshProject, 
     const candidates = source.filter((item) => String(mapValue(item.visual_style).visual_style_id || "") === styleId);
     return candidates.find(isStaticChapterBright) || candidates.find((item) => String(variantRole(item)) === "chapter_title" && String(item.preview_kind || "static") === "static") || candidates.find((item) => String(item.preview_kind || "static") === "static") || candidates[0];
   }
+  function usablePrimaryHero(source: Array<Record<string, unknown>>, styleId: string) {
+    const hero = heroForList(source, styleId);
+    if (!hero) return false;
+    return String(mapValue(hero.visual_style).visual_style_id || "") === styleId
+      && String(hero.url || "").trim().length > 0
+      && String(hero.preview_plan_hash || "").trim().length > 0
+      && String(hero.preview_variant_id || "").trim().length > 0
+      && String(hero.preview_kind || "static") === "static";
+  }
+  function previewFeedback() {
+    if (previewLifecycle.status === "running") {
+      return <p className="visual-style-preview-feedback running" role="status" aria-live="polite">正在以真實素材產生預覽，請稍候…</p>;
+    }
+    if (previewLifecycle.status === "success") {
+      return <p className="visual-style-preview-feedback success" role="status" aria-live="polite">真實畫面預覽已完成（{(previewLifecycle.elapsedMs / 1000).toFixed(1)} 秒），請逐一比較 {primaryStyles.length} 種風格。</p>;
+    }
+    if (previewLifecycle.status === "error") {
+      return <div className="visual-style-preview-feedback error" role="alert" aria-live="assertive"><strong>真實畫面預覽失敗</strong><span>{previewLifecycle.error}</span><button type="button" onClick={() => void preview()}>重試真實預覽</button></div>;
+    }
+    return null;
+  }
   async function preview() {
-    setBusy(true);
+    const startedAt = performance.now();
+    invalidatePreview();
+    setVariants([]);
+    setPreviewLifecycle({ status: "running", error: "", elapsedMs: 0 });
     try {
       const result = await api.previewVisualStyles(detail.project.id, false, overrides);
-      if (!result.ok) { setMessage(result.error || "Creative Brief 尚未核准，不能產生 authoritative visual preview。"); return; }
-      const nextVariants = result.variants || [];
+      if (!result.ok) throw new Error(result.error || "Creative Brief 尚未核准，不能產生 authoritative visual preview。");
+      const nextVariants = Array.isArray(result.variants) ? result.variants : [];
+      if (!nextVariants.length) throw new Error("API 沒有回傳任何可供核准的真實預覽畫面。");
+      if (!primaryStyles.length) throw new Error("目前沒有啟用的公開主要視覺風格可供比較。");
+      const missingStyles = primaryStyles
+        .filter((style) => !usablePrimaryHero(nextVariants, String(style.style_id || "")))
+        .map((style) => String(style.label || style.style_id || "未命名風格"));
+      if (missingStyles.length) throw new Error(`部分視覺風格預覽沒有成功產生，請重新產生預覽。缺少：${missingStyles.join("、")}`);
       setVariants(nextVariants);
       const first = heroForList(nextVariants, selected);
       if (first) selectVariant(first, selected);
+      setPreviewLifecycle({ status: "success", error: "", elapsedMs: Math.round(performance.now() - startedAt) });
       onPreviewReady?.();
-    } catch (error) { setMessage(`Visual Style preview 失敗：${formatApiError(error)}`); }
-    finally { setBusy(false); }
+    } catch (error) {
+      const message = `Visual Style 預覽失敗：${formatApiError(error)}`;
+      setPreviewLifecycle({ status: "error", error: message, elapsedMs: Math.round(performance.now() - startedAt) });
+      setMessage(message);
+    }
   }
 
   async function approve() {
@@ -94,7 +129,7 @@ function VisualStylePreviewWorkspaceInner({ detail, setMessage, refreshProject, 
       return <div className="visual-style-grading-summary">
         <strong>{String(selectedStyle.label || selectedStyle.style_id || "尚未設定")}</strong>
         <p>目前調色與 LUT 由已核准的 Visual Style preset 決定；此處不新增另一套 grading 設定。</p>
-        <button type="button" disabled={!approvedBrief || busy} onClick={() => void preview()}>以目前風格重新預覽</button>
+        <button type="button" disabled={!approvedBrief || busy || previewBusy} onClick={() => void preview()}>以目前風格重新預覽</button>
       </div>;
     }
     return <div className="visual-style-overrides" aria-label="字卡控制項">
@@ -106,13 +141,14 @@ function VisualStylePreviewWorkspaceInner({ detail, setMessage, refreshProject, 
       <label>組成<select value={String(effective("composition"))} disabled={busy || !defaultsAvailable} onChange={(event) => patchOverride("composition", event.target.value)}>{registryOptions(optionData.compositions).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
       <label>可讀性<select value={String(effectiveNested("readability", "surface"))} disabled={busy || !defaultsAvailable} onChange={(event) => patchNestedOverride("readability", { surface: event.target.value })}>{registryOptions(optionData.readability_surfaces).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
       <label>動畫<select value={String(effectiveNested("motion", "preset"))} disabled={busy || !defaultsAvailable} onChange={(event) => patchNestedOverride("motion", { preset: event.target.value })}>{registryOptions(optionData.title_motion_presets).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-      <button type="button" disabled={!approvedBrief || busy} onClick={() => void preview()}>以這組設定重新預覽</button>
+      <button type="button" disabled={!approvedBrief || busy || previewBusy} onClick={() => void preview()}>以這組設定重新預覽</button>
     </div>;
   }
 
   if (compact && advancedSection) {
     return <section className="creative-advanced-editor visual-style-advanced-editor" aria-label={advancedSection === "title" ? "字卡詳細設定" : "視覺與調色詳細設定"}>
       <div><strong>{advancedSection === "title" ? "字卡" : "視覺與調色"}</strong><p>{advancedSection === "title" ? "微調字型、位置、可讀性與動畫；變更後需要重新產生預覽。" : "查看目前 preset 的調色與 LUT 摘要；實際 grading contract 仍由 Visual Style registry 提供。"}</p></div>
+      {previewFeedback()}
       {advancedControls(advancedSection)}
     </section>;
   }
@@ -120,7 +156,8 @@ function VisualStylePreviewWorkspaceInner({ detail, setMessage, refreshProject, 
   return <section className={`visual-style-preview card${compact ? " visual-style-preview-simple" : ""}`} aria-label="Visual Style Preview">
     <div className="visual-style-heading"><div>{compact ? <><span className="step-kicker">步驟 2／3</span><h3>選一個你喜歡的視覺風格</h3><p>先看真實素材預覽，滿意後再採用；字體與細節可以之後微調。</p></> : <><span className="eyebrow">VISUAL STYLE PREVIEW</span><h3>先用真實畫面確認字幕與視覺方向</h3><p>預覽使用 approved Creative Brief、真實 source frame 與可稽核的 grading/framing contract；不會修改素材。</p></>}</div><span className={approvedBrief ? "brief-status approved" : "brief-status"}>{approvedBrief ? "可產生正式預覽" : "先核准 Creative Brief"}</span></div>
     {!approvedBrief && <div className="visual-style-blocked">目前只顯示 AI 建議：{String((state.recommendation?.label as string) || "Diary Natural")}。Creative Brief 仍是 needs_confirmation，不能自動核准或產生 authoritative Coffee preview。</div>}
-    <div className="visual-style-actions"><button type="button" disabled={!approvedBrief || busy} onClick={() => void preview()}>{busy ? "處理中…" : "產生真實畫面預覽"}</button>{approvedBrief && <><select className={compact ? "visual-style-hidden-picker" : ""} aria-label="選擇視覺風格" value={selected} disabled={busy} onChange={(event) => { const next = event.target.value; const match = heroFor(next); if (match) selectVariant(match, next); else { setSelectedStyle(next); invalidatePreview(); } }}>{styles.map((style) => <option key={String(style.style_id)} value={String(style.style_id)}>{String(style.label || style.style_id)}</option>)}</select><button type="button" className="primary" disabled={busy || !selected || !selectedPreviewPlanHash || !selectedPreviewVariantId} onClick={() => void approve()}>{compact ? "使用這個風格並繼續" : "核准選定 Visual Style"}</button></>}</div>
+    <div className="visual-style-actions"><button type="button" disabled={!approvedBrief || busy || previewBusy} onClick={() => void preview()}>{previewBusy ? "正在產生真實預覽…" : previewLifecycle.status === "error" ? "重試真實預覽" : "產生真實畫面預覽"}</button>{approvedBrief && <><select className={compact ? "visual-style-hidden-picker" : ""} aria-label="選擇視覺風格" value={selected} disabled={busy || previewBusy} onChange={(event) => { const next = event.target.value; const match = heroFor(next); if (match) selectVariant(match, next); else { setSelectedStyle(next); invalidatePreview(); } }}>{styles.map((style) => <option key={String(style.style_id)} value={String(style.style_id)}>{String(style.label || style.style_id)}</option>)}</select><button type="button" className="primary" disabled={busy || previewBusy || !selected || !selectedPreviewPlanHash || !selectedPreviewVariantId} onClick={() => void approve()}>{compact ? "使用這個風格並繼續" : "核准選定 Visual Style"}</button></>}</div>
+    {previewFeedback()}
     {approvedBrief && !compact && <div className="visual-style-overrides-shell" aria-label="視覺風格詳細設定">{advancedControls("title")}</div>}
     <div className="visual-style-grid" aria-label="主要視覺風格選擇">{primaryStyles.map((style) => { const styleId = String(style.style_id || ""); const hero = heroFor(styleId); const frame = mapValue(hero?.representative_frame); const isSelected = styleId === selected; const isRecommended = String((state.recommendation as Record<string, unknown> | undefined)?.visual_style_id || "diary_natural") === styleId; return <article className={isSelected ? "selected" : ""} key={styleId} onClick={() => hero ? selectVariant(hero, styleId) : setSelectedStyle(styleId)}><div className="visual-style-preview-media">{hero?.url ? <img src={String(hero.url)} alt={`${String(style.label || styleId)} 主要預覽`} /> : <div className="visual-style-preview-placeholder">產生預覽後顯示</div>}</div><div className="visual-style-card-heading"><h4>{String(style.label || styleId)}</h4>{isRecommended && <span>AI 推薦</span>}</div><p className="visual-style-card-summary">{String(style.description || (String(style.composition || "overlay") === "overlay" ? "自然疊加、保留生活感" : "獨立字卡畫面"))}</p>{hero && <small className="visual-style-hero-meta">{String(frame.selection_reason || "代表畫面")} · 字卡預覽</small>}</article>; })}</div>
     {variants.length > 0 && <div className="visual-style-extra-evidence"><button type="button" onClick={() => setShowExtraEvidence((current) => !current)}>{showExtraEvidence ? "收起其他預覽" : "查看更多預覽"}</button>{showExtraEvidence && <div className="visual-style-extra-grid">{variants.map((variant, index) => { const style = mapValue(variant.visual_style); const frame = mapValue(variant.representative_frame); const animated = String(variant.preview_kind || frame.preview_kind || "static") === "animated"; return <article key={`${String(variant.preview_variant_id || style.visual_style_id)}-${String(variantRole(variant))}-${String(variant.timestamp_seconds || index)}-${String(variant.preview_kind || "static")}`} onClick={() => selectVariant(variant)}><div className="visual-style-preview-media">{animated ? <video src={String(variant.url || "")} controls muted loop playsInline /> : <img src={String(variant.url || "")} alt={`${String(style.label || style.visual_style_id)} ${String(frame.role_label || "補充預覽")}`} />}</div><p>{String(style.label || style.visual_style_id)} · {String(variant.role_label || frame.role_label || "補充預覽")}{animated ? " · 動畫" : ""}</p></article>; })}</div>}</div>}

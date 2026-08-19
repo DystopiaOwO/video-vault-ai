@@ -37,6 +37,10 @@ function detail(): ProjectDetail {
   } as ProjectDetail;
 }
 
+function heroVariant(styleId: string, suffix = styleId): Record<string, unknown> {
+  return { visual_style: { visual_style_id: styleId }, url: `${suffix}.png`, preview_kind: "static", preview_plan_hash: `${suffix}-plan`, preview_variant_id: `${suffix}-variant`, title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } };
+}
+
 describe("VisualStylePreviewWorkspace resolved controls", () => {
   afterEach(() => {
     cleanup();
@@ -46,7 +50,7 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
   it("keeps nested readability and motion overrides visible and invalidates preview evidence", async () => {
     vi.spyOn(api, "previewVisualStyles").mockResolvedValue({
       ok: true,
-      variants: [{ visual_style: { visual_style_id: "diary_natural" }, url: "diary.png", preview_kind: "static", preview_plan_hash: "plan", preview_variant_id: "variant", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } }],
+      variants: [heroVariant("diary_natural", "diary"), heroVariant("cinematic")],
     });
     render(<VisualStylePreviewWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
 
@@ -63,6 +67,7 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
     expect(readability.value).toBe("solid");
     expect(motion.value).toBe("fade_rise");
     expect(screen.queryByAltText("diary_natural 主要預覽")).toBeNull();
+    expect(screen.queryByText(/真實畫面預覽已完成/)).toBeNull();
     expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -70,11 +75,11 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
     const preview = vi.spyOn(api, "previewVisualStyles")
       .mockResolvedValueOnce({
         ok: true,
-        variants: [{ visual_style: { visual_style_id: "diary_natural" }, url: "old.png", preview_kind: "static", preview_plan_hash: "plan-a", preview_variant_id: "variant-a", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } }],
+        variants: [heroVariant("diary_natural", "old"), heroVariant("cinematic", "old-cinematic")],
       })
       .mockResolvedValueOnce({
         ok: true,
-        variants: [{ visual_style: { visual_style_id: "diary_natural" }, url: "new.png", preview_kind: "static", preview_plan_hash: "plan-b", preview_variant_id: "variant-b", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } }],
+        variants: [{ ...heroVariant("diary_natural", "new"), preview_plan_hash: "plan-b", preview_variant_id: "variant-b" }, { ...heroVariant("cinematic", "new-cinematic"), preview_plan_hash: "plan-b-cinematic", preview_variant_id: "variant-b-cinematic" }],
       });
     const approve = vi.spyOn(api, "approveVisualStyle").mockResolvedValue({ ok: true });
     render(<VisualStylePreviewWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
@@ -85,6 +90,7 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
 
     fireEvent.change(screen.getByLabelText("位置"), { target: { value: "top-center" } });
     expect(screen.queryByAltText("diary_natural 主要預覽")).toBeNull();
+    expect(screen.queryByText(/真實畫面預覽已完成/)).toBeNull();
     expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(true);
 
     fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
@@ -100,7 +106,7 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
     const input = detail();
     const preview = vi.spyOn(api, "previewVisualStyles").mockResolvedValue({
       ok: true,
-      variants: [{ visual_style: { visual_style_id: "diary_natural" }, url: "current.png", preview_kind: "static", preview_plan_hash: "plan", preview_variant_id: "variant", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } }],
+      variants: [heroVariant("diary_natural", "current"), heroVariant("cinematic", "current-cinematic")],
     });
     const { rerender } = render(<VisualStylePreviewWorkspace detail={input} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
     fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
@@ -195,5 +201,82 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
     fireEvent.click(screen.getByRole("button", { name: "查看更多預覽" }));
     expect(screen.getByText("Standalone Card Compare · Location")).toBeTruthy();
     expect(screen.getAllByText(/Diary Natural ·/).length).toBeGreaterThan(1);
+  });
+
+  it("shows shared running feedback and prevents duplicate preview requests", async () => {
+    let resolvePreview: (value: { ok: true; variants: Array<Record<string, unknown>> }) => void = () => undefined;
+    const preview = vi.spyOn(api, "previewVisualStyles").mockImplementation(() => new Promise((resolve) => { resolvePreview = resolve as typeof resolvePreview; }));
+    render(<VisualStylePreviewWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    const cta = screen.getByRole("button", { name: "產生真實畫面預覽" });
+    fireEvent.click(cta);
+    expect(screen.getByRole("status").textContent).toContain("正在以真實素材產生預覽");
+    expect((cta as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(cta);
+    expect(preview).toHaveBeenCalledTimes(1);
+
+    resolvePreview({ ok: true, variants: [heroVariant("diary_natural", "coffee"), heroVariant("cinematic", "coffee-cinematic")] });
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("真實畫面預覽已完成"));
+  });
+
+  it("shows a local retryable error when the product endpoint rejects preview", async () => {
+    const preview = vi.spyOn(api, "previewVisualStyles").mockResolvedValue({ ok: false, error: "source_changed" });
+    const setMessage = vi.fn();
+    render(<VisualStylePreviewWorkspace detail={detail()} setMessage={setMessage} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("真實畫面預覽失敗");
+    expect(alert.textContent).toContain("source_changed");
+    expect(setMessage).toHaveBeenCalledWith(expect.stringContaining("source_changed"));
+    expect((alert.querySelector("button") as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(alert.querySelector("button") as HTMLButtonElement);
+    await waitFor(() => expect(preview).toHaveBeenCalledTimes(2));
+  });
+
+  it("fails visibly and clears approval evidence when the endpoint returns no variants", async () => {
+    vi.spyOn(api, "previewVisualStyles").mockResolvedValue({ ok: true, variants: [] });
+    render(<VisualStylePreviewWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("沒有回傳任何可供核准的真實預覽畫面");
+    expect(screen.queryByAltText("diary_natural 主要預覽")).toBeNull();
+    expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("fails closed when a public primary registry style is missing from the response", async () => {
+    vi.spyOn(api, "previewVisualStyles").mockResolvedValue({ ok: true, variants: [heroVariant("diary_natural", "partial-diary")] });
+    render(<VisualStylePreviewWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("部分視覺風格預覽沒有成功產生");
+    expect(alert.textContent).toContain("cinematic");
+    expect(screen.queryByText(/真實畫面預覽已完成/)).toBeNull();
+    expect(screen.queryByAltText("diary_natural 主要預覽")).toBeNull();
+    expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("uses registry-derived completeness for a future public sibling style", async () => {
+    const input = detail();
+    input.visual_style = {
+      ...input.visual_style,
+      options: {
+        ...input.visual_style?.options,
+        styles: [
+          ...(input.visual_style?.options?.styles || []),
+          { style_id: "test_future_visual_style", label: "Future Visual", composition: "overlay", enabled_for_round1_ui: true },
+        ],
+      },
+    };
+    vi.spyOn(api, "previewVisualStyles").mockResolvedValue({ ok: true, variants: [heroVariant("diary_natural"), heroVariant("cinematic"), heroVariant("test_future_visual_style", "future")] });
+    render(<VisualStylePreviewWorkspace detail={input} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    await waitFor(() => expect(screen.getByText(/真實畫面預覽已完成/)).toBeTruthy());
+    expect(screen.getByAltText("Future Visual 主要預覽")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

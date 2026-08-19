@@ -10,6 +10,12 @@ export type VisualStyleDraft = {
   selectedTitleRole: string;
 };
 
+export type VisualStylePreviewLifecycle = {
+  status: "idle" | "running" | "success" | "error";
+  error: string;
+  elapsedMs: number;
+};
+
 export type VisualStyleDraftController = {
   draft: VisualStyleDraft;
   setSelectedStyle: (styleId: string) => void;
@@ -18,6 +24,8 @@ export type VisualStyleDraftController = {
   patchOverride: (key: string, value: unknown) => void;
   patchNestedOverride: (key: string, value: Record<string, unknown>) => void;
   invalidatePreview: () => void;
+  previewLifecycle: VisualStylePreviewLifecycle;
+  setPreviewLifecycle: (lifecycle: VisualStylePreviewLifecycle) => void;
 };
 
 const VisualStyleDraftContext = createContext<VisualStyleDraftController | null>(null);
@@ -94,22 +102,28 @@ export function VisualStyleDraftProvider({ detail, children }: { detail: Project
   const identity = sourceIdentity(detail);
   const [draft, setDraft] = useState<VisualStyleDraft>(() => initialDraft(detail));
   const [materializedIdentity, setMaterializedIdentity] = useState(identity);
+  const [previewLifecycle, setPreviewLifecycle] = useState<VisualStylePreviewLifecycle>({ status: "idle", error: "", elapsedMs: 0 });
+  const resetPreviewLifecycle = () => setPreviewLifecycle({ status: "idle", error: "", elapsedMs: 0 });
 
   useEffect(() => {
     if (identity === materializedIdentity) return;
     setDraft(initialDraft(detail));
     setMaterializedIdentity(identity);
+    setPreviewLifecycle({ status: "idle", error: "", elapsedMs: 0 });
   }, [detail, identity, materializedIdentity]);
 
   const controller = useMemo<VisualStyleDraftController>(() => ({
     draft,
-    setSelectedStyle: (styleId) => setDraft((current) => current.selectedStyleId === styleId ? current : {
-      ...current,
-      selectedStyleId: styleId,
-      overrides: legalOverridesForStyle(detail, styleId, current.overrides, current.selectedTitleRole),
-      selectedPreviewPlanHash: "",
-      selectedPreviewVariantId: "",
-    }),
+    setSelectedStyle: (styleId) => {
+      setDraft((current) => current.selectedStyleId === styleId ? current : {
+        ...current,
+        selectedStyleId: styleId,
+        overrides: legalOverridesForStyle(detail, styleId, current.overrides, current.selectedTitleRole),
+        selectedPreviewPlanHash: "",
+        selectedPreviewVariantId: "",
+      });
+      resetPreviewLifecycle();
+    },
     selectVariant: (variant, styleId) => {
       const visualStyle = mapValue(variant.visual_style);
       const representative = mapValue(variant.representative_frame);
@@ -123,22 +137,33 @@ export function VisualStyleDraftProvider({ detail, children }: { detail: Project
       }));
     },
     setVariants: (variants) => setDraft((current) => ({ ...current, variants })),
-    patchOverride: (key, value) => setDraft((current) => ({
-      ...current,
-      overrides: { ...current.overrides, [key]: value },
-      variants: [],
-      selectedPreviewPlanHash: "",
-      selectedPreviewVariantId: "",
-    })),
-    patchNestedOverride: (key, value) => setDraft((current) => ({
-      ...current,
-      overrides: { ...current.overrides, [key]: { ...mapValue(current.overrides[key]), ...value } },
-      variants: [],
-      selectedPreviewPlanHash: "",
-      selectedPreviewVariantId: "",
-    })),
-    invalidatePreview: () => setDraft((current) => ({ ...current, selectedPreviewPlanHash: "", selectedPreviewVariantId: "" })),
-  }), [detail, draft]);
+    patchOverride: (key, value) => {
+      setDraft((current) => ({
+        ...current,
+        overrides: { ...current.overrides, [key]: value },
+        variants: [],
+        selectedPreviewPlanHash: "",
+        selectedPreviewVariantId: "",
+      }));
+      resetPreviewLifecycle();
+    },
+    patchNestedOverride: (key, value) => {
+      setDraft((current) => ({
+        ...current,
+        overrides: { ...current.overrides, [key]: { ...mapValue(current.overrides[key]), ...value } },
+        variants: [],
+        selectedPreviewPlanHash: "",
+        selectedPreviewVariantId: "",
+      }));
+      resetPreviewLifecycle();
+    },
+    invalidatePreview: () => {
+      setDraft((current) => ({ ...current, selectedPreviewPlanHash: "", selectedPreviewVariantId: "" }));
+      resetPreviewLifecycle();
+    },
+    previewLifecycle,
+    setPreviewLifecycle,
+  }), [detail, draft, previewLifecycle]);
 
   return <VisualStyleDraftContext.Provider value={controller}>{children}</VisualStyleDraftContext.Provider>;
 }
