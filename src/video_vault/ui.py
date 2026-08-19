@@ -3,11 +3,13 @@ from __future__ import annotations
 from email import policy
 from email.parser import BytesParser
 from copy import deepcopy
+from datetime import datetime, timezone
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 import json
+import math
 import mimetypes
 import os
 import re
@@ -2161,11 +2163,45 @@ def _job_stopped(project_id: int, name: str) -> bool:
         return JOBS.get((project_id, name), {}).get("status") == "stopped"
 
 
+def _job_updated_at_sort_key(value: object) -> float:
+    """Return a presentation-only Unix timestamp for mixed job payloads.
+
+    Legacy in-memory jobs use numeric Unix seconds while persisted jobs use
+    timezone-aware ISO-8601 strings.  Invalid values deliberately share the
+    oldest sentinel so ``sorted(..., reverse=True)`` keeps them last without
+    mutating the source job payload.
+    """
+    if isinstance(value, bool):
+        return float("-inf")
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        return timestamp if math.isfinite(timestamp) else float("-inf")
+    if not isinstance(value, str):
+        return float("-inf")
+
+    text = value.strip()
+    if not text:
+        return float("-inf")
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return float("-inf")
+    if parsed.tzinfo is None:
+        return float("-inf")
+    try:
+        timestamp = parsed.astimezone(timezone.utc).timestamp()
+    except (OverflowError, OSError, ValueError):
+        return float("-inf")
+    return timestamp if math.isfinite(timestamp) else float("-inf")
+
+
 def _jobs_panel(jobs: list[dict]) -> str:
     if not jobs:
         return ""
     lines = []
-    for job in sorted(jobs, key=lambda j: j.get("updated_at", 0), reverse=True):
+    for job in sorted(jobs, key=lambda j: _job_updated_at_sort_key(j.get("updated_at")), reverse=True):
         status = job.get("status", "")
         done = int(job.get("done") or 0)
         total = int(job.get("total") or 0)
