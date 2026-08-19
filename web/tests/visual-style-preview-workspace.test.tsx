@@ -196,4 +196,47 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
     expect(screen.getByText("Standalone Card Compare · Location")).toBeTruthy();
     expect(screen.getAllByText(/Diary Natural ·/).length).toBeGreaterThan(1);
   });
+
+  it("shows shared running feedback and prevents duplicate preview requests", async () => {
+    let resolvePreview: (value: { ok: true; variants: Array<Record<string, unknown>> }) => void = () => undefined;
+    const preview = vi.spyOn(api, "previewVisualStyles").mockImplementation(() => new Promise((resolve) => { resolvePreview = resolve as typeof resolvePreview; }));
+    render(<VisualStylePreviewWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    const cta = screen.getByRole("button", { name: "產生真實畫面預覽" });
+    fireEvent.click(cta);
+    expect(screen.getByRole("status").textContent).toContain("正在以真實素材產生預覽");
+    expect((cta as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(cta);
+    expect(preview).toHaveBeenCalledTimes(1);
+
+    resolvePreview({ ok: true, variants: [{ visual_style: { visual_style_id: "diary_natural" }, url: "coffee.png", preview_kind: "static", preview_plan_hash: "plan", preview_variant_id: "variant", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } }] });
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("真實畫面預覽已完成"));
+  });
+
+  it("shows a local retryable error when the product endpoint rejects preview", async () => {
+    const preview = vi.spyOn(api, "previewVisualStyles").mockResolvedValue({ ok: false, error: "source_changed" });
+    const setMessage = vi.fn();
+    render(<VisualStylePreviewWorkspace detail={detail()} setMessage={setMessage} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("真實畫面預覽失敗");
+    expect(alert.textContent).toContain("source_changed");
+    expect(setMessage).toHaveBeenCalledWith(expect.stringContaining("source_changed"));
+    expect((alert.querySelector("button") as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(alert.querySelector("button") as HTMLButtonElement);
+    await waitFor(() => expect(preview).toHaveBeenCalledTimes(2));
+  });
+
+  it("fails visibly and clears approval evidence when the endpoint returns no variants", async () => {
+    vi.spyOn(api, "previewVisualStyles").mockResolvedValue({ ok: true, variants: [] });
+    render(<VisualStylePreviewWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("沒有回傳任何可供核准的真實預覽畫面");
+    expect(screen.queryByAltText("diary_natural 主要預覽")).toBeNull();
+    expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(true);
+  });
 });
