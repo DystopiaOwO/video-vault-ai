@@ -4,6 +4,7 @@ import type { ProjectDataLoadOptions } from "../../projectDataLoader";
 import type { ProjectMutationControls } from "../../projectMutation";
 import { CreativeBriefCheckpoint } from "./CreativeBriefCheckpoint";
 import { VisualStylePreviewWorkspace } from "./VisualStylePreviewWorkspace";
+import { VisualStyleDraftProvider } from "./VisualStyleDraftController";
 import { disclosureSections, resolveDisclosureAction, resolveDisclosureSummary } from "./disclosure";
 import "./creative-flow.css";
 
@@ -15,7 +16,7 @@ type Props = {
 };
 
 type FlowStep = "direction" | "style" | "summary";
-type AdvancedRendererProps = Omit<Props, "detail">;
+type AdvancedRendererProps = Omit<Props, "detail"> & { onPreviewReady?: () => void };
 
 const ADVANCED_RENDERERS: Record<string, (props: AdvancedRendererProps & { detail: ProjectDetail }) => ReactNode> = {
   "creative_brief.framing": ({ detail, ...props }) => <CreativeBriefCheckpoint {...props} detail={detail} compact advancedSection="framing" />,
@@ -61,12 +62,12 @@ export function CreativeFlowWorkspace({ detail, setMessage, refreshProject, muta
     const renderer = target ? ADVANCED_RENDERERS[target] : undefined;
     if (section.enabled === false || !renderer) return <span className="advanced-unavailable">{action.reason || "此區塊目前沒有可用的編輯入口"}</span>;
     return <>
-      {renderer({ detail, setMessage, refreshProject, mutationControls })}
+      {renderer({ detail, setMessage, refreshProject, mutationControls, onPreviewReady: () => setStep("style") })}
       {action.available && <button type="button" className="semantic-editor-action" onClick={() => openSemanticEditor(section.section_id, action)}>{action.label}</button>}
     </>;
   }
 
-  return <section className="creative-flow" aria-label="創意設定流程">
+  return <VisualStyleDraftProvider detail={detail}><section className="creative-flow" aria-label="創意設定流程">
     <header className="creative-flow-header">
       <div><span className="eyebrow">創意流程</span><h2>先看結果，再調細節</h2><p>AI 先提出建議，確認真實預覽後再進入故事整理。</p></div>
       <div className="creative-flow-progress" aria-label="創意流程進度">
@@ -100,5 +101,5 @@ export function CreativeFlowWorkspace({ detail, setMessage, refreshProject, muta
         })}
       </div>
     </details>
-  </section>;
+  </section></VisualStyleDraftProvider>;
 }

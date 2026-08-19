@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, type ProjectDetail } from "../src/api";
 import { ProjectMutationCoordinator, createProjectMutationControls } from "../src/projectMutation";
@@ -71,6 +71,60 @@ describe("CreativeFlowWorkspace", () => {
     fireEvent.click(within(titleSection as HTMLElement).getByRole("button", { name: "微調" }));
     expect(screen.getByText("選一個你喜歡的視覺風格")).toBeTruthy();
     expect(screen.getByLabelText("字卡詳細設定")).toBeTruthy();
+  });
+
+  it("shares the pending Visual Style draft between primary preview and title controls", async () => {
+    const base = detail();
+    const value = detail({
+      creative_brief: { ...base.creative_brief, status: "approved", approved: { output: base.creative_brief?.recommendation?.output } },
+      visual_style: {
+        status: "needs_confirmation",
+        options: {
+          styles: [
+            { style_id: "diary_natural", label: "Diary Natural", composition: "overlay", enabled_for_round1_ui: true },
+            { style_id: "cinematic", label: "Cinematic", composition: "overlay", enabled_for_round1_ui: true },
+          ],
+          control_defaults: [
+            { visual_style_id: "cinematic", is_default_title_style: true, role: "chapter_title", aspect: "landscape", font_family: "Segoe UI", weight: 700, anchor: "top-right", composition: "overlay", readability: { surface: "solid" }, motion: { preset: "fade_rise" } },
+          ],
+          title_font_families: [{ id: "Segoe UI", label: "Segoe UI" }],
+          title_weight_values: [{ id: "700", label: "700" }],
+          title_size_presets: [{ id: "normal", label: "標準" }],
+          title_anchors: [{ id: "top-right", label: "右上" }, { id: "top-center", label: "上中" }],
+          compositions: [{ id: "overlay", label: "疊在影片上" }],
+          readability_surfaces: [{ id: "solid", label: "實色" }],
+          title_motion_presets: [{ id: "fade_rise", label: "淡入上移" }, { id: "none", label: "不使用" }],
+        },
+      } as ProjectDetail["visual_style"],
+      editor_disclosure: {
+        ...base.editor_disclosure,
+        sections: [...(base.editor_disclosure?.sections || []), { section_id: "grading", version: "1", label: "視覺與調色", disclosure_level: "advanced", order: 40, summary_resolver: "visual_style.grading@1", semantic_domain: "visual_style", invalidation_class: "visual_preview_and_render", action: { type: "open_semantic_editor@1", target: "visual_style.grading" } }],
+      },
+    });
+    const preview = vi.spyOn(api, "previewVisualStyles").mockResolvedValue({
+      ok: true,
+      variants: [{ visual_style: { visual_style_id: "cinematic", label: "Cinematic" }, url: "cinematic.png", preview_kind: "static", preview_variant_id: "cinematic-variant", preview_plan_hash: "cinematic-plan", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } }],
+    });
+    render(<CreativeFlowWorkspace detail={value} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    fireEvent.click(screen.getByRole("heading", { name: "Cinematic" }));
+    fireEvent.click(screen.getByText("詳細設定"));
+    fireEvent.click(screen.getByText("字卡"));
+    expect((screen.getByLabelText("位置") as HTMLSelectElement).value).toBe("top-right");
+    fireEvent.change(screen.getByLabelText("位置"), { target: { value: "top-center" } });
+    expect((screen.getByRole("button", { name: "使用這個風格並繼續" }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByText("視覺與調色"));
+    fireEvent.click(screen.getByText("字卡"));
+    expect((screen.getByLabelText("位置") as HTMLSelectElement).value).toBe("top-center");
+
+    fireEvent.click(screen.getByRole("button", { name: "以這組設定重新預覽" }));
+    await waitFor(() => expect(preview).toHaveBeenCalledWith(1, false, { anchor: "top-center" }));
+    expect(screen.getByAltText("Cinematic 主要預覽")).toBeTruthy();
+
+    const approve = vi.spyOn(api, "approveVisualStyle").mockResolvedValue({ ok: true });
+    fireEvent.click(screen.getByRole("button", { name: "使用這個風格並繼續" }));
+    await waitFor(() => expect(approve).toHaveBeenCalledWith(1, "cinematic", 4, "cinematic-plan", "cinematic-variant", "chapter_title", { anchor: "top-center" }));
   });
 
   it("renders the visual step as preview-first and hides technical controls until advanced is opened", () => {

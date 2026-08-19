@@ -77,6 +77,26 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
     expect(anchor.value).toBe("top-right");
   });
 
+  it("materializes the persisted approved style, overrides, and preview identity after refresh", () => {
+    const input = detail();
+    input.visual_style = {
+      ...input.visual_style,
+      status: "approved",
+      approved: {
+        visual_style_id: "cinematic",
+        visual_style_version: "1",
+        overrides: { anchor: "top-right" },
+        title_style: { role: "chapter_title" },
+        approved_preview_variant_id: "persisted-variant",
+        approved_preview_plan_hash: "persisted-plan",
+      },
+    };
+    render(<VisualStylePreviewWorkspace detail={input} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+    expect((screen.getByRole("combobox", { name: "選擇視覺風格" }) as HTMLSelectElement).value).toBe("cinematic");
+    expect((screen.getByLabelText("位置") as HTMLSelectElement).value).toBe("top-right");
+    expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("renders sparse inherited child defaults from API without a child-specific UI branch", async () => {
     const input = detail();
     input.visual_style = {
