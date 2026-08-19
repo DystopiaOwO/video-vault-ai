@@ -10,6 +10,15 @@
   --app-subtle: #8b97a9;
   --app-primary: #315efb;
   --app-primary-hover: #254bd2;
+  --app-primary-soft: #edf2ff;
+  --app-nav-text: #57667c;
+  --app-nav-hover-text: #244bcf;
+  --app-nav-hover-bg: #edf2ff;
+  --app-nav-active-text: #244bcf;
+  --app-nav-active-bg: #e8eeff;
+  --app-nav-active-border: #8ca7ff;
+  --app-nav-active-underline: #315efb;
+  --app-focus-ring: #315efb;
   --app-success: #16815a;
   --app-danger: #b43b32;
   --sidebar-bg: #111a2c;

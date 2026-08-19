@@ -169,7 +169,7 @@
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  color: #57667c;
+  color: var(--app-nav-text);
   font-size: 10px;
   font-weight: 750;
   text-decoration: none;
@@ -179,8 +179,8 @@
 
 #root > main > section .workspace-nav a:hover,
 #root > main > section .workspace-nav a:focus-visible {
-  color: #244bcf;
-  background: #edf2ff;
+  color: var(--app-nav-hover-text);
+  background: var(--app-nav-hover-bg);
   outline: none;
 }
 
