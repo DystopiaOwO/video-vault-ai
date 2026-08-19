@@ -360,8 +360,6 @@ export function App() {
       <nav className="sidebar-links" aria-label="主要導覽">
         <a className="nav" href="/system-status">系統狀態</a>
         <a className="nav" href="/bgm">BGM 資料庫</a>
-        <a className="nav" href="/classic-bgm">舊版 BGM 上傳</a>
-        <a className="nav" href="/classic">舊版工作台</a>
       </nav>
       <div className="new-project">
         <label htmlFor="new-project-name">建立專案</label>

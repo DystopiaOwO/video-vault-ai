@@ -152,6 +152,9 @@ describe("project navigation", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "福岡旅行" });
 
+    const primaryNavigation = screen.getByRole("navigation", { name: "主要導覽" });
+    expect(primaryNavigation.querySelector('a[href="/classic-bgm"]')).toBeNull();
+    expect(primaryNavigation.querySelector('a[href="/classic"]')).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /手沖日記/ }));
     await screen.findByRole("heading", { name: "手沖日記" });
 

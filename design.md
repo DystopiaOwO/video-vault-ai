@@ -79,6 +79,10 @@ replace the selected text with `#fff` or an undefined generic token such as
 6. If a new component needs a color role, add a semantic token here and to
    `web/src/app-shell.css` before using it.
 
+The primary sidebar exposes only the current workspace, system status, and
+BGM library. Legacy workspace/uploader routes are not primary navigation and
+must not be reintroduced as sidebar entries.
+
 ## Regression guard
 
 When changing navigation or global styles, check the selected workspace tab in
