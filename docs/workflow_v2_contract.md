@@ -40,10 +40,10 @@ stable API identifiers; labels may be localized.
 | --- | --- | --- | --- | --- | --- |
 | 1 | `import` | 匯入素材 | Copy/reference source assets, fingerprint, probe metadata | None; user starts import | immutable source identity, clip records |
 | 2 | `understanding` | AI 理解與整理 | Perception, transcription, audio perception, summaries; independent jobs may run in parallel after import | Review only when an analysis is blocked or needs correction | current perception runs, transcript, audio candidates, source/orientation summary |
-| 3 | `creative_brief` | 決定成片方向與創作意圖 | Recommend output direction, target duration, pacing, high-level story intent, aspect, resolution, and framing from source geometry/project context | Required: accept recommendation or save a human override for Story-relevant intent | approved Creative Brief, recommendation provenance |
+| 3 | `creative_brief` | 決定成片方向與創作意圖 | Recommend output direction, target duration, pacing, high-level story intent, aspect, resolution, and framing from source geometry/project context | Required: accept recommendation or save human decisions; visual and Story-relevant fields remain separately classified | approved Creative Brief, recommendation provenance |
 | 4 | `story_draft` | 產生第一版剪輯結果 | Generate Story from the current StoryInput snapshot and approved Story-relevant brief fields; build a valid Story/storyboard draft and automatically request a cheap Draft Preview | No approval yet; user enters review looking at the playable result | Story generation, storyboard draft, exact segment coverage, Draft Preview |
-| 5 | `review` | 看結果並微調 | Play the Draft Preview first; on demand open Timeline, Visual Style, Subtitle, Audio, Color, and other Workspace previews | Required once: confirm the reviewed edit, or return to edit; domain edits remain tracked as readiness | pending semantic drafts, preview evidence, domain readiness |
-| 6 | `approval` | 核准目前版本 | Validate currentity, provenance, manifest, rights, and all required contracts | Required: approve the exact reviewed revision | immutable approval snapshot and approved revision |
+| 5 | `review` | 看結果並微調 | Play the Draft Preview first; on demand open Timeline, Visual Style, Subtitle, Audio, Color, and other Workspace previews | Required once: confirm the reviewed edit, or return to edit; confirmation starts the Apply boundary operation | candidate semantic drafts, preview evidence, domain readiness |
+| 6 | `approval` | 套用並核准目前版本 | Atomically Apply the reviewed candidate when needed, verify the exact applied revision/currentity, then validate provenance, manifest, rights, and all approval contracts | Human intent was captured by Review confirmation; an explicit separate approval action is allowed only if product policy requires it | applied authoritative revision, immutable approval snapshot, approval readiness |
 | 7 | `formal_render` | 產生正式成片 | Formal Render Job using approved snapshot only | None while running; cancellation is not success | Render Report, output fingerprint, encoder/probe audit |
 | 8 | `automated_qa` | 驗證交付品質 | Final QC and Delivery QA as separate formal gates | Resolve `qa_needs_review` findings; no threshold bypass | QC/QA evidence and gate result |
 | 9 | `human_preview` | 最後看成品 | Present the exact final MP4 and evidence bundle | Required: human final preview confirmation | human confirmation bound to render/QA/output fingerprint |
@@ -56,8 +56,17 @@ required checkpoint:
 
 ```text
 import → understanding → creative_brief → story_draft → review
-review → approval → formal_render → automated_qa → human_preview → delivered
+review → apply_candidate → applied_revision → approval
+approval → formal_render → automated_qa → human_preview → delivered
 ```
+
+`Story generation` produces a candidate Story generation and draft storyboard;
+it does not become the current authoritative project edit. After Review
+confirmation, VID-16 Apply validates candidate currentity and atomically commits
+storyboard/project revision. Only after exact Apply success may the system
+persist or refresh the formal Approval candidate. Apply and Approval are two
+authoritative contracts even when one Simple-first CTA orchestrates them
+sequentially.
 
 `formal_render` is never entered from a draft, recommendation, preview, or
 legacy UI flag. It requires the existing approval gate and an immutable
@@ -133,10 +142,13 @@ blocked analysis explicitly.
 
 Story generation starts only after its StoryInput snapshot is complete and the
 Creative Brief checkpoint has approved Story-relevant fields. At minimum these
-are output direction, bounded target duration, pacing, and high-level story
-intent. Visual Style selection may remain in the later Review stage because it
-is primarily visual/render semantics and must not unnecessarily block Story
-generation. Story generation continues to use its existing context preflight,
+are bounded target duration, pacing, high-level story intent, and existing
+schema-declared Story instructions. Output direction/aspect/resolution/framing
+may be confirmed at the same Simple-first checkpoint, but are visual/render
+semantics and are excluded from StoryInput identity. Visual Style selection may
+remain in the later Review stage because it is primarily visual/render semantics
+and must not unnecessarily block Story generation. Story generation continues
+to use its existing context preflight,
 strict schema, semantic validation, compact corrective retry, and fail-closed
 publish gate.
 
@@ -210,9 +222,10 @@ runtime.
 | Source Transcript and word timestamps | Source Transcript artifact contract | StoryInput, Caption Track derivation, search/audit |
 | Caption Track cues and style | Caption Track editing contract | Subtitle Workspace, preview, Render, QA |
 | Creative Intent recommendation | Creative Brief recommendation state | checkpoint UI, Story context |
-| Approved output direction/framing | persisted approved Creative Brief snapshot | Story context, Render, VID-27 |
-| Story input and generation | Story generation store/cache contract | Story review, Apply |
-| Storyboard order/timing/segment inclusion | storyboard state and Apply revision | preview, approval, Render |
+| Approved output direction/framing | persisted approved Creative Brief snapshot | Draft Preview, Visual Style, Render, VID-27 |
+| Story-relevant Creative Intent | persisted Creative Brief fields included in StoryInput | Story generation / StoryInput |
+| Candidate Story generation | Story generation store/cache contract | Story review, Draft Preview, Apply |
+| Storyboard order/timing/segment inclusion | storyboard state and Apply revision | Draft Preview, approval, Render |
 | Visual style/title/grading | Visual Style and color contracts | preview, manifest, Render |
 | Audio role/BGM/normalization | Audio state and BGM provenance | preview, manifest, Render, QA |
 | Subtitle cues/style | Subtitle Workspace contract | preview, Render, QA |
@@ -223,11 +236,23 @@ runtime.
 No stage may reconstruct these values from labels, browser state, stale cached
 payloads, or another Workspace's local draft.
 
+The following identities are intentionally distinct:
+
+- **Story Generation Store**: candidate AI generation;
+- **Storyboard / Apply revision**: current authoritative edit state;
+- **Draft Preview**: candidate evidence bound to candidate Story, draft
+  storyboard, visual semantics, and source identity;
+- **Approval Snapshot**: exact applied revision approval;
+- **Formal Render**: consumer of the Approval Snapshot.
+
+A Story generation ID or Draft Preview ID alone can never authorize Approval or
+Formal Render.
+
 ## 6. Creative Brief checkpoint
 
 The checkpoint is before Story generation and is the first creative decision in
 the workflow. Its Simple-first surface must expose only the high-value
-Story-relevant Creative Intent decisions:
+Creative Intent decisions, while preserving their separate semantic classes:
 
 - output direction: 16:9 or 9:16;
 - target duration: AI recommendation plus bounded presets/human override, such
@@ -256,6 +281,32 @@ The user may accept the recommendation or save an override. Saving an approved
 brief is an explicit human action. Migration may create a deterministic
 recommendation with `needs_confirmation`, but must never create human approval.
 
+The checkpoint intentionally presents two semantic classes together for a
+simple decision, but persists them separately:
+
+**Visual/render-only Creative Brief fields**
+
+- output direction;
+- aspect ratio and resolution;
+- framing strategy.
+
+These can be confirmed before Story so Draft Preview and geometry know the
+target, but they are excluded from Story-relevant invalidation identity. A
+16:9 → 9:16 change stales the visual Creative Brief contract, Visual Style
+preview, Draft Preview pixels, approval snapshot, and downstream render/cache
+identity; it does not rerun Perception or Story.
+
+**Story-relevant Creative Intent fields**
+
+- bounded target duration;
+- pacing;
+- high-level Story intent;
+- `must_keep`, `exclude`, desired sequence, user summary, and other
+  schema-declared Story instructions.
+
+These are the fields consumed by StoryInput. Changing them stales Story and
+the Draft Preview and requires Story regeneration.
+
 Visual Style choices (`Diary Natural`, `Clean Minimal`, `Cinematic`) remain in
 the Story draft Review stage. They are primarily visual/render semantics and do
 not block Story generation unless a future schema explicitly marks a field as
@@ -282,9 +333,15 @@ The tiers are intentionally separate:
 | Delivered | delivery state | all gates current and confirmed | Already passed | `deliverable_ready=true` |
 
 Draft Preview is playable, cheap, reversible, and may become stale after
-pending review edits. It does not imply Apply, Formal Render, QC PASS, Approval,
-or delivery. This round defines the contract only; it does not implement a
-Draft Preview renderer.
+pending review edits. Its identity is bound to the candidate Story generation,
+relevant storyboard draft identity, visual-only Creative Brief contract,
+current preview-relevant visual semantics, and source identity. A
+visual-direction/framing change therefore stales the Draft Preview and may
+regenerate it cheaply while reusing the same Story/storyboard candidate. A
+Story-relevant intent change stales both Story and Draft Preview. Pure
+disclosure changes stale nothing. Draft Preview does not imply Apply, Formal
+Render, QC PASS, Approval, or delivery. This round defines the contract only;
+it does not implement a Draft Preview renderer.
 
 The primary Review actions are:
 
@@ -373,8 +430,11 @@ cache as appropriate, but do not make Perception or Story stale by themselves:
 - renderer/encoder/GPU execution contracts.
 
 They require a new visual preview or approval snapshot when the approved
-artifact changes, but must not force Perception/Story rerun unless a separate
-Story-relevant field changed.
+artifact changes. A direction/framing change stales any Draft Preview whose
+pixels depend on that visual contract, but may reuse the same Story/storyboard
+candidate and regenerate only the cheap preview. These changes must not force
+Perception or Story rerun unless the same mutation also changes a separate
+Story-relevant field.
 
 ### 9.2 Story-relevant changes
 
@@ -385,9 +445,9 @@ approval, and Render artifacts:
 - segment inclusion, order, source range, or semantic action/shot evidence;
 - user summary, must-keep/exclude, desired sequence, pacing, or other
   human-authored Story instructions;
-- a Creative Brief field explicitly declared Story-relevant by its schema,
-  including the approved direction, target duration, pacing, or high-level story
-  intent when those values are part of StoryInput;
+- target duration, pacing, high-level story intent, or another Creative Brief
+  field explicitly declared Story-relevant by its schema when included in
+  StoryInput;
 - Source Transcript text/timestamps or transcript revision when the transcript
   identity is included in StoryInput.
 
@@ -419,7 +479,25 @@ After the playable Draft Preview, the user either accepts the direction or opens
 the relevant Workspace to make edits. Visual Style, Subtitle, Audio, Color,
 and Timeline remain domain-level persisted currentity, but they do not become
 separate compulsory approval pages in the main path. The user confirms the
-reviewed revision once, after required domain readiness is current.
+reviewed revision once, after required domain readiness is current. The single
+CTA may say `確認這個版本`; it need not expose the engineering term Apply.
+
+The backend orchestration is nevertheless sequential and fail-closed:
+
+```text
+human review intent
+  → VID-16 Apply candidate
+  → verify exact applied project revision/currentity
+  → persist formal Approval
+```
+
+VID-16 Apply must validate the candidate Story generation, validate stale
+currentity, atomically commit storyboard/project revision, return the exact
+applied revision, and leave no partial success on failure. Approval must bind
+that exact applied revision, not a Story generation ID, Draft Preview ID, or
+browser draft. Apply failure stops before Approval; Approval validation failure
+leaves the applied revision authoritative and marks Approval `needs_review` or
+`blocked` rather than rolling back or pretending Apply did not happen.
 
 ### C. Human Final Preview
 
@@ -442,6 +520,38 @@ require human resolution; it is not an automatic pass.
 - Source media and production data remain immutable during preview and formal
   acceptance work.
 
+### 11.1 Explicit failure cases
+
+**Case A — Apply stale/currentity failure**
+
+The user confirms a current Draft Preview, but Apply detects a stale candidate:
+
+```yaml
+main_stage: review
+approval: blocked
+formal_render: unavailable
+```
+
+No Approval call is made; the user returns to Review.
+
+**Case B — Apply succeeds, Approval validation fails**
+
+Apply commits project revision 9, but formal Approval validation fails. Revision
+9 remains the authoritative project state; Approval is `needs_review` or
+`blocked`, and Formal Render is unavailable. The system does not roll back
+revision 9.
+
+**Case C — Visual direction changes after Story**
+
+Story generation remains current. The visual Creative Brief, Visual Style
+preview, and Draft Preview become stale; the same Story/storyboard candidate
+may regenerate a cheap Draft Preview without rerunning Story.
+
+**Case D — Target duration changes after Story**
+
+StoryInput and Story generation become stale. Draft Preview, Apply, and Approval
+are unavailable until Story is regenerated.
+
 ## 12. Existing VID scope map
 
 | VID | Treatment | Workflow v2 stage/workspace | Dependency and timing |
@@ -449,10 +559,11 @@ require human resolution; it is not an automatic pass.
 | VID-11 | retain | acceptance / hardening umbrella | Remains active until VID-18 Round-1 closure; Workflow v2 cannot skip it. |
 | VID-18 | retain | formal Render → QA → human preview | Current Round-1 deliverable acceptance remains independent and must close before delivery claims. |
 | VID-25 | reposition; eventually superseded as UX v1 by VID-41 slices | Project orchestrator / Review shell | Preserve completed child results; migrate only after this contract is reviewed. |
-| VID-26 | retain | Creative Brief / Creative Intent checkpoint | Before Story; owns direction, duration, pacing, and approved output contract. |
+| VID-26 | retain | Creative Brief / Creative Intent checkpoint | Mixed domain: Story-relevant duration/pacing/high-level Story intent/instructions; visual-only direction/aspect/resolution/framing. |
 | VID-27 | retain | Visual Style / Workspace Preview | Review drill-down after Draft Preview; consumes approved Creative Brief. |
 | VID-28 | retain; reposition | Timeline Inspector drill-down in Review | Do after the Workflow shell placement is stable; not required to define this contract. |
 | VID-29 | defer | Editorial Policy domain | Start after Workflow v2 core flow is stable; no policy engine in this round. |
+| VID-16 | retain | Review → Apply → Approval boundary | Atomic Apply remains authoritative; Workflow v2 does not replace it. A single CTA may orchestrate Apply then Approval sequentially, fail-closed. |
 | VID-35 | retain backlog | Render performance / formal Render | Independent performance work; does not block Workflow v2 UX. |
 | VID-40 | completed; retain principles | Simple-first components / progressive disclosure | Reuse locally; it is not the whole Workflow v2 orchestrator. |
 | VID-41 | active | Workflow v2 control-plane contract | This document is Round 1; implementation follows focused slices. |
@@ -485,10 +596,14 @@ devolve into a pipeline control panel.
 5. If the direction is good, the user presses [這版方向可以]. If not, [微調]
    opens Timeline, Visual Style, Subtitle, Audio, or Color only as needed.
 6. The user presses [確認這個版本] once after required Review readiness is
-   current.
-7. The product runs Formal Render, Final QC, and Delivery QA.
-8. The user performs the final human preview of the exact MP4.
-9. Only then does the system set `deliverable_ready=true`.
+   current. The UI may show 「正在套用這個版本」 while the system performs
+   the boundary operation; it need not expose the word Apply.
+7. The system atomically Applies the candidate and verifies the exact applied
+   project revision.
+8. Only after Apply succeeds does the system persist formal Approval.
+9. The product runs Formal Render, Final QC, and Delivery QA.
+10. The user performs the final human preview of the exact MP4.
+11. Only then does the system set `deliverable_ready=true`.
 
 For a user who accepts the recommendation and makes no edits, the minimum
 human decisions are Creative Intent, Review completed/Approve edit, and Human
@@ -535,3 +650,17 @@ prove that it has not bypassed an existing gate.
 - [x] Source Transcript and Caption Track ownership are separated.
 - [x] WorkflowDescriptor extensibility and non-linear readiness are defined.
 - [x] The Coffee user journey and minimum human decisions are explicit.
+
+The contract answers the required correctness questions unambiguously:
+
+- 16:9 → 9:16: no Story rerun; only visual/Draft Preview/downstream render
+  identities become stale.
+- 90 seconds → 60 seconds: StoryInput and Story become stale; regeneration is
+  required.
+- AI Story generation: candidate only, not the current authoritative project
+  edit; VID-16 Apply is required.
+- Draft Preview: cannot enter Formal Render directly; Review → Apply → formal
+  Approval is required.
+- One-click `確認這個版本`: allowed as UX, but the backend must execute Apply
+  → exact applied revision → Approval sequentially and fail closed.
+- Apply failure: Approval must not be created or updated as successful.
