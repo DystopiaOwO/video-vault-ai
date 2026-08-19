@@ -46,12 +46,13 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
   it("keeps nested readability and motion overrides visible and invalidates preview evidence", async () => {
     vi.spyOn(api, "previewVisualStyles").mockResolvedValue({
       ok: true,
-      variants: [{ visual_style: { visual_style_id: "diary_natural" }, preview_plan_hash: "plan", preview_variant_id: "variant", title_role: "chapter_title" }],
+      variants: [{ visual_style: { visual_style_id: "diary_natural" }, url: "diary.png", preview_kind: "static", preview_plan_hash: "plan", preview_variant_id: "variant", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } }],
     });
     render(<VisualStylePreviewWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
 
     fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
     await waitFor(() => expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.getByAltText("diary_natural 主要預覽")).toBeTruthy();
 
     const readability = screen.getByLabelText("可讀性") as HTMLSelectElement;
     const motion = screen.getByLabelText("動畫") as HTMLSelectElement;
@@ -61,6 +62,53 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
     fireEvent.change(motion, { target: { value: "fade_rise" } });
     expect(readability.value).toBe("solid");
     expect(motion.value).toBe("fade_rise");
+    expect(screen.queryByAltText("diary_natural 主要預覽")).toBeNull();
+    expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("clears scalar stale variants and requires a new exact preview before approval", async () => {
+    const preview = vi.spyOn(api, "previewVisualStyles")
+      .mockResolvedValueOnce({
+        ok: true,
+        variants: [{ visual_style: { visual_style_id: "diary_natural" }, url: "old.png", preview_kind: "static", preview_plan_hash: "plan-a", preview_variant_id: "variant-a", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } }],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        variants: [{ visual_style: { visual_style_id: "diary_natural" }, url: "new.png", preview_kind: "static", preview_plan_hash: "plan-b", preview_variant_id: "variant-b", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } }],
+      });
+    const approve = vi.spyOn(api, "approveVisualStyle").mockResolvedValue({ ok: true });
+    render(<VisualStylePreviewWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    await waitFor(() => expect(screen.getByAltText("diary_natural 主要預覽")).toBeTruthy());
+    expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.change(screen.getByLabelText("位置"), { target: { value: "top-center" } });
+    expect(screen.queryByAltText("diary_natural 主要預覽")).toBeNull();
+    expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    await waitFor(() => expect(preview).toHaveBeenCalledWith(1, false, { anchor: "top-center" }));
+    await waitFor(() => expect(screen.getByAltText("diary_natural 主要預覽")).toBeTruthy());
+    expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "核准選定 Visual Style" }));
+    await waitFor(() => expect(approve).toHaveBeenCalledWith(1, "diary_natural", 4, "plan-b", "variant-b", "chapter_title", { anchor: "top-center" }));
+  });
+
+  it("clears preview evidence when Creative Brief currentity refreshes", async () => {
+    const input = detail();
+    const preview = vi.spyOn(api, "previewVisualStyles").mockResolvedValue({
+      ok: true,
+      variants: [{ visual_style: { visual_style_id: "diary_natural" }, url: "current.png", preview_kind: "static", preview_plan_hash: "plan", preview_variant_id: "variant", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } }],
+    });
+    const { rerender } = render(<VisualStylePreviewWorkspace detail={input} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    await waitFor(() => expect(preview).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByAltText("diary_natural 主要預覽")).toBeTruthy());
+
+    rerender(<VisualStylePreviewWorkspace detail={{ ...input, project_revision: 5 }} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+    await waitFor(() => expect(screen.queryByAltText("diary_natural 主要預覽")).toBeNull());
     expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(true);
   });
 

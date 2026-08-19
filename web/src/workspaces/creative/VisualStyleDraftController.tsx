@@ -126,12 +126,14 @@ export function VisualStyleDraftProvider({ detail, children }: { detail: Project
     patchOverride: (key, value) => setDraft((current) => ({
       ...current,
       overrides: { ...current.overrides, [key]: value },
+      variants: [],
       selectedPreviewPlanHash: "",
       selectedPreviewVariantId: "",
     })),
     patchNestedOverride: (key, value) => setDraft((current) => ({
       ...current,
       overrides: { ...current.overrides, [key]: { ...mapValue(current.overrides[key]), ...value } },
+      variants: [],
       selectedPreviewPlanHash: "",
       selectedPreviewVariantId: "",
     })),
