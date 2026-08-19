@@ -59,9 +59,12 @@ export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mu
   const [outputContractId, setOutputContractId] = useState(String(approved.output?.output_contract_id || recommendedOutputId));
   const [strategies, setStrategies] = useState<Record<string, string>>(() => initialFraming(directions, approved, recommendation));
   const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
   const selectedOutput = useMemo(() => materializedOutput(outputOptions, outputContractId, approved.output || recommendation.output), [approved.output, outputContractId, outputOptions, recommendation.output]);
   const counts = recommendation.source_orientation_summary || brief.source_geometry?.orientation_counts || {};
   const approvedState = brief.status === "approved";
+  const selectedAspectRatio = String(selectedOutput.aspect_ratio || selectedOutput.label || selectedOutput.output_contract_id || "目前方向");
+  const isRecommendationSelected = Boolean(recommendedOutputId) && outputContractId === recommendedOutputId;
 
   useEffect(() => {
     setOutputContractId(String(approved.output?.output_contract_id || recommendedOutputId));
@@ -72,6 +75,7 @@ export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mu
     const mutation = mutationControls.beginProjectMutation(detail.project.id, "story");
     if (!mutation) return;
     setBusy("recommend");
+    setError("");
     try {
       const result = await api.recommendCreativeBrief(detail.project.id, detail.project_revision);
       if (!result.ok || !result.creative_brief) throw new Error(result.error || "素材方向分析失敗");
@@ -96,6 +100,7 @@ export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mu
       return;
     }
     setBusy("save");
+    setError("");
     try {
       const nextStrategies = values?.strategies || strategies;
       const result = await api.saveCreativeBrief(detail.project.id, {
@@ -107,7 +112,9 @@ export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mu
       setMessage(approvalSource === "recommendation" ? "已採用 AI 建議並核准 Creative Brief。" : "已儲存手動覆寫並核准 Creative Brief。");
       onApproved?.();
     } catch (error) {
-      setMessage(`Creative Brief 儲存失敗：${formatApiError(error)}`);
+      const message = `Creative Brief 儲存失敗：${formatApiError(error)}`;
+      setError(message);
+      setMessage(message);
     } finally {
       mutationControls.finishProjectMutation(mutation);
       setBusy("");
@@ -159,16 +166,31 @@ export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mu
       <div className="creative-brief-simple-options" aria-label="影片方向選擇">
         {outputOptions.map((option) => <label key={option.output_contract_id} className={outputContractId === option.output_contract_id ? "selected" : ""}>
           <input type="radio" name={`brief-simple-output-${detail.project.id}`} checked={outputContractId === option.output_contract_id} disabled={Boolean(busy)} onChange={() => setOutputContractId(String(option.output_contract_id))} />
+          <span className="direction-selected-indicator" aria-hidden="true">{outputContractId === option.output_contract_id ? "✓" : ""}</span>
           <span className="orientation-icon" aria-hidden="true"><span /></span>
           <span><strong>{option.label || option.aspect_ratio}</strong><small>{option.width}×{option.height}</small></span>
           {String(option.output_contract_id) === recommendedOutputId && <em>AI 推薦</em>}
         </label>)}
       </div>
-      <p className="creative-brief-simple-framing"><strong>畫面處理：</strong>{framingSummary()}</p>
-      <div className="creative-brief-simple-actions">
-        <button type="button" className="primary" disabled={Boolean(busy) || !recommendedOutputId} onClick={() => { const nextStrategies = initialFraming(directions, {}, recommendation); setOutputContractId(recommendedOutputId); setStrategies(nextStrategies); void save("recommendation", { outputContractId: recommendedOutputId, strategies: nextStrategies }); }}>{busy === "save" ? "儲存中…" : "採用推薦方向"}</button>
-        <button type="button" disabled={Boolean(busy) || !outputContractId || outputContractId === recommendedOutputId} onClick={() => void save("human_override")}>{busy === "save" ? "儲存中…" : "使用此方向並繼續"}</button>
+      <div className="creative-brief-selection-summary" aria-live="polite">
+        <span>目前選擇</span>
+        <strong>{selectedAspectRatio}</strong>
+        <small>{selectedOutput.width}×{selectedOutput.height} · {isRecommendationSelected ? "AI 推薦，待人工確認" : "人工選擇，待人工確認"}</small>
       </div>
+      <div className="creative-brief-simple-actions">
+        <button type="button" className="primary" disabled={Boolean(busy) || !outputContractId} onClick={() => {
+          const approvalSource = isRecommendationSelected ? "recommendation" : "human_override";
+          if (approvalSource === "recommendation") {
+            const nextStrategies = initialFraming(directions, {}, recommendation);
+            setStrategies(nextStrategies);
+            void save(approvalSource, { outputContractId: recommendedOutputId, strategies: nextStrategies });
+            return;
+          }
+          void save(approvalSource);
+        }}>{busy === "save" ? "儲存中…" : isRecommendationSelected ? `採用 ${selectedAspectRatio} 推薦並繼續` : `使用 ${selectedAspectRatio} 並繼續`}</button>
+      </div>
+      {error && <p className="creative-brief-error" role="alert">{error}</p>}
+      <p className="creative-brief-simple-framing"><strong>畫面處理：</strong>{framingSummary()}</p>
       {approvedState && <p className="creative-brief-approved" role="status">方向已核准，可以進入下一步視覺風格。</p>}
     </section>;
   }
