@@ -102,6 +102,26 @@ export type VisualStyleState = {
   };
 };
 
+export type EditorDisclosureSection = {
+  section_id: string;
+  version: string;
+  label: string;
+  disclosure_level: "primary" | "advanced" | "diagnostic" | string;
+  order: number;
+  enabled?: boolean;
+  capability?: Record<string, unknown>;
+  summary_resolver: string;
+  semantic_domain: string;
+  invalidation_class: string;
+};
+
+export type EditorDisclosureMetadata = {
+  schema_version?: string;
+  registry_version?: string;
+  registry_hash?: string;
+  sections?: EditorDisclosureSection[];
+};
+
 export type PerceptionWindowResult = {
   window_uuid: string;
   segment_uuid?: string;
@@ -520,6 +540,7 @@ export type ProjectDetail = {
   story?: StoryDetail;
   creative_brief?: CreativeBrief;
   visual_style?: VisualStyleState;
+  editor_disclosure?: EditorDisclosureMetadata;
   delivery_qa?: DeliveryQAState;
 };
 
