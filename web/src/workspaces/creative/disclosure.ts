@@ -25,7 +25,14 @@ export function disclosureSection(detail: ProjectDetail, id: string): EditorDisc
 export const disclosureFallback = FALLBACK_DISCLOSURE;
 
 export type DisclosureSummary = { text: string; available: boolean };
-export type DisclosureAction = { available: boolean; label: string; step?: "direction" | "style"; reason?: string };
+export type DisclosureAction = {
+  available: boolean;
+  label: string;
+  step?: "direction" | "style";
+  section_id?: string;
+  semantic_editor_target?: string;
+  reason?: string;
+};
 
 type SummaryResolver = (detail: ProjectDetail) => string;
 
@@ -81,8 +88,13 @@ const SUMMARY_RESOLVERS: Record<string, SummaryResolver> = {
 
 const ACTION_RESOLVERS: Record<string, (target: string) => DisclosureAction> = {
   "open_semantic_editor@1": (target) => {
-    const step = target === "creative_brief.framing" ? "direction" : target.startsWith("visual_style.") ? "style" : undefined;
-    return step ? { available: true, label: "微調", step } : { available: false, label: "目前不可用", reason: "此設定尚未提供可開啟的編輯入口" };
+    const stepByTarget: Record<string, "direction" | "style"> = {
+      "creative_brief.framing": "direction",
+      "visual_style.grading": "style",
+      "visual_style.title_style": "style",
+    };
+    const step = stepByTarget[target];
+    return step ? { available: true, label: "微調", step, semantic_editor_target: target } : { available: false, label: "目前不可用", reason: "此設定尚未提供可開啟的編輯入口" };
   },
 };
 
@@ -100,5 +112,6 @@ export function resolveDisclosureAction(section: EditorDisclosureSection): Discl
   }
   const resolver = ACTION_RESOLVERS[String(action.type)];
   if (!resolver) return { available: false, label: "目前不可用", reason: "此區塊的 action resolver 尚未註冊" };
-  return resolver(String(action.target));
+  const resolved = resolver(String(action.target));
+  return { ...resolved, section_id: section.section_id, semantic_editor_target: resolved.semantic_editor_target || String(action.target) };
 }

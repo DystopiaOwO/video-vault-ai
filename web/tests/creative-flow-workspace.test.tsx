@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, type ProjectDetail } from "../src/api";
 import { ProjectMutationCoordinator, createProjectMutationControls } from "../src/projectMutation";
@@ -40,6 +40,37 @@ describe("CreativeFlowWorkspace", () => {
     fireEvent.click(screen.getByText("詳細設定"));
     expect(screen.getByText("音訊偏好（測試）")).toBeTruthy();
     expect(screen.getAllByText("使用專案音訊偏好（測試）")).toHaveLength(2);
+    expect(screen.queryByLabelText("字型")).toBeNull();
+    expect(screen.queryByLabelText("畫面配置詳細設定")).toBeNull();
+  });
+
+  it("opens only the selected semantic section and keeps unrelated controls closed", () => {
+    const value = detail();
+    value.editor_disclosure = { ...value.editor_disclosure, sections: [...(value.editor_disclosure?.sections || []), { section_id: "grading", version: "1", label: "視覺與調色", disclosure_level: "advanced", order: 40, summary_resolver: "visual_style.grading@1", semantic_domain: "visual_style", invalidation_class: "visual_preview_and_render", action: { type: "open_semantic_editor@1", target: "visual_style.grading" } }] };
+    render(<CreativeFlowWorkspace detail={value} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+    fireEvent.click(screen.getByText("詳細設定"));
+    fireEvent.click(screen.getByText("字卡"));
+    expect(screen.getByLabelText("字卡詳細設定")).toBeTruthy();
+    expect(screen.getByText("字型")).toBeTruthy();
+    expect(screen.queryByLabelText("畫面配置詳細設定")).toBeNull();
+    fireEvent.click(screen.getByText("畫面配置"));
+    expect(screen.getByLabelText("畫面配置詳細設定")).toBeTruthy();
+    expect(screen.queryByLabelText("字卡詳細設定")).toBeNull();
+    expect(screen.getByText("套用畫面配置")).toBeTruthy();
+    fireEvent.click(screen.getByText("視覺與調色"));
+    expect(screen.getByLabelText("視覺與調色詳細設定")).toBeTruthy();
+    expect(screen.queryByLabelText("字卡詳細設定")).toBeNull();
+  });
+
+  it("consumes exact semantic target for title actions", () => {
+    render(<CreativeFlowWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+    fireEvent.click(screen.getByText("詳細設定"));
+    fireEvent.click(screen.getByText("字卡"));
+    const titleSection = screen.getByLabelText("字卡詳細設定").closest("details");
+    expect(titleSection).toBeTruthy();
+    fireEvent.click(within(titleSection as HTMLElement).getByRole("button", { name: "微調" }));
+    expect(screen.getByText("選一個你喜歡的視覺風格")).toBeTruthy();
+    expect(screen.getByLabelText("字卡詳細設定")).toBeTruthy();
   });
 
   it("renders the visual step as preview-first and hides technical controls until advanced is opened", () => {

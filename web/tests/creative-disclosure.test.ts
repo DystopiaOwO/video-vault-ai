@@ -29,7 +29,9 @@ describe("editor disclosure resolver contract", () => {
 
   it("resolves actions from metadata and rejects unknown resolvers explicitly", () => {
     const action = resolveDisclosureAction(section("creative_brief.framing@1", { action: { type: "open_semantic_editor@1", target: "creative_brief.framing" } }));
-    expect(action).toMatchObject({ available: true, step: "direction" });
+    expect(action).toMatchObject({ available: true, step: "direction", section_id: "test", semantic_editor_target: "creative_brief.framing" });
+    expect(resolveDisclosureAction(section("visual_style.grading@1", { section_id: "grading", action: { type: "open_semantic_editor@1", target: "visual_style.grading" } }))).toMatchObject({ available: true, step: "style", semantic_editor_target: "visual_style.grading" });
+    expect(resolveDisclosureAction(section("visual_style.title_style@1", { section_id: "title", action: { type: "open_semantic_editor@1", target: "visual_style.title_style" } }))).toMatchObject({ available: true, step: "style", semantic_editor_target: "visual_style.title_style" });
     expect(resolveDisclosureSummary(section("unknown@99"), baseDetail()).available).toBe(false);
     expect(resolveDisclosureAction(section("audio.policy@1", { action: { type: "future_action@1", target: "audio.policy" } })).available).toBe(false);
   });
