@@ -23,7 +23,7 @@ function detail(overrides: Partial<ProjectDetail> = {}): ProjectDetail {
       },
     },
     visual_style: { status: "needs_confirmation", recommendation: { visual_style_id: "diary_natural", label: "Diary Natural" }, options: { styles: [{ style_id: "diary_natural", label: "Diary Natural", enabled_for_round1_ui: true }] } },
-    editor_disclosure: { schema_version: "editor-disclosure-v1", registry_version: "editor-disclosure-registry-v1", sections: [{ section_id: "output_direction", version: "1", label: "影片方向", disclosure_level: "primary", order: 10, summary_resolver: "creative_brief.output", semantic_domain: "creative_brief.visual", invalidation_class: "visual_render_only" }, { section_id: "visual_style", version: "1", label: "視覺風格", disclosure_level: "primary", order: 20, summary_resolver: "visual_style.approved", semantic_domain: "visual_style", invalidation_class: "visual_preview_and_render" }, { section_id: "captions", version: "1", label: "字幕", disclosure_level: "advanced", order: 60, summary_resolver: "creative_brief.captions", semantic_domain: "caption_policy", invalidation_class: "caption_renderer" }, { section_id: "audio_policy_test", version: "1", label: "音訊偏好（測試）", disclosure_level: "advanced", order: 70, summary_resolver: "audio.policy", semantic_domain: "audio_policy", invalidation_class: "audio_render_only" }] },
+    editor_disclosure: { schema_version: "editor-disclosure-v1", registry_version: "editor-disclosure-registry-v1", sections: [{ section_id: "output_direction", version: "1", label: "影片方向", disclosure_level: "primary", order: 10, summary_resolver: "creative_brief.output@1", semantic_domain: "creative_brief.visual", invalidation_class: "visual_render_only", include_in_final_summary: true, summary_order: 10 }, { section_id: "visual_style", version: "1", label: "視覺風格", disclosure_level: "primary", order: 20, summary_resolver: "visual_style.approved@1", semantic_domain: "visual_style", invalidation_class: "visual_preview_and_render", include_in_final_summary: true, summary_order: 20 }, { section_id: "framing", version: "1", label: "畫面配置", disclosure_level: "advanced", order: 30, summary_resolver: "creative_brief.framing@1", semantic_domain: "creative_brief.visual", invalidation_class: "visual_render_only", action: { type: "open_semantic_editor@1", target: "creative_brief.framing" }, include_in_final_summary: true, summary_order: 30 }, { section_id: "title", version: "1", label: "字卡", disclosure_level: "advanced", order: 50, summary_resolver: "visual_style.title_style@1", semantic_domain: "visual_style.title", invalidation_class: "visual_preview_and_render", action: { type: "open_semantic_editor@1", target: "visual_style.title_style" }, include_in_final_summary: true, summary_order: 50 }, { section_id: "captions", version: "1", label: "字幕", disclosure_level: "advanced", order: 60, summary_resolver: "creative_brief.captions@1", semantic_domain: "caption_policy", invalidation_class: "caption_renderer" }, { section_id: "audio_policy_test", version: "1", label: "音訊偏好（測試）", disclosure_level: "advanced", order: 70, summary_resolver: "audio.policy@1", semantic_domain: "audio_policy", invalidation_class: "audio_render_only", include_in_final_summary: true, summary_order: 70, action: { type: "open_semantic_editor@1", target: "audio.policy" } }] },
     ...overrides,
   } as ProjectDetail;
 }
@@ -36,9 +36,10 @@ describe("CreativeFlowWorkspace", () => {
     expect(screen.getByText("先決定影片方向")).toBeTruthy();
     expect(screen.getByRole("button", { name: "採用推薦方向" })).toBeTruthy();
     expect(screen.queryByLabelText("字型")).toBeNull();
-    expect(screen.getByText("詳細設定與更多資訊")).toBeTruthy();
-    fireEvent.click(screen.getByText("詳細設定與更多資訊"));
+    expect(screen.getByText("詳細設定")).toBeTruthy();
+    fireEvent.click(screen.getByText("詳細設定"));
     expect(screen.getByText("音訊偏好（測試）")).toBeTruthy();
+    expect(screen.getAllByText("使用專案音訊偏好（測試）")).toHaveLength(2);
   });
 
   it("renders the visual step as preview-first and hides technical controls until advanced is opened", () => {
@@ -47,9 +48,20 @@ describe("CreativeFlowWorkspace", () => {
     });
     render(<CreativeFlowWorkspace detail={value} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
     expect(screen.getByText("選一個你喜歡的視覺風格")).toBeTruthy();
-    expect(document.querySelector(".visual-style-advanced")?.hasAttribute("open")).toBe(false);
+    expect(document.querySelector(".creative-flow-advanced")?.hasAttribute("open")).toBe(false);
     expect(screen.getByRole("button", { name: "產生真實畫面預覽" })).toBeTruthy();
-    expect(screen.getByText("詳細設定與更多資訊")).toBeTruthy();
+    expect(screen.getByText("詳細設定")).toBeTruthy();
     expect(api.previewVisualStyles).toBeDefined();
+  });
+
+  it("builds the final summary from approved metadata and keeps one advanced entry", () => {
+    const base = detail();
+    const value = detail({
+      creative_brief: { ...base.creative_brief, status: "approved", approved: { output: base.creative_brief?.recommendation?.output, framing_intent: { portrait_source_in_landscape: { approved_strategy_id: "crop_reframe" } } } },
+      visual_style: { ...base.visual_style, status: "approved", approved: { visual_style_id: "diary_natural", composition: "standalone", title_style_id: "diary_natural_overlay" } },
+    });
+    render(<CreativeFlowWorkspace detail={value} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+    expect(screen.getByText(/Diary Natural · 獨立字卡畫面/)).toBeTruthy();
+    expect(screen.getAllByText("詳細設定")).toHaveLength(1);
   });
 });

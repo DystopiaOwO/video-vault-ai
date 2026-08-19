@@ -26,6 +26,8 @@ def test_project_has_own_source_and_clip_files(tmp_path):
     assert "中午 / 飲食" in [g["label"] for g in plan["groups"]]
     assert Path(detail["folder"], "source").exists()
     assert Path(detail["folder"], "clips", "clip_001", "clip.json").exists()
+    assert detail["editor_disclosure"]["schema_version"] == "editor-disclosure-v1"
+    assert [item["section_id"] for item in detail["editor_disclosure"]["sections"][:2]] == ["output_direction", "visual_style"]
     assert all("08_projects" in seg["source_file"] for group in plan["groups"] for seg in group["segments"])
 
 

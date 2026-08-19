@@ -96,4 +96,36 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
     fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
     await waitFor(() => expect(preview).toHaveBeenCalledWith(1, false, {}));
   });
+
+  it("groups the VID-27 variant matrix into exactly three public primary cards", async () => {
+    const input = detail();
+    input.visual_style = {
+      ...input.visual_style,
+      options: {
+        ...input.visual_style?.options,
+        styles: [
+          { style_id: "diary_natural", label: "Diary Natural", composition: "overlay", enabled_for_round1_ui: true },
+          { style_id: "clean_minimal", label: "Clean Minimal", composition: "overlay", enabled_for_round1_ui: true },
+          { style_id: "cinematic", label: "Cinematic", composition: "overlay", enabled_for_round1_ui: true },
+          { style_id: "standalone_card_compare", label: "Standalone Card Compare", composition: "standalone", enabled_for_round1_ui: true },
+        ],
+      },
+    };
+    const labels: Record<string, string> = { diary_natural: "Diary Natural", clean_minimal: "Clean Minimal", cinematic: "Cinematic", standalone_card_compare: "Standalone Card Compare" };
+    const matrix = Object.keys(labels).flatMap((style) => [
+      { visual_style: { visual_style_id: style, label: labels[style] }, url: `${style}-bright.png`, preview_variant_id: `${style}-bright`, preview_plan_hash: `${style}-plan`, title_role: "chapter_title", preview_kind: "static", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative", role_label: "Chapter" } },
+      { visual_style: { visual_style_id: style, label: labels[style] }, url: `${style}-dark.png`, preview_variant_id: `${style}-dark`, preview_plan_hash: `${style}-dark-plan`, title_role: "location_title", preview_kind: "static", representative_frame: { title_role: "location_title", selection_reason: "dark_complex_low_luma_representative", role_label: "Location" } },
+      { visual_style: { visual_style_id: style, label: labels[style] }, url: `${style}-animated.mp4`, preview_variant_id: `${style}-animated`, preview_plan_hash: `${style}-animated-plan`, title_role: "chapter_title", preview_kind: "animated", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative", role_label: "Chapter" } },
+    ]);
+    vi.spyOn(api, "previewVisualStyles").mockResolvedValue({ ok: true, variants: matrix });
+    render(<VisualStylePreviewWorkspace detail={input} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} compact />);
+
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    await waitFor(() => expect(document.querySelectorAll('[aria-label="主要視覺風格選擇"] > article')).toHaveLength(3));
+    expect(document.querySelector('[aria-label="主要視覺風格選擇"] img[alt*="Standalone Card Compare"]')).toBeNull();
+    expect(screen.queryByLabelText("字型")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "查看更多預覽" }));
+    expect(screen.getByText("Standalone Card Compare · Location")).toBeTruthy();
+    expect(screen.getAllByText(/Diary Natural ·/).length).toBeGreaterThan(1);
+  });
 });

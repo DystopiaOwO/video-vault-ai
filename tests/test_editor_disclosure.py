@@ -9,6 +9,8 @@ def test_default_disclosure_metadata_is_versioned_and_ordered():
     assert metadata["registry_version"] == "editor-disclosure-registry-v1"
     assert [item["section_id"] for item in metadata["sections"][:2]] == ["output_direction", "visual_style"]
     assert all(item["summary_resolver"] and item["semantic_domain"] and item["invalidation_class"] for item in metadata["sections"])
+    assert metadata["sections"][0]["include_in_final_summary"] is True
+    assert metadata["sections"][2]["action"]["target"] == "creative_brief.framing"
 
 
 def test_synthetic_sibling_section_uses_same_registry_without_core_branch():

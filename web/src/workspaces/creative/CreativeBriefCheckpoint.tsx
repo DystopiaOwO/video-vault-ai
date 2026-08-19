@@ -11,6 +11,7 @@ type Props = {
   refreshProject: (options?: ProjectDataLoadOptions) => Promise<unknown>;
   mutationControls: ProjectMutationControls;
   compact?: boolean;
+  showAdvanced?: boolean;
   onApproved?: () => void;
 };
 
@@ -47,7 +48,7 @@ function framingPayload(directions: DirectionOption[], strategies: Record<string
   }));
 }
 
-export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mutationControls, compact = false, onApproved }: Props) {
+export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mutationControls, compact = false, showAdvanced = false, onApproved }: Props) {
   const brief = detail.creative_brief || {};
   const recommendation = brief.recommendation || {};
   const approved = brief.approved || {};
@@ -146,16 +147,13 @@ export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mu
         </label>)}
       </div>
       <p className="creative-brief-simple-framing"><strong>畫面處理：</strong>{framingSummary()}</p>
-      <details className="creative-brief-advanced">
-        <summary>詳細設定</summary>
-        <div className="creative-brief-advanced-body">
+      {showAdvanced && <div className="creative-brief-advanced-body creative-brief-advanced-content" aria-label="畫面配置詳細設定">
           <button type="button" disabled={Boolean(busy)} onClick={() => void refreshRecommendation()}>{busy === "recommend" ? "分析中…" : "重新分析素材方向"}</button>
           <div className="creative-brief-controls">
             <div className="creative-brief-output"><span>目前選擇</span><strong>{selectedOutput.width}×{selectedOutput.height}</strong><code>{selectedOutput.render_profile_id || "unknown-profile"}</code></div>
             {directions.map((direction) => <label key={direction.direction_id}>{direction.label}<select value={strategies[direction.direction_id] || ""} disabled={Boolean(busy)} onChange={(event) => setStrategies((current) => ({ ...current, [direction.direction_id]: event.target.value }))}>{strategiesFor(direction.direction_id).map((strategy) => <option key={strategy.strategy_id} value={strategy.strategy_id}>{strategy.label}</option>)}</select></label>)}
           </div>
-        </div>
-      </details>
+      </div>}
       <div className="creative-brief-simple-actions">
         <button type="button" className="primary" disabled={Boolean(busy) || !recommendedOutputId} onClick={() => { const nextStrategies = initialFraming(directions, {}, recommendation); setOutputContractId(recommendedOutputId); setStrategies(nextStrategies); void save("recommendation", { outputContractId: recommendedOutputId, strategies: nextStrategies }); }}>{busy === "save" ? "儲存中…" : "採用推薦方向"}</button>
         <button type="button" disabled={Boolean(busy) || !outputContractId || outputContractId === recommendedOutputId} onClick={() => void save("human_override")}>{busy === "save" ? "儲存中…" : "使用此方向並繼續"}</button>

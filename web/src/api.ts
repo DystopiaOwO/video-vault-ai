@@ -110,9 +110,12 @@ export type EditorDisclosureSection = {
   order: number;
   enabled?: boolean;
   capability?: Record<string, unknown>;
+  action?: { type?: string; target?: string; [key: string]: unknown };
   summary_resolver: string;
   semantic_domain: string;
   invalidation_class: string;
+  include_in_final_summary?: boolean;
+  summary_order?: number;
 };
 
 export type EditorDisclosureMetadata = {

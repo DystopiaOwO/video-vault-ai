@@ -4,7 +4,7 @@ import type { ProjectDataLoadOptions } from "../../projectDataLoader";
 import type { ProjectMutationControls } from "../../projectMutation";
 import { CreativeBriefCheckpoint } from "./CreativeBriefCheckpoint";
 import { VisualStylePreviewWorkspace } from "./VisualStylePreviewWorkspace";
-import { disclosureSections } from "./disclosure";
+import { disclosureSections, resolveDisclosureAction, resolveDisclosureSummary } from "./disclosure";
 import "./creative-flow.css";
 
 type Props = {
@@ -16,52 +16,15 @@ type Props = {
 
 type FlowStep = "direction" | "style" | "summary";
 
-const ADVANCED_STEP_TARGETS: Record<string, FlowStep> = {
-  framing: "direction",
-  grading: "style",
-  title: "style",
-};
-
 function initialStep(detail: ProjectDetail): FlowStep {
   if (detail.visual_style?.status === "approved" && detail.creative_brief?.status === "approved") return "summary";
   if (detail.creative_brief?.status === "approved") return "style";
   return "direction";
 }
 
-function humanStrategy(value: unknown) {
-  const strategy = String(value || "");
-  return {
-    crop_reframe: "裁切填滿",
-    background_treatment: "模糊背景補齊",
-    preserve_full_frame: "保留完整畫面",
-    auto_recommended: "依素材自動處理",
-  }[strategy] || "依素材自動處理";
-}
-
-function summaryFor(sectionId: string, detail: ProjectDetail): string {
-  const brief = detail.creative_brief || {};
-  const output = brief.approved?.output || brief.recommendation?.output || {};
-  const style = detail.visual_style?.approved || detail.visual_style?.recommendation || {};
-  const framing = brief.approved?.framing_intent || brief.recommendation?.framing_intent || {};
-  if (sectionId === "framing") {
-    const strategies = Object.values(framing).map((item) => humanStrategy(item?.approved_strategy_id || item?.approved_strategy || item?.recommended_strategy_id || item?.recommended_strategy));
-    return strategies.length ? strategies.join("；") : "依素材自動處理畫面";
-  }
-  if (sectionId === "grading") return String((style.grading as Record<string, unknown> | undefined)?.look_id || "跟隨所選風格");
-  if (sectionId === "title") return `${String(style.title_style_id || "預設字卡")} · ${String(style.anchor || "安全區內")}`;
-  if (sectionId === "captions") return "字幕樣式可於字幕功能中調整";
-  if (sectionId === "technical") return `方向 ${String(output.aspect_ratio || "—")} · 語意 contract 已保留`;
-  return "尚未設定";
-}
-
-function styleLabel(detail: ProjectDetail) {
-  const style = detail.visual_style?.approved || detail.visual_style?.recommendation || {};
-  const id = String(style.visual_style_id || "diary_natural");
-  return ({ diary_natural: "Diary Natural", clean_minimal: "Clean Minimal", cinematic: "Cinematic" } as Record<string, string>)[id] || id;
-}
-
 export function CreativeFlowWorkspace({ detail, setMessage, refreshProject, mutationControls }: Props) {
   const [step, setStep] = useState<FlowStep>(() => initialStep(detail));
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const briefApproved = detail.creative_brief?.status === "approved";
   const styleApproved = detail.visual_style?.status === "approved";
   const advancedSections = useMemo(() => disclosureSections(detail, "advanced"), [detail.editor_disclosure]);
@@ -85,20 +48,31 @@ export function CreativeFlowWorkspace({ detail, setMessage, refreshProject, muta
       </div>
     </header>
 
-    {step === "direction" && <CreativeBriefCheckpoint detail={detail} setMessage={setMessage} refreshProject={refreshProject} mutationControls={mutationControls} compact onApproved={() => setStep("style")} />}
-    {step === "style" && <VisualStylePreviewWorkspace detail={detail} setMessage={setMessage} refreshProject={refreshProject} mutationControls={mutationControls} compact onApproved={() => setStep("summary")} />}
+    {step === "direction" && <CreativeBriefCheckpoint detail={detail} setMessage={setMessage} refreshProject={refreshProject} mutationControls={mutationControls} compact showAdvanced={advancedOpen} onApproved={() => setStep("style")} />}
+    {step === "style" && <VisualStylePreviewWorkspace detail={detail} setMessage={setMessage} refreshProject={refreshProject} mutationControls={mutationControls} compact showAdvanced={advancedOpen} onApproved={() => setStep("summary")} />}
     {step === "summary" && <section className="creative-summary" aria-label="創意設定確認">
       <div className="creative-summary-heading"><div><span className="step-kicker">步驟 3／3</span><h3>確認目前的創意設定</h3><p>這裡只顯示已核准的語意值；展開詳細設定不會另外建立一份設定。</p></div><span className="brief-status approved">已準備</span></div>
-      <div className="creative-summary-line"><strong>{String((detail.creative_brief?.approved?.output || detail.creative_brief?.recommendation?.output)?.aspect_ratio || "—")}</strong><span>·</span><strong>{styleLabel(detail)}</strong><span>·</span><span>{summaryFor("framing", detail)}</span><span>·</span><span>疊在影片上</span></div>
+      <div className="creative-summary-line" aria-label="已核准設定摘要">
+        {disclosureSections(detail).filter((section) => section.include_in_final_summary).sort((left, right) => (left.summary_order || left.order) - (right.summary_order || right.order)).map((section) => {
+          const summary = resolveDisclosureSummary(section, detail);
+          return <span className={!summary.available ? "summary-unavailable" : ""} key={`${section.section_id}@${section.version}`}><small>{section.label}</small><strong>{summary.text}</strong></span>;
+        })}
+      </div>
       <div className="creative-summary-actions"><button type="button" onClick={() => setStep("direction")}>返回調整方向</button><button type="button" onClick={() => setStep("style")}>返回預覽風格</button><button type="button" className="primary" onClick={continueToStory}>確認設定，進入故事整理</button></div>
     </section>}
 
-    <details className="creative-flow-advanced">
-      <summary>詳細設定與更多資訊</summary>
+    <details className="creative-flow-advanced" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}>
+      <summary>詳細設定</summary>
       <div className="creative-flow-advanced-grid">
-        {advancedSections.map((section) => <article key={`${section.section_id}@${section.version}`} data-section-id={section.section_id}><div><h4>{section.label}</h4><p>{summaryFor(section.section_id, detail)}</p></div>{ADVANCED_STEP_TARGETS[section.section_id] ? <button type="button" onClick={() => setStep(ADVANCED_STEP_TARGETS[section.section_id])}>微調</button> : <span>摘要</span>}</article>)}
+        {[...advancedSections, ...diagnosticSections].map((section) => {
+          const summary = resolveDisclosureSummary(section, detail);
+          const action = resolveDisclosureAction(section);
+          return <details className="creative-flow-advanced-section" key={`${section.section_id}@${section.version}`} data-section-id={section.section_id}>
+            <summary><span>{section.label}</span><small>{section.enabled === false ? "目前不可用" : summary.text}</small></summary>
+            <div className="creative-flow-advanced-section-body"><p className={!summary.available ? "summary-unavailable" : ""}>{summary.text}</p>{action.available && action.step ? <button type="button" onClick={() => setStep(action.step as FlowStep)}>{action.label}</button> : <span className="advanced-unavailable">{action.reason || action.label}</span>}</div>
+          </details>;
+        })}
       </div>
-      {diagnosticSections.length > 0 && <details className="creative-flow-diagnostic"><summary>技術資訊</summary>{diagnosticSections.map((section) => <p key={section.section_id}>{section.label}：{summaryFor(section.section_id, detail)} · {detail.editor_disclosure?.registry_version || ""}</p>)}</details>}
     </details>
   </section>;
 }
