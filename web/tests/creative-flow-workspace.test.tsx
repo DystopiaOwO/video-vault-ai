@@ -34,7 +34,7 @@ describe("CreativeFlowWorkspace", () => {
   it("starts with only the direction decision and keeps advanced controls closed", () => {
     render(<CreativeFlowWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
     expect(screen.getByText("先決定影片方向")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "採用推薦方向" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "採用 16:9 推薦並繼續" })).toBeTruthy();
     expect(screen.queryByLabelText("字型")).toBeNull();
     expect(screen.getByText("詳細設定")).toBeTruthy();
     fireEvent.click(screen.getByText("詳細設定"));
@@ -148,5 +148,88 @@ describe("CreativeFlowWorkspace", () => {
     render(<CreativeFlowWorkspace detail={value} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
     expect(screen.getByText(/Diary Natural · 獨立字卡畫面/)).toBeTruthy();
     expect(screen.getAllByText("詳細設定")).toHaveLength(1);
+  });
+
+  it("shows recommendation as pending approval and moves selection when the whole card is clicked", () => {
+    const base = detail();
+    const value = detail({
+      creative_brief: {
+        ...base.creative_brief,
+        recommendation: {
+          ...base.creative_brief?.recommendation,
+          reason: "兩支主要素材都是直向，建議直向輸出。",
+          output: { output_contract_id: "portrait_9_16", orientation: "portrait", aspect_ratio: "9:16", width: 1080, height: 1920, render_profile_id: "final_1080p_portrait" },
+        },
+      },
+    });
+    render(<CreativeFlowWorkspace detail={value} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    const portrait = screen.getByRole("radio", { name: /直向 9:16/ }) as HTMLInputElement;
+    const landscape = screen.getByRole("radio", { name: /橫向 16:9/ }) as HTMLInputElement;
+    expect(portrait.checked).toBe(true);
+    expect(screen.getByText("待人工確認")).toBeTruthy();
+    expect(screen.getByText("目前選擇").parentElement?.textContent).toContain("9:16");
+    expect(screen.getByRole("button", { name: "採用 9:16 推薦並繼續" })).toBeTruthy();
+
+    fireEvent.click(screen.getByText("橫向 16:9").closest("label") as HTMLElement);
+    expect(landscape.checked).toBe(true);
+    expect(portrait.checked).toBe(false);
+    expect(screen.getByText("目前選擇").parentElement?.textContent).toContain("16:9");
+    expect(screen.getByRole("button", { name: "使用 16:9 並繼續" })).toBeTruthy();
+
+    fireEvent.click(screen.getByText("直向 9:16").closest("label") as HTMLElement);
+    expect(portrait.checked).toBe(true);
+    expect(screen.getByRole("button", { name: "採用 9:16 推薦並繼續" })).toBeTruthy();
+  });
+
+  it("saves the selected recommendation with the exact API contract and enters Visual Style only after refresh", async () => {
+    const base = detail();
+    const save = vi.spyOn(api, "saveCreativeBrief").mockResolvedValue({ ok: true, creative_brief: { status: "approved" } } as never);
+    const refresh = vi.fn(async () => []);
+    render(<CreativeFlowWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={refresh} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "採用 16:9 推薦並繼續" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(1, {
+      output: base.creative_brief?.options?.output_contracts?.[0],
+      framing_intent: { portrait_source_in_landscape: { approved_strategy_id: "crop_reframe", approved_strategy_version: "1" } },
+    }, "recommendation", 4));
+    await waitFor(() => expect(refresh).toHaveBeenCalledWith({ forceFresh: true }));
+    expect(screen.getByText("選一個你喜歡的視覺風格")).toBeTruthy();
+  });
+
+  it("uses human_override for an alternate direction", async () => {
+    const save = vi.spyOn(api, "saveCreativeBrief").mockResolvedValue({ ok: true, creative_brief: { status: "approved" } } as never);
+    render(<CreativeFlowWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    fireEvent.click(screen.getByText("直向 9:16").closest("label") as HTMLElement);
+    fireEvent.click(screen.getByRole("button", { name: "使用 9:16 並繼續" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(1, expect.objectContaining({
+      output: expect.objectContaining({ output_contract_id: "portrait_9_16", width: 1080, height: 1920 }),
+    }), "human_override", 4));
+  });
+
+  it("disables the single CTA during save and rejects duplicate submission", async () => {
+    let resolveSave!: (value: unknown) => void;
+    const pending = new Promise((resolve) => { resolveSave = resolve; });
+    const save = vi.spyOn(api, "saveCreativeBrief").mockReturnValue(pending as never);
+    render(<CreativeFlowWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    const cta = screen.getByRole("button", { name: "採用 16:9 推薦並繼續" }) as HTMLButtonElement;
+    fireEvent.click(cta);
+    fireEvent.click(cta);
+    expect(save).toHaveBeenCalledTimes(1);
+    expect((screen.getByRole("button", { name: "儲存中…" }) as HTMLButtonElement).disabled).toBe(true);
+    resolveSave({ ok: true, creative_brief: { status: "approved" } });
+    await waitFor(() => expect(screen.getByText("選一個你喜歡的視覺風格")).toBeTruthy());
+  });
+
+  it("stays on Step 1 and shows a visible error when saving fails", async () => {
+    vi.spyOn(api, "saveCreativeBrief").mockRejectedValue(new Error("network down"));
+    render(<CreativeFlowWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "採用 16:9 推薦並繼續" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("Creative Brief 儲存失敗");
+    expect(screen.getByText("先決定影片方向")).toBeTruthy();
+    expect(screen.queryByText("選一個你喜歡的視覺風格")).toBeNull();
   });
 });
