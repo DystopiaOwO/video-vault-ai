@@ -40,9 +40,9 @@ stable API identifiers; labels may be localized.
 | --- | --- | --- | --- | --- | --- |
 | 1 | `import` | 匯入素材 | Copy/reference source assets, fingerprint, probe metadata | None; user starts import | immutable source identity, clip records |
 | 2 | `understanding` | AI 理解與整理 | Perception, transcription, audio perception, summaries; independent jobs may run in parallel after import | Review only when an analysis is blocked or needs correction | current perception runs, transcript, audio candidates, source/orientation summary |
-| 3 | `creative_brief` | 決定成片方向 | Recommend output orientation, aspect, resolution, and framing intent from source geometry/project context | Required: accept recommendation or save a human override | approved Creative Brief, recommendation provenance |
-| 4 | `story_draft` | 產生第一版剪輯結果 | Generate Story from the current StoryInput snapshot and available approved brief context; build rough-cut/storyboard draft | No approval yet; user enters review when draft is ready | Story generation, storyboard draft, exact segment coverage |
-| 5 | `review` | 看結果並微調 | Cheap local previews, representative frames, chapter/segment previews, validation | Required: edit/review Story, timing, style, audio, color, title, subtitle as needed | pending semantic drafts and preview evidence |
+| 3 | `creative_brief` | 決定成片方向與創作意圖 | Recommend output direction, target duration, pacing, high-level story intent, aspect, resolution, and framing from source geometry/project context | Required: accept recommendation or save a human override for Story-relevant intent | approved Creative Brief, recommendation provenance |
+| 4 | `story_draft` | 產生第一版剪輯結果 | Generate Story from the current StoryInput snapshot and approved Story-relevant brief fields; build a valid Story/storyboard draft and automatically request a cheap Draft Preview | No approval yet; user enters review looking at the playable result | Story generation, storyboard draft, exact segment coverage, Draft Preview |
+| 5 | `review` | 看結果並微調 | Play the Draft Preview first; on demand open Timeline, Visual Style, Subtitle, Audio, Color, and other Workspace previews | Required once: confirm the reviewed edit, or return to edit; domain edits remain tracked as readiness | pending semantic drafts, preview evidence, domain readiness |
 | 6 | `approval` | 核准目前版本 | Validate currentity, provenance, manifest, rights, and all required contracts | Required: approve the exact reviewed revision | immutable approval snapshot and approved revision |
 | 7 | `formal_render` | 產生正式成片 | Formal Render Job using approved snapshot only | None while running; cancellation is not success | Render Report, output fingerprint, encoder/probe audit |
 | 8 | `automated_qa` | 驗證交付品質 | Final QC and Delivery QA as separate formal gates | Resolve `qa_needs_review` findings; no threshold bypass | QC/QA evidence and gate result |
@@ -64,6 +64,57 @@ legacy UI flag. It requires the existing approval gate and an immutable
 approval snapshot. `delivered` is never inferred from a successful Render Job;
 it requires Final QC, Delivery QA, and an explicit human preview confirmation.
 
+### 2.2 Workflow is a derived projection
+
+The workflow is not an independently writable state machine. The authoritative
+state remains in the existing domain contracts:
+
+- source/import and media identity;
+- Perception, transcription, and audio analysis runs;
+- Creative Brief and its human approval;
+- Story generation, storyboard, and Apply revision;
+- Visual Style, color, Audio, and Caption Track contracts;
+- Approval snapshot;
+- Render Job/Render Report, Final QC, Delivery QA, and human final preview.
+
+The following values are deterministic projections of those contracts:
+
+- `stage` / `main_stage`;
+- domain `readiness`;
+- `next_action`;
+- `blocked_reason`.
+
+No API may persist a free-standing value such as
+`workflow.current_stage = "review"` and use it to advance the product. If a
+future optimization materializes a projection, it must include
+`projection_version`, the source state identities/hashes, and `computed_at`.
+It must be deterministically rebuildable; source mismatch requires recompute or
+fail-closed behavior. A projection can never authorize Approval or Render and
+can never overwrite domain state.
+
+### 2.3 Non-linear readiness
+
+The main stage is a summary, not a single progress counter. Review can expose
+independent domain readiness, for example:
+
+```yaml
+main_stage: review
+readiness:
+  story: ready
+  visual_style: ready
+  subtitle: needs_review
+  audio: ready
+  timeline: needs_review
+  approval: blocked
+next_action:
+  id: review_subtitle
+  label: 字幕尚未確認
+```
+
+The next action is derived from required blockers and the highest-value pending
+decision. Adding a Workspace must not require renumbering a linear stage
+counter.
+
 ## 3. Automatic work and concurrency
 
 After `import` has persisted source identity, the following understanding jobs
@@ -81,9 +132,13 @@ policy says the available evidence is sufficient; the UI must show partial or
 blocked analysis explicitly.
 
 Story generation starts only after its StoryInput snapshot is complete and the
-Creative Brief checkpoint has an approved output contract. Story generation
-continues to use its existing context preflight, strict schema, semantic
-validation, compact corrective retry, and fail-closed publish gate.
+Creative Brief checkpoint has approved Story-relevant fields. At minimum these
+are output direction, bounded target duration, pacing, and high-level story
+intent. Visual Style selection may remain in the later Review stage because it
+is primarily visual/render semantics and must not unnecessarily block Story
+generation. Story generation continues to use its existing context preflight,
+strict schema, semantic validation, compact corrective retry, and fail-closed
+publish gate.
 
 ## 4. Workspace information architecture
 
@@ -109,14 +164,52 @@ The main path may link to a Workspace more than once, but each Workspace must
 read and write the existing persisted semantic contract for its domain. A
 Workspace-local draft is temporary UI state until its domain save API commits it.
 
+### 4.1 Horizontal extensibility: WorkflowDescriptor
+
+Workflow v2 is horizontally extensible in stages, Workspaces, analysis jobs,
+review capabilities, human checkpoints, and preview/render tiers. This is a
+small descriptor contract, not a universal plugin framework.
+
+Each registered descriptor must provide:
+
+```yaml
+id: subtitle
+version: 1
+label: 字幕
+owner_domain: caption_track
+dependencies:
+  - semantic_state_identity: transcript_id/revision
+readiness_resolver_identity: caption_track_readiness_v1
+requiredness: conditional # required | optional | conditional
+surface_role: workspace # main_path | workspace | drill_down | diagnostic
+invalidation_class: visual_render_only
+capability_requirement: local_caption_editor_v1
+next_action_identity: review_subtitle
+order: 60
+```
+
+The descriptor also defines dependency ordering and unknown/unavailable
+semantics. Unknown descriptor or version is unsupported and fails closed.
+Missing required dependency produces a blocked readiness with a human-readable
+reason. An unavailable optional Workspace does not block the main path. A
+required unavailable capability blocks the relevant checkpoint.
+
+For example, a future `sound_design` Workspace can register its owner domain,
+audio dependency, readiness resolver, disclosure role, and review action. The
+Workflow projection can then surface it without adding a special branch for
+`stage === "sound_design"` to every existing consumer. This round defines only
+the contract/example; it does not implement descriptor loading or a plugin
+runtime.
+
 ## 5. Semantic state ownership
 
 | Semantic state | Authoritative owner | Consumers |
 | --- | --- | --- |
 | Source path, fingerprint, coded/display geometry | source/media records and approved source evidence | Perception, StoryInput, Render, QA |
 | Perception windows/results and provider provenance | Perception run store | StoryInput, understanding UI, audit |
-| Transcript and word timestamps | transcription artifact contract | Story, Subtitle Workspace, Render |
-| Creative Brief recommendation | Creative Brief recommendation state | checkpoint UI, Story context |
+| Source Transcript and word timestamps | Source Transcript artifact contract | StoryInput, Caption Track derivation, search/audit |
+| Caption Track cues and style | Caption Track editing contract | Subtitle Workspace, preview, Render, QA |
+| Creative Intent recommendation | Creative Brief recommendation state | checkpoint UI, Story context |
 | Approved output direction/framing | persisted approved Creative Brief snapshot | Story context, Render, VID-27 |
 | Story input and generation | Story generation store/cache contract | Story review, Apply |
 | Storyboard order/timing/segment inclusion | storyboard state and Apply revision | preview, approval, Render |
@@ -133,7 +226,23 @@ payloads, or another Workspace's local draft.
 ## 6. Creative Brief checkpoint
 
 The checkpoint is before Story generation and is the first creative decision in
-the workflow. It must display:
+the workflow. Its Simple-first surface must expose only the high-value
+Story-relevant Creative Intent decisions:
+
+- output direction: 16:9 or 9:16;
+- target duration: AI recommendation plus bounded presets/human override, such
+  as approximately 60 seconds, 90 seconds, or 2 minutes;
+- pacing: AI recommendation plus registry-backed `relaxed`, `natural`, or
+  `fast` semantics;
+- high-level story intent: one concise human-editable request, such as
+  「以手沖過程為主，保留準備與收尾」.
+
+The surface must not expose `must_keep`, `exclude`, provider settings, contract
+hashes, or every Story knob in the primary path. Those belong in Advanced or a
+later Workspace. The approved fields consumed by Story are persisted in the
+existing Creative Brief contract; the UI does not create a second intent store.
+
+It must also display:
 
 - source orientation summary using VID-39 normalized display geometry;
 - recommended output contract and reason;
@@ -147,18 +256,41 @@ The user may accept the recommendation or save an override. Saving an approved
 brief is an explicit human action. Migration may create a deterministic
 recommendation with `needs_confirmation`, but must never create human approval.
 
-## 7. Review surface and preview layers
+Visual Style choices (`Diary Natural`, `Clean Minimal`, `Cinematic`) remain in
+the Story draft Review stage. They are primarily visual/render semantics and do
+not block Story generation unless a future schema explicitly marks a field as
+Story-relevant.
 
-Stage 5 is where users see a result before paying the cost of formal Render.
-The layers are intentionally separate:
+## 7. Review surface and preview tiers
 
-1. **Draft result**: Story/storyboard structure and coverage.
-2. **Local preview**: segment, transition, range, visual-style, audio, and
-   subtitle previews using the existing preview contracts and cache identity.
-3. **Formal Render**: approved snapshot only; produces the final encoded MP4.
-4. **Final QC / Delivery QA**: authoritative automated gates over the formal
-   output.
-5. **Human final preview**: explicit confirmation over the exact output.
+Stage 5 is where users first see a result before paying the cost of formal
+Render. After an approved Creative Brief, valid Story/storyboard draft, and
+exact segment coverage, the product automatically requests a **Draft / Rough-cut
+Preview**. The user should see 「AI 已經幫你剪了一版」 and a playable result
+before seeing Story JSON or opening technical controls.
+
+The tiers are intentionally separate:
+
+| Tier | Authority | Cost/source state | Approval? | Deliverable? |
+| --- | --- | --- | --- | --- |
+| Story Draft | semantic editing draft | Story/storyboard draft; no encoded final output | No | No |
+| Draft / Rough-cut Preview | cheap playable evidence | proxy/cache/local preview path from current draft | No | No |
+| Workspace Preview | local evidence for one domain | current pending Visual Style, Subtitle, Audio, Color, Timeline, or range state | No | No |
+| Formal Render | approved final render | immutable approved snapshot and current source evidence | Produces candidate only | No |
+| Automated QA | authoritative Final QC + Delivery QA | exact formal output and provenance | Gate required | No |
+| Human Final Preview | exact output review | exact formal MP4 plus current QA evidence | Final human gate | No until confirmed |
+| Delivered | delivery state | all gates current and confirmed | Already passed | `deliverable_ready=true` |
+
+Draft Preview is playable, cheap, reversible, and may become stale after
+pending review edits. It does not imply Apply, Formal Render, QC PASS, Approval,
+or delivery. This round defines the contract only; it does not implement a
+Draft Preview renderer.
+
+The primary Review actions are:
+
+- `這版方向可以` → enter the single Review completed/Approve edit checkpoint;
+- `微調` → disclose Timeline, Visual Style, Subtitle, Audio, Color, or other
+  Workspace on demand.
 
 Preview success never implies approval, Render success, QA success, or
 `deliverable_ready`. Preview cache identities remain artifact identities;
@@ -169,6 +301,42 @@ approval and semantic provenance remain separate identities.
 Subtitle is a Stage 5 editing Workspace after transcription is available and
 before approval. It is not a mandatory early form field and it is not silently
 burned into a draft merely because transcription exists.
+
+### 8.1 Source Transcript
+
+Source Transcript is the authoritative speech-understanding artifact. Its
+minimum identity is:
+
+- `transcript_id` and `revision`;
+- language;
+- words and word timestamps;
+- provider/model provenance.
+
+Its primary consumers are StoryInput, Caption Track derivation, search, and
+audit. A new transcript revision is a new Story-relevant identity when the
+current StoryInput includes the transcript identity; it then makes the current
+Story stale according to the existing fail-closed currentity rules.
+
+### 8.2 Caption Track
+
+Caption Track is derived from Source Transcript but is an independent editing
+semantic layer. Its minimum identity is:
+
+- `caption_track_id` and `revision`;
+- source transcript identity;
+- ordered cues with stable cue IDs, text, and timing;
+- style references;
+- human edit provenance.
+
+The Subtitle Workspace operates on Caption Track by default. Text correction,
+Traditional Chinese sentence breaking, proper-noun edits, cue merge/split,
+and subtitle timing changes update Caption Track only. They must not silently
+rewrite Source Transcript or make Story stale. An explicit user action such as
+「修正逐字稿」 creates a new transcript revision instead.
+
+AI output must also identify whether it is a `caption_suggestion` or a
+`source_transcript_correction`; a suggestion cannot silently become a source
+correction.
 
 The first contract must support:
 
@@ -217,8 +385,15 @@ approval, and Render artifacts:
 - segment inclusion, order, source range, or semantic action/shot evidence;
 - user summary, must-keep/exclude, desired sequence, pacing, or other
   human-authored Story instructions;
-- a Creative Brief field explicitly declared Story-relevant by its schema;
-- transcript text/timestamps when they are included in StoryInput.
+- a Creative Brief field explicitly declared Story-relevant by its schema,
+  including the approved direction, target duration, pacing, or high-level story
+  intent when those values are part of StoryInput;
+- Source Transcript text/timestamps or transcript revision when the transcript
+  identity is included in StoryInput.
+
+Caption Track text/timing/style edits alone are visual/render or subtitle
+review changes and do not stale Story. An explicit Source Transcript correction
+creates a new transcript identity and follows the StoryInput rule above.
 
 ### 9.3 Formal approval currentity
 
@@ -228,7 +403,31 @@ previous approval because the visible UI appears equivalent. The existing
 stale-before-Apply and post-Apply historical-generation semantics remain
 unchanged.
 
-## 10. Failure and recovery semantics
+## 10. Human checkpoints
+
+The normal path converges human decisions into three primary checkpoints:
+
+### A. Creative Intent
+
+Before Story generation, the user accepts or overrides output direction, target
+duration, pacing, and high-level story intent. This is the Creative Brief
+checkpoint.
+
+### B. Review completed / Approve edit
+
+After the playable Draft Preview, the user either accepts the direction or opens
+the relevant Workspace to make edits. Visual Style, Subtitle, Audio, Color,
+and Timeline remain domain-level persisted currentity, but they do not become
+separate compulsory approval pages in the main path. The user confirms the
+reviewed revision once, after required domain readiness is current.
+
+### C. Human Final Preview
+
+After Formal Render, Final QC, and Delivery QA, the user confirms the exact
+output. `qa_needs_review` creates a conditional checkpoint only when warnings
+require human resolution; it is not an automatic pass.
+
+## 11. Failure and recovery semantics
 
 - Automatic jobs expose `queued`, `running`, `succeeded`, `blocked`, and
   `failed`; unavailable evidence is never displayed as complete.
@@ -243,28 +442,67 @@ unchanged.
 - Source media and production data remain immutable during preview and formal
   acceptance work.
 
-## 11. Existing VID scope map
+## 12. Existing VID scope map
 
-| Existing work | Workflow v2 treatment |
-| --- | --- |
-| VID-15 / VID-20 | Keep strict multi-frame planning, UUID coverage, rescue provenance, and publish gate inside `understanding`. |
-| VID-21–24 / VID-30 | Keep StoryInput budgeting, live context authority, runtime provisioning, strict schema, and compact retry inside `story_draft`. |
-| VID-16 | Keep Apply authoritative and atomic; it is a Stage 5→6 boundary operation. |
-| VID-17 | Keep Doctor capability evidence as health/readiness evidence, never as formal Render/QC replacement. |
-| VID-26 | Own the Creative Brief checkpoint and approved output contract. |
-| VID-27 / VID-39 | Own visual style, title, geometry, framing, and real preview behavior in Stage 5. |
-| VID-28 | Keep Timeline Inspector as a Stage 5 drill-down until Workflow v2 decides whether to promote it. |
-| VID-29 | Keep Editorial Policy out of this contract implementation; it follows after the workflow is stable. |
-| VID-31–38 | Preserve source probe, encoder/GPU, approval provenance, cache, QC, and render contracts under formal Render/QA. |
-| VID-40 | Reuse Simple-first and progressive-disclosure component principles locally; do not make it the whole workflow orchestrator. |
-| VID-41 | Defines this orchestration contract and the implementation slices that follow. |
+| VID | Treatment | Workflow v2 stage/workspace | Dependency and timing |
+| --- | --- | --- | --- |
+| VID-11 | retain | acceptance / hardening umbrella | Remains active until VID-18 Round-1 closure; Workflow v2 cannot skip it. |
+| VID-18 | retain | formal Render → QA → human preview | Current Round-1 deliverable acceptance remains independent and must close before delivery claims. |
+| VID-25 | reposition; eventually superseded as UX v1 by VID-41 slices | Project orchestrator / Review shell | Preserve completed child results; migrate only after this contract is reviewed. |
+| VID-26 | retain | Creative Brief / Creative Intent checkpoint | Before Story; owns direction, duration, pacing, and approved output contract. |
+| VID-27 | retain | Visual Style / Workspace Preview | Review drill-down after Draft Preview; consumes approved Creative Brief. |
+| VID-28 | retain; reposition | Timeline Inspector drill-down in Review | Do after the Workflow shell placement is stable; not required to define this contract. |
+| VID-29 | defer | Editorial Policy domain | Start after Workflow v2 core flow is stable; no policy engine in this round. |
+| VID-35 | retain backlog | Render performance / formal Render | Independent performance work; does not block Workflow v2 UX. |
+| VID-40 | completed; retain principles | Simple-first components / progressive disclosure | Reuse locally; it is not the whole Workflow v2 orchestrator. |
+| VID-41 | active | Workflow v2 control-plane contract | This document is Round 1; implementation follows focused slices. |
+| VID-42 | retain; do not duplicate | Subtitle Workspace in Review | Caption Track editor after transcription; implement as a focused follow-up. |
 
-## 12. Implementation boundary after this contract
+This is a contract-level migration/remap plan only. It does not change Linear
+relations or statuses and does not create the follow-up issues.
+
+## 13. Primary UX example: Coffee project
+
+This example is the acceptance lens for the contract; the experience must not
+devolve into a pipeline control panel.
+
+1. The user drags Coffee source clips into a new project.
+2. The project shows 「AI 正在整理 17 個片段」 while Perception,
+   transcription, audio analysis, and source geometry run in the background.
+3. Once the required evidence is ready, the simple Creative Intent checkpoint
+   shows:
+
+   ```text
+   建議：16:9 · 約 90 秒 · 自然節奏
+   [採用建議並產生第一版]    詳細設定 ▾
+   ```
+
+   The user may edit the direction, duration, pacing, or one-sentence story
+   intent before accepting it.
+4. The system generates Story and a cheap playable Draft Preview. The user
+   sees 「第一版完成」 and can press [播放]. The first result is the preview,
+   not Story JSON or a wall of technical controls.
+5. If the direction is good, the user presses [這版方向可以]. If not, [微調]
+   opens Timeline, Visual Style, Subtitle, Audio, or Color only as needed.
+6. The user presses [確認這個版本] once after required Review readiness is
+   current.
+7. The product runs Formal Render, Final QC, and Delivery QA.
+8. The user performs the final human preview of the exact MP4.
+9. Only then does the system set `deliverable_ready=true`.
+
+For a user who accepts the recommendation and makes no edits, the minimum
+human decisions are Creative Intent, Review completed/Approve edit, and Human
+Final Preview. Conditional QA review may add a decision only when warnings
+require it.
+
+## 14. Implementation boundary after this contract
 
 This contract intentionally does not implement the full product reorganization.
 The next implementation issues should be narrow and independently verifiable:
 
-1. persisted workflow stage/readiness projection and next-action API;
+1. derived workflow readiness / next-action projection API, rebuilt from
+   authoritative domain identities rather than independently persisted workflow
+   state;
 2. Project-page result-first stage shell with Workspace routing;
 3. understanding job aggregation and blocked/partial evidence presentation;
 4. Creative Brief checkpoint integration before Story generation;
@@ -277,7 +515,7 @@ Each implementation issue must identify the existing authoritative contract it
 orchestrates, the invalidation class it changes, and the evidence required to
 prove that it has not bypassed an existing gate.
 
-## 13. Acceptance checklist for VID-41 Round 1
+## 15. Acceptance checklist for VID-41 Round 1
 
 - [x] Stage order and transition rules are explicit.
 - [x] Automatic work and human checkpoints are explicit.
@@ -290,3 +528,10 @@ prove that it has not bypassed an existing gate.
 - [x] Existing VID tasks are mapped to retain/merge/reorder scope.
 - [x] Implementation is deferred to focused follow-up issues rather than a
   single unsafe product rewrite.
+- [x] The first playable Draft Preview is explicitly positioned before detailed
+  Workspace editing.
+- [x] Story-before intent covers direction, duration, pacing, and high-level
+  story intent without exposing every Story knob.
+- [x] Source Transcript and Caption Track ownership are separated.
+- [x] WorkflowDescriptor extensibility and non-linear readiness are defined.
+- [x] The Coffee user journey and minimum human decisions are explicit.
