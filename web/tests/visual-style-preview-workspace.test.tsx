@@ -46,12 +46,13 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
   it("keeps nested readability and motion overrides visible and invalidates preview evidence", async () => {
     vi.spyOn(api, "previewVisualStyles").mockResolvedValue({
       ok: true,
-      variants: [{ visual_style: { visual_style_id: "diary_natural" }, preview_plan_hash: "plan", preview_variant_id: "variant", title_role: "chapter_title" }],
+      variants: [{ visual_style: { visual_style_id: "diary_natural" }, url: "diary.png", preview_kind: "static", preview_plan_hash: "plan", preview_variant_id: "variant", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } }],
     });
     render(<VisualStylePreviewWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
 
     fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
     await waitFor(() => expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.getByAltText("diary_natural 主要預覽")).toBeTruthy();
 
     const readability = screen.getByLabelText("可讀性") as HTMLSelectElement;
     const motion = screen.getByLabelText("動畫") as HTMLSelectElement;
@@ -61,6 +62,53 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
     fireEvent.change(motion, { target: { value: "fade_rise" } });
     expect(readability.value).toBe("solid");
     expect(motion.value).toBe("fade_rise");
+    expect(screen.queryByAltText("diary_natural 主要預覽")).toBeNull();
+    expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("clears scalar stale variants and requires a new exact preview before approval", async () => {
+    const preview = vi.spyOn(api, "previewVisualStyles")
+      .mockResolvedValueOnce({
+        ok: true,
+        variants: [{ visual_style: { visual_style_id: "diary_natural" }, url: "old.png", preview_kind: "static", preview_plan_hash: "plan-a", preview_variant_id: "variant-a", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } }],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        variants: [{ visual_style: { visual_style_id: "diary_natural" }, url: "new.png", preview_kind: "static", preview_plan_hash: "plan-b", preview_variant_id: "variant-b", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } }],
+      });
+    const approve = vi.spyOn(api, "approveVisualStyle").mockResolvedValue({ ok: true });
+    render(<VisualStylePreviewWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    await waitFor(() => expect(screen.getByAltText("diary_natural 主要預覽")).toBeTruthy());
+    expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.change(screen.getByLabelText("位置"), { target: { value: "top-center" } });
+    expect(screen.queryByAltText("diary_natural 主要預覽")).toBeNull();
+    expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    await waitFor(() => expect(preview).toHaveBeenCalledWith(1, false, { anchor: "top-center" }));
+    await waitFor(() => expect(screen.getByAltText("diary_natural 主要預覽")).toBeTruthy());
+    expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "核准選定 Visual Style" }));
+    await waitFor(() => expect(approve).toHaveBeenCalledWith(1, "diary_natural", 4, "plan-b", "variant-b", "chapter_title", { anchor: "top-center" }));
+  });
+
+  it("clears preview evidence when Creative Brief currentity refreshes", async () => {
+    const input = detail();
+    const preview = vi.spyOn(api, "previewVisualStyles").mockResolvedValue({
+      ok: true,
+      variants: [{ visual_style: { visual_style_id: "diary_natural" }, url: "current.png", preview_kind: "static", preview_plan_hash: "plan", preview_variant_id: "variant", title_role: "chapter_title", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative" } }],
+    });
+    const { rerender } = render(<VisualStylePreviewWorkspace detail={input} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    await waitFor(() => expect(preview).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByAltText("diary_natural 主要預覽")).toBeTruthy());
+
+    rerender(<VisualStylePreviewWorkspace detail={{ ...input, project_revision: 5 }} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+    await waitFor(() => expect(screen.queryByAltText("diary_natural 主要預覽")).toBeNull());
     expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -75,6 +123,26 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
     expect(anchor.value).toBe("top-center");
     fireEvent.change(anchor, { target: { value: "top-right" } });
     expect(anchor.value).toBe("top-right");
+  });
+
+  it("materializes the persisted approved style, overrides, and preview identity after refresh", () => {
+    const input = detail();
+    input.visual_style = {
+      ...input.visual_style,
+      status: "approved",
+      approved: {
+        visual_style_id: "cinematic",
+        visual_style_version: "1",
+        overrides: { anchor: "top-right" },
+        title_style: { role: "chapter_title" },
+        approved_preview_variant_id: "persisted-variant",
+        approved_preview_plan_hash: "persisted-plan",
+      },
+    };
+    render(<VisualStylePreviewWorkspace detail={input} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+    expect((screen.getByRole("combobox", { name: "選擇視覺風格" }) as HTMLSelectElement).value).toBe("cinematic");
+    expect((screen.getByLabelText("位置") as HTMLSelectElement).value).toBe("top-right");
+    expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("renders sparse inherited child defaults from API without a child-specific UI branch", async () => {
@@ -95,5 +163,37 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
     expect((screen.getByLabelText("動畫") as HTMLSelectElement).value).toBe("fade_rise");
     fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
     await waitFor(() => expect(preview).toHaveBeenCalledWith(1, false, {}));
+  });
+
+  it("groups the VID-27 variant matrix into exactly three public primary cards", async () => {
+    const input = detail();
+    input.visual_style = {
+      ...input.visual_style,
+      options: {
+        ...input.visual_style?.options,
+        styles: [
+          { style_id: "diary_natural", label: "Diary Natural", composition: "overlay", enabled_for_round1_ui: true },
+          { style_id: "clean_minimal", label: "Clean Minimal", composition: "overlay", enabled_for_round1_ui: true },
+          { style_id: "cinematic", label: "Cinematic", composition: "overlay", enabled_for_round1_ui: true },
+          { style_id: "standalone_card_compare", label: "Standalone Card Compare", composition: "standalone", enabled_for_round1_ui: true },
+        ],
+      },
+    };
+    const labels: Record<string, string> = { diary_natural: "Diary Natural", clean_minimal: "Clean Minimal", cinematic: "Cinematic", standalone_card_compare: "Standalone Card Compare" };
+    const matrix = Object.keys(labels).flatMap((style) => [
+      { visual_style: { visual_style_id: style, label: labels[style] }, url: `${style}-bright.png`, preview_variant_id: `${style}-bright`, preview_plan_hash: `${style}-plan`, title_role: "chapter_title", preview_kind: "static", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative", role_label: "Chapter" } },
+      { visual_style: { visual_style_id: style, label: labels[style] }, url: `${style}-dark.png`, preview_variant_id: `${style}-dark`, preview_plan_hash: `${style}-dark-plan`, title_role: "location_title", preview_kind: "static", representative_frame: { title_role: "location_title", selection_reason: "dark_complex_low_luma_representative", role_label: "Location" } },
+      { visual_style: { visual_style_id: style, label: labels[style] }, url: `${style}-animated.mp4`, preview_variant_id: `${style}-animated`, preview_plan_hash: `${style}-animated-plan`, title_role: "chapter_title", preview_kind: "animated", representative_frame: { title_role: "chapter_title", selection_reason: "bright_high_luma_representative", role_label: "Chapter" } },
+    ]);
+    vi.spyOn(api, "previewVisualStyles").mockResolvedValue({ ok: true, variants: matrix });
+    render(<VisualStylePreviewWorkspace detail={input} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} compact />);
+
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    await waitFor(() => expect(document.querySelectorAll('[aria-label="主要視覺風格選擇"] > article')).toHaveLength(3));
+    expect(document.querySelector('[aria-label="主要視覺風格選擇"] img[alt*="Standalone Card Compare"]')).toBeNull();
+    expect(screen.queryByLabelText("字型")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "查看更多預覽" }));
+    expect(screen.getByText("Standalone Card Compare · Location")).toBeTruthy();
+    expect(screen.getAllByText(/Diary Natural ·/).length).toBeGreaterThan(1);
   });
 });

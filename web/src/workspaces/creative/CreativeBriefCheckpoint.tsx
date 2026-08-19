@@ -10,6 +10,9 @@ type Props = {
   setMessage: (value: string) => void;
   refreshProject: (options?: ProjectDataLoadOptions) => Promise<unknown>;
   mutationControls: ProjectMutationControls;
+  compact?: boolean;
+  advancedSection?: "framing";
+  onApproved?: () => void;
 };
 
 type BriefOptions = NonNullable<CreativeBrief["options"]>;
@@ -45,7 +48,7 @@ function framingPayload(directions: DirectionOption[], strategies: Record<string
   }));
 }
 
-export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mutationControls }: Props) {
+export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mutationControls, compact = false, advancedSection, onApproved }: Props) {
   const brief = detail.creative_brief || {};
   const recommendation = brief.recommendation || {};
   const approved = brief.approved || {};
@@ -102,6 +105,7 @@ export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mu
       if (!result.ok || !result.creative_brief) throw new Error(result.error || "Creative Brief 儲存失敗");
       await refreshProject({ forceFresh: true });
       setMessage(approvalSource === "recommendation" ? "已採用 AI 建議並核准 Creative Brief。" : "已儲存手動覆寫並核准 Creative Brief。");
+      onApproved?.();
     } catch (error) {
       setMessage(`Creative Brief 儲存失敗：${formatApiError(error)}`);
     } finally {
@@ -112,6 +116,61 @@ export function CreativeBriefCheckpoint({ detail, setMessage, refreshProject, mu
 
   function strategiesFor(directionId: string) {
     return (options.framing_strategies || []).filter((item) => item.supported_direction_ids.includes(directionId));
+  }
+
+  function framingSummary() {
+    const selected = directions.map((direction) => {
+      const strategy = strategies[direction.direction_id] || "auto_recommended";
+      return strategiesFor(direction.direction_id).find((item) => item.strategy_id === strategy)?.label || "自動建議";
+    }).filter(Boolean);
+    return selected.length ? selected.join("；") : "依素材方向自動處理畫面";
+  }
+
+  function framingControls() {
+    return <>
+      <button type="button" disabled={Boolean(busy)} onClick={() => void refreshRecommendation()}>{busy === "recommend" ? "分析中…" : "重新分析素材方向"}</button>
+      <div className="creative-brief-controls">
+        <div className="creative-brief-output"><span>目前選擇</span><strong>{selectedOutput.width}×{selectedOutput.height}</strong><code>{selectedOutput.render_profile_id || "unknown-profile"}</code></div>
+        {directions.map((direction) => <label key={direction.direction_id}>{direction.label}<select value={strategies[direction.direction_id] || ""} disabled={Boolean(busy)} onChange={(event) => setStrategies((current) => ({ ...current, [direction.direction_id]: event.target.value }))}>{strategiesFor(direction.direction_id).map((strategy) => <option key={strategy.strategy_id} value={strategy.strategy_id}>{strategy.label}</option>)}</select></label>)}
+      </div>
+      <button type="button" className="primary" disabled={Boolean(busy) || !outputContractId} onClick={() => void save("human_override", { outputContractId, strategies })}>{busy === "save" ? "儲存中…" : "套用畫面配置"}</button>
+    </>;
+  }
+
+  if (compact && advancedSection === "framing") {
+    return <section className="creative-advanced-editor creative-brief-advanced-content" aria-label="畫面配置詳細設定">
+      <div><strong>畫面配置</strong><p>依目前素材方向選擇裁切、補背景或保留完整畫面的策略。</p></div>
+      {framingControls()}
+    </section>;
+  }
+
+  if (compact) {
+    return <section className="creative-brief creative-brief-simple" aria-label="Creative Brief checkpoint">
+      <div className="creative-brief-simple-heading">
+        <div><span className="step-kicker">步驟 1／3</span><h3>先決定影片方向</h3><p>AI 先根據素材比例提出建議，你可以直接採用或改選另一個方向。</p></div>
+        <span className={approvedState ? "brief-status approved" : "brief-status"}>{approvedState ? "已核准" : "待人工確認"}</span>
+      </div>
+      <div className="creative-brief-recommendation creative-brief-recommendation-simple">
+        <span className="recommendation-label">AI 建議</span>
+        <strong>{String(recommendation.output?.aspect_ratio || "尚未解析")} · {String(recommendation.output?.width || "—")}×{String(recommendation.output?.height || "—")}</strong>
+        <span>{recommendation.reason || "尚無建議理由"}</span>
+        <small>素材：直向 {counts.portrait ?? 0} · 橫向 {counts.landscape ?? 0} · 方形／未知 {(counts.square ?? 0) + (counts.unknown ?? 0)}</small>
+      </div>
+      <div className="creative-brief-simple-options" aria-label="影片方向選擇">
+        {outputOptions.map((option) => <label key={option.output_contract_id} className={outputContractId === option.output_contract_id ? "selected" : ""}>
+          <input type="radio" name={`brief-simple-output-${detail.project.id}`} checked={outputContractId === option.output_contract_id} disabled={Boolean(busy)} onChange={() => setOutputContractId(String(option.output_contract_id))} />
+          <span className="orientation-icon" aria-hidden="true"><span /></span>
+          <span><strong>{option.label || option.aspect_ratio}</strong><small>{option.width}×{option.height}</small></span>
+          {String(option.output_contract_id) === recommendedOutputId && <em>AI 推薦</em>}
+        </label>)}
+      </div>
+      <p className="creative-brief-simple-framing"><strong>畫面處理：</strong>{framingSummary()}</p>
+      <div className="creative-brief-simple-actions">
+        <button type="button" className="primary" disabled={Boolean(busy) || !recommendedOutputId} onClick={() => { const nextStrategies = initialFraming(directions, {}, recommendation); setOutputContractId(recommendedOutputId); setStrategies(nextStrategies); void save("recommendation", { outputContractId: recommendedOutputId, strategies: nextStrategies }); }}>{busy === "save" ? "儲存中…" : "採用推薦方向"}</button>
+        <button type="button" disabled={Boolean(busy) || !outputContractId || outputContractId === recommendedOutputId} onClick={() => void save("human_override")}>{busy === "save" ? "儲存中…" : "使用此方向並繼續"}</button>
+      </div>
+      {approvedState && <p className="creative-brief-approved" role="status">方向已核准，可以進入下一步視覺風格。</p>}
+    </section>;
   }
 
   return <section className="creative-brief card" aria-label="Creative Brief checkpoint">
