@@ -62,12 +62,21 @@ function VisualStylePreviewWorkspaceInner({ detail, setMessage, refreshProject, 
     const candidates = source.filter((item) => String(mapValue(item.visual_style).visual_style_id || "") === styleId);
     return candidates.find(isStaticChapterBright) || candidates.find((item) => String(variantRole(item)) === "chapter_title" && String(item.preview_kind || "static") === "static") || candidates.find((item) => String(item.preview_kind || "static") === "static") || candidates[0];
   }
+  function usablePrimaryHero(source: Array<Record<string, unknown>>, styleId: string) {
+    const hero = heroForList(source, styleId);
+    if (!hero) return false;
+    return String(mapValue(hero.visual_style).visual_style_id || "") === styleId
+      && String(hero.url || "").trim().length > 0
+      && String(hero.preview_plan_hash || "").trim().length > 0
+      && String(hero.preview_variant_id || "").trim().length > 0
+      && String(hero.preview_kind || "static") === "static";
+  }
   function previewFeedback() {
     if (previewLifecycle.status === "running") {
       return <p className="visual-style-preview-feedback running" role="status" aria-live="polite">正在以真實素材產生預覽，請稍候…</p>;
     }
     if (previewLifecycle.status === "success") {
-      return <p className="visual-style-preview-feedback success" role="status" aria-live="polite">真實畫面預覽已完成（{(previewLifecycle.elapsedMs / 1000).toFixed(1)} 秒），請逐一比較三種風格。</p>;
+      return <p className="visual-style-preview-feedback success" role="status" aria-live="polite">真實畫面預覽已完成（{(previewLifecycle.elapsedMs / 1000).toFixed(1)} 秒），請逐一比較 {primaryStyles.length} 種風格。</p>;
     }
     if (previewLifecycle.status === "error") {
       return <div className="visual-style-preview-feedback error" role="alert" aria-live="assertive"><strong>真實畫面預覽失敗</strong><span>{previewLifecycle.error}</span><button type="button" onClick={() => void preview()}>重試真實預覽</button></div>;
@@ -76,14 +85,19 @@ function VisualStylePreviewWorkspaceInner({ detail, setMessage, refreshProject, 
   }
   async function preview() {
     const startedAt = performance.now();
-    setPreviewLifecycle({ status: "running", error: "", elapsedMs: 0 });
     invalidatePreview();
     setVariants([]);
+    setPreviewLifecycle({ status: "running", error: "", elapsedMs: 0 });
     try {
       const result = await api.previewVisualStyles(detail.project.id, false, overrides);
       if (!result.ok) throw new Error(result.error || "Creative Brief 尚未核准，不能產生 authoritative visual preview。");
       const nextVariants = Array.isArray(result.variants) ? result.variants : [];
       if (!nextVariants.length) throw new Error("API 沒有回傳任何可供核准的真實預覽畫面。");
+      if (!primaryStyles.length) throw new Error("目前沒有啟用的公開主要視覺風格可供比較。");
+      const missingStyles = primaryStyles
+        .filter((style) => !usablePrimaryHero(nextVariants, String(style.style_id || "")))
+        .map((style) => String(style.label || style.style_id || "未命名風格"));
+      if (missingStyles.length) throw new Error(`部分視覺風格預覽沒有成功產生，請重新產生預覽。缺少：${missingStyles.join("、")}`);
       setVariants(nextVariants);
       const first = heroForList(nextVariants, selected);
       if (first) selectVariant(first, selected);
