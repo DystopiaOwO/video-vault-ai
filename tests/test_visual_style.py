@@ -23,6 +23,7 @@ from video_vault.visual_style import (
     render_true_frame_preview,
     resolve_visual_render_plan,
     _refresh_visual_style_currentity,
+    _preview_seek_args,
     _select_representative_frames,
     _validate_preview_evidence,
     validate_materialized_visual_style,
@@ -560,8 +561,70 @@ def test_preview_surface_contains_roles_and_bounded_animation_evidence(tmp_path:
 
     monkeypatch.setattr("video_vault.visual_style.render_true_frame_preview", fake_static)
     monkeypatch.setattr("video_vault.visual_style.render_animated_title_preview", fake_animated)
-    result = preview_visual_styles({"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe", "library_root": str(tmp_path)}, db, 1, force=True, overrides={"anchor": "top-center"})
+    result = preview_visual_styles({"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe", "library_root": str(tmp_path)}, db, 1, force=True, overrides={"anchor": "top-center"}, scope="extended")
     assert result["ok"] is True
     assert {str(item["title_role"]) for item in result["variants"] if item.get("preview_kind") == "static"} == {"chapter_title", "location_title"}
     assert any(item.get("preview_kind") == "animated" for item in result["variants"])
     assert all(item.get("preview_plan_hash") for item in result["variants"])
+
+
+def test_primary_scope_requires_registry_public_primary_heroes_and_excludes_extended(tmp_path: Path, monkeypatch):
+    from video_vault.visual_style import preview_visual_styles
+    from video_vault.database import connect
+
+    db = tmp_path / "primary.sqlite3"
+    init_db(db)
+    with connect(db) as con:
+        con.execute("insert into projects(id, name, project_revision) values(1, 'Primary', 1)")
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"fixture")
+    source_data = {"project_media_uuid": "media-1", "path": str(source), "fingerprint": {"sha256": "source"}, "duration_seconds": 10.0, "display_geometry": {"display_ratio": 16 / 9, "source_orientation": "landscape", "sample_aspect_ratio": "1:1"}}
+    monkeypatch.setattr("video_vault.visual_style._load_brief", lambda *_args: _brief())
+    monkeypatch.setattr("video_vault.visual_style.ensure_visual_style_state", lambda *_args: {"project_id": 1, "status": "approved", "preview_revision": 1})
+    monkeypatch.setattr("video_vault.visual_style._source_provenance", lambda *_args: [source_data])
+    monkeypatch.setattr("video_vault.visual_style._measure_source_luma", lambda *_args: 0.8)
+
+    def fake_static(_cfg, _project_id, _source, _timestamp, _snapshot, output, **_kwargs):
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"png")
+        return {"file": str(output), "sha256": __import__("hashlib").sha256(b"png").hexdigest()}
+
+    monkeypatch.setattr("video_vault.visual_style.render_true_frame_preview", fake_static)
+    registry = VisualStyleRegistry(VISUAL_STYLES.list())
+    future = registry.resolve("diary_natural")
+    future.update({"style_id": "future_public", "label": "Future Public", "default_title_style_id": "diary_natural_overlay", "preview_scope": "primary", "public_primary": True})
+    registry.register("future_public", future)
+    result = preview_visual_styles({"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe", "library_root": str(tmp_path)}, db, 1, force=True, registry=registry)
+    assert result["ok"] is True
+    assert {item["visual_style"]["visual_style_id"] for item in result["variants"]} == {"diary_natural", "clean_minimal", "cinematic", "future_public"}
+    assert all(item["title_role"] == "chapter_title" and item["preview_kind"] == "static" for item in result["variants"])
+
+
+def test_bounded_seek_contract_is_shared_and_preserves_near_beginning_timestamp():
+    assert _preview_seek_args(0.25) == ["-ss", "0.000000", "-i", "__SOURCE__", "-ss", "0.250000"]
+    assert _preview_seek_args(32.675531) == ["-ss", "30.675531", "-i", "__SOURCE__", "-ss", "2.000000"]
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required for media smoke")
+def test_bounded_seek_matches_full_decode_on_long_gop_fixture(tmp_path: Path):
+    source = tmp_path / "long-gop.mp4"
+    generated = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30", "-t", "8", "-c:v", "libx264", "-g", "60", "-keyint_min", "60", "-sc_threshold", "0", "-pix_fmt", "yuv420p", str(source)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert generated.returncode == 0, generated.stderr
+
+    def frame(command: list[str]) -> bytes:
+        result = subprocess.run(command, capture_output=True, check=False)
+        assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+        assert len(result.stdout) == 160 * 90 * 3
+        return result.stdout
+
+    target = 5.25
+    reference = frame(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-i", str(source), "-ss", f"{target:.6f}", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+    seek = _preview_seek_args(target)
+    candidate = frame(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", *[str(source) if item == "__SOURCE__" else item for item in seek], "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+    assert candidate == reference

@@ -199,7 +199,7 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
     expect(document.querySelector('[aria-label="主要視覺風格選擇"] img[alt*="Standalone Card Compare"]')).toBeNull();
     expect(screen.queryByLabelText("字型")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "查看更多預覽" }));
-    expect(screen.getByText("Standalone Card Compare · Location")).toBeTruthy();
+    expect(await screen.findByText("Standalone Card Compare · Location")).toBeTruthy();
     expect(screen.getAllByText(/Diary Natural ·/).length).toBeGreaterThan(1);
   });
 
@@ -278,5 +278,38 @@ describe("VisualStylePreviewWorkspace resolved controls", () => {
     await waitFor(() => expect(screen.getByText(/真實畫面預覽已完成/)).toBeTruthy());
     expect(screen.getByAltText("Future Visual 主要預覽")).toBeTruthy();
     expect((screen.getByRole("button", { name: "核准選定 Visual Style" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("loads extended evidence lazily and keeps primary heroes visible", async () => {
+    const primary = [heroVariant("diary_natural", "primary-diary"), heroVariant("cinematic", "primary-cinematic")];
+    const extended = [
+      ...primary,
+      { ...heroVariant("diary_natural", "location"), title_role: "location_title", representative_frame: { title_role: "location_title", selection_reason: "dark_complex_low_luma_representative" } },
+    ];
+    const preview = vi.spyOn(api, "previewVisualStyles")
+      .mockResolvedValueOnce({ ok: true, variants: primary })
+      .mockResolvedValueOnce({ ok: true, variants: extended });
+    render(<VisualStylePreviewWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    await waitFor(() => expect(screen.getByAltText("diary_natural 主要預覽")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "查看更多預覽" }));
+    await waitFor(() => expect(preview).toHaveBeenLastCalledWith(1, false, {}, "extended"));
+    expect((await screen.findAllByAltText("diary_natural 補充預覽")).length).toBe(2);
+    expect(screen.getByAltText("diary_natural 主要預覽")).toBeTruthy();
+  });
+
+  it("keeps primary evidence when the lazy extended request fails", async () => {
+    const preview = vi.spyOn(api, "previewVisualStyles")
+      .mockResolvedValueOnce({ ok: true, variants: [heroVariant("diary_natural"), heroVariant("cinematic")] })
+      .mockResolvedValueOnce({ ok: false, error: "preview_extended_failed" });
+    render(<VisualStylePreviewWorkspace detail={detail()} setMessage={vi.fn()} refreshProject={vi.fn(async () => [])} mutationControls={createProjectMutationControls(new ProjectMutationCoordinator())} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "產生真實畫面預覽" }));
+    await waitFor(() => expect(screen.getByAltText("diary_natural 主要預覽")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "查看更多預覽" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("preview_extended_failed");
+    expect(screen.getByAltText("diary_natural 主要預覽")).toBeTruthy();
+    expect(preview).toHaveBeenLastCalledWith(1, false, {}, "extended");
   });
 });
