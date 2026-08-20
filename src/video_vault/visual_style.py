@@ -25,7 +25,8 @@ from .database import connect, init_db
 from .paths import root
 from .project import project_dir
 from .project_lifecycle import project_commit
-from .source_fingerprint import parse_source_fingerprint, persisted_fingerprint_for_stat
+from .project_media import revalidate_and_rebind_project_source_fingerprint
+from .source_fingerprint import SourceFingerprintChangedError, parse_source_fingerprint
 from .media_probe import probe_media_metadata
 
 
@@ -1355,11 +1356,21 @@ def _source_provenance(db: Path, project_id: int) -> list[dict[str, Any]]:
     result = []
     for row in rows:
         path = Path(str(row["current_path"] or ""))
-        stat = {"size": path.stat().st_size, "mtime_ns": path.stat().st_mtime_ns} if path.is_file() else {}
         persisted = parse_source_fingerprint(str(row["source_fingerprint_json"] or "{}"))
-        if path.is_file() and persisted and persisted_fingerprint_for_stat(path, persisted) is None:
-            raise VisualStyleError("source_changed", f"source fingerprint changed: {path}")
-        result.append({"project_media_uuid": str(row["project_media_uuid"] or ""), "video_id": int(row["video_id"]), "path": str(path), "fingerprint": persisted or stat})
+        if not path.is_file() or not persisted:
+            raise VisualStyleError("source_changed", f"source fingerprint changed or source missing: {path}")
+        try:
+            revalidation = revalidate_and_rebind_project_source_fingerprint(
+                db,
+                project_id,
+                str(row["project_media_uuid"] or ""),
+                path,
+                persisted,
+            )
+        except SourceFingerprintChangedError as exc:
+            raise VisualStyleError("source_changed", f"source fingerprint changed: {path} ({exc.reason})") from exc
+        fingerprint = dict(revalidation["fingerprint"])
+        result.append({"project_media_uuid": str(row["project_media_uuid"] or ""), "video_id": int(row["video_id"]), "path": str(path), "fingerprint": fingerprint, "source_revalidation": {"status": revalidation["status"], "content_equal": bool(revalidation["content_equal"]), "rebound": bool(revalidation["rebound"]), "full_hash": bool(revalidation["full_hash"])}})
     return result
 
 

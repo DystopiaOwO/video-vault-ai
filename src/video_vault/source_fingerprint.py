@@ -22,10 +22,13 @@ SOURCE_IDENTITY_CONTRACT = "stat-file-identity-v1"
 class SourceFingerprintChangedError(RuntimeError):
     """The source changed while a full fingerprint was being calculated."""
 
-    def __init__(self, path: Path, before: Mapping[str, Any], after: Mapping[str, Any]):
+    code = "source_changed"
+
+    def __init__(self, path: Path, before: Mapping[str, Any], after: Mapping[str, Any], *, reason: str = "source_changed"):
         self.path = path
         self.before = dict(before)
         self.after = dict(after)
+        self.reason = str(reason)
         super().__init__(f"source changed during fingerprint: {path}")
 
 
@@ -166,6 +169,57 @@ def resolve_source_fingerprint(path: Path, persisted: Any = None) -> dict[str, A
             _CONDITION.notify_all()
 
 
+def revalidate_source_fingerprint(path: Path, persisted: Any) -> dict[str, Any]:
+    """Explicitly revalidate a persisted fingerprint before a source-consuming action.
+
+    The strict stat matcher remains the zero-hash fast path.  A mismatch is
+    never accepted from metadata alone: the current bytes are hashed through
+    the existing single-flight resolver and must match the already persisted
+    SHA-256 before the caller may persist a current stat identity.
+    """
+
+    path = path.expanduser().resolve(strict=True)
+    current = source_stat(path)
+    persisted_value = parse_source_fingerprint(persisted)
+    persisted_sha = str(persisted_value.get("sha256") or "").lower()
+    if (
+        str(persisted_value.get("contract_version") or "") != SOURCE_FINGERPRINT_CONTRACT_VERSION
+        or len(persisted_sha) != 64
+        or any(character not in "0123456789abcdef" for character in persisted_sha)
+    ):
+        raise SourceFingerprintChangedError(path, persisted_value, current, reason="invalid_persisted_fingerprint")
+
+    strict = persisted_fingerprint_for_stat(path, persisted_value, stat=current)
+    if strict is not None:
+        return {
+            "status": "current",
+            "content_equal": True,
+            "rebound": False,
+            "fingerprint": strict,
+            "full_hash": False,
+        }
+
+    resolved = resolve_source_fingerprint(path, persisted_value)
+    after = source_stat(path)
+    if _source_version(after) != _source_version(resolved):
+        raise SourceFingerprintChangedError(path, resolved, after, reason="source_changed_after_hash")
+    current_sha = str(resolved.get("sha256") or "").lower()
+    if current_sha != persisted_sha:
+        raise SourceFingerprintChangedError(
+            path,
+            {**current, "sha256": persisted_sha},
+            {**after, "sha256": current_sha},
+            reason="content_sha_mismatch",
+        )
+    return {
+        "status": "rebound",
+        "content_equal": True,
+        "rebound": True,
+        "fingerprint": resolved,
+        "full_hash": True,
+    }
+
+
 def reset_source_fingerprint_cache() -> None:
     with _CONDITION:
         _CACHE.clear()
@@ -218,6 +272,7 @@ __all__ = [
     "persisted_fingerprint_for_stat",
     "reset_source_fingerprint_cache",
     "resolve_source_fingerprint",
+    "revalidate_source_fingerprint",
     "source_fingerprint_metrics",
     "source_stat",
 ]
