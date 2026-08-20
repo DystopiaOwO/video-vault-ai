@@ -1042,7 +1042,8 @@ def run_ui(cfg: dict, host: str = "127.0.0.1", port: int = 8765) -> None:
             elif path == "/api/project/visual-style/preview":
                 try:
                     project_id = int(data.get("project_id", 0))
-                    result = preview_visual_styles(cfg, db, project_id, force=bool(data.get("force")), overrides=data.get("overrides") if isinstance(data.get("overrides"), dict) else None)
+                    scope = str(data.get("scope") or "primary")
+                    result = preview_visual_styles(cfg, db, project_id, force=bool(data.get("force")), overrides=data.get("overrides") if isinstance(data.get("overrides"), dict) else None, scope=scope)
                     for variant in result.get("variants", []):
                         filename = Path(str(variant.get("file") or "")).name
                         variant["file"] = filename

@@ -36,6 +36,10 @@ TITLE_STYLE_SCHEMA_VERSION = "title-style-v1"
 TITLE_STYLE_REGISTRY_VERSION = "title-style-registry-v1"
 VISUAL_STYLE_STATE_SCHEMA_VERSION = 1
 VISUAL_RENDER_CONTRACT_VERSION = "visual-render-v1"
+VISUAL_PREVIEW_SCOPE_VERSION = "visual-preview-scope-v1"
+PREVIEW_SCOPES = ("primary", "extended")
+PREVIEW_SEEK_STRATEGY = "bounded-pre-roll-v1"
+PREVIEW_SEEK_PREROLL_SECONDS = 2.0
 TITLE_ANCHORS = ("top-left", "top-center", "top-right", "center", "bottom-left", "bottom-center", "bottom-right")
 TITLE_MOTION_PRESETS = ("none", "fade", "fade_rise", "slide_fade")
 TITLE_SIZE_PRESETS = {"small": 0.85, "normal": 1.0, "large": 1.2}
@@ -393,6 +397,7 @@ def visual_style_options(*, registry: VisualStyleRegistry | None = None, title_r
         "schema_version": VISUAL_STYLE_SCHEMA_VERSION,
         "registry_version": VISUAL_STYLE_REGISTRY_VERSION,
         "registry_hash": style_resolver.hash(),
+        "preview_scope_version": VISUAL_PREVIEW_SCOPE_VERSION,
         # Standalone is a deliberate human comparison option.  Test-only
         # entries remain hidden from the product surface.
         "styles": [item for item in style_resolver.list(include_internal=True) if item.get("style_id") != "test_soft_panel"],
@@ -965,9 +970,7 @@ def render_true_frame_preview(
     height = int((snapshot.get("output") or {}).get("height") or 1080)
     plan = resolve_visual_render_plan(snapshot, width=width, height=height, title_text=title_text, color_settings=color_settings, source_display_ratio=source_display_ratio, source_geometry=source_geometry, title_role=title_role, title_duration_seconds=title_duration_seconds)
     filter_graph = plan["filter_graph"]
-    # Place the seek after the input so synthetic/short-GOP fixtures still
-    # yield a decoded representative frame instead of an empty image stream.
-    command = [str(cfg["ffmpeg_path"]), "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(source), "-ss", f"{float(timestamp_seconds):.6f}"]
+    command = _preview_ffmpeg_prefix(cfg, source, timestamp_seconds)
     if str(plan.get("graph_type") or "linear") == "split_background_overlay":
         command.extend(["-filter_complex", materialize_visual_graph(plan, input_label="[0:v]", output_label="[vout]"), "-map", "[vout]"])
     else:
@@ -1001,7 +1004,7 @@ def render_animated_title_preview(
     width = int((snapshot.get("output") or {}).get("width") or 1920)
     height = int((snapshot.get("output") or {}).get("height") or 1080)
     plan = resolve_visual_render_plan(snapshot, width=width, height=height, title_text=title_text, color_settings=color_settings, source_geometry=source_geometry, title_role=title_role, title_duration_seconds=duration)
-    command = [str(cfg["ffmpeg_path"]), "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(source), "-ss", f"{float(timestamp_seconds):.6f}"]
+    command = _preview_ffmpeg_prefix(cfg, source, timestamp_seconds)
     if str(plan.get("graph_type") or "linear") == "split_background_overlay":
         command.extend(["-filter_complex", materialize_visual_graph(plan, input_label="[0:v]", output_label="[vout]"), "-map", "[vout]"])
     else:
@@ -1015,6 +1018,26 @@ def render_animated_title_preview(
     return {"file": str(output), "sha256": _file_hash(output), "timestamp_seconds": float(timestamp_seconds), "width": width, "height": height, "duration_seconds": duration, "filter_contract": str(plan.get("filter_graph") or plan.get("filter_complex") or ""), "visual_render_plan": plan, "visual_style_hash": snapshot.get("semantic_hash") or snapshot.get("resolved_hash"), "title_text": title_text, "preview_kind": "animated"}
 
 
+def _preview_seek_args(timestamp_seconds: float, *, preroll_seconds: float = PREVIEW_SEEK_PREROLL_SECONDS) -> list[str]:
+    """Return one shared bounded-seek contract for static and animated previews.
+
+    Input-side seeking bounds the expensive decode to a small pre-roll window;
+    the residual output-side seek retains frame accuracy.  Near the beginning
+    the input seek stays at zero so short/synthetic fixtures remain decodable.
+    """
+    target = max(0.0, float(timestamp_seconds))
+    preroll = max(0.0, float(preroll_seconds))
+    input_timestamp = max(0.0, target - preroll)
+    residual = target - input_timestamp
+    return ["-ss", f"{input_timestamp:.6f}", "-i", "__SOURCE__", "-ss", f"{residual:.6f}"]
+
+
+def _preview_ffmpeg_prefix(cfg: Mapping[str, Any], source: Path, timestamp_seconds: float) -> list[str]:
+    seek = _preview_seek_args(timestamp_seconds)
+    seek[3] = str(source)
+    return [str(cfg["ffmpeg_path"]), "-hide_banner", "-loglevel", "error", "-nostdin", "-y", *seek]
+
+
 def visual_style_preview_path(cfg: Mapping[str, Any], project_id: int, filename: str) -> Path:
     token = Path(str(filename)).name
     if token != str(filename) or not token or token.startswith("."):
@@ -1022,8 +1045,47 @@ def visual_style_preview_path(cfg: Mapping[str, Any], project_id: int, filename:
     return project_dir(dict(cfg), int(project_id)) / "output" / "visual_style_previews" / token
 
 
-def preview_visual_styles(cfg: Mapping[str, Any], db: Path, project_id: int, *, force: bool = False, overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Generate bounded true-frame variants only after Creative Brief approval."""
+def _preview_style_entries(*, scope: str, registry: VisualStyleRegistry | None = None) -> list[dict[str, Any]]:
+    if scope not in PREVIEW_SCOPES:
+        raise VisualStyleError("preview_scope_invalid", f"unknown visual preview scope: {scope}")
+    entries = [item for item in (registry or VISUAL_STYLES).list(include_internal=True) if item.get("style_id") != "test_soft_panel"]
+    if scope == "primary":
+        return [item for item in entries if item.get("enabled_for_round1_ui", True) and item.get("preview_scope") == "primary" and item.get("public_primary") is True]
+    return [item for item in entries if item.get("enabled_for_round1_ui", True)]
+
+
+def _primary_preview_complete(styles: list[dict[str, Any]], variants: list[dict[str, Any]]) -> tuple[bool, list[str]]:
+    missing: list[str] = []
+    for style in styles:
+        style_id = str(style.get("style_id") or "")
+        usable = any(
+            str((item.get("visual_style") or {}).get("visual_style_id") or "") == style_id
+            and str(item.get("preview_kind") or "static") == "static"
+            and str(item.get("title_role") or "") == "chapter_title"
+            and bool(str(item.get("file") or "").strip())
+            and bool(str(item.get("preview_plan_hash") or "").strip())
+            and bool(str(item.get("preview_variant_id") or "").strip())
+            and Path(str(item.get("file") or "")).is_file()
+            for item in variants
+        )
+        if not usable:
+            missing.append(style_id)
+    return not missing, missing
+
+
+def preview_visual_styles(
+    cfg: Mapping[str, Any],
+    db: Path,
+    project_id: int,
+    *,
+    force: bool = False,
+    overrides: Mapping[str, Any] | None = None,
+    scope: str = "primary",
+    registry: VisualStyleRegistry | None = None,
+) -> dict[str, Any]:
+    """Generate registry-scoped true-frame variants after Creative Brief approval."""
+    if scope not in PREVIEW_SCOPES:
+        raise VisualStyleError("preview_scope_invalid", f"unknown visual preview scope: {scope}")
     brief = _load_brief(db, project_id)
     state = ensure_visual_style_state(cfg, db, project_id)
     if not brief or brief.get("status") != "approved":
@@ -1035,17 +1097,16 @@ def preview_visual_styles(cfg: Mapping[str, Any], db: Path, project_id: int, *, 
     variants: list[dict[str, Any]] = []
     from .color_consistency import effective_color_settings, load_project_color_state
     color_settings = effective_color_settings(load_project_color_state(dict(cfg), project_id))
-    # Four variants are intentionally generated for each deterministic frame:
-    # the three public looks plus the standalone card comparison surface.
-    styles = [item for item in VISUAL_STYLES.list(include_internal=True) if item.get("style_id") in {"diary_natural", "clean_minimal", "cinematic", "standalone_card_compare"}]
-    roles = (("chapter_title", "Chapter"), ("location_title", "Location / Lower Third"))
-    for frame in representative_frames:
+    styles = _preview_style_entries(scope=scope, registry=registry)
+    frames = representative_frames[:1] if scope == "primary" else representative_frames
+    roles = (("chapter_title", "Chapter"),) if scope == "primary" else (("chapter_title", "Chapter"), ("location_title", "Location / Lower Third"))
+    for frame in frames:
         source = frame["source"]
         timestamp = float(frame["timestamp_seconds"])
         for style in styles:
             for title_role, role_label in roles:
                 role_text = "咖啡日記 / Coffee Diary" if title_role == "chapter_title" else "台北 · Coffee Shop"
-                snapshot = materialize_visual_style(str(style["style_id"]), brief, color_settings=color_settings, title_role=title_role, overrides=overrides)
+                snapshot = materialize_visual_style(str(style["style_id"]), brief, color_settings=color_settings, title_role=title_role, overrides=overrides, registry=registry or VISUAL_STYLES)
                 preview_plan = resolve_visual_render_plan(snapshot, width=int((snapshot.get("output") or {}).get("width") or 1920), height=int((snapshot.get("output") or {}).get("height") or 1080), title_text=role_text, color_settings=color_settings, source_geometry=frame.get("display_geometry") if isinstance(frame.get("display_geometry"), Mapping) else None, title_role=title_role)
                 token = _hash({"source": source, "timestamp": timestamp, "style": snapshot["semantic_hash"], "plan": preview_plan["semantic_hash"], "role": title_role, "overrides": snapshot.get("overrides"), "creative_brief_hash": brief.get("visual_contract_hash"), "frame": frame["selection_reason"]})[:20]
                 output = visual_style_preview_path(cfg, project_id, f"{style['style_id']}-{title_role}-{token}.png")
@@ -1067,9 +1128,10 @@ def preview_visual_styles(cfg: Mapping[str, Any], db: Path, project_id: int, *, 
                 item["generated_at"] = _now()
                 _persist_preview_evidence(db, project_id, state, item, snapshot)
                 variants.append(item)
-                # One short animated artifact per style is enough for a human
-                # to judge the selected motion; it remains exact-plan bound.
-                if frame is representative_frames[0] and title_role == "chapter_title":
+                # Animated, location, dark/complex and standalone evidence is
+                # extended-only so the primary CTA returns the first-look
+                # comparison without waiting for the diagnostic matrix.
+                if scope == "extended" and frame is representative_frames[0] and title_role == "chapter_title":
                     animated_plan = resolve_visual_render_plan(snapshot, width=int((snapshot.get("output") or {}).get("width") or 1920), height=int((snapshot.get("output") or {}).get("height") or 1080), title_text=role_text, color_settings=color_settings, source_geometry=frame.get("display_geometry") if isinstance(frame.get("display_geometry"), Mapping) else None, title_role=title_role, title_duration_seconds=2.0)
                     animated_token = _hash({"source": source, "timestamp": timestamp, "style": snapshot["semantic_hash"], "plan": animated_plan["semantic_hash"], "role": title_role, "kind": "animated", "overrides": snapshot.get("overrides")})[:20]
                     animated_output = visual_style_preview_path(cfg, project_id, f"{style['style_id']}-{title_role}-{animated_token}.mp4")
@@ -1091,7 +1153,11 @@ def preview_visual_styles(cfg: Mapping[str, Any], db: Path, project_id: int, *, 
                     animated["generated_at"] = _now()
                     _persist_preview_evidence(db, project_id, state, animated, snapshot)
                     variants.append(animated)
-    return {"ok": True, "status": "ready", "preview_revision": int(state.get("preview_revision") or 0), "source": _public_source(representative_frames[0]["source"]), "representative_frames": [{key: value for key, value in frame.items() if key != "source"} for frame in representative_frames], "variants": variants}
+    if scope == "primary":
+        complete, missing = _primary_preview_complete(styles, variants)
+        if not complete:
+            return {"ok": False, "status": "needs_confirmation", "code": "preview_primary_incomplete", "missing_style_ids": missing, "preview_scope": scope, "preview_scope_version": VISUAL_PREVIEW_SCOPE_VERSION, "variants": variants}
+    return {"ok": True, "status": "ready", "preview_scope": scope, "preview_scope_version": VISUAL_PREVIEW_SCOPE_VERSION, "preview_revision": int(state.get("preview_revision") or 0), "source": _public_source(frames[0]["source"]), "representative_frames": [{key: value for key, value in frame.items() if key != "source"} for frame in frames], "variants": variants}
 
 
 def _persist_preview_evidence(db: Path, project_id: int, state: Mapping[str, Any], item: Mapping[str, Any], snapshot: Mapping[str, Any]) -> None:
@@ -1161,11 +1227,11 @@ def _measure_source_luma(ffmpeg_path: str, source: Path, timestamp: float) -> fl
 
 def _DEFAULT_VISUAL_STYLE_DATA() -> dict[str, dict[str, Any]]:
     return {
-        "diary_natural": {"version": "1", "label": "Diary Natural", "composition": "overlay", "default_title_style_id": "diary_natural_overlay", "palette": {"text_primary": "#FFF8EE", "text_secondary": "#E8DED0", "accent": "#E1A46A", "surface_overlay": "#241B14CC", "surface_overlay_strong": "#17110DEE", "shadow": "#00000099"}, "grading": {"look_id": "diary-warm-neutral", "look_version": "1", "source_colorspace": "bt709", "brightness": 0.015, "contrast": 1.03, "saturation": 1.04}, "supported_aspects": ["landscape", "portrait"], "enabled_for_round1_ui": True, "required_capabilities": {}},
-        "clean_minimal": {"version": "1", "label": "Clean Minimal", "composition": "overlay", "default_title_style_id": "clean_minimal_overlay", "palette": {"text_primary": "#FFFFFF", "text_secondary": "#E7E7E7", "accent": "#9ED8FF", "surface_overlay": "#111111B8", "surface_overlay_strong": "#111111DD", "shadow": "#00000080"}, "grading": {"look_id": "clean-neutral", "look_version": "1", "source_colorspace": "bt709", "brightness": 0.0, "contrast": 1.0, "saturation": 0.96}, "supported_aspects": ["landscape", "portrait"], "enabled_for_round1_ui": True, "required_capabilities": {}},
-        "cinematic": {"version": "1", "label": "Cinematic", "composition": "overlay", "default_title_style_id": "cinematic_overlay", "palette": {"text_primary": "#FFF7DD", "text_secondary": "#E0D4B8", "accent": "#D6A85C", "surface_overlay": "#0B1820C7", "surface_overlay_strong": "#071016E6", "shadow": "#000000AA"}, "grading": {"look_id": "cinematic-teal-gold", "look_version": "1", "source_colorspace": "bt709", "brightness": -0.015, "contrast": 1.08, "saturation": 1.08}, "supported_aspects": ["landscape", "portrait"], "enabled_for_round1_ui": True, "required_capabilities": {}},
-        "standalone_card_compare": {"version": "1", "label": "Standalone Card Compare", "composition": "standalone", "default_title_style_id": "standalone_card", "palette": {"text_primary": "#FFF8EE", "text_secondary": "#D9D9D9", "accent": "#E1A46A", "surface_overlay": "#20242AFF", "surface_overlay_strong": "#20242AFF", "shadow": "#000000AA"}, "grading": {"look_id": "card-neutral", "look_version": "1", "source_colorspace": "bt709", "brightness": 0.0, "contrast": 1.0, "saturation": 1.0}, "supported_aspects": ["landscape", "portrait"], "enabled_for_round1_ui": True, "required_capabilities": {}},
-        "test_soft_panel": {"version": "1", "label": "Test Soft Panel", "composition": "overlay", "default_title_style_id": "test_soft_panel", "palette": {"text_primary": "#FFFFFF", "text_secondary": "#E8F4FF", "accent": "#7BDFF2", "surface_overlay": "#153047CC", "surface_overlay_strong": "#102033E6", "shadow": "#00000088"}, "grading": {"look_id": "test-soft-panel", "look_version": "1", "source_colorspace": "bt709", "brightness": 0.02, "contrast": 1.01, "saturation": 1.02}, "supported_aspects": ["landscape", "portrait"], "enabled_for_round1_ui": False, "required_capabilities": {}}
+        "diary_natural": {"version": "1", "label": "Diary Natural", "composition": "overlay", "default_title_style_id": "diary_natural_overlay", "preview_scope": "primary", "public_primary": True, "palette": {"text_primary": "#FFF8EE", "text_secondary": "#E8DED0", "accent": "#E1A46A", "surface_overlay": "#241B14CC", "surface_overlay_strong": "#17110DEE", "shadow": "#00000099"}, "grading": {"look_id": "diary-warm-neutral", "look_version": "1", "source_colorspace": "bt709", "brightness": 0.015, "contrast": 1.03, "saturation": 1.04}, "supported_aspects": ["landscape", "portrait"], "enabled_for_round1_ui": True, "required_capabilities": {}},
+        "clean_minimal": {"version": "1", "label": "Clean Minimal", "composition": "overlay", "default_title_style_id": "clean_minimal_overlay", "preview_scope": "primary", "public_primary": True, "palette": {"text_primary": "#FFFFFF", "text_secondary": "#E7E7E7", "accent": "#9ED8FF", "surface_overlay": "#111111B8", "surface_overlay_strong": "#111111DD", "shadow": "#00000080"}, "grading": {"look_id": "clean-neutral", "look_version": "1", "source_colorspace": "bt709", "brightness": 0.0, "contrast": 1.0, "saturation": 0.96}, "supported_aspects": ["landscape", "portrait"], "enabled_for_round1_ui": True, "required_capabilities": {}},
+        "cinematic": {"version": "1", "label": "Cinematic", "composition": "overlay", "default_title_style_id": "cinematic_overlay", "preview_scope": "primary", "public_primary": True, "palette": {"text_primary": "#FFF7DD", "text_secondary": "#E0D4B8", "accent": "#D6A85C", "surface_overlay": "#0B1820C7", "surface_overlay_strong": "#071016E6", "shadow": "#000000AA"}, "grading": {"look_id": "cinematic-teal-gold", "look_version": "1", "source_colorspace": "bt709", "brightness": -0.015, "contrast": 1.08, "saturation": 1.08}, "supported_aspects": ["landscape", "portrait"], "enabled_for_round1_ui": True, "required_capabilities": {}},
+        "standalone_card_compare": {"version": "1", "label": "Standalone Card Compare", "composition": "standalone", "default_title_style_id": "standalone_card", "preview_scope": "extended", "public_primary": False, "palette": {"text_primary": "#FFF8EE", "text_secondary": "#D9D9D9", "accent": "#E1A46A", "surface_overlay": "#20242AFF", "surface_overlay_strong": "#20242AFF", "shadow": "#000000AA"}, "grading": {"look_id": "card-neutral", "look_version": "1", "source_colorspace": "bt709", "brightness": 0.0, "contrast": 1.0, "saturation": 1.0}, "supported_aspects": ["landscape", "portrait"], "enabled_for_round1_ui": True, "required_capabilities": {}},
+        "test_soft_panel": {"version": "1", "label": "Test Soft Panel", "composition": "overlay", "default_title_style_id": "test_soft_panel", "preview_scope": "extended", "public_primary": False, "palette": {"text_primary": "#FFFFFF", "text_secondary": "#E8F4FF", "accent": "#7BDFF2", "surface_overlay": "#153047CC", "surface_overlay_strong": "#102033E6", "shadow": "#00000088"}, "grading": {"look_id": "test-soft-panel", "look_version": "1", "source_colorspace": "bt709", "brightness": 0.02, "contrast": 1.01, "saturation": 1.02}, "supported_aspects": ["landscape", "portrait"], "enabled_for_round1_ui": False, "required_capabilities": {}}
     }
 
 
