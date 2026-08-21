@@ -12,6 +12,7 @@ from video_vault.visual_style import (
     TITLE_ANCHORS,
     TITLE_MOTION_PRESETS,
     TITLE_STYLES,
+    PREVIEW_TITLE_SAMPLE_SECONDS,
     VISUAL_STYLES,
     TitleStyleRegistry,
     VisualStyleError,
@@ -26,6 +27,7 @@ from video_vault.visual_style import (
     _preview_seek_args,
     _select_representative_frames,
     _validate_preview_evidence,
+    _wrap_title_text,
     validate_materialized_visual_style,
     visual_style_control_defaults,
     visual_style_options,
@@ -57,12 +59,31 @@ def _brief(orientation="landscape"):
     }
 
 
+def _fake_font_identity(*_args, **_kwargs):
+    return {
+        "path": Path("synthetic-test-font.ttf"),
+        "resolved_family": "Synthetic Test Font",
+        "resolved_weight": 500,
+        "fallback_index": 0,
+        "reason": "test_fixture",
+        "sha256": "synthetic-test-font",
+        "coverage_checked": True,
+        "coverage_contract": "font-cmap-v1",
+    }
+
+
 def test_round1_styles_are_distinct_and_registry_lists_only_public_variants():
     options = visual_style_options()
     assert {item["style_id"] for item in options["styles"]} == {"diary_natural", "clean_minimal", "cinematic", "standalone_card_compare"}
     snapshots = [materialize_visual_style(style_id, _brief()) for style_id in sorted({"diary_natural", "clean_minimal", "cinematic"})]
     assert len({item["resolved_hash"] for item in snapshots}) == 3
     assert {item["grading"]["look_id"] for item in snapshots} == {"diary-warm-neutral", "clean-neutral", "cinematic-teal-gold"}
+
+
+def test_title_wrapper_keeps_latin_words_intact_when_display_width_allows():
+    wrapped, line_count = _wrap_title_text("咖啡日記 / Coffee Diary", 842, 67)
+    assert wrapped == "咖啡日記 /\nCoffee Diary"
+    assert line_count == 2
 
 
 def test_synthetic_style_and_title_use_common_resolvers_without_special_case():
@@ -100,7 +121,7 @@ def test_unknown_framing_and_title_role_fail_closed():
 
 def test_preview_filter_has_display_safe_framing_actual_grading_and_title():
     snapshot = materialize_visual_style("cinematic", _brief())
-    graph = build_preview_filter(snapshot, width=1920, height=1080, title_text="咖啡日記 / Coffee Diary")
+    graph = build_preview_filter(snapshot, width=1920, height=1080, title_text="Coffee Diary")
     assert "force_original_aspect_ratio" in graph
     assert "setsar=1" in graph
     assert "eq=brightness=" in graph
@@ -139,6 +160,23 @@ def test_title_motion_and_roles_are_real_resolved_semantics():
     assert lower["title"]["role"] == "lower_third"
     assert lower["title"]["max_width_pixels"] < rise["title"]["max_width_pixels"]
     assert "alpha=" not in none["title"]["filter"]
+
+
+def test_static_preview_uses_a_deterministic_visible_sample_without_changing_formal_clock():
+    snapshot = materialize_visual_style("diary_natural", _brief())
+    formal = resolve_visual_render_plan(snapshot, width=1920, height=1080, title_text="Coffee")
+    preview = resolve_visual_render_plan(snapshot, width=1920, height=1080, title_text="Coffee", title_time_offset_seconds=PREVIEW_TITLE_SAMPLE_SECONDS)
+    assert "min(t/0.280000" in formal["title"]["filter"]
+    assert "0.350000" in preview["title"]["filter"]
+    assert formal["title"]["filter"] != preview["title"]["filter"]
+    assert preview["title"]["bbox"]["in_frame"] is True
+
+
+def test_title_font_resolution_fails_closed_without_required_glyph_coverage(monkeypatch):
+    monkeypatch.setattr("video_vault.visual_style._font_supports_text", lambda *_args, **_kwargs: False)
+    snapshot = materialize_visual_style("diary_natural", _brief())
+    with pytest.raises(VisualStyleError, match="title font"):
+        resolve_visual_render_plan(snapshot, width=1920, height=1080, title_text="咖啡日記")
 
 
 def test_background_treatment_is_not_preserve_full_frame():
@@ -241,11 +279,12 @@ def test_visual_style_changes_render_artifact_cache_identity_not_approval_contra
     assert visual_cache_key(item, profile, "style-a") != visual_cache_key(item, profile, "style-b")
 
 
-def test_true_frame_preview_records_resolved_contract_and_does_not_need_real_ffmpeg(tmp_path: Path):
+def test_true_frame_preview_records_resolved_contract_and_does_not_need_real_ffmpeg(tmp_path: Path, monkeypatch):
     output = tmp_path / "frame.png"
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source")
     snapshot = materialize_visual_style("clean_minimal", _brief())
+    monkeypatch.setattr("video_vault.visual_style._resolve_font", _fake_font_identity)
 
     def runner(command):
         output.write_bytes(b"rendered-frame")
@@ -300,6 +339,7 @@ def test_preview_evidence_rejects_arbitrary_plan_hash_and_stale_variants(tmp_pat
         "source_fingerprint": {"sha256": "source-sha"},
         "preview_filename": preview.name,
         "preview_image_sha256": __import__("hashlib").sha256(preview.read_bytes()).hexdigest(),
+        "title_render_evidence": {"version": "title-pixel-evidence-v1", "status": "pass", "changed_pixels": 12, "in_frame": True, "bbox": {"x": 10, "y": 10, "width": 100, "height": 40}},
         "generated_at": "2026-08-18T00:00:00+00:00",
     }
     monkeypatch.setattr("video_vault.visual_style.visual_style_preview_path", lambda *_args: preview)
@@ -334,6 +374,11 @@ def test_title_anchors_wrap_and_supported_motion_real_ffmpeg(tmp_path: Path):
         assert output.is_file() and rendered["visual_render_plan"]["title"]["motion"]["preset"] == preset
         assert rendered["visual_render_plan"]["title"]["anchor"] == "bottom-center"
         assert rendered["visual_render_plan"]["title"]["wrap_lines"] <= 3
+        assert "\n" in rendered["visual_render_plan"]["title"]["filter"]
+        assert r"\n" not in rendered["visual_render_plan"]["title"]["filter"]
+        assert rendered["title_render_evidence"]["status"] == "pass"
+        assert rendered["title_render_evidence"]["changed_pixels"] > 0
+        assert rendered["title_render_evidence"]["in_frame"] is True
     assert len({plan["title"]["filter"] for plan in plans}) == 4
     unsupported = deepcopy(base)
     unsupported_title = deepcopy(unsupported["title_style"])
@@ -552,13 +597,14 @@ def test_preview_surface_contains_roles_and_bounded_animation_evidence(tmp_path:
     def fake_static(_cfg, _project_id, _source, _timestamp, _snapshot, output, **_kwargs):
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(b"png")
-        return {"file": str(output), "sha256": __import__("hashlib").sha256(b"png").hexdigest()}
+        return {"file": str(output), "sha256": __import__("hashlib").sha256(b"png").hexdigest(), "title_render_evidence": {"version": "title-pixel-evidence-v1", "status": "pass", "changed_pixels": 12, "in_frame": True, "bbox": {"x": 10, "y": 10, "width": 100, "height": 40}}}
 
     def fake_animated(_cfg, _project_id, _source, _timestamp, _snapshot, output, **_kwargs):
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(b"mp4")
         return {"file": str(output), "sha256": __import__("hashlib").sha256(b"mp4").hexdigest(), "duration_seconds": 2.0, "preview_kind": "animated"}
 
+    monkeypatch.setattr("video_vault.visual_style._resolve_font", _fake_font_identity)
     monkeypatch.setattr("video_vault.visual_style.render_true_frame_preview", fake_static)
     monkeypatch.setattr("video_vault.visual_style.render_animated_title_preview", fake_animated)
     result = preview_visual_styles({"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe", "library_root": str(tmp_path)}, db, 1, force=True, overrides={"anchor": "top-center"}, scope="extended")
@@ -587,17 +633,53 @@ def test_primary_scope_requires_registry_public_primary_heroes_and_excludes_exte
     def fake_static(_cfg, _project_id, _source, _timestamp, _snapshot, output, **_kwargs):
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(b"png")
-        return {"file": str(output), "sha256": __import__("hashlib").sha256(b"png").hexdigest()}
+        return {"file": str(output), "sha256": __import__("hashlib").sha256(b"png").hexdigest(), "title_render_evidence": {"version": "title-pixel-evidence-v1", "status": "pass", "changed_pixels": 12, "in_frame": True, "bbox": {"x": 10, "y": 10, "width": 100, "height": 40}}}
 
     monkeypatch.setattr("video_vault.visual_style.render_true_frame_preview", fake_static)
     registry = VisualStyleRegistry(VISUAL_STYLES.list())
     future = registry.resolve("diary_natural")
     future.update({"style_id": "future_public", "label": "Future Public", "default_title_style_id": "diary_natural_overlay", "preview_scope": "primary", "public_primary": True})
     registry.register("future_public", future)
+    monkeypatch.setattr("video_vault.visual_style._resolve_font", _fake_font_identity)
     result = preview_visual_styles({"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe", "library_root": str(tmp_path)}, db, 1, force=True, registry=registry)
     assert result["ok"] is True
     assert {item["visual_style"]["visual_style_id"] for item in result["variants"]} == {"diary_natural", "clean_minimal", "cinematic", "future_public"}
     assert all(item["title_role"] == "chapter_title" and item["preview_kind"] == "static" for item in result["variants"])
+
+
+def test_preview_render_contract_version_invalidates_legacy_cache_and_then_hits(tmp_path: Path, monkeypatch):
+    from video_vault.visual_style import preview_visual_styles
+    from video_vault.database import connect
+
+    db = tmp_path / "preview-cache.sqlite3"
+    init_db(db)
+    with connect(db) as con:
+        con.execute("insert into projects(id, name, project_revision) values(1, 'Preview Cache', 1)")
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"fixture")
+    source_data = {"project_media_uuid": "media-1", "path": str(source), "fingerprint": {"sha256": "source"}, "duration_seconds": 10.0, "display_geometry": {"display_ratio": 16 / 9, "source_orientation": "landscape", "sample_aspect_ratio": "1:1"}}
+    monkeypatch.setattr("video_vault.visual_style._load_brief", lambda *_args: _brief())
+    monkeypatch.setattr("video_vault.visual_style.ensure_visual_style_state", lambda *_args: {"project_id": 1, "status": "approved", "preview_revision": 1})
+    monkeypatch.setattr("video_vault.visual_style._source_provenance", lambda *_args: [source_data])
+    monkeypatch.setattr("video_vault.visual_style._measure_source_luma", lambda *_args: 0.8)
+    monkeypatch.setattr("video_vault.visual_style._resolve_font", _fake_font_identity)
+
+    def fake_static(_cfg, _project_id, _source, _timestamp, _snapshot, output, **_kwargs):
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"png")
+        return {"file": str(output), "sha256": __import__("hashlib").sha256(b"png").hexdigest(), "title_render_evidence": {"version": "title-pixel-evidence-v1", "status": "pass", "changed_pixels": 12, "in_frame": True, "bbox": {"x": 10, "y": 10, "width": 100, "height": 40}}}
+
+    monkeypatch.setattr("video_vault.visual_style.render_true_frame_preview", fake_static)
+    monkeypatch.setattr("video_vault.visual_style.VISUAL_PREVIEW_RENDER_CONTRACT_VERSION", "visual-preview-render-v1")
+    legacy = preview_visual_styles({"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe", "library_root": str(tmp_path)}, db, 1, force=True)
+    monkeypatch.setattr("video_vault.visual_style.VISUAL_PREVIEW_RENDER_CONTRACT_VERSION", "visual-preview-render-v2")
+    current = preview_visual_styles({"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe", "library_root": str(tmp_path)}, db, 1, force=False)
+    repeat = preview_visual_styles({"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe", "library_root": str(tmp_path)}, db, 1, force=False)
+    assert {item["preview_render_contract_version"] for item in legacy["variants"]} == {"visual-preview-render-v1"}
+    assert {item["preview_render_contract_version"] for item in current["variants"]} == {"visual-preview-render-v2"}
+    assert {item["file"] for item in legacy["variants"]}.isdisjoint({item["file"] for item in current["variants"]})
+    assert all(item["cache_hit"] is False for item in current["variants"])
+    assert all(item["cache_hit"] is True for item in repeat["variants"])
 
 
 def test_bounded_seek_contract_is_shared_and_preserves_near_beginning_timestamp():
