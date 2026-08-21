@@ -88,7 +88,8 @@ def test_title_wrapper_keeps_latin_words_intact_when_display_width_allows():
     assert line_count == 2
 
 
-def test_chapter_title_refinement_scales_shared_layout_for_portrait_and_landscape():
+def test_chapter_title_refinement_scales_shared_layout_for_portrait_and_landscape(monkeypatch):
+    monkeypatch.setattr("video_vault.visual_style._resolve_font", _fake_font_identity)
     expected = {
         "portrait": {"old_ratio": 0.046, "width": 1080, "height": 1920},
         "landscape": {"old_ratio": 0.052, "width": 1920, "height": 1080},
@@ -127,7 +128,8 @@ def test_chapter_title_refinement_scales_shared_layout_for_portrait_and_landscap
         assert plan["semantic_hash"] != legacy_plan["semantic_hash"]
 
 
-def test_chapter_title_refinement_changes_preview_plan_identity_without_special_case():
+def test_chapter_title_refinement_changes_preview_plan_identity_without_special_case(monkeypatch):
+    monkeypatch.setattr("video_vault.visual_style._resolve_font", _fake_font_identity)
     portrait = materialize_visual_style("diary_natural", _brief("portrait"))
     landscape = materialize_visual_style("diary_natural", _brief("landscape"))
     portrait_plan = resolve_visual_render_plan(portrait, width=1080, height=1920, title_text="咖啡日記 / Coffee Diary")
