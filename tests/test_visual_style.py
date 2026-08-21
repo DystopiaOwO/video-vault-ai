@@ -9,7 +9,9 @@ import pytest
 from video_vault.database import init_db
 from video_vault.project_lifecycle import ProjectRevisionConflict
 from video_vault.visual_style import (
+    CHAPTER_TITLE_SIZE_SCALE,
     TITLE_ANCHORS,
+    TITLE_LAYOUT_CONTRACT_VERSION,
     TITLE_MOTION_PRESETS,
     TITLE_STYLES,
     PREVIEW_TITLE_SAMPLE_SECONDS,
@@ -84,6 +86,56 @@ def test_title_wrapper_keeps_latin_words_intact_when_display_width_allows():
     wrapped, line_count = _wrap_title_text("咖啡日記 / Coffee Diary", 842, 67)
     assert wrapped == "咖啡日記 /\nCoffee Diary"
     assert line_count == 2
+
+
+def test_chapter_title_refinement_scales_shared_layout_for_portrait_and_landscape():
+    expected = {
+        "portrait": {"old_ratio": 0.046, "width": 1080, "height": 1920},
+        "landscape": {"old_ratio": 0.052, "width": 1920, "height": 1080},
+    }
+    for orientation, values in expected.items():
+        snapshot = materialize_visual_style("diary_natural", _brief(orientation))
+        title = snapshot["title_style"]
+        responsive = title["responsive"]
+        assert title["layout_contract_version"] == TITLE_LAYOUT_CONTRACT_VERSION
+        assert title["surface_padding"] == 14
+        assert title["line_height"] == 1.12
+        assert title["line_spacing_ratio"] == 0.12
+        assert responsive["size_ratio"] == pytest.approx(values["old_ratio"] * CHAPTER_TITLE_SIZE_SCALE)
+
+        plan = resolve_visual_render_plan(snapshot, width=values["width"], height=values["height"], title_text="咖啡日記 / Coffee Diary")
+        assert plan["title"]["font_size"] == int(values["height"] * responsive["size_ratio"])
+        assert plan["title"]["surface_padding"] == 14
+        assert plan["title"]["line_spacing_pixels"] < plan["title"]["font_size"] * 0.18
+        assert plan["title"]["bbox"]["in_frame"] is True
+        assert plan["title"]["wrapped_text"] == ("咖啡日記 /\nCoffee Diary" if orientation == "portrait" else "咖啡日記 / Coffee Diary")
+        assert "Coffee Diary" in plan["title"]["wrapped_text"]
+
+        legacy = deepcopy(snapshot)
+        legacy_title = legacy["title_style"]
+        legacy_title["responsive"] = {**legacy_title["responsive"], "size_ratio": values["old_ratio"]}
+        legacy_title["line_height"] = 1.18
+        legacy_title.pop("line_spacing_ratio", None)
+        legacy_title["surface_padding"] = 18
+        legacy_title["layout_contract_version"] = "title-layout-v1"
+        legacy_hash = __import__("hashlib").sha256(__import__("json").dumps({key: value for key, value in legacy.items() if key not in {"resolved_hash", "semantic_hash"}}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        legacy["semantic_hash"] = legacy_hash
+        legacy["resolved_hash"] = legacy_hash
+        legacy_plan = resolve_visual_render_plan(legacy, width=values["width"], height=values["height"], title_text="咖啡日記 / Coffee Diary")
+        assert plan["title"]["font_size"] / legacy_plan["title"]["font_size"] == pytest.approx(CHAPTER_TITLE_SIZE_SCALE, abs=0.02)
+        assert plan["title"]["bbox"]["height"] < legacy_plan["title"]["bbox"]["height"]
+        assert plan["semantic_hash"] != legacy_plan["semantic_hash"]
+
+
+def test_chapter_title_refinement_changes_preview_plan_identity_without_special_case():
+    portrait = materialize_visual_style("diary_natural", _brief("portrait"))
+    landscape = materialize_visual_style("diary_natural", _brief("landscape"))
+    portrait_plan = resolve_visual_render_plan(portrait, width=1080, height=1920, title_text="咖啡日記 / Coffee Diary")
+    landscape_plan = resolve_visual_render_plan(landscape, width=1920, height=1080, title_text="咖啡日記 / Coffee Diary")
+    assert portrait["title_style"]["layout_contract_version"] == landscape["title_style"]["layout_contract_version"]
+    assert portrait_plan["semantic_hash"] != landscape_plan["semantic_hash"]
+    assert portrait_plan["title"]["layout_contract_version"] == TITLE_LAYOUT_CONTRACT_VERSION
+    assert landscape_plan["title"]["layout_contract_version"] == TITLE_LAYOUT_CONTRACT_VERSION
 
 
 def test_synthetic_style_and_title_use_common_resolvers_without_special_case():
