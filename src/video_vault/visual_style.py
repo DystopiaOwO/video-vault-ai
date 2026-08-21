@@ -37,6 +37,7 @@ VISUAL_STYLE_SCHEMA_VERSION = "visual-style-v1"
 VISUAL_STYLE_REGISTRY_VERSION = "visual-style-registry-v1"
 TITLE_STYLE_SCHEMA_VERSION = "title-style-v1"
 TITLE_STYLE_REGISTRY_VERSION = "title-style-registry-v1"
+TITLE_LAYOUT_CONTRACT_VERSION = "title-layout-v2"
 VISUAL_STYLE_STATE_SCHEMA_VERSION = 1
 VISUAL_RENDER_CONTRACT_VERSION = "visual-render-v1"
 VISUAL_PREVIEW_SCOPE_VERSION = "visual-preview-scope-v1"
@@ -46,6 +47,7 @@ PREVIEW_SCOPES = ("primary", "extended")
 PREVIEW_SEEK_STRATEGY = "bounded-pre-roll-v1"
 PREVIEW_SEEK_PREROLL_SECONDS = 2.0
 PREVIEW_TITLE_SAMPLE_SECONDS = 0.35
+CHAPTER_TITLE_SIZE_SCALE = 0.85
 TITLE_ANCHORS = ("top-left", "top-center", "top-right", "center", "bottom-left", "bottom-center", "bottom-right")
 TITLE_MOTION_PRESETS = ("none", "fade", "fade_rise", "slide_fade")
 TITLE_SIZE_PRESETS = {"small": 0.85, "normal": 1.0, "large": 1.2}
@@ -377,6 +379,9 @@ def visual_style_control_defaults(
                     "size_preset": "normal",
                     "anchor": str(responsive.get("anchor") or ""),
                     "max_width_ratio": float(resolved_title.get("max_width_ratio") or 0.0),
+                    "line_height": float(resolved_title.get("line_height") or 0.0),
+                    "surface_padding": int(resolved_title.get("surface_padding") or 0),
+                    "layout_contract_version": str(resolved_title.get("layout_contract_version") or ""),
                     "composition": str(resolved_style.get("composition") or ""),
                     "readability": deepcopy(resolved_title.get("readability") or {}),
                     "motion": deepcopy(resolved_title.get("motion") or {}),
@@ -897,7 +902,16 @@ def _resolve_title_plan(
         # Current supported FFmpeg drawtext builds expose line_spacing but not
         # letter_spacing.  Do not advertise a token that pixels cannot consume.
         raise VisualStyleError("title_letter_spacing_unsupported", "non-zero letter_spacing is not supported by the active FFmpeg drawtext contract")
-    options = [f"text='{escaped}'", font_option.lstrip(":"), f"fontcolor=0x{color}", f"fontsize={font_size}", f"x={x}", f"y={y}", f"text_align={str(title_style.get('alignment') or 'left')}", f"line_spacing={int(float(title_style.get('line_height') or 1.18) * 10)}", f"boxw={max_width_pixels}", "fix_bounds=1"]
+    line_height = float(title_style.get("line_height") or 1.18)
+    line_spacing_ratio = title_style.get("line_spacing_ratio")
+    if line_spacing_ratio is None:
+        # Preserve the legacy spacing contract for roles without the newer
+        # role-level spacing semantic.
+        line_spacing = int(line_height * 10)
+    else:
+        line_spacing = max(0, int(round(font_size * float(line_spacing_ratio))))
+    surface_padding = max(0, int(title_style.get("surface_padding") or 18))
+    options = [f"text='{escaped}'", font_option.lstrip(":"), f"fontcolor=0x{color}", f"fontsize={font_size}", f"x={x}", f"y={y}", f"text_align={str(title_style.get('alignment') or 'left')}", f"line_spacing={line_spacing}", f"boxw={max_width_pixels}", "fix_bounds=1"]
     if bool(readability.get("shadow", True)):
         options.extend([f"shadowcolor=0x{shadow}", "shadowx=2", "shadowy=2"])
     outline = int(readability.get("outline") or 0)
@@ -905,7 +919,7 @@ def _resolve_title_plan(
         options.extend(["borderw=" + str(outline), f"bordercolor=0x{shadow}"])
     if str(readability.get("surface") or "") in {"translucent", "solid"}:
         surface = str(palette.get("surface_overlay") or "#00000099").lstrip("#")[:8]
-        options.extend(["box=1", f"boxcolor=0x{surface}", "boxborderw=18"])
+        options.extend(["box=1", f"boxcolor=0x{surface}", f"boxborderw={surface_padding}"])
     motion = dict(title_style.get("motion") or {})
     preset = str(motion.get("preset") or "none")
     if preset not in {"none", "fade", "fade_rise", "slide_fade"}:
@@ -938,7 +952,7 @@ def _resolve_title_plan(
     if title_enable:
         options.append(f"enable='{title_enable}'")
     drawtext = "drawtext=" + ":".join(option for option in options if option)
-    title_plan = {"role": role, "text": str(title_text), "wrapped_text": wrapped_text, "wrap_lines": wrap_lines, "anchor": anchor, "safe_zone": safe, "max_width_ratio": max_width_ratio, "max_width_pixels": max_width_pixels, "max_width_enforced": True, "font_path": str(font_path or ""), "font_identity": {key: value for key, value in font_identity.items() if key != "path"}, "font_family": str(title_style.get("font_family") or "system-sans"), "letter_spacing": letter_spacing, "weight": int(title_style.get("weight") or 500), "font_size": font_size, "line_height": float(title_style.get("line_height") or 1.18), "readability": deepcopy(readability), "filter": drawtext if title_text else "", "time_offset_seconds": max(0.0, float(time_offset_seconds or 0.0)), "motion": {**motion, "easing": easing, "resolved_enter_seconds": enter, "resolved_exit_seconds": exit_seconds, "resolved_duration_seconds": duration}}
+    title_plan = {"role": role, "text": str(title_text), "wrapped_text": wrapped_text, "wrap_lines": wrap_lines, "anchor": anchor, "safe_zone": safe, "max_width_ratio": max_width_ratio, "max_width_pixels": max_width_pixels, "max_width_enforced": True, "font_path": str(font_path or ""), "font_identity": {key: value for key, value in font_identity.items() if key != "path"}, "font_family": str(title_style.get("font_family") or "system-sans"), "layout_contract_version": str(title_style.get("layout_contract_version") or TITLE_LAYOUT_CONTRACT_VERSION), "letter_spacing": letter_spacing, "weight": int(title_style.get("weight") or 500), "font_size": font_size, "size_ratio": size_ratio, "line_height": line_height, "line_spacing_pixels": line_spacing, "surface_padding": surface_padding, "readability": deepcopy(readability), "filter": drawtext if title_text else "", "time_offset_seconds": max(0.0, float(time_offset_seconds or 0.0)), "motion": {**motion, "easing": easing, "resolved_enter_seconds": enter, "resolved_exit_seconds": exit_seconds, "resolved_duration_seconds": duration}}
     title_plan["bbox"] = _title_bbox(title_plan, width=width, height=height) if title_text else {"x": 0, "y": 0, "width": 0, "height": 0, "in_frame": True}
     return title_plan
 
@@ -951,7 +965,7 @@ def _title_bbox(title_plan: Mapping[str, Any], *, width: int, height: int) -> di
     right = float(safe.get("right") or 0.05)
     top = float(safe.get("top") or 0.06)
     bottom = float(safe.get("bottom") or 0.08)
-    padding = 18 if str((title_plan.get("readability") or {}).get("surface") or "translucent") in {"translucent", "solid"} else 4
+    padding = int(title_plan.get("surface_padding") or (18 if str((title_plan.get("readability") or {}).get("surface") or "translucent") in {"translucent", "solid"} else 4))
     text_width = min(int(title_plan.get("max_width_pixels") or width), max(1, int(title_plan.get("font_size") or 20) * 2))
     text_height = max(1, int(round(float(title_plan.get("font_size") or 20) * float(title_plan.get("line_height") or 1.18) * int(title_plan.get("wrap_lines") or 1))))
     box_width = min(width, max(text_width, int(title_plan.get("max_width_pixels") or text_width)) + padding * 2)
@@ -1434,12 +1448,16 @@ def _DEFAULT_VISUAL_STYLE_DATA() -> dict[str, dict[str, Any]]:
 
 def _DEFAULT_TITLE_STYLES_DATA() -> dict[str, dict[str, Any]]:
     roles = ["chapter_title", "section_title", "location_title", "date_time_title", "lower_third", "caption_subtitle"]
-    base = {"supported_roles": roles, "font_family": "system-sans", "fallback_chain": ["Noto Sans CJK TC", "Noto Sans CJK JP", "Segoe UI", "Arial", "sans-serif"], "weight": 600, "line_height": 1.18, "letter_spacing": 0.0, "alignment": "left", "max_width_ratio": 0.78, "safe_zone": {"left": 0.05, "right": 0.05, "top": 0.06, "bottom": 0.08}, "readability": {"shadow": True, "outline": 0, "surface": "translucent"}, "motion": {"preset": "fade", "enter_seconds": 0.28, "exit_seconds": 0.22, "easing": "ease-out"}, "responsive": {"landscape": {"anchor": "bottom-left", "size_ratio": 0.052}, "portrait": {"anchor": "bottom-left", "size_ratio": 0.046}}}
+    base = {"supported_roles": roles, "font_family": "system-sans", "fallback_chain": ["Noto Sans CJK TC", "Noto Sans CJK JP", "Segoe UI", "Arial", "sans-serif"], "weight": 600, "line_height": 1.18, "letter_spacing": 0.0, "alignment": "left", "max_width_ratio": 0.78, "surface_padding": 18, "layout_contract_version": TITLE_LAYOUT_CONTRACT_VERSION, "safe_zone": {"left": 0.05, "right": 0.05, "top": 0.06, "bottom": 0.08}, "readability": {"shadow": True, "outline": 0, "surface": "translucent"}, "motion": {"preset": "fade", "enter_seconds": 0.28, "exit_seconds": 0.22, "easing": "ease-out"}, "responsive": {"landscape": {"anchor": "bottom-left", "size_ratio": 0.052}, "portrait": {"anchor": "bottom-left", "size_ratio": 0.046}}}
     def item(style_id: str, label: str, accent: str, weight: int, motion: str) -> dict[str, Any]:
         value = deepcopy(base)
         value.update({"title_style_id": style_id, "version": "1", "label": label, "text_color_token": "text_primary", "accent_color": accent, "weight": weight})
+        chapter_responsive = {
+            aspect: {**dict(settings), "size_ratio": round(float(settings.get("size_ratio") or 0.05) * CHAPTER_TITLE_SIZE_SCALE, 6)}
+            for aspect, settings in value["responsive"].items()
+        }
         value["role_tokens"] = {
-            "chapter_title": {"max_width_ratio": 0.78, "responsive": deepcopy(value["responsive"])},
+            "chapter_title": {"max_width_ratio": 0.78, "line_height": 1.12, "line_spacing_ratio": 0.12, "surface_padding": 14, "responsive": chapter_responsive},
             "section_title": {"max_width_ratio": 0.72, "responsive": deepcopy(value["responsive"])},
             "location_title": {"max_width_ratio": 0.68, "responsive": {"landscape": {"anchor": "top-left", "size_ratio": 0.038}, "portrait": {"anchor": "top-left", "size_ratio": 0.034}}},
             "date_time_title": {"max_width_ratio": 0.62, "responsive": {"landscape": {"anchor": "top-right", "size_ratio": 0.032}, "portrait": {"anchor": "top-right", "size_ratio": 0.03}}},
@@ -1481,8 +1499,8 @@ def _validate_title_definition(item: Mapping[str, Any]) -> None:
 
 _TITLE_STYLE_INHERITANCE_FIELDS = {
     "title_style_id", "version", "extends", "overrides", "label", "supported_roles",
-    "font_family", "fallback_chain", "weight", "line_height", "letter_spacing", "alignment",
-    "max_width_ratio", "safe_zone", "readability", "motion", "responsive", "role_tokens",
+    "font_family", "fallback_chain", "weight", "line_height", "line_spacing_ratio", "letter_spacing", "alignment",
+    "max_width_ratio", "surface_padding", "layout_contract_version", "safe_zone", "readability", "motion", "responsive", "role_tokens",
     "text_color_token", "accent_color",
 }
 
@@ -1941,5 +1959,5 @@ def _now() -> str:
 
 
 __all__ = [
-    "TITLE_ANCHORS", "TITLE_MOTION_PRESETS", "TITLE_STYLES", "TITLE_STYLE_REGISTRY_VERSION", "TITLE_STYLE_SCHEMA_VERSION", "VISUAL_STYLES", "VISUAL_STYLE_REGISTRY_VERSION", "VISUAL_STYLE_SCHEMA_VERSION", "VISUAL_RENDER_CONTRACT_VERSION", "VISUAL_PREVIEW_RENDER_CONTRACT_VERSION", "TITLE_PIXEL_EVIDENCE_VERSION", "VisualStyleError", "build_preview_filter", "ensure_visual_style_state", "load_visual_style_state", "materialize_visual_graph", "materialize_visual_style", "preview_visual_styles", "render_animated_title_preview", "render_true_frame_preview", "resolve_visual_render_plan", "save_visual_style_approval", "validate_materialized_visual_style", "visual_style_api_payload", "visual_style_control_defaults", "visual_style_options", "visual_style_preview_path",
+    "CHAPTER_TITLE_SIZE_SCALE", "TITLE_ANCHORS", "TITLE_LAYOUT_CONTRACT_VERSION", "TITLE_MOTION_PRESETS", "TITLE_STYLES", "TITLE_STYLE_REGISTRY_VERSION", "TITLE_STYLE_SCHEMA_VERSION", "VISUAL_STYLES", "VISUAL_STYLE_REGISTRY_VERSION", "VISUAL_STYLE_SCHEMA_VERSION", "VISUAL_RENDER_CONTRACT_VERSION", "VISUAL_PREVIEW_RENDER_CONTRACT_VERSION", "TITLE_PIXEL_EVIDENCE_VERSION", "VisualStyleError", "build_preview_filter", "ensure_visual_style_state", "load_visual_style_state", "materialize_visual_graph", "materialize_visual_style", "preview_visual_styles", "render_animated_title_preview", "render_true_frame_preview", "resolve_visual_render_plan", "save_visual_style_approval", "validate_materialized_visual_style", "visual_style_api_payload", "visual_style_control_defaults", "visual_style_options", "visual_style_preview_path",
 ]
