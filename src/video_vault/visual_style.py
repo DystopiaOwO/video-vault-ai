@@ -10,12 +10,15 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import functools
 import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import struct
 import subprocess
 import os
+import tempfile
 import unicodedata
 from typing import Any, Mapping
 
@@ -37,9 +40,12 @@ TITLE_STYLE_REGISTRY_VERSION = "title-style-registry-v1"
 VISUAL_STYLE_STATE_SCHEMA_VERSION = 1
 VISUAL_RENDER_CONTRACT_VERSION = "visual-render-v1"
 VISUAL_PREVIEW_SCOPE_VERSION = "visual-preview-scope-v1"
+VISUAL_PREVIEW_RENDER_CONTRACT_VERSION = "visual-preview-render-v3"
+TITLE_PIXEL_EVIDENCE_VERSION = "title-pixel-evidence-v1"
 PREVIEW_SCOPES = ("primary", "extended")
 PREVIEW_SEEK_STRATEGY = "bounded-pre-roll-v1"
 PREVIEW_SEEK_PREROLL_SECONDS = 2.0
+PREVIEW_TITLE_SAMPLE_SECONDS = 0.35
 TITLE_ANCHORS = ("top-left", "top-center", "top-right", "center", "bottom-left", "bottom-center", "bottom-right")
 TITLE_MOTION_PRESETS = ("none", "fade", "fade_rise", "slide_fade")
 TITLE_SIZE_PRESETS = {"small": 0.85, "normal": 1.0, "large": 1.2}
@@ -556,7 +562,7 @@ def _load_preview_evidence(db: Path, project_id: int, preview_variant_id: str) -
     if not row:
         raise VisualStyleError("visual_style_preview_stale", "preview variant 不存在或不屬於此 project")
     result = dict(row)
-    for field in ("technical_transform_json", "source_fingerprint_json", "representative_frame_json"):
+    for field in ("technical_transform_json", "source_fingerprint_json", "representative_frame_json", "title_render_evidence_json"):
         try:
             result[field.removesuffix("_json")] = json.loads(result.get(field) or "{}")
         except (TypeError, ValueError):
@@ -596,6 +602,9 @@ def _validate_preview_evidence(
     preview_path = visual_style_preview_path(cfg, project_id, str(evidence.get("preview_filename") or ""))
     if not preview_path.is_file() or _file_hash(preview_path) != str(evidence.get("preview_image_sha256") or ""):
         raise VisualStyleError("visual_style_preview_stale", "preview image evidence 不存在或已變更")
+    title_evidence = evidence.get("title_render_evidence") or {}
+    if not isinstance(title_evidence, Mapping) or str(title_evidence.get("version") or "") != TITLE_PIXEL_EVIDENCE_VERSION or title_evidence.get("status") != "pass" or int(title_evidence.get("changed_pixels") or 0) <= 0 or not bool(title_evidence.get("in_frame")):
+        raise VisualStyleError("visual_style_title_not_visible", "preview 沒有可稽核的 title pixel evidence")
 
 
 def build_preview_filter(snapshot: Mapping[str, Any], *, width: int, height: int, title_text: str = "") -> str:
@@ -635,6 +644,7 @@ def resolve_visual_render_plan(
     title_enable: str = "",
     title_role: str | None = None,
     title_duration_seconds: float | None = None,
+    title_time_offset_seconds: float = 0.0,
 ) -> dict[str, Any]:
     """Resolve one immutable, renderer-ready Visual Style contract.
 
@@ -706,7 +716,7 @@ def resolve_visual_render_plan(
     }
     creative_filter = build_color_filter(creative_settings)
     color_filter = ",".join(value for value in (technical_filter, creative_filter) if value)
-    title_plan = _resolve_title_plan(snapshot, width, height, title_text, title_enable=title_enable, title_role=title_role, duration_seconds=title_duration_seconds)
+    title_plan = _resolve_title_plan(snapshot, width, height, title_text, title_enable=title_enable, title_role=title_role, duration_seconds=title_duration_seconds, time_offset_seconds=title_time_offset_seconds)
     filter_parts = [framing_filter]
     if color_filter:
         filter_parts.append(color_filter)
@@ -826,6 +836,7 @@ def _resolve_title_plan(
     title_enable: str = "",
     title_role: str | None = None,
     duration_seconds: float | None = None,
+    time_offset_seconds: float = 0.0,
 ) -> dict[str, Any]:
     aspect = str((snapshot.get("output") or {}).get("orientation") or "landscape")
     title_style = dict(snapshot.get("title_style") or {})
@@ -861,7 +872,11 @@ def _resolve_title_plan(
     text_token = str(title_style.get("text_color_token") or "text_primary")
     color = str(palette.get(text_token) or palette.get("text_primary") or "#FFFFFF").lstrip("#")[:6]
     shadow = str(palette.get("shadow") or "#00000099").lstrip("#")[:6]
-    font_identity = _resolve_font([title_style.get("font_family"), *(title_style.get("fallback_chain") or [])], int(title_style.get("weight") or 500))
+    font_identity = _resolve_font(
+        [title_style.get("font_family"), *(title_style.get("fallback_chain") or [])],
+        int(title_style.get("weight") or 500),
+        text=str(title_text),
+    )
     font_path = font_identity["path"]
     if font_path is None:
         raise VisualStyleError("title_font_unresolved", "declared title font and fallback chain are not installed")
@@ -871,7 +886,12 @@ def _resolve_title_plan(
     max_width_pixels = max(1, int(width * max_width_ratio))
     font_size = max(20, int(height * size_ratio))
     wrapped_text, wrap_lines = _wrap_title_text(str(title_text), max_width_pixels, font_size)
-    escaped = wrapped_text.replace("\\", "\\\\").replace("\n", "\\n").replace(":", "\\:").replace("'", "\\'")
+    # Keep actual newlines in the filter value.  The Windows FFmpeg builds used
+    # by the product treat a single ``\\n`` as an escaped literal ``n`` rather
+    # than a line break, which made a valid CJK/English title render as ``/n``
+    # and clip the second line.  Other filter metacharacters still need the
+    # normal escaping below.
+    escaped = wrapped_text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
     letter_spacing = float(title_style.get("letter_spacing") or 0.0)
     if abs(letter_spacing) > 0.001:
         # Current supported FFmpeg drawtext builds expose line_spacing but not
@@ -896,22 +916,62 @@ def _resolve_title_plan(
     enter = max(0.001, float(motion.get("enter_seconds") or 0.28))
     exit_seconds = max(0.001, float(motion.get("exit_seconds") or 0.22))
     duration = max(enter + exit_seconds, float(duration_seconds or 1.0))
-    enter_progress = f"min(t/{enter:.6f}\\,1)"
-    exit_progress = f"min(max(0\\,({duration:.6f}-t)/{exit_seconds:.6f})\\,1)"
+    # A non-zero value is a deterministic preview sample time, not an
+    # addition to the source PTS.  Static previews are taken after a seek and
+    # FFmpeg may expose either the source or output timestamp to drawtext;
+    # using a literal sample time keeps animated title visibility independent
+    # of that implementation detail.  Formal rendering leaves this at zero
+    # and continues to use the frame clock (`t`).
+    time_expr = "t" if abs(float(time_offset_seconds or 0.0)) < 0.000001 else f"{max(0.0, float(time_offset_seconds)):.6f}"
+    enter_progress = f"min({time_expr}/{enter:.6f}\\,1)"
+    exit_progress = f"min(max(0\\,({duration:.6f}-{time_expr})/{exit_seconds:.6f})\\,1)"
     if easing == "ease-out":
         enter_progress = f"(1-pow(1-{enter_progress}\\,2))"
         exit_progress = f"pow({exit_progress}\\,2)"
-    alpha = f"if(lt(t\\,{enter:.6f})\\,{enter_progress}\\,if(lt(t\\,{max(enter, duration-exit_seconds):.6f})\\,1\\,{exit_progress}))"
+    alpha = f"if(lt({time_expr}\\,{enter:.6f})\\,{enter_progress}\\,if(lt({time_expr}\\,{max(enter, duration-exit_seconds):.6f})\\,1\\,{exit_progress}))"
     if preset in {"fade", "fade_rise", "slide_fade"}:
         options.append(f"alpha={alpha}")
     if preset == "fade_rise":
-        options[-1:] = [f"alpha={alpha}", f"y=({y})+((1-min(t/{enter:.6f}\\,1))*{max(4, int(height * 0.018))})"]
+        options[-1:] = [f"alpha={alpha}", f"y=({y})+((1-min({time_expr}/{enter:.6f}\\,1))*{max(4, int(height * 0.018))})"]
     elif preset == "slide_fade":
-        options[-1:] = [f"alpha={alpha}", f"x=({x})-((1-min(t/{enter:.6f}\\,1))*{max(6, int(width * 0.025))})"]
+        options[-1:] = [f"alpha={alpha}", f"x=({x})-((1-min({time_expr}/{enter:.6f}\\,1))*{max(6, int(width * 0.025))})"]
     if title_enable:
         options.append(f"enable='{title_enable}'")
     drawtext = "drawtext=" + ":".join(option for option in options if option)
-    return {"role": role, "text": str(title_text), "wrapped_text": wrapped_text, "wrap_lines": wrap_lines, "anchor": anchor, "safe_zone": safe, "max_width_ratio": max_width_ratio, "max_width_pixels": max_width_pixels, "max_width_enforced": True, "font_path": str(font_path or ""), "font_identity": {key: value for key, value in font_identity.items() if key != "path"}, "font_family": str(title_style.get("font_family") or "system-sans"), "letter_spacing": letter_spacing, "weight": int(title_style.get("weight") or 500), "font_size": font_size, "filter": drawtext if title_text else "", "motion": {**motion, "easing": easing, "resolved_enter_seconds": enter, "resolved_exit_seconds": exit_seconds, "resolved_duration_seconds": duration}}
+    title_plan = {"role": role, "text": str(title_text), "wrapped_text": wrapped_text, "wrap_lines": wrap_lines, "anchor": anchor, "safe_zone": safe, "max_width_ratio": max_width_ratio, "max_width_pixels": max_width_pixels, "max_width_enforced": True, "font_path": str(font_path or ""), "font_identity": {key: value for key, value in font_identity.items() if key != "path"}, "font_family": str(title_style.get("font_family") or "system-sans"), "letter_spacing": letter_spacing, "weight": int(title_style.get("weight") or 500), "font_size": font_size, "line_height": float(title_style.get("line_height") or 1.18), "readability": deepcopy(readability), "filter": drawtext if title_text else "", "time_offset_seconds": max(0.0, float(time_offset_seconds or 0.0)), "motion": {**motion, "easing": easing, "resolved_enter_seconds": enter, "resolved_exit_seconds": exit_seconds, "resolved_duration_seconds": duration}}
+    title_plan["bbox"] = _title_bbox(title_plan, width=width, height=height) if title_text else {"x": 0, "y": 0, "width": 0, "height": 0, "in_frame": True}
+    return title_plan
+
+
+def _title_bbox(title_plan: Mapping[str, Any], *, width: int, height: int) -> dict[str, Any]:
+    """Return a conservative, deterministic pixel region for title evidence."""
+
+    safe = dict(title_plan.get("safe_zone") or {})
+    left = float(safe.get("left") or 0.05)
+    right = float(safe.get("right") or 0.05)
+    top = float(safe.get("top") or 0.06)
+    bottom = float(safe.get("bottom") or 0.08)
+    padding = 18 if str((title_plan.get("readability") or {}).get("surface") or "translucent") in {"translucent", "solid"} else 4
+    text_width = min(int(title_plan.get("max_width_pixels") or width), max(1, int(title_plan.get("font_size") or 20) * 2))
+    text_height = max(1, int(round(float(title_plan.get("font_size") or 20) * float(title_plan.get("line_height") or 1.18) * int(title_plan.get("wrap_lines") or 1))))
+    box_width = min(width, max(text_width, int(title_plan.get("max_width_pixels") or text_width)) + padding * 2)
+    box_height = min(height, text_height + padding * 2)
+    anchor = str(title_plan.get("anchor") or "bottom-left")
+    if anchor in {"top-left", "bottom-left"}:
+        x = int(round(width * left)) - padding
+    elif anchor in {"top-right", "bottom-right"}:
+        x = int(round(width * (1 - right))) - box_width + padding
+    else:
+        x = (width - box_width) // 2
+    if anchor in {"top-left", "top-center", "top-right"}:
+        y = int(round(height * top)) - padding
+    elif anchor in {"bottom-left", "bottom-center", "bottom-right"}:
+        y = int(round(height * (1 - bottom))) - box_height
+    else:
+        y = (height - box_height) // 2
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(width, x + box_width), min(height, y + box_height)
+    return {"x": x0, "y": y0, "width": max(0, x1 - x0), "height": max(0, y1 - y0), "in_frame": x >= 0 and y >= 0 and x + box_width <= width and y + box_height <= height}
 
 
 def _wrap_title_text(text: str, max_width_pixels: int, font_size: int, *, max_lines: int = 3) -> tuple[str, int]:
@@ -924,22 +984,51 @@ def _wrap_title_text(text: str, max_width_pixels: int, font_size: int, *, max_li
     """
 
     limit = max(4, int(max_width_pixels / max(1.0, float(font_size) * 0.92)))
+    def display_width(value: str) -> int:
+        return sum(2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1 for char in value)
+
+    def hard_chunks(value: str) -> list[str]:
+        chunks: list[str] = []
+        current = ""
+        units = 0
+        for char in value:
+            width = 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+            if current and units + width > limit:
+                chunks.append(current)
+                current, units = "", 0
+            current += char
+            units += width
+        if current or not chunks:
+            chunks.append(current)
+        return chunks
+
     lines: list[str] = []
-    current = ""
-    units = 0
-    for char in str(text):
-        if char == "\n":
-            lines.append(current.rstrip())
-            current, units = "", 0
+    for raw_line in str(text).split("\n"):
+        words = raw_line.split(" ")
+        current = ""
+        if len(words) == 1:
+            lines.extend(hard_chunks(raw_line))
             continue
-        width = 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
-        if current and units + width > limit:
-            lines.append(current.rstrip())
-            current, units = "", 0
-        current += char
-        units += width
-    if current or not lines:
+        for word in words:
+            if not word:
+                continue
+            if display_width(word) > limit:
+                if current:
+                    lines.append(current.rstrip())
+                    current = ""
+                chunks = hard_chunks(word)
+                lines.extend(chunks[:-1])
+                current = chunks[-1]
+                continue
+            candidate = word if not current else f"{current} {word}"
+            if current and display_width(candidate) > limit:
+                lines.append(current.rstrip())
+                current = word
+            else:
+                current = candidate
         lines.append(current.rstrip())
+    if not lines:
+        lines.append("")
     if len(lines) > max_lines:
         lines = lines[:max_lines]
         last = lines[-1].rstrip()
@@ -968,20 +1057,38 @@ def render_true_frame_preview(
     output.parent.mkdir(parents=True, exist_ok=True)
     width = int((snapshot.get("output") or {}).get("width") or 1920)
     height = int((snapshot.get("output") or {}).get("height") or 1080)
-    plan = resolve_visual_render_plan(snapshot, width=width, height=height, title_text=title_text, color_settings=color_settings, source_display_ratio=source_display_ratio, source_geometry=source_geometry, title_role=title_role, title_duration_seconds=title_duration_seconds)
-    filter_graph = plan["filter_graph"]
-    command = _preview_ffmpeg_prefix(cfg, source, timestamp_seconds)
-    if str(plan.get("graph_type") or "linear") == "split_background_overlay":
-        command.extend(["-filter_complex", materialize_visual_graph(plan, input_label="[0:v]", output_label="[vout]"), "-map", "[vout]"])
-    else:
-        command.extend(["-vf", filter_graph])
-    command.extend(["-frames:v", "1", str(output)])
-    result = runner(command) if runner else subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False)
-    returncode = int(getattr(result, "returncode", 0))
-    if returncode != 0 or not output.is_file() or output.stat().st_size <= 0:
+    motion_preset = str(((snapshot.get("title_style") or {}).get("motion") or {}).get("preset") or "none")
+    title_time_offset = PREVIEW_TITLE_SAMPLE_SECONDS if title_text and motion_preset != "none" else 0.0
+    # Keep the resolved title semantics identical to formal rendering.  The
+    # preview-only clock is applied by the seek/output graph below because
+    # ffmpeg's output-side -ss can otherwise leave drawtext's `t` at the
+    # source timestamp (making fade/fade_rise appear already finished).
+    plan = resolve_visual_render_plan(snapshot, width=width, height=height, title_text=title_text, color_settings=color_settings, source_display_ratio=source_display_ratio, source_geometry=source_geometry, title_role=title_role, title_duration_seconds=title_duration_seconds, title_time_offset_seconds=title_time_offset)
+    filter_graph = _preview_filter_graph(plan)
+    result = _run_preview_frame(cfg, source, timestamp_seconds, output, plan, filter_graph, runner=runner)
+    if int(getattr(result, "returncode", 0)) != 0 or not output.is_file() or output.stat().st_size <= 0:
         stderr = str(getattr(result, "stderr", ""))[-1200:]
         raise VisualStyleError("preview_render_failed", f"true-frame preview failed: {stderr}")
-    return {"file": str(output), "sha256": _file_hash(output), "timestamp_seconds": float(timestamp_seconds), "width": width, "height": height, "filter_contract": filter_graph, "visual_render_plan": plan, "visual_style_hash": snapshot.get("semantic_hash") or snapshot.get("resolved_hash"), "title_text": title_text}
+    title_evidence: dict[str, Any]
+    if title_text and runner is None:
+        baseline_handle = tempfile.NamedTemporaryFile(prefix=f".{output.stem}.", suffix=".no-title.png", dir=str(output.parent), delete=False)
+        baseline = Path(baseline_handle.name)
+        baseline_handle.close()
+        try:
+            baseline_plan = resolve_visual_render_plan(snapshot, width=width, height=height, title_text="", color_settings=color_settings, source_display_ratio=source_display_ratio, source_geometry=source_geometry, title_role=title_role, title_duration_seconds=title_duration_seconds)
+            baseline_filter = _preview_filter_graph(baseline_plan)
+            baseline_result = _run_preview_frame(cfg, source, timestamp_seconds, baseline, baseline_plan, baseline_filter, runner=None)
+            if int(getattr(baseline_result, "returncode", 0)) != 0 or not baseline.is_file() or baseline.stat().st_size <= 0:
+                stderr = str(getattr(baseline_result, "stderr", ""))[-1200:]
+                raise VisualStyleError("preview_render_failed", f"no-title baseline failed: {stderr}")
+            title_evidence = _title_pixel_evidence(str(cfg["ffmpeg_path"]), output, baseline, plan, width=width, height=height)
+        finally:
+            baseline.unlink(missing_ok=True)
+        if title_evidence.get("status") != "pass":
+            raise VisualStyleError("title_visibility_failed", "title render completed without a measurable title pixel delta")
+    else:
+        title_evidence = {"version": TITLE_PIXEL_EVIDENCE_VERSION, "status": "unmeasured", "reason": "injected_runner" if runner is not None else "title_text_empty", "bbox": dict((plan.get("title") or {}).get("bbox") or {})}
+    return {"file": str(output), "sha256": _file_hash(output), "timestamp_seconds": float(timestamp_seconds), "width": width, "height": height, "filter_contract": filter_graph, "visual_render_plan": plan, "visual_style_hash": snapshot.get("semantic_hash") or snapshot.get("resolved_hash"), "title_text": title_text, "title_render_evidence": title_evidence, "title_preview_time_offset_seconds": title_time_offset}
 
 
 def render_animated_title_preview(
@@ -1006,9 +1113,9 @@ def render_animated_title_preview(
     plan = resolve_visual_render_plan(snapshot, width=width, height=height, title_text=title_text, color_settings=color_settings, source_geometry=source_geometry, title_role=title_role, title_duration_seconds=duration)
     command = _preview_ffmpeg_prefix(cfg, source, timestamp_seconds)
     if str(plan.get("graph_type") or "linear") == "split_background_overlay":
-        command.extend(["-filter_complex", materialize_visual_graph(plan, input_label="[0:v]", output_label="[vout]"), "-map", "[vout]"])
+        command.extend(["-filter_complex", _preview_filter_graph(plan), "-map", "[vout]"])
     else:
-        command.extend(["-vf", str(plan.get("filter_graph") or "")])
+        command.extend(["-vf", _preview_filter_graph(plan)])
     command.extend(["-t", f"{duration:.3f}", "-an", "-r", "24", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output)])
     output.parent.mkdir(parents=True, exist_ok=True)
     result = runner(command) if runner else subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False)
@@ -1038,6 +1145,77 @@ def _preview_ffmpeg_prefix(cfg: Mapping[str, Any], source: Path, timestamp_secon
     return [str(cfg["ffmpeg_path"]), "-hide_banner", "-loglevel", "error", "-nostdin", "-y", *seek]
 
 
+def _preview_filter_graph(plan: Mapping[str, Any]) -> str:
+    """Reset the seek clock for a deterministic static/animated preview."""
+
+    # Reset the seek clock for animated previews; static title sampling is
+    # materialized in the title plan as a literal time expression.
+    if str(plan.get("graph_type") or "linear") == "split_background_overlay":
+        graph = materialize_visual_graph(plan, input_label="[0:v]", output_label="[vout]")
+        graph = graph.replace("[0:v]", "[0:v]setpts=PTS-STARTPTS[preview_clock];[preview_clock]", 1)
+        return graph
+    graph = str(plan.get("filter_graph") or "")
+    return f"setpts=PTS-STARTPTS,{graph}" if graph else graph
+
+
+def _run_preview_frame(cfg: Mapping[str, Any], source: Path, timestamp_seconds: float, output: Path, plan: Mapping[str, Any], filter_graph: str, *, runner: Any | None) -> Any:
+    command = _preview_ffmpeg_prefix(cfg, source, timestamp_seconds)
+    if str(plan.get("graph_type") or "linear") == "split_background_overlay":
+        command.extend(["-filter_complex", filter_graph, "-map", "[vout]"])
+    else:
+        command.extend(["-vf", filter_graph])
+    command.extend(["-frames:v", "1", str(output)])
+    return runner(command) if runner else subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False)
+
+
+def _read_rgb_frame(ffmpeg_path: str, image: Path, *, width: int, height: int) -> bytes:
+    result = subprocess.run([ffmpeg_path, "-hide_banner", "-loglevel", "error", "-nostdin", "-i", str(image), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=False, timeout=30)
+    if result.returncode != 0 or len(result.stdout) < width * height * 3:
+        raise VisualStyleError("title_pixel_evidence_failed", f"pixel evidence decode failed: {result.stderr[-1200:].decode('utf-8', errors='replace')}")
+    return bytes(result.stdout[: width * height * 3])
+
+
+def _title_pixel_evidence(ffmpeg_path: str, rendered: Path, baseline: Path, plan: Mapping[str, Any], *, width: int, height: int) -> dict[str, Any]:
+    bbox = dict((plan.get("title") or {}).get("bbox") or {})
+    x0, y0 = max(0, int(bbox.get("x") or 0)), max(0, int(bbox.get("y") or 0))
+    x1, y1 = min(width, x0 + max(0, int(bbox.get("width") or 0))), min(height, y0 + max(0, int(bbox.get("height") or 0)))
+    if x1 <= x0 or y1 <= y0:
+        return {"version": TITLE_PIXEL_EVIDENCE_VERSION, "status": "failed", "reason": "empty_title_bbox", "bbox": bbox, "in_frame": False}
+    current = _read_rgb_frame(ffmpeg_path, rendered, width=width, height=height)
+    previous = _read_rgb_frame(ffmpeg_path, baseline, width=width, height=height)
+    changed_pixels = 0
+    total_abs_delta = 0
+    max_channel_delta = 0
+    for y in range(y0, y1):
+        row = (y * width + x0) * 3
+        for offset in range((x1 - x0) * 3):
+            delta = abs(current[row + offset] - previous[row + offset])
+            total_abs_delta += delta
+            max_channel_delta = max(max_channel_delta, delta)
+        for x in range(x0, x1):
+            index = (y * width + x) * 3
+            if current[index:index + 3] != previous[index:index + 3]:
+                changed_pixels += 1
+    area = (x1 - x0) * (y1 - y0)
+    return {
+        "version": TITLE_PIXEL_EVIDENCE_VERSION,
+        "status": "pass" if changed_pixels > 0 else "failed",
+        "reason": "pixel_delta_in_expected_title_region" if changed_pixels > 0 else "no_pixel_delta_in_expected_title_region",
+        "bbox": {**bbox, "x": x0, "y": y0, "width": x1 - x0, "height": y1 - y0},
+        "in_frame": bool(bbox.get("in_frame", False)),
+        "changed_pixels": changed_pixels,
+        "changed_pixel_ratio": round(changed_pixels / max(1, area), 8),
+        "mean_abs_channel_delta": round(total_abs_delta / max(1, area * 3), 6),
+        "max_channel_delta": max_channel_delta,
+        "rendered_sha256": _file_hash(rendered),
+        "baseline_sha256": _file_hash(baseline),
+        "font_identity": dict((plan.get("title") or {}).get("font_identity") or {}),
+        "title_role": str((plan.get("title") or {}).get("role") or ""),
+        "title_text": str((plan.get("title") or {}).get("text") or ""),
+        "sample_time_seconds": float((plan.get("title") or {}).get("time_offset_seconds") or 0.0),
+    }
+
+
 def visual_style_preview_path(cfg: Mapping[str, Any], project_id: int, filename: str) -> Path:
     token = Path(str(filename)).name
     if token != str(filename) or not token or token.startswith("."):
@@ -1065,6 +1243,11 @@ def _primary_preview_complete(styles: list[dict[str, Any]], variants: list[dict[
             and bool(str(item.get("file") or "").strip())
             and bool(str(item.get("preview_plan_hash") or "").strip())
             and bool(str(item.get("preview_variant_id") or "").strip())
+            and isinstance(item.get("title_render_evidence"), Mapping)
+            and str((item.get("title_render_evidence") or {}).get("version") or "") == TITLE_PIXEL_EVIDENCE_VERSION
+            and (item.get("title_render_evidence") or {}).get("status") == "pass"
+            and int((item.get("title_render_evidence") or {}).get("changed_pixels") or 0) > 0
+            and bool((item.get("title_render_evidence") or {}).get("in_frame"))
             and Path(str(item.get("file") or "")).is_file()
             for item in variants
         )
@@ -1108,20 +1291,34 @@ def preview_visual_styles(
                 role_text = "咖啡日記 / Coffee Diary" if title_role == "chapter_title" else "台北 · Coffee Shop"
                 snapshot = materialize_visual_style(str(style["style_id"]), brief, color_settings=color_settings, title_role=title_role, overrides=overrides, registry=registry or VISUAL_STYLES)
                 preview_plan = resolve_visual_render_plan(snapshot, width=int((snapshot.get("output") or {}).get("width") or 1920), height=int((snapshot.get("output") or {}).get("height") or 1080), title_text=role_text, color_settings=color_settings, source_geometry=frame.get("display_geometry") if isinstance(frame.get("display_geometry"), Mapping) else None, title_role=title_role)
-                token = _hash({"source": source, "timestamp": timestamp, "style": snapshot["semantic_hash"], "plan": preview_plan["semantic_hash"], "role": title_role, "overrides": snapshot.get("overrides"), "creative_brief_hash": brief.get("visual_contract_hash"), "frame": frame["selection_reason"]})[:20]
+                title_style_identity = _hash(snapshot.get("title_style") or {})
+                token = _hash({"preview_render_contract": VISUAL_PREVIEW_RENDER_CONTRACT_VERSION, "source": source, "timestamp": timestamp, "style": snapshot["semantic_hash"], "plan": preview_plan["semantic_hash"], "role": title_role, "title_text": role_text, "title_style_identity": title_style_identity, "overrides": snapshot.get("overrides"), "creative_brief_hash": brief.get("visual_contract_hash"), "frame": frame["selection_reason"]})[:20]
                 output = visual_style_preview_path(cfg, project_id, f"{style['style_id']}-{title_role}-{token}.png")
+                preview_plan_hash = str(preview_plan.get("semantic_hash") or preview_plan.get("resolved_hash") or "")
+                preview_variant_id = _hash({"preview_render_contract": VISUAL_PREVIEW_RENDER_CONTRACT_VERSION, "project_id": project_id, "style": snapshot.get("semantic_hash"), "plan": preview_plan_hash, "source": source.get("project_media_uuid"), "timestamp": timestamp, "role": title_role, "title_text": role_text, "kind": "static", "overrides": snapshot.get("overrides"), "frame": frame.get("selection_reason")})[:32]
                 if force:
                     output.unlink(missing_ok=True)
                 if output.is_file() and output.stat().st_size > 0:
-                    item = {"file": str(output), "sha256": _file_hash(output), "cache_hit": True, "visual_style": snapshot, "source": _public_source(source), "timestamp_seconds": timestamp, "title_role": title_role, "role_label": role_label, "preview_kind": "static"}
+                    with connect(db) as con:
+                        evidence_row = con.execute("select title_render_evidence_json from visual_style_preview_evidence where project_id=? and preview_variant_id=?", (int(project_id), preview_variant_id)).fetchone()
+                    title_render_evidence = {}
+                    if evidence_row:
+                        try:
+                            title_render_evidence = json.loads(evidence_row["title_render_evidence_json"] or "{}")
+                        except (TypeError, ValueError):
+                            title_render_evidence = {}
+                    item = {"file": str(output), "sha256": _file_hash(output), "cache_hit": True, "visual_style": snapshot, "source": _public_source(source), "timestamp_seconds": timestamp, "title_role": title_role, "role_label": role_label, "preview_kind": "static", "title_render_evidence": title_render_evidence}
                 else:
                     item = render_true_frame_preview(cfg, project_id, Path(str(source["path"])), timestamp, snapshot, output, color_settings=color_settings, source_display_ratio=float((frame.get("display_geometry") or {}).get("display_ratio") or 0.0) or None, source_geometry=frame.get("display_geometry") if isinstance(frame.get("display_geometry"), Mapping) else None, title_text=role_text, title_role=title_role)
                     item.update({"cache_hit": False, "visual_style": snapshot, "source": _public_source(source), "title_role": title_role, "role_label": role_label, "preview_kind": "static"})
-                item["preview_plan_hash"] = str(preview_plan.get("semantic_hash") or preview_plan.get("resolved_hash") or "")
+                item["preview_plan_hash"] = preview_plan_hash
                 item["technical_transform"] = dict(preview_plan.get("technical_transform") or {})
+                item["title_bbox"] = dict((preview_plan.get("title") or {}).get("bbox") or {})
+                item["font_resolution"] = {"path": str((preview_plan.get("title") or {}).get("font_path") or ""), **dict((preview_plan.get("title") or {}).get("font_identity") or {})}
                 item["representative_frame"] = {**{key: value for key, value in frame.items() if key != "source"}, "title_role": title_role, "role_label": role_label, "preview_kind": "static"}
-                item["preview_variant_id"] = _hash({"project_id": project_id, "style": snapshot.get("semantic_hash"), "plan": item["preview_plan_hash"], "source": source.get("project_media_uuid"), "timestamp": timestamp, "role": title_role, "kind": "static", "overrides": snapshot.get("overrides"), "frame": frame.get("selection_reason")})[:32]
-                item["title_style_identity"] = _hash(snapshot.get("title_style") or {})
+                item["preview_variant_id"] = preview_variant_id
+                item["title_style_identity"] = title_style_identity
+                item["preview_render_contract_version"] = VISUAL_PREVIEW_RENDER_CONTRACT_VERSION
                 item["creative_brief_hash"] = str(brief.get("visual_contract_hash") or "")
                 item["source_media_uuid"] = str(source.get("project_media_uuid") or "")
                 item["source_fingerprint"] = dict(source.get("fingerprint") or {})
@@ -1133,7 +1330,7 @@ def preview_visual_styles(
                 # comparison without waiting for the diagnostic matrix.
                 if scope == "extended" and frame is representative_frames[0] and title_role == "chapter_title":
                     animated_plan = resolve_visual_render_plan(snapshot, width=int((snapshot.get("output") or {}).get("width") or 1920), height=int((snapshot.get("output") or {}).get("height") or 1080), title_text=role_text, color_settings=color_settings, source_geometry=frame.get("display_geometry") if isinstance(frame.get("display_geometry"), Mapping) else None, title_role=title_role, title_duration_seconds=2.0)
-                    animated_token = _hash({"source": source, "timestamp": timestamp, "style": snapshot["semantic_hash"], "plan": animated_plan["semantic_hash"], "role": title_role, "kind": "animated", "overrides": snapshot.get("overrides")})[:20]
+                    animated_token = _hash({"preview_render_contract": VISUAL_PREVIEW_RENDER_CONTRACT_VERSION, "source": source, "timestamp": timestamp, "style": snapshot["semantic_hash"], "plan": animated_plan["semantic_hash"], "role": title_role, "title_text": role_text, "kind": "animated", "overrides": snapshot.get("overrides")})[:20]
                     animated_output = visual_style_preview_path(cfg, project_id, f"{style['style_id']}-{title_role}-{animated_token}.mp4")
                     if force:
                         animated_output.unlink(missing_ok=True)
@@ -1145,7 +1342,7 @@ def preview_visual_styles(
                     animated["preview_plan_hash"] = str(animated_plan.get("semantic_hash") or animated_plan.get("resolved_hash") or "")
                     animated["technical_transform"] = dict(animated_plan.get("technical_transform") or {})
                     animated["representative_frame"] = {**{key: value for key, value in frame.items() if key != "source"}, "title_role": title_role, "role_label": role_label, "preview_kind": "animated", "duration_seconds": 2.0}
-                    animated["preview_variant_id"] = _hash({"project_id": project_id, "style": snapshot.get("semantic_hash"), "plan": animated["preview_plan_hash"], "source": source.get("project_media_uuid"), "timestamp": timestamp, "role": title_role, "kind": "animated", "overrides": snapshot.get("overrides")})[:32]
+                    animated["preview_variant_id"] = _hash({"preview_render_contract": VISUAL_PREVIEW_RENDER_CONTRACT_VERSION, "project_id": project_id, "style": snapshot.get("semantic_hash"), "plan": animated["preview_plan_hash"], "source": source.get("project_media_uuid"), "timestamp": timestamp, "role": title_role, "title_text": role_text, "kind": "animated", "overrides": snapshot.get("overrides")})[:32]
                     animated["title_style_identity"] = _hash(snapshot.get("title_style") or {})
                     animated["creative_brief_hash"] = str(brief.get("visual_contract_hash") or "")
                     animated["source_media_uuid"] = str(source.get("project_media_uuid") or "")
@@ -1163,9 +1360,9 @@ def preview_visual_styles(
 def _persist_preview_evidence(db: Path, project_id: int, state: Mapping[str, Any], item: Mapping[str, Any], snapshot: Mapping[str, Any]) -> None:
     with connect(db) as con:
         con.execute(
-            "insert or replace into visual_style_preview_evidence(preview_variant_id, project_id, preview_revision, preview_plan_hash, visual_style_id, visual_style_version, visual_style_hash, title_style_identity, creative_brief_hash, technical_transform_json, source_media_uuid, source_fingerprint_json, timestamp_seconds, representative_frame_json, preview_filename, preview_image_sha256, generated_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "insert or replace into visual_style_preview_evidence(preview_variant_id, project_id, preview_revision, preview_plan_hash, visual_style_id, visual_style_version, visual_style_hash, title_style_identity, creative_brief_hash, technical_transform_json, source_media_uuid, source_fingerprint_json, timestamp_seconds, representative_frame_json, title_render_evidence_json, preview_filename, preview_image_sha256, generated_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                str(item["preview_variant_id"]), int(project_id), int(state.get("preview_revision") or 0), str(item["preview_plan_hash"]), str(snapshot.get("visual_style_id") or ""), str(snapshot.get("visual_style_version") or ""), str(snapshot.get("resolved_hash") or ""), str(item["title_style_identity"]), str(item["creative_brief_hash"]), json.dumps(item.get("technical_transform") or {}, ensure_ascii=False, sort_keys=True), str(item["source_media_uuid"]), json.dumps(item.get("source_fingerprint") or {}, ensure_ascii=False, sort_keys=True), float(item.get("timestamp_seconds") or 0), json.dumps(item.get("representative_frame") or {}, ensure_ascii=False, sort_keys=True), Path(str(item.get("file") or "")).name, str(item["sha256"]), str(item["generated_at"]),
+                str(item["preview_variant_id"]), int(project_id), int(state.get("preview_revision") or 0), str(item["preview_plan_hash"]), str(snapshot.get("visual_style_id") or ""), str(snapshot.get("visual_style_version") or ""), str(snapshot.get("resolved_hash") or ""), str(item["title_style_identity"]), str(item["creative_brief_hash"]), json.dumps(item.get("technical_transform") or {}, ensure_ascii=False, sort_keys=True), str(item["source_media_uuid"]), json.dumps(item.get("source_fingerprint") or {}, ensure_ascii=False, sort_keys=True), float(item.get("timestamp_seconds") or 0), json.dumps(item.get("representative_frame") or {}, ensure_ascii=False, sort_keys=True), json.dumps(item.get("title_render_evidence") or {}, ensure_ascii=False, sort_keys=True), Path(str(item.get("file") or "")).name, str(item["sha256"]), str(item["generated_at"]),
             ),
         )
 
@@ -1456,46 +1653,175 @@ def _file_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _system_font_path(fallback_chain: Any = None, weight: int = 500) -> Path | None:
-    return _resolve_font(fallback_chain, weight)["path"]
+def _system_font_path(fallback_chain: Any = None, weight: int = 500, text: str = "") -> Path | None:
+    return _resolve_font(fallback_chain, weight, text=text)["path"]
 
 
-def _resolve_font(fallback_chain: Any = None, weight: int = 500) -> dict[str, Any]:
-    """Resolve the declared family/fallback contract to installed files only."""
+def _font_requires_cjk(text: str) -> bool:
+    return any(
+        any(start <= ord(char) <= end for start, end in ((0x2E80, 0x2FFF), (0x3000, 0x30FF), (0x31A0, 0x31BF), (0x3400, 0x9FFF), (0xF900, 0xFAFF)))
+        for char in str(text or "")
+    )
+
+
+@functools.lru_cache(maxsize=64)
+def _font_codepoint_ranges(path_string: str, size: int, mtime_ns: int) -> tuple[tuple[int, int], ...]:
+    """Read Unicode cmap coverage without depending on a font package.
+
+    The production contract is installed-font-only.  Parsing the TrueType
+    cmap locally lets us reject a present-but-inadequate font (for example
+    Segoe UI for Traditional Chinese) before FFmpeg can silently render tofu.
+    The cache key includes file identity metadata so a replaced font cannot
+    reuse stale coverage.
+    """
+
+    del size, mtime_ns  # They intentionally participate in the cache key.
+    data = Path(path_string).read_bytes()
+
+    def u16(offset: int) -> int:
+        return struct.unpack_from(">H", data, offset)[0]
+
+    def u32(offset: int) -> int:
+        return struct.unpack_from(">I", data, offset)[0]
+
+    face_offsets = [0]
+    if data[:4] == b"ttcf":
+        count = u32(8)
+        face_offsets = [u32(12 + index * 4) for index in range(count)]
+    ranges: list[tuple[int, int]] = []
+    points: set[int] = set()
+
+    for face_offset in face_offsets:
+        if face_offset < 0 or face_offset + 12 > len(data):
+            continue
+        table_count = u16(face_offset + 4)
+        cmap_offset = None
+        cmap_length = 0
+        for index in range(table_count):
+            record = face_offset + 12 + index * 16
+            if record + 16 > len(data):
+                break
+            tag = data[record:record + 4]
+            table_offset = u32(record + 8)
+            table_length = u32(record + 12)
+            if tag == b"cmap":
+                cmap_offset, cmap_length = table_offset, table_length
+                break
+        if cmap_offset is None or cmap_offset + 4 > len(data):
+            continue
+        cmap_end = min(len(data), cmap_offset + cmap_length)
+        subtable_count = u16(cmap_offset + 2)
+        subtables: list[tuple[int, int, int]] = []
+        for index in range(subtable_count):
+            record = cmap_offset + 4 + index * 8
+            if record + 8 > cmap_end:
+                break
+            platform = u16(record)
+            encoding = u16(record + 2)
+            relative_offset = u32(record + 4)
+            subtable = cmap_offset + relative_offset
+            if platform in {0, 3} and (platform == 0 or encoding in {0, 1, 10}) and subtable + 2 <= cmap_end:
+                subtables.append((platform, encoding, subtable))
+        for _platform, _encoding, subtable in subtables:
+            fmt = u16(subtable)
+            if fmt == 4 and subtable + 16 <= cmap_end:
+                length = u16(subtable + 2)
+                end = min(cmap_end, subtable + length)
+                seg_count = u16(subtable + 6) // 2
+                end_codes = subtable + 14
+                start_codes = end_codes + seg_count * 2 + 2
+                deltas = start_codes + seg_count * 2
+                range_offsets = deltas + seg_count * 2
+                if range_offsets + seg_count * 2 > end:
+                    continue
+                for segment in range(seg_count):
+                    start = u16(start_codes + segment * 2)
+                    finish = u16(end_codes + segment * 2)
+                    if start > finish or start == 0xFFFF:
+                        continue
+                    delta = struct.unpack_from(">h", data, deltas + segment * 2)[0]
+                    range_offset = u16(range_offsets + segment * 2)
+                    if range_offset == 0:
+                        for codepoint in range(start, finish + 1):
+                            if (codepoint + delta) & 0xFFFF:
+                                points.add(codepoint)
+                    else:
+                        range_word = range_offsets + segment * 2
+                        for codepoint in range(start, finish + 1):
+                            glyph_offset = range_word + range_offset + (codepoint - start) * 2
+                            if glyph_offset + 2 <= end and u16(glyph_offset) != 0:
+                                points.add(codepoint)
+            elif fmt in {12, 13} and subtable + 16 <= cmap_end:
+                length = u32(subtable + 4)
+                end = min(cmap_end, subtable + length)
+                group_count = u32(subtable + 12)
+                group_size = 12
+                for group in range(group_count):
+                    record = subtable + 16 + group * group_size
+                    if record + group_size > end:
+                        break
+                    start = u32(record)
+                    finish = u32(record + 4)
+                    if start <= finish:
+                        ranges.append((start, finish))
+
+    # Compress format-4 points so the lookup remains cheap for every title
+    # character while retaining exact glyph-zero behavior.
+    for codepoint in sorted(points):
+        if ranges and ranges[-1][1] + 1 == codepoint:
+            ranges[-1] = (ranges[-1][0], codepoint)
+        else:
+            ranges.append((codepoint, codepoint))
+    return tuple(sorted(set(ranges)))
+
+
+def _font_supports_text(path: Path, text: str) -> bool:
+    required = {ord(char) for char in str(text or "") if not char.isspace() and unicodedata.category(char) not in {"Cf"}}
+    if not required:
+        return True
+    try:
+        stat = path.stat()
+        ranges = _font_codepoint_ranges(str(path), int(stat.st_size), int(stat.st_mtime_ns))
+    except (OSError, struct.error, ValueError):
+        return False
+    return all(any(start <= codepoint <= finish for start, finish in ranges) for codepoint in required)
+
+
+def _resolve_font(fallback_chain: Any = None, weight: int = 500, *, text: str = "") -> dict[str, Any]:
+    """Resolve installed fonts and verify every non-whitespace glyph."""
     windows_fonts = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
     family_names = [str(value).strip() for value in (fallback_chain if isinstance(fallback_chain, (list, tuple)) else [fallback_chain]) if str(value or "").strip()]
     if not family_names:
         family_names = ["system-sans"]
-    candidates: list[tuple[str, Path]] = []
-    file_map = {
-        "system-sans": [("Segoe UI", windows_fonts / "segoeui.ttf"), ("Arial", windows_fonts / "arial.ttf"), ("DejaVu Sans", Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"))],
-        "noto sans cjk tc": [("Noto Sans CJK TC", Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")), ("Noto Sans CJK TC", Path("/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf"))],
-        "noto sans cjk jp": [("Noto Sans CJK JP", Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"))],
+    requires_cjk = _font_requires_cjk(text)
+    cjk_files = [("Microsoft JhengHei", windows_fonts / "msjh.ttc"), ("Microsoft YaHei", windows_fonts / "msyh.ttc"), ("Noto Sans CJK TC", Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")), ("Noto Sans CJK TC", Path("/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf"))]
+    if int(weight or 500) >= 600:
+        cjk_files = [("Microsoft JhengHei", windows_fonts / "msjhbd.ttc"), ("Microsoft YaHei", windows_fonts / "msyhbd.ttc"), *cjk_files]
+    normal_files = {
+        "system-sans": [("Segoe UI", windows_fonts / ("segoeuib.ttf" if int(weight or 500) >= 600 else "segoeui.ttf")), ("Arial", windows_fonts / ("arialbd.ttf" if int(weight or 500) >= 600 else "arial.ttf")), ("DejaVu Sans", Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"))],
+        "noto sans cjk tc": cjk_files,
+        "noto sans cjk jp": [("Noto Sans CJK JP", Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")), *cjk_files],
         "segoe ui": [("Segoe UI", windows_fonts / ("segoeuib.ttf" if int(weight or 500) >= 600 else "segoeui.ttf"))],
         "arial": [("Arial", windows_fonts / ("arialbd.ttf" if int(weight or 500) >= 600 else "arial.ttf"))],
         "sans-serif": [("DejaVu Sans", Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"))],
     }
+    candidates: list[tuple[str, Path]] = []
     for family in family_names:
         normalized = family.casefold()
-        if normalized == "system-sans":
-            candidates.extend(file_map["system-sans"])
-        elif normalized in file_map:
-            candidates.extend(file_map[normalized])
-        elif normalized == "noto sans cjk tc":
-            candidates.extend(file_map["noto sans cjk tc"])
-    # Traditional Chinese Windows faces are a deterministic family fallback,
-    # but remain installed-only and are never downloaded or bundled.
-    if int(weight or 500) >= 600:
-        candidates.extend([("Microsoft JhengHei", windows_fonts / "msjhbd.ttc"), ("Microsoft YaHei", windows_fonts / "msyhbd.ttc")])
-    candidates.extend([("Microsoft JhengHei", windows_fonts / "msjh.ttc"), ("Microsoft YaHei", windows_fonts / "msyh.ttc")])
+        if normalized == "system-sans" and requires_cjk:
+            candidates.extend(cjk_files)
+        candidates.extend(normal_files.get(normalized, []))
+    # Traditional Chinese Windows faces are deterministic, installed-only
+    # fallbacks.  Coverage checking prevents a Latin-only face from winning.
+    candidates.extend(cjk_files)
     seen: set[str] = set()
     for index, (resolved_family, path) in enumerate(candidates):
         if str(path) in seen:
             continue
         seen.add(str(path))
-        if path.is_file():
-            return {"path": path, "resolved_family": resolved_family, "resolved_weight": int(weight or 500), "fallback_index": index, "reason": "preferred_installed" if index == 0 else "fallback_installed", "sha256": _file_hash(path)}
-    return {"path": None, "resolved_family": "unresolved", "resolved_weight": int(weight or 500), "fallback_index": -1, "reason": "no_allowed_installed_font", "sha256": ""}
+        if path.is_file() and _font_supports_text(path, text):
+            return {"path": path, "resolved_family": resolved_family, "resolved_weight": int(weight or 500), "fallback_index": index, "reason": "preferred_installed" if index == 0 else "fallback_installed", "sha256": _file_hash(path), "coverage_checked": True, "coverage_contract": "font-cmap-v1"}
+    return {"path": None, "resolved_family": "unresolved", "resolved_weight": int(weight or 500), "fallback_index": -1, "reason": "no_allowed_installed_font_with_required_glyphs", "sha256": "", "coverage_checked": True, "coverage_contract": "font-cmap-v1"}
 
 
 def _deep_merge(parent: Mapping[str, Any], child: Mapping[str, Any]) -> dict[str, Any]:
@@ -1615,5 +1941,5 @@ def _now() -> str:
 
 
 __all__ = [
-    "TITLE_ANCHORS", "TITLE_MOTION_PRESETS", "TITLE_STYLES", "TITLE_STYLE_REGISTRY_VERSION", "TITLE_STYLE_SCHEMA_VERSION", "VISUAL_STYLES", "VISUAL_STYLE_REGISTRY_VERSION", "VISUAL_STYLE_SCHEMA_VERSION", "VISUAL_RENDER_CONTRACT_VERSION", "VisualStyleError", "build_preview_filter", "ensure_visual_style_state", "load_visual_style_state", "materialize_visual_graph", "materialize_visual_style", "preview_visual_styles", "render_animated_title_preview", "render_true_frame_preview", "resolve_visual_render_plan", "save_visual_style_approval", "validate_materialized_visual_style", "visual_style_api_payload", "visual_style_control_defaults", "visual_style_options", "visual_style_preview_path",
+    "TITLE_ANCHORS", "TITLE_MOTION_PRESETS", "TITLE_STYLES", "TITLE_STYLE_REGISTRY_VERSION", "TITLE_STYLE_SCHEMA_VERSION", "VISUAL_STYLES", "VISUAL_STYLE_REGISTRY_VERSION", "VISUAL_STYLE_SCHEMA_VERSION", "VISUAL_RENDER_CONTRACT_VERSION", "VISUAL_PREVIEW_RENDER_CONTRACT_VERSION", "TITLE_PIXEL_EVIDENCE_VERSION", "VisualStyleError", "build_preview_filter", "ensure_visual_style_state", "load_visual_style_state", "materialize_visual_graph", "materialize_visual_style", "preview_visual_styles", "render_animated_title_preview", "render_true_frame_preview", "resolve_visual_render_plan", "save_visual_style_approval", "validate_materialized_visual_style", "visual_style_api_payload", "visual_style_control_defaults", "visual_style_options", "visual_style_preview_path",
 ]

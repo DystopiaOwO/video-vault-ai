@@ -247,6 +247,13 @@ def init_db(db: Path) -> None:
         con.executescript(SCHEMA)
         _ensure_columns(
             con,
+            "visual_style_preview_evidence",
+            {
+                "title_render_evidence_json": "text not null default '{}'",
+            },
+        )
+        _ensure_columns(
+            con,
             "projects",
             {
                 "category": "text default 'unknown'",
