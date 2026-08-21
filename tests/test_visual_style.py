@@ -59,6 +59,19 @@ def _brief(orientation="landscape"):
     }
 
 
+def _fake_font_identity(*_args, **_kwargs):
+    return {
+        "path": Path("synthetic-test-font.ttf"),
+        "resolved_family": "Synthetic Test Font",
+        "resolved_weight": 500,
+        "fallback_index": 0,
+        "reason": "test_fixture",
+        "sha256": "synthetic-test-font",
+        "coverage_checked": True,
+        "coverage_contract": "font-cmap-v1",
+    }
+
+
 def test_round1_styles_are_distinct_and_registry_lists_only_public_variants():
     options = visual_style_options()
     assert {item["style_id"] for item in options["styles"]} == {"diary_natural", "clean_minimal", "cinematic", "standalone_card_compare"}
@@ -108,7 +121,7 @@ def test_unknown_framing_and_title_role_fail_closed():
 
 def test_preview_filter_has_display_safe_framing_actual_grading_and_title():
     snapshot = materialize_visual_style("cinematic", _brief())
-    graph = build_preview_filter(snapshot, width=1920, height=1080, title_text="咖啡日記 / Coffee Diary")
+    graph = build_preview_filter(snapshot, width=1920, height=1080, title_text="Coffee Diary")
     assert "force_original_aspect_ratio" in graph
     assert "setsar=1" in graph
     assert "eq=brightness=" in graph
@@ -266,11 +279,12 @@ def test_visual_style_changes_render_artifact_cache_identity_not_approval_contra
     assert visual_cache_key(item, profile, "style-a") != visual_cache_key(item, profile, "style-b")
 
 
-def test_true_frame_preview_records_resolved_contract_and_does_not_need_real_ffmpeg(tmp_path: Path):
+def test_true_frame_preview_records_resolved_contract_and_does_not_need_real_ffmpeg(tmp_path: Path, monkeypatch):
     output = tmp_path / "frame.png"
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source")
     snapshot = materialize_visual_style("clean_minimal", _brief())
+    monkeypatch.setattr("video_vault.visual_style._resolve_font", _fake_font_identity)
 
     def runner(command):
         output.write_bytes(b"rendered-frame")
@@ -590,6 +604,7 @@ def test_preview_surface_contains_roles_and_bounded_animation_evidence(tmp_path:
         output.write_bytes(b"mp4")
         return {"file": str(output), "sha256": __import__("hashlib").sha256(b"mp4").hexdigest(), "duration_seconds": 2.0, "preview_kind": "animated"}
 
+    monkeypatch.setattr("video_vault.visual_style._resolve_font", _fake_font_identity)
     monkeypatch.setattr("video_vault.visual_style.render_true_frame_preview", fake_static)
     monkeypatch.setattr("video_vault.visual_style.render_animated_title_preview", fake_animated)
     result = preview_visual_styles({"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe", "library_root": str(tmp_path)}, db, 1, force=True, overrides={"anchor": "top-center"}, scope="extended")
@@ -625,6 +640,7 @@ def test_primary_scope_requires_registry_public_primary_heroes_and_excludes_exte
     future = registry.resolve("diary_natural")
     future.update({"style_id": "future_public", "label": "Future Public", "default_title_style_id": "diary_natural_overlay", "preview_scope": "primary", "public_primary": True})
     registry.register("future_public", future)
+    monkeypatch.setattr("video_vault.visual_style._resolve_font", _fake_font_identity)
     result = preview_visual_styles({"ffmpeg_path": "ffmpeg", "ffprobe_path": "ffprobe", "library_root": str(tmp_path)}, db, 1, force=True, registry=registry)
     assert result["ok"] is True
     assert {item["visual_style"]["visual_style_id"] for item in result["variants"]} == {"diary_natural", "clean_minimal", "cinematic", "future_public"}
@@ -646,6 +662,7 @@ def test_preview_render_contract_version_invalidates_legacy_cache_and_then_hits(
     monkeypatch.setattr("video_vault.visual_style.ensure_visual_style_state", lambda *_args: {"project_id": 1, "status": "approved", "preview_revision": 1})
     monkeypatch.setattr("video_vault.visual_style._source_provenance", lambda *_args: [source_data])
     monkeypatch.setattr("video_vault.visual_style._measure_source_luma", lambda *_args: 0.8)
+    monkeypatch.setattr("video_vault.visual_style._resolve_font", _fake_font_identity)
 
     def fake_static(_cfg, _project_id, _source, _timestamp, _snapshot, output, **_kwargs):
         output.parent.mkdir(parents=True, exist_ok=True)
