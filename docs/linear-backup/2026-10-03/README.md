@@ -31,3 +31,15 @@ Historical state-transition timestamps and original Linear internal UUIDs are ar
 ## Verification
 
 This backup was re-read from the GitHub backup branch after writing. The exported issue set contains every identifier from VID-5 through VID-50 exactly once.
+
+## Linear-hosted attachment payloads
+
+Three attachments were hosted on Linear's signed upload CDN rather than GitHub. Their payloads were fetched before cleanup:
+
+- VID-18: E4B formal perception blocker evidence (Markdown)
+- VID-49: Coffee primary preview v3 (PNG, stored as base64)
+- VID-50: Coffee primary preview v2 (PNG, stored as base64)
+
+Run `python restore_attachments.py` inside this backup directory to reconstruct the two PNG files losslessly. The other 51 attachment references point to GitHub issues, PRs, commits, or external repository references and remain preserved in the issue JSON.
+
+Comment pagination was verified: all 46 issues report `hasNextPage=false`; the 250 preserved comments are the complete issue-comment set at export time.
