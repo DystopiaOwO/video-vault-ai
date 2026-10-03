@@ -1,0 +1,1517 @@
+{
+  "exportedAt": "2026-10-03T22:13:00+08:00",
+  "team": "VID",
+  "issues": [
+    {
+      "issue": {
+        "id": "VID-5",
+        "uuid": "defcab2f-3dc9-42a2-967d-9435975958a8",
+        "title": "Perception Pipeline vNext｜感知流程升級",
+        "description": "GitHub 原始規格：[https://github.com/DystopiaOwO/video-vault-ai/issues/75](<https://github.com/DystopiaOwO/video-vault-ai/issues/75>)\n\n## 定位\n\n<issue id=\"defcab2f-3dc9-42a2-967d-9435975958a8\" href=\"https://linear.app/videoai/issue/VID-5/perception-pipeline-vnext感知流程升級\">VID-5</issue> 是 Perception Pipeline vNext 的父任務 / roadmap，不對應單一 PR。子階段全部完成後才移 Done。\n\n## 最終進度\n\n* Phase 1：已完成並合併\n* Phase 2：已完成並合併\n* Phase 3：<issue id=\"94bf11b8-041e-4f9c-93f8-d5967a69f125\" href=\"https://linear.app/videoai/issue/VID-8/phase-3專案級故事理解\">VID-8</issue> 已完成；PR #81 已合併，merge commit `56aff213e5a70e26c9ad11bf9f72905540bb9d7a`\n* Phase 4：<issue id=\"f254db03-72f0-4451-ba96-ce8d20a07d19\" href=\"https://linear.app/videoai/issue/VID-9/phase-4低信心雲端複判\">VID-9</issue> 已完成；PR #82 已合併，merge commit `9744c1c5c02611c8ea6300f4b6295c23b62af854`\n* Phase 5：<issue id=\"0da7ea31-db57-43cf-be85-1407407fdffe\" href=\"https://linear.app/videoai/issue/VID-10/phase-5音訊感知\">VID-10</issue> 已完成；PR #83 已合併，merge commit `f30e77df59b78a809951f6348a4dec3de82316fc`\n\n**Perception Pipeline vNext 全部 Phase 已完成，**<issue id=\"defcab2f-3dc9-42a2-967d-9435975958a8\" href=\"https://linear.app/videoai/issue/VID-5/perception-pipeline-vnext感知流程升級\">VID-5</issue> **已 Done。**\n\n## 執行前狀態驗證規則（強制）\n\n開始任何新 Phase、建立 branch、判定 blocked/unblocked、Ready 或 Merge 前，必須先讀取即時系統狀態，不可只依賴描述文字、舊 comment、cached context 或先前回報。\n\n狀態來源優先順序：\n\n1. GitHub PR / branch / commit 即時 metadata（state、merged、draft、head_sha、base、CI checks）\n2. Linear issue 即時 status / relations\n3. PR body、Linear description、comments、歷史紀錄只作說明，不可單獨作為 blocker 判定\n\n若文字敘述與即時 metadata 衝突，以即時 metadata 為準，並先同步修正 Linear / PR 說明後再繼續。\n\n每個新 Phase 開始前固定執行：\n\n* `git fetch origin`\n* 確認前置 PR `merged=true`\n* 確認最新 `origin/main` 已包含前置 merge commit\n* 從最新 `origin/main` 建立新 Phase branch\n* 禁止從上一 Phase branch 開 stacked PR，除非 Linear 明確允許\n\n## Codex → Review 交接規則（強制）\n\nCodex 不得在只有本機 commit / local tests 完成時回報「完成」「可 review」或等同語意。交接給 ChatGPT review 前必須同時滿足：\n\n* 專用 branch 已 push 到 GitHub，遠端 branch 可由 GitHub metadata 查到\n* 已建立對應 Draft PR，base 必須是最新 `main`，不可 stacked\n* PR body 已包含本次實作範圍、HEAD SHA、測試/CI evidence、source media / production data 是否修改\n* Linear 子任務已留下 handoff comment，至少包含 PR URL、branch、HEAD SHA、CI/evidence 與已知未完成項\n* 若 required CI 尚在跑，可以回報「已送 review、CI pending」，不可回報「完成」\n* 若尚未 push / 尚未建 PR，即使 local tests 全綠，Linear 必須維持 `In Progress`，不得要求 ChatGPT review\n\nChatGPT 收到使用者「跑完了 / done / 好了」時，先以 GitHub 即時 metadata 驗證上述 handoff；若不存在遠端 branch/PR，視為交接未完成，不得根據本機口頭回報判定 PASS。\n\n## Review / Merge 狀態規則\n\n* 開發中：Linear `In Progress`、PR Draft\n* 最終 review PASS：Linear `In Review`、PR Ready\n* Review PASS 後優先啟用 GitHub Auto-merge；若 PR 已是 clean、GitHub 不接受 enable auto-merge，則在 required checks 全綠且 reviewed HEAD 未變動時，以 expected HEAD SHA 鎖定後直接 merge\n* GitHub 實際 `merged=true` 後才將該 Phase Linear issue 移 `Done`\n* 下一 Phase 只有在前置 PR 即時 metadata 已確認 merged 後才開始\n\n## 共通原則\n\n* local-first\n* stable IDs / human override 不得被自動流程破壞\n* 不修改 source media 或 production user data\n* cloud 能力必須 optional、可稽核並有成本/隱私邊界\n* AI 輸出只提供 recommendation；真正影響剪輯的變更需走明確 Apply / review 流程\n\nLinear 作為 roadmap 與任務狀態入口；GitHub 即時 metadata 是 PR/branch/merge/CI 狀態的權威來源。GitHub Issue #75 保留完整歷史規格與 phase evidence。",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-5/perception-pipeline-vnext感知流程升級",
+        "gitBranchName": "vid-5",
+        "createdAt": "2026-08-07T16:59:21.448Z",
+        "updatedAt": "2026-08-08T16:15:23.959Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-08T16:15:23.948Z",
+        "startedAt": "2026-08-07T16:59:21.543Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [
+          "Feature"
+        ],
+        "attachments": [
+          {
+            "id": "39a24548-7d34-4225-a9fb-804141daf818",
+            "title": "GitHub Issue #75",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/issues/75"
+          },
+          {
+            "id": "5da14e5d-9f2f-4927-84e9-3cba69e988aa",
+            "title": "Draft PR #81",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/81"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-07T16:59:21.448Z",
+            "endedAt": "2026-08-08T16:15:23.959Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-08T16:15:23.959Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-6",
+        "uuid": "c66e1632-7fc9-415b-a4f9-5c9930c5efea",
+        "title": "本機環境健檢｜Doctor + WebUI 系統狀態",
+        "description": "GitHub 原始規格：[https://github.com/DystopiaOwO/video-vault-ai/issues/77](<https://github.com/DystopiaOwO/video-vault-ai/issues/77>)\n\n## 目標\n\n建立一個可稽核、預設唯讀的本機健康檢查入口，並讓 WebUI 使用同一份結構化報告顯示系統狀態。\n\n## 實作範圍\n\n* 提供 `video-vault doctor`、`--quick`、`--full` 與 JSON export。\n* 建立版本化的 `pass / warning / blocked / skipped` result contract。\n* 檢查 runtime/media、Node/HyperFrames、SQLite/library、AI provider、asset/configuration。\n* `--full` 只使用隔離 temporary fixture，不修改 production data。\n* WebUI 新增「系統狀態」頁，直接消費相同 backend report。\n\n## 驗收條件\n\n* 缺少 dependency、provider offline 等情況必須有明確 fail / skip 語意。\n* 敏感路徑、secret、API key 必須去敏。\n* Doctor 不得自動安裝套件、修改設定或下載模型。\n* Windows、Ubuntu portability、Frontend tests/build 通過。\n\n## Codex 使用方式\n\n先讀這張 Linear Issue；只有需要更細的 implementation detail 或 attribution 規則時才讀 GitHub #77。",
+        "priority": {
+          "value": 2,
+          "name": "High"
+        },
+        "url": "https://linear.app/videoai/issue/VID-6/本機環境健檢doctor-webui-系統狀態",
+        "gitBranchName": "vid-6",
+        "createdAt": "2026-08-07T16:59:39.559Z",
+        "updatedAt": "2026-08-09T05:53:21.156Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-09T05:53:21.139Z",
+        "startedAt": "2026-08-08T16:36:58.766Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [
+          "Feature"
+        ],
+        "attachments": [
+          {
+            "id": "58ee5b57-4cf1-4811-bfe6-58d994dd27ac",
+            "title": "VID-6: add auditable local doctor and system status",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/84"
+          },
+          {
+            "id": "d8ef530e-6ade-4ca7-a42e-d3e653d334c8",
+            "title": "GitHub Issue #77",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/issues/77"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "9ffd9ed6-7dc9-4466-b9d3-bf3535ad549e",
+              "name": "Todo",
+              "type": "unstarted"
+            },
+            "startedAt": "2026-08-07T16:59:39.559Z",
+            "endedAt": "2026-08-08T16:36:58.793Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-08T16:36:58.793Z",
+            "endedAt": "2026-08-09T05:52:44.758Z"
+          },
+          {
+            "state": {
+              "id": "5483c4af-1579-4f03-8847-229c14bb1a15",
+              "name": "In Review",
+              "type": "started"
+            },
+            "startedAt": "2026-08-09T05:52:44.758Z",
+            "endedAt": "2026-08-09T05:52:53.528Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-09T05:52:53.528Z",
+            "endedAt": "2026-08-09T05:53:21.148Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-09T05:53:21.148Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "543dcffd-a657-4c86-8925-834ab79d166f",
+            "body": "Merged successfully. PR #84 actual GitHub state is `merged=true`; merge commit `b3cf980d89229dcc15917cc20e40ab8d82e32cfa`. VID-6 marked Done.",
+            "attachments": [],
+            "createdAt": "2026-08-09T05:53:40.429Z",
+            "updatedAt": "2026-08-09T05:53:40.403Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "50e84cc9-b4d7-4884-b18b-b2f72c7479db",
+            "body": "### ChatGPT final review — PASS\n\nPR #84 / reviewed HEAD `25b039b178a08faaf14a38d49c6714e4c1077768`\n\nFinal Windows long-path blocker is fixed:\n- fixture uses multiple normal-sized nested components;\n- total path must exceed 260;\n- each component is bounded by `_WINDOWS_LONG_PATH_COMPONENT_LIMIT=180`;\n- evidence records threshold, total length, max component length;\n- Windows pass requires actual mkdir + copy + read/content verification;\n- non-Windows remains skipped/not_verified.\n\nLatest CI `31296644662` is green. No remaining Medium+ issues found in this review. Moving VID-6 to In Review and PR #84 to Ready, then merge using the reviewed HEAD SHA.",
+            "attachments": [],
+            "createdAt": "2026-08-09T05:52:37.626Z",
+            "updatedAt": "2026-08-09T05:52:37.608Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "ce1676c4-62f0-4198-8be1-7af97d66b310",
+            "body": "VID-6 / PR #84 final long-path blocker 已修正並更新 handoff。\n\nPR： https://github.com/DystopiaOwO/video-vault-ai/pull/84（維持 Draft）\nBranch：agent/vid-6\nHEAD：25b039b178a08faaf14a38d49c6714e4c1077768\n\n本輪變更：\n- 移除單一 300+ 字元 directory component。\n- 改用至少四層一般長度的 nested directories。\n- fixture component safety limit = 180；regression 同時驗證 total path > 260 與每個 generated component <= 180。\n- evidence 新增/保留 long_path_threshold、long_path_length、max_component_length。\n- Windows 只有 actual mkdir + copy + read/content verification 全部成功才 pass；失敗為 blocked/warning 且 verified=false。\n- 非 Windows 維持 skipped/not_verified，不宣稱 Windows capability。\n- 其他 VID-6 修正未變更。\n\nEvidence：\n- Targeted Doctor/CLI/HyperFrames：40 passed。\n- Full Python：592 passed、2 skipped。\n- Required CI #31296644662 全綠（Frontend、Media Smoke/Ubuntu、Ubuntu Python 3.13、Windows Python 3.11、selector）。\n- 本機 Windows fixture：threshold=260、total length=327、max component=59。主機在 mkdir 回 FileNotFoundError，因此如實 blocked/warning；未偽造 pass。\n- Source media unchanged；production user data modified = No。",
+            "attachments": [],
+            "createdAt": "2026-08-09T05:31:04.022Z",
+            "updatedAt": "2026-08-09T05:31:03.969Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "fd199b9d-eec5-49dc-b5ca-f9c5a7c24a6d",
+            "body": "### ChatGPT review — CHANGES REQUIRED (round 3)\n\nPR #84 / HEAD `dcbc53c8a6b2abf92f0d75ba5c61d0bf017d239f`\n\nRound 2 blockers 1–3 are fixed correctly and CI `31294504302` is green. One correctness blocker remains:\n\n**Windows long-path fixture is testing an overlong single path component, not total-path > MAX_PATH.**\n\nCurrent code constructs:\n`fixture_root / (\"long-path-\" + (\"nested-\" * 45) + \"測試\")`\n\nThat creates one directory component around 300+ characters long. Windows long-path support can raise the total path above 260, but an individual path component is still normally limited to 255 characters. Therefore this probe can fail even on a machine where long paths are correctly enabled, and can never reliably distinguish MAX_PATH support from the per-component filename limit.\n\nRequired fix:\n- Build a total path > `_WINDOWS_LONG_PATH_THRESHOLD` using **multiple normal-sized nested directory components**, each safely below the filesystem component limit.\n- Record `long_path_threshold`, total `long_path_length`, and preferably `max_component_length` in evidence.\n- On Windows: only `pass` if total path > threshold and the actual mkdir/copy/read operation succeeds; otherwise `blocked`/warning.\n- On non-Windows: keep `long_path_status=skipped/not_verified` and never claim Windows capability.\n- Regression must assert total path > threshold **and every generated component remains <= the chosen safe component bound**.\n\nKeep all other current fixes unchanged: production `database.init_db()` migration fixture, render/library-volume disk threshold, optional false/malformed config handling, recursive redaction, H.264/AAC Unicode fixture, HyperFrames offline/no-install, provider/story checks, single-check rerun, loopback-only, no production writes/paid calls.\n\nKeep VID-6 `In Progress` and PR #84 Draft. After this fix rerun targeted Doctor tests + full Python + required CI and update handoff.",
+            "attachments": [],
+            "createdAt": "2026-08-09T04:51:38.382Z",
+            "updatedAt": "2026-08-09T04:51:38.354Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "47d96fff-a28a-4b11-8556-67000f3c9636",
+            "body": "VID-6 round-2 correctness blockers 已修正並完成 review handoff。\n\nPR： https://github.com/DystopiaOwO/video-vault-ai/pull/84（維持 Draft）\nBranch：agent/vid-6\nHEAD：dcbc53c8a6b2abf92f0d75ba5c61d0bf017d239f\n\n本輪完成：\n- full SQLite fixture 改為 legacy/older schema + production database.init_db()，驗證 columns/backfill/index/rollback/cleanup，不再以 current SCHEMA 自我驗證。\n- free-disk 拆分 OS temp 與實際 render/library（library_root/99_exports）volume，minimum_free_disk_bytes 套用於 render volume；補 C:/D: different-volume regression。\n- false/no/0/off 統一 false；disabled BGM/retention skipped；malformed enabled boolean/numeric 回 structured blocked、不 crash。\n- Windows long-path 實際嘗試 >260 path，記錄 threshold/actual length/status；本機 OS 對 length 415 回 FileNotFoundError，因此如實為 blocked/warning；非 Windows 會 skipped/not_verified。\n- 保留 recursive redaction、真 CJK H.264/AAC、HyperFrames offline/no-install、provider/model/story、single-check、loopback-only、no production writes/paid cloud calls。\n\nEvidence：\n- Full Python：591 passed、2 skipped。\n- CI-equivalent non-media：556 passed、2 skipped、35 deselected。\n- Doctor/CLI/HyperFrames targeted：39 passed。\n- Frontend：36 files、249 passed；production build passed。\n- Required CI #31294504302 全綠（Frontend、Media Smoke/Ubuntu、Ubuntu Python 3.13、Windows Python 3.11、selector）。\n- Isolated CLI/WebUI acceptance 使用 temporary root；SQLite production migration check、render free-disk check、WebUI root/security/full doctor/single-check 均完成；redacted JSON 的 sensitive_data_redacted=true 且無 temp-root leakage。\n- Source media unchanged；production user data modified = No。",
+            "attachments": [],
+            "createdAt": "2026-08-09T04:27:51.890Z",
+            "updatedAt": "2026-08-09T04:27:51.825Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "45440c71-44fe-448b-a389-f62ac92b642b",
+            "body": "### ChatGPT review — CHANGES REQUIRED (round 2)\n\nPR #84 / HEAD `d18a90284b6c0a2f0068dd9dc5a09a1655014f88`\n\nPrevious blockers are substantially fixed and required CI `31271651473` is green. Four correctness blockers remain before merge:\n\n1. **`storage.sqlite` does not actually test the production migration path.**\n   - Current fixture imports raw `SCHEMA`, executes it directly, extracts required tables from that same string, and hard-codes `schema_contract_version=database-schema-v1`.\n   - Production startup uses `database.init_db()`, which also runs `_ensure_columns`, legacy BGM migration, stable-ID/media backfills, indexes, etc. The current check can pass even when those migrations are broken.\n   - Required: build an isolated legacy/older-schema fixture, run the real `init_db()` migration path, then verify required columns/indexes/backfills/rollback and cleanup. Do not claim migration/version consistency from a SCHEMA-vs-itself check.\n\n2. **`runtime.free_disk` checks the wrong filesystem for render readiness.**\n   - It always calls `disk_usage(tempfile.gettempdir())`, then compares that C:/temp (or equivalent) free space to `render.minimum_free_disk_bytes`.\n   - The library/render/output may live on another volume (e.g. D:). This can falsely block when temp is low but render volume is healthy, or falsely pass when temp is healthy but render volume is full.\n   - Required: keep a separate temp-volume free-space check if useful, but evaluate render/storage threshold against the actual configured library/render/output filesystem (or the same path contract production render uses). Add cross-volume regression.\n\n3. **Disabled optional asset settings can be treated as enabled, and malformed retention can crash Doctor.**\n   - The repository YAML parser currently leaves `false` as the string `\"false\"`; `_asset_checks()` uses `bool(bgm.get(\"enabled\"))` / `bool(retention.get(\"enabled\"))`, so explicit `enabled: false` becomes truthy and may be falsely blocked.\n   - `float(...)` conversion for retention policy runs inside eager `_asset_checks()` and can raise before `_timed()` catches it, so malformed config can crash the whole CLI/API instead of returning structured `blocked`.\n   - Required: use normalized boolean semantics (`false/no/0/off` => false), validate numeric policy fail-closed into a Doctor check, and ensure all malformed asset/config values produce structured results rather than exceptions.\n   - Regression: YAML `bgm.enabled: false` and `retention.enabled: false` => skipped; malformed enabled retention numeric => structured blocked, no crash.\n\n4. **Windows long-path probe still does not prove a Windows long-path condition.**\n   - The path is created by repeating `nested-` 18 times, but there is no assertion/guarantee that the final path exceeds the Windows MAX_PATH-risk range; the test only checks that the copy succeeded.\n   - A normal temp base can leave this path below ~260 chars, yet `long_path_verified=true` and the media check can pass.\n   - Required: on Windows intentionally construct a path above the chosen long-path threshold (record threshold + actual length) and verify the actual operation. On non-Windows, report Windows long-path as `skipped`/not verified rather than claiming a Windows capability. Add threshold regression.\n\nExisting fixes must remain green: recursive redaction, real CJK H.264/AAC fixture, HyperFrames no-install/offline probe, provider/model/story checks, single-check rerun, loopback-only UI, no production writes/paid cloud calls.\n\nKeep VID-6 `In Progress` and PR #84 Draft. After fixes rerun full Python, targeted Doctor regressions, frontend/build, required CI, isolated CLI/WebUI acceptance, and update handoff evidence.",
+            "attachments": [],
+            "createdAt": "2026-08-08T18:32:47.250Z",
+            "updatedAt": "2026-08-08T18:32:47.195Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "adbcf19a-f142-48ff-af73-175340434cf6",
+            "body": "VID-6 review handoff completed.\n\n- PR #84: https://github.com/DystopiaOwO/video-vault-ai/pull/84\n- Branch: agent/vid-6\n- HEAD: d18a90284b6c0a2f0068dd9dc5a09a1655014f88\n- PR remains Draft; not merged/Ready.\n- Scope completed: recursive safe evidence/report redaction; real Unicode + H.264/AAC/long-path/temp/free-disk probes; HyperFrames offline no-install formal probe; mock/local/cloud/Story Provider matrix; SQLite/library/assets/config checks; shared CLI/API/WebUI check contract with per-check rerun and redacted export.\n- Full Python: 587 passed, 2 skipped.\n- Frontend: 36 files / 249 passed; production build passed.\n- Required CI run 31271651473: Frontend, Media Smoke/Ubuntu, Ubuntu Python 3.13, Windows authoritative Python 3.11, Select PR test layers all passed.\n- Isolated CLI quick/full JSON and media single-check acceptance passed available probes; full report correctly marks local Python 3.10 and missing HyperFrames node_modules as blocked, never pass.\n- WebUI per-check rerun/merge/redacted export regressions and UI static/security acceptance passed.\n- Source media unchanged; production user data modified = No; no installs/downloads/config mutation/paid cloud requests.",
+            "attachments": [],
+            "createdAt": "2026-08-08T18:26:18.717Z",
+            "updatedAt": "2026-08-08T18:26:18.667Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "6bf22fc8-0602-40ba-92aa-2a9f094a5069",
+            "body": "### ChatGPT review — CHANGES REQUIRED\n\nPR #84 / HEAD `069cf63a35a46e97bf470bb6425d969ee597bbdf`\n\nHandoff is valid and required CI `31268554939` is green, but VID-6 is **not merge-ready**. The implementation covers the Doctor/report/UI skeleton, but GitHub #77 is explicitly the detailed implementation contract and several Definition-of-Done items are still missing or falsely reported.\n\nConfirmed blockers:\n\n1. **`sensitive_data_redacted=true` is not enforced on `evidence`.**\n   - `_check()` redacts `summary` / `remediation`, but does `clean_evidence = dict(evidence or {})` and returns it unchanged.\n   - WebUI renders `JSON.stringify(check.evidence)` and JSON export returns the same object.\n   - Therefore any future/current evidence containing an absolute path, token, URL credential, filename, or secret leaks while the report claims it is redacted.\n   - Required: recursive redaction/sanitization at the report boundary for nested dict/list/string values and sensitive key names; `sensitive_data_redacted=true` only when that invariant is actually enforced.\n   - Regression must inject nested path/token/API-key/Authorization values into evidence and assert API/WebUI/export payload contains none of them.\n\n2. **Full media/runtime probe does not satisfy #77 and currently makes a false Unicode capability claim.**\n   - `_media_fixture_check()` uses `unicode fixture.mp4`, which is ASCII-only, but reports `unicode_path: true`.\n   - It encodes `mpeg4` + AAC, so it does not verify the required H.264 capability.\n   - #77 also requires Windows long-path risk, temp-directory writability, and free-disk checks; these are absent.\n   - Required: real CJK/Unicode path fixture, H.264 + AAC capability evidence (or explicit blocked/skipped if unavailable), temp/free-space check, and Windows long-path risk result. Never claim a capability that was not exercised.\n\n3. **`--full` HyperFrames check is only a file-presence check, not a behavior test.**\n   - `_hyperframes_check()` only checks `package.json` and `node_modules`; it is identical in default/quick/full.\n   - #77 explicitly requires full-mode HyperFrames behavior validation plus offline/formal-subprocess contract, while preserving no auto-download.\n   - Required: isolated/non-production behavior probe in full mode; quick/default must clearly distinguish presence/import sanity from behavior-tested capability.\n\n4. **AI provider health is too shallow to support the #77 provider contract.**\n   - Local provider passes on any 2xx `/models`; configured model existence, provider/model contract, vision/multi-image capability are not validated.\n   - Active cloud provider passes on API-key presence alone; unsupported cloud provider/model/config is not fail-closed.\n   - Enabled cloud-review is only reported as warning and does not validate whether its configured provider/key/contract is usable (without making a paid call).\n   - Story provider is not represented at all even though it is an enabled AI subsystem.\n   - Required: auditable checks for each enabled provider subsystem, model/config contract and required capability; cloud remains config-only/no paid request; unsupported capability must blocked/skipped correctly.\n\n5. **The remaining #77 check matrix / WebUI DoD is incomplete.**\n   - Storage/library: add migration-version consistency and configured inbox/project/render/cache availability (without modifying production data).\n   - Configuration/assets: validate lockfile parseability, enabled LUT/BGM/retention requirements only when applicable; disabled optional assets must remain skipped.\n   - WebUI: #77 requires rerun **single check or all checks**; current page only reruns quick/full whole reports.\n   - Add the specified fault-injection regressions: missing Node, missing node_modules, SQLite unavailable/unwritable/isolation failure, local provider offline/model missing/capability missing, plus recursive redaction and individual rerun.\n\nExisting good behavior must remain:\n- quick: no real FFmpeg/Node subprocess;\n- full writes only isolated OS-temp fixtures and cleans them;\n- production library/source/user data untouched;\n- cloud checks never issue paid requests;\n- loopback-only WebUI boundary remains enforced;\n- pass/warning/blocked/skipped and exit-code semantics remain stable.\n\nKeep VID-6 `In Progress` and PR #84 Draft. After fixes rerun full Python, targeted Doctor/provider/storage tests, frontend full + production build, required CI, and isolated CLI/WebUI acceptance; update PR + Linear handoff evidence.",
+            "attachments": [],
+            "createdAt": "2026-08-08T17:16:24.469Z",
+            "updatedAt": "2026-08-08T17:16:24.438Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "1a85413e-a93d-4d79-8d50-9dbf33be2d63",
+            "body": "VID-6 review handoff complete。\n\n- Draft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/84\n- Branch: `agent/vid-6` (standalone from latest `origin/main`)\n- HEAD: `069cf63a35a46e97bf470bb6425d969ee597bbdf`\n- Scope: versioned read-only `video-vault doctor` with default/quick/full/JSON modes; redacted evidence/remediation/duration; isolated full FFmpeg/FFprobe, SQLite migration/rollback and loopback fixtures; `/api/doctor`; WebUI `/system-status` with rerun, grouped evidence, remediation and redacted export; Python/frontend regressions.\n- Local evidence: full Python `578 passed, 2 skipped`; targeted doctor/CLI `14 passed`; frontend `36 files / 248 tests passed`; production `npm run build` passed; `git diff --check` passed.\n- Required CI run `31268554939`: all green — Frontend; Windows authoritative PR Core/Targeted Python 3.11; Ubuntu portability PR Core/Targeted Python 3.13; Media Smoke Ubuntu; Select PR test layers.\n- Isolated acceptance root: `C:\\Users\\b3b3b\\AppData\\Local\\Temp\\vid6-acceptance-20260809`; CLI quick/full/JSON and live WebUI `/system-status` HTTP 200 + `/api/doctor?mode=quick` schema/mode/redaction checks passed. Full fixture probes passed.\n- Source media unchanged: Yes. Production user data modified: No.\n- Known limitations: acceptance host only has Python 3.10 while repo requires >=3.11; `tools/hyperframes/node_modules` is absent and is reported blocked without auto-download. PR remains Draft for review; no merge/Ready action taken.\n- Attribution: concepts informed by Issue #77 notes for `Hao0321/video-autopilot-kit` commit `f081e99ed169b5aba1156a2aa6a80b748c39fbc9`; no source code copied or directly adapted.",
+            "attachments": [],
+            "createdAt": "2026-08-08T17:09:02.312Z",
+            "updatedAt": "2026-08-08T17:09:02.279Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-7",
+        "uuid": "9c639d87-1f2f-42dc-96c9-608a8e77df0d",
+        "title": "正式輸出 QA｜自動媒體檢查與交付閘門",
+        "description": "GitHub 原始規格：[https://github.com/DystopiaOwO/video-vault-ai/issues/78](<https://github.com/DystopiaOwO/video-vault-ai/issues/78>)\n\n## 目標\n\n在 approved render 與人工最終交付之間加入獨立、可稽核的 Delivery QA 階段。\n\n## 實作範圍\n\n* 建立版本化 QA run / check schema，使用 `pass / warning / blocked / skipped` 語意。\n* 自動檢查 container/manifest、black/flash、freeze/silence、border/crop、audio 與 continuity。\n* travel / coffee / matcha diary 使用 profile-aware thresholds。\n* 產生 QA evidence bundle：contact sheet、event strip、metrics、stable segment UUID reference、output fingerprint。\n* WebUI 提供最終 delivery gate；Automatic QA 不取代人工 final preview。\n\n## 驗收條件\n\n* 所有非 pass finding 都要有 evidence 與 remediation context。\n* `skipped` 不得偽裝成 success。\n* `blocked` 在問題修復或重新評估前不得成為 `deliverable_ready`。\n* source media、approval snapshot、user override、production data 均保持不變。\n* Windows 真實輸出 smoke、FFmpeg E2E、Frontend tests/build、Ubuntu portability 通過。\n\n## Codex 使用方式\n\n先讀這張 Linear Issue；需要完整檢查矩陣、profile threshold 或 attribution 細節時再讀 GitHub #78。",
+        "priority": {
+          "value": 2,
+          "name": "High"
+        },
+        "url": "https://linear.app/videoai/issue/VID-7/正式輸出-qa自動媒體檢查與交付閘門",
+        "gitBranchName": "vid-7",
+        "createdAt": "2026-08-07T16:59:58.685Z",
+        "updatedAt": "2026-08-16T13:26:59.556Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-09T08:05:37.761Z",
+        "startedAt": "2026-08-09T05:53:53.071Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [
+          "Feature"
+        ],
+        "attachments": [
+          {
+            "id": "26be4ab2-4a36-4281-87bd-412af4ecda67",
+            "title": "VID-7: add formal delivery QA gate",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/85"
+          },
+          {
+            "id": "0bb81339-ee07-4d4e-aa00-388dd3dcfcf9",
+            "title": "GitHub Issue #78",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/issues/78"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "9ffd9ed6-7dc9-4466-b9d3-bf3535ad549e",
+              "name": "Todo",
+              "type": "unstarted"
+            },
+            "startedAt": "2026-08-07T16:59:58.685Z",
+            "endedAt": "2026-08-09T05:53:53.086Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-09T05:53:53.086Z",
+            "endedAt": "2026-08-09T08:04:46.761Z"
+          },
+          {
+            "state": {
+              "id": "5483c4af-1579-4f03-8847-229c14bb1a15",
+              "name": "In Review",
+              "type": "started"
+            },
+            "startedAt": "2026-08-09T08:04:46.761Z",
+            "endedAt": "2026-08-09T08:05:08.146Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-09T08:05:08.146Z",
+            "endedAt": "2026-08-09T08:05:37.768Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-09T08:05:37.768Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-39",
+              "title": "Formal Render display geometry｜尊重 SAR / DAR / rotation / Display Matrix，避免 framing 失真"
+            },
+            {
+              "id": "VID-37",
+              "title": "Delivery QA audio provenance｜separate approval semantic identity from render cache identity"
+            },
+            {
+              "id": "VID-18",
+              "title": "Round 1 最終真實流程驗收重跑｜deliverable_ready DoD"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "81b5dc95-dae9-448b-b023-19597ad321cb",
+            "body": "### MERGED\n\nPR #85 has been merged after PASS.\n\n- reviewed HEAD: `f639c9e2710b1fff0e7065785bd58502fd612ebb`\n- required CI: `31302417529` / #316 — success\n- GitHub native Auto-merge attempt was rejected because the PR was already `clean`\n- safe fallback used: squash merge with `expected_head_sha` locked to the reviewed HEAD\n- merge commit: `b76fdb5140d6fa0c19a195646f76f048f35646dd`\n- live GitHub verification: `merged=true`\n\nVID-7 is now Done.",
+            "attachments": [],
+            "createdAt": "2026-08-09T08:06:02.600Z",
+            "updatedAt": "2026-08-09T08:06:02.575Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "2f4861f5-35b7-47e4-af75-1a954d8b4372",
+            "body": "### ChatGPT final review — PASS\n\nPR #85 reviewed at HEAD `f639c9e2710b1fff0e7065785bd58502fd612ebb`.\n\nFinal blockers verified fixed:\n- brightness/YAVG evidence missing/insufficient => fail-closed non-pass; no false flash PASS.\n- every Render Report segment must be an object with non-empty cache key; counts and ordered keys exact-match approved manifest.\n- malformed/non-object `qa_settings.json` is distinguished from absent config and blocks Delivery QA.\n\nPrevious fixes remain intact: real signalstats flash events, strict Render Report provenance, segment/BGM audio provenance, invalid/unknown threshold blocking, blocked/skipped human gate, redaction and retention.\n\nEvidence at reviewed HEAD:\n- targeted Delivery QA + real FFmpeg: 21 passed\n- full Python: 618 passed, 2 skipped (Windows-inapplicable POSIX process-group tests)\n- frontend: 37 files / 258 tests\n- production build passed\n- required CI `31302417529` / #316: success\n- isolated Windows Travel + Coffee/Matcha acceptance retained; source media unchanged; production user data modified = No\n\nNo Medium+ blocker remains. Proceeding to Ready and merge using the reviewed HEAD lock.",
+            "attachments": [],
+            "createdAt": "2026-08-09T08:04:57.923Z",
+            "updatedAt": "2026-08-09T08:04:57.901Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "7d023849-6262-45a5-8488-edd524c47ee7",
+            "body": "VID-7 最後 3 個 fail-closed blocker 已完成（PR #85 維持 Draft，未 merge）\n\n- PR: https://github.com/DystopiaOwO/video-vault-ai/pull/85\n- Branch: `agent/vid-7`\n- HEAD: `f639c9e2710b1fff0e7065785bd58502fd612ebb`\n- Base: `origin/main` `b3cf980d89229dcc15917cc20e40ab8d82e32cfa`\n\n修正：\n- FFmpeg rc=0 但 brightness/YAVG samples 為 0 或不足 reversal 判斷時，`black_flash` structured blocked，evidence 保留 sample count、minimum 與 reason；正常 samples、timestamped flash、hard-cut separation、fade-to-black 維持。\n- Audio Render Report 每個 segment 強制 object + non-empty string cache_key；approved/reported segment/key count 四者 exact match，ordered cache keys exact match；trailing/middle corrupt、missing key、extra segment 全部 blocked。\n- `qa_settings.json` 明確區分 absent、valid object、malformed JSON、non-object root；後兩者產生 `threshold_config=blocked`，不可 silent fallback 或進 `deliverable_ready`。\n\n驗證：\n- Targeted Delivery QA + real FFmpeg fixtures: 21 passed。\n- Full Python: 618 passed, 2 skipped（POSIX process-group semantics，Windows 不適用）。\n- Frontend: 37 files / 258 tests passed；production build passed（Vite 7.3.6）。\n- Required CI workflow #31302417529 全綠：Select PR、Frontend、Media Smoke/Ubuntu、Ubuntu portability/Python 3.13、Windows authoritative/Python 3.11。\n- 既有 isolated Windows acceptance evidence 保留：Travel run `56ba6840bce34630999c436875906270`、Coffee/Matcha run `403d4dd9b2a645b799788358c0c103c3`，兩者 pass=6/warning=2/blocked=0/skipped=0；source media unchanged、production user data modified = No。此 blocker pass 聚焦 QA contract hardening，未重新產生 real acceptance output。\n- Attribution 維持 Hao0321/video-autopilot-kit MIT inspiration（commit `f081e99`），無複製/改寫程式碼。\n\nKnown limitation：既有 acceptance 的兩個 warning 是刻意 fade-to-black 與未啟用 loudness normalization 的 integrated loudness，均已由人工 preview 接受；VID-7 不宣稱其他 phase 的 LM Studio/cloud-provider、Ubuntu 或 HyperFrames capability。",
+            "attachments": [],
+            "createdAt": "2026-08-09T08:01:58.177Z",
+            "updatedAt": "2026-08-09T08:01:58.136Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "a1fb233a-1e1b-4a8e-bfe3-a8960bf086dc",
+            "body": "### ChatGPT review round 2 — CHANGES REQUIRED\n\nPR #85 / reviewed HEAD `9b802cc07fbe6f29cd35eafe738f2d3828332b2f`\n\nPrevious 4 blockers are substantively fixed and CI `31301529041` is green. Three fail-closed edge cases remain:\n\n1. **Flash analysis can still pass when brightness evidence is absent.**\n   - `_analyze_output()` may return `ok=true` solely because FFmpeg exited 0, even if the YAVG parser produced 0 (or too few) `brightness_samples`.\n   - `_black_flash_check()` then sees `flash=[]` and can return `pass`, despite flash detection not actually being verifiable.\n   - Required: treat missing/insufficient brightness samples as explicit `blocked` or `skipped` (prefer blocked for a formal Delivery Gate), with remediation/evidence. Do not claim flash pass unless the output-backed brightness detector actually produced sufficient samples.\n   - Regression: FFmpeg success + zero/insufficient brightness samples => non-pass; normal real media with samples keeps current behavior.\n\n2. **Malformed Render Report segment entries can bypass audio provenance.**\n   - `_audio_render_provenance()` sets `reported_segments` to the raw list and compares `len(reported_segments)` to approved count, but builds `reported_keys` by filtering only Mapping entries.\n   - Example: 2 approved segments + report `[valid_first_segment, \"corrupt\"]` => raw lengths both 2, `reported_keys` length 1, `zip(expected_keys, reported_keys)` only checks the first key, so no mismatch is necessarily recorded.\n   - Required: every reported segment entry must be a valid mapping with non-empty `cache_key`; reported count and ordered key count must exactly match approved segments. Any malformed/missing/extra entry => blocked.\n   - Regression: corrupt trailing/middle entry, missing cache_key, extra segment => blocked; exact ordered report passes.\n\n3. **Malformed project threshold file silently becomes “no override”.**\n   - `resolve_qa_profile()` loads `qa_settings.json` through `_read_json()`, which returns `{}` for missing *and* malformed JSON.\n   - If the file exists but is corrupt/unparseable, `threshold_config` currently passes and defaults are used silently—the exact fail-open behavior this round was intended to eliminate.\n   - Required: distinguish absent file from present-but-invalid/non-object file. Present malformed `qa_settings.json` must create structured blocked threshold/config evidence and prevent `deliverable_ready`.\n   - Regression: absent file => normal; valid file => source/value audit; malformed JSON or non-object root => blocked.\n\nKeep the current fixes intact: signalstats-based flash events, strict Render Report fields, segment/BGM provenance, invalid/unknown threshold blocking, blocked/skipped human gate, redaction, retention, Windows real acceptance, source/production data unchanged.\n\nKeep VID-7 In Progress and PR #85 Draft. After fixes rerun targeted Delivery QA + full Python + required CI; update handoff for re-review.",
+            "attachments": [],
+            "createdAt": "2026-08-09T07:42:15.376Z",
+            "updatedAt": "2026-08-09T07:42:15.351Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "72f688e0-229e-4c61-b70d-198473632e05",
+            "body": "VID-7 review handoff 更新（PR #85 維持 Draft，未 merge）\n\n- PR: https://github.com/DystopiaOwO/video-vault-ai/pull/85\n- Branch: `agent/vid-7`\n- HEAD: `9b802cc07fbe6f29cd35eafe738f2d3828332b2f`\n- Base: `origin/main` `b3cf980d89229dcc15917cc20e40ab8d82e32cfa`\n\n本輪 blocker 修正：\n- 以 FFmpeg signalstats/YAVG brightness reversal 建立 timestamped flash events，接入 cluster/evidence；ordinary hard cuts 不轉 flash，fade-to-black 維持獨立判定。\n- Formal Render Report 缺失、不可解析、manifest/output fingerprint 不符、qc/decode/timestamp continuity provenance 缺失時 fail closed。\n- Audio QA 重新計算 approved manifest 每段 `build_segment_cache_key()`，比對 Render Report segment keys，並 exact 比對 BGM used/fingerprint；錯誤 provenance blocked。\n- threshold override 對 malformed/negative/NaN/Inf/unknown key 結構化稽核，invalid 不得進 `deliverable_ready`。\n\n驗證：\n- Full Python: 616 passed, 2 skipped（POSIX process-group semantics，Windows 不適用）。\n- Delivery QA + real FFmpeg fixtures: 19 passed。\n- Render/manager/final-QC targeted: 51 passed。\n- Frontend: 37 files / 258 tests passed。\n- Production build: passed（tsc + Vite 7.3.6）。\n- Required CI workflow #31301529041 全綠：Media Smoke/Ubuntu、Ubuntu portability/Python 3.13、Windows authoritative/Python 3.11、Frontend、Select PR test layers。\n\nWindows isolated real acceptance：\n- Travel 2 clips，QA run `56ba6840bce34630999c436875906270`，pass=6/warning=2/blocked=0/skipped=0；WebUI warning reason、full preview、final confirmation 完成，未重送 render。\n- Coffee/Matcha 2 clips，QA run `403d4dd9b2a645b799788358c0c103c3`，pass=6/warning=2/blocked=0/skipped=0；同樣完成 WebUI review，未重送 render。\n- isolated temp DB/project root；source media unchanged（四個 source 的 SHA-256/size/mtime 不變）；production user data modified = No；acceptance server 已停止。\n- 兩個 warnings 是預期的 fade-to-black 與未啟用 loudness normalization 的 integrated-loudness review，均由人工 preview 後明確接受。Attribution 維持 Hao0321/video-autopilot-kit MIT inspiration（commit `f081e99`），無複製/改寫其程式碼。\n\nKnown limitation：本 issue 不宣稱 LM Studio/cloud-provider、Ubuntu 或 HyperFrames capability；那些屬其他 phase gate。",
+            "attachments": [],
+            "createdAt": "2026-08-09T07:39:08.975Z",
+            "updatedAt": "2026-08-09T07:39:08.917Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "041560f5-2c34-41b3-ae4b-33f00fc61b43",
+            "body": "### ChatGPT review — CHANGES REQUIRED\n\nPR #85 / reviewed HEAD `45387f4872434f0c360d44a52472673c72bed2f1`\n\nRequired CI `31299888825` is green and the handoff is complete, but four correctness blockers remain before merge:\n\n1. **Flash detection is not implemented end-to-end.**\n   - `_analyze_output()` only runs cropdetect / blackdetect / freezedetect / scene-select+showinfo.\n   - `_parse_analysis_log()` initializes `flashes=[]` but never appends any flash event; only `scene_changes` are populated.\n   - `_black_flash_check()` decides high-frequency flashing from `dense_flash`, so real output can contain rapid bright/dark switching while flash count stays zero.\n   - Required: add a real output-backed brightness/flash detector (do not equate every scene cut with a flash), produce flash timestamps, and feed those events into evidence/cluster logic.\n   - Regression: real FFmpeg alternating dark/bright fixture triggers warning; normal hard cuts do not falsely become a flash cluster; isolated fade remains handled separately.\n\n2. **Audio QA treats the manifest declaration as proof that the render applied the user audio contract.**\n   - Current `_audio_check()` reads keep/lower/mute/fades and BGM scheduling from the approved manifest, then only measures whole-output loudness/peak/tail.\n   - It does not prove that the formal render actually used those segment audio settings. A manifest `mute` with a render produced from `keep` can therefore still look valid to QA.\n   - The existing deterministic segment cache key already includes role/volume/fade settings, and the Render Report carries per-segment cache keys plus BGM provenance.\n   - Required: compare Render Report segment provenance against cache keys recomputed from the approved manifest; mismatches/missing entries are blocked. Validate BGM `used`/fingerprint against approved manifest. Add output-backed evidence for mute/duck/fade boundaries where practical; at minimum provenance must make a false role pass impossible.\n   - Regression: approved mute vs render keep key => blocked; lower/duck/fade provenance mismatch => blocked; BGM used/fingerprint mismatch => blocked; valid provenance passes to measured-audio checks.\n\n3. **Formal Render Report provenance currently fails open when fields are missing.**\n   - `_container_check()` allows empty Render Report manifest hash, only checks output SHA if present, and only rejects QC/decode when those dicts exist.\n   - Missing/corrupt `.render.json`, missing output fingerprint, or missing QC/decode evidence can therefore avoid a hard block.\n   - Required: for a succeeded formal render, require a valid Render Report with exact manifest hash, exact output SHA, explicit `qc.passed=true`, explicit full-decode success, and timestamp continuity evidence. Missing/corrupt/blank provenance must be `blocked`.\n   - Regression: missing report, blank manifest hash, missing output SHA, missing QC/decode => blocked; valid report => pass.\n\n4. **Malformed threshold overrides are silently ignored.**\n   - `_merge_thresholds()` catches malformed/non-finite/negative values and simply `continue`s, silently falling back to defaults.\n   - A user/project can believe a threshold override is active while QA actually evaluates another threshold and still reports pass.\n   - Required: validate known threshold overrides and audit invalid key/value/source. Explicit malformed/non-finite/negative known thresholds must produce structured non-pass (prefer blocked) and prevent `deliverable_ready`; valid overrides continue recording resolved value + source. Unknown keys must not disappear silently.\n   - Regression: `silence_warning_seconds: \"oops\"`, negative, NaN/Inf => structured non-pass; valid override records source/value; no silent fallback.\n\nKeep existing guarantees green: blocked/skipped cannot be accepted, warning reasons required, output/snapshot currentity invalidation, evidence redaction, protected QA retention, real Travel + Coffee/Matcha acceptance, frontend refresh-success semantics, source/production data unchanged.\n\nKeep VID-7 `In Progress` and PR #85 Draft. After fixes rerun full Python, targeted Delivery QA + real flashing/audio-provenance fixtures, frontend/build, required CI, and isolated Windows acceptance; update PR + Linear handoff before re-review.",
+            "attachments": [],
+            "createdAt": "2026-08-09T07:08:39.993Z",
+            "updatedAt": "2026-08-09T07:08:39.967Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "c06c8724-b115-48db-9690-92b6c6149764",
+            "body": "VID-7 review handoff 已完成（PR 維持 Draft，未 merge）。\n\n- PR: https://github.com/DystopiaOwO/video-vault-ai/pull/85\n- Branch: `agent/vid-7`\n- HEAD: `45387f4872434f0c360d44a52472673c72bed2f1`\n- Base: `origin/main` `b3cf980d89229dcc15917cc20e40ab8d82e32cfa`\n\nImplementation:\n- Versioned Delivery QA contract（pass / warning / blocked / skipped）、profile thresholds、authoritative render post-publish QA。\n- Container/manifest、black/flash、freeze/silence、border/crop/safe-area、audio、continuity/repeat checks。\n- Redacted evidence bundle、contact sheets/event strips/audio summary/artifact index、retention protection與schema。\n- WebUI human final-preview gate、warning reasons、preview confirmation、optimistic review concurrency、historical invalidation、rerun-current-QA（不重送 render）。\n- blocked/skipped 不得變成 deliverable_ready。\n\nEvidence:\n- Full Python: 611 passed, 2 skipped（兩個 POSIX process-group semantics 僅 Windows 不適用）。\n- Frontend: 37 files / 258 tests passed。\n- Production build: passed（tsc && vite build）。\n- Required CI run #31299888825 全綠：Frontend、Media Smoke / Ubuntu、Ubuntu Python 3.13、Windows Python 3.11、Select PR test layers。\n- Windows isolated real acceptance：\n  - Travel 2 clips，current QA run `cddcbd370bd24546b29f4f1d27d4b562`，pass=5 / warning=2 / blocked=0 / skipped=0，WebUI rerun + human preview confirmation，deliverable_ready。\n  - Coffee + Matcha 各 1 clip，current QA run `6597a749d2e44d61ad64fb0cc9f37cc1`，pass=5 / warning=2 / blocked=0 / skipped=0，WebUI rerun + human preview confirmation，deliverable_ready。\n- Reports sensitive_data_redacted=true；source media 四個檔案 SHA-256、size、mtime unchanged。\n- Production user data modified = No；production tree/DB snapshot unchanged，所有 acceptance 寫入 isolated temp root。\n- 已知限制：real acceptance 有兩個需人工確認的 auditable warnings（fade-to-black / loudness）；未宣稱 LM Studio、cloud、Ubuntu、HyperFrames capability。\n- Attribution：概念參考 Hao0321/video-autopilot-kit MIT，未複製或改寫其程式碼。\n\n請依 GitHub PR review 流程檢查；目前不改 Ready、不 merge。",
+            "attachments": [],
+            "createdAt": "2026-08-09T06:58:13.996Z",
+            "updatedAt": "2026-08-09T06:58:13.899Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-8",
+        "uuid": "94bf11b8-041e-4f9c-93f8-d5967a69f125",
+        "title": "Phase 3｜專案級故事理解",
+        "description": "Parent：<issue id=\"defcab2f-3dc9-42a2-967d-9435975958a8\" href=\"https://linear.app/videoai/issue/VID-5/perception-pipeline-vnext感知流程升級\">VID-5</issue>\nGitHub 原始規格：[https://github.com/DystopiaOwO/video-vault-ai/issues/75](<https://github.com/DystopiaOwO/video-vault-ai/issues/75>)\n目前 PR：<pull-request id=\"67821eaf-8759-4216-9fc0-b12d9595f951\" href=\"https://linear.app/videoai/review/issue-75-phase-3-project-level-story-understanding-2f819e5a09e6\">DystopiaOwO/video-vault-ai#81</pull-request>\nBranch：`agent/issue-75-phase-3`\n\n## 目前狀態\n\nPhase 3 主體已建立，但尚未達到 merge gate；目前回到 hardening / acceptance 階段。\n\n* Draft PR #81：Open / mergeable / Draft\n* Current HEAD：`37ede97e82108830ef80b6233674da1d6254e134`\n* Base：`main`\n* ahead / behind：3 / 0\n* 最新 CI：Run `31194608104`，required jobs 全部 success\n* Python local：`525 passed, 2 skipped`\n* Frontend local：`32 files / 226 tests passed`\n* Frontend build：Passed\n* Source media unchanged：Yes\n* Production user data modified：No\n\n## 已完成主體\n\n* Versioned Creator Profile\n* `travel_diary` / `coffee_matcha_diary` / `roasting_diary` / `general_diary`\n* Deterministic text-only `StoryInputSnapshot`\n* Local LM Studio text-provider adapter + Mock provider\n* Versioned Story output / validation / cache / persistence\n* Stable segment UUID validation\n* Story generation review / lock / regenerate skeleton\n* Explicit Apply to existing `storyboard.py`\n* Calibration helper skeleton\n* WebUI Story workspace skeleton\n* Open-source attribution：concept inspired by `Hao0321/video-autopilot-kit` commit `f081e99ed169b5aba1156a2aa6a80b748c39fbc9`; Code adapted from: None\n\n## 目前 confirmed hardening blockers\n\n 1. **Recovery-on-read**：一般 Story GET / project polling 不可呼叫 destructive recovery，把仍在執行的 generation 誤標 `interrupted`。Recovery 只能放在明確 startup/recovery boundary。\n 2. **Stale generation Apply**：Apply 前必須重新計算 current `StoryInputSnapshot`；舊 generation 的 `input_hash` 不等於目前 input 時必須 fail closed，不能用新的 request revision 套用舊故事。\n 3. **Duplicate suppression**：目前 validator 要求所有 included segment 全部出現在 chapter，與 duplicate suppression 衝突。需加入明確 `suppressed_segments` contract 與 representative 驗證。\n 4. **Stable chapter identity**：Human review 必須保留 App 配置的 `chapter_id`；client 不可偽造 ID；rename/reorder 不得改 chapter identity。\n 5. **Creator/Profile concurrency**：Creator Profile 與 Project Story Settings 不應綁在同一半原子 API；no-op 不增 version；stale write 409；Story settings 不得在尚未 Apply 前提早使 render approval 失效。\n 6. **StoryInput privacy / provenance**：模型 input 不應使用 filename/display-name 作語意來源；需真正整合既有 `story_context.py` 的 user summary、negative guidance 與 provenance。\n 7. **WebUI dirty draft**：polling refresh 不得覆蓋尚未儲存的 Creator / settings / chapter 草稿；需沿用現有 workspace dirty / navigation guard 契約。\n 8. **WebUI 完整度**：補 Creator 全欄位、Project Story Settings、可視化 segment cards/reorder/move、chapter transition/title card/notes、raw/normalized/effective audit、stale state、suppression evidence。\n 9. **Calibration production wiring**：目前只有 helper；需真正從 valid approved storyboard / approval snapshot / render metadata 收集 user-owned calibration records，並提供 WebUI recalc/reset。\n10. **Publish rollback**：story current pointer 與 generation `succeeded` 必須形成一致 publish boundary；故障/取消不得讓 failed/publishing generation 成為 current。\n11. **Local provider audit/retry**：strict schema、最多一次 corrective retry；記錄 call count / retry / per-call latency / total latency；仍只傳 text JSON。\n12. **Real acceptance**：Windows Travel + Coffee/Matcha 多 clip、實際 LM Studio local text model、WebUI人工 lock/regenerate/stale/apply/calibration 尚待完成。\n\n## Merge gate\n\n只有以下全部完成才能將 PR <pull-request id=\"67821eaf-8759-4216-9fc0-b12d9595f951\" href=\"https://linear.app/videoai/review/issue-75-phase-3-project-level-story-understanding-2f819e5a09e6\">DystopiaOwO/video-vault-ai#81</pull-request> 改 Ready：\n\n* 上述 hardening blockers 全部修正且有 regression tests\n* 新增 Story workspace frontend tests，不能只沿用既有 226 tests\n* Windows Travel real-project acceptance Passed\n* Windows Coffee/Matcha real-project acceptance Passed\n* Actual LM Studio text model Passed，含 text-only payload proof、calls/cache/retries/latency\n* Full Python / Frontend / build / required CI 全綠\n* Final read-only Luna high review 無 confirmed Medium+\n* source media unchanged / production data modified = No\n* Attribution 正確\n\nPR <pull-request id=\"67821eaf-8759-4216-9fc0-b12d9595f951\" href=\"https://linear.app/videoai/review/issue-75-phase-3-project-level-story-understanding-2f819e5a09e6\">DystopiaOwO/video-vault-ai#81</pull-request> 不自行 merge；Phase 3 merge 後本 Issue 才移到 Done。Parent <issue id=\"defcab2f-3dc9-42a2-967d-9435975958a8\" href=\"https://linear.app/videoai/issue/VID-5/perception-pipeline-vnext感知流程升級\">VID-5</issue> 保持開啟，之後才開始 <issue id=\"f254db03-72f0-4451-ba96-ce8d20a07d19\" href=\"https://linear.app/videoai/issue/VID-9/phase-4低信心雲端複判\">VID-9</issue> / Phase 4。",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-8/phase-3專案級故事理解",
+        "gitBranchName": "vid-8",
+        "createdAt": "2026-08-07T17:01:41.128Z",
+        "updatedAt": "2026-08-15T13:29:48.621Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-08T08:33:47.578Z",
+        "startedAt": "2026-08-07T17:01:41.215Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "4c07a01a-cb6e-4cae-a371-49aed7d7c674",
+            "title": "GitHub Issue #75",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/issues/75"
+          },
+          {
+            "id": "84e01a42-5a32-4515-8ae9-11508da4429d",
+            "title": "Draft PR #81",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/81"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "5483c4af-1579-4f03-8847-229c14bb1a15",
+              "name": "In Review",
+              "type": "started"
+            },
+            "startedAt": "2026-08-07T17:01:41.128Z",
+            "endedAt": "2026-08-07T17:18:15.833Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-07T17:18:15.833Z",
+            "endedAt": "2026-08-08T08:31:09.567Z"
+          },
+          {
+            "state": {
+              "id": "5483c4af-1579-4f03-8847-229c14bb1a15",
+              "name": "In Review",
+              "type": "started"
+            },
+            "startedAt": "2026-08-08T08:31:09.567Z",
+            "endedAt": "2026-08-08T08:32:58.968Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-08T08:32:58.968Z",
+            "endedAt": "2026-08-08T08:33:47.588Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-08T08:33:47.588Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-5",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-26",
+              "title": "Creative Brief｜一次完成 AI 建議與創意核准"
+            },
+            {
+              "id": "VID-9",
+              "title": "Phase 4｜低信心雲端複判"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "7b79e905-0a25-492e-8c6d-5f81df1b1774",
+            "body": "### Final review — PASS / Merge-ready\n\n- PR #81 latest HEAD: `b9f487cd3f4cec907edd9838d01285d15560eaf7`\n- Latest CI: run `31247891478` / #291 — all required jobs green\n- Windows Travel multi-clip real acceptance: Passed\n- Windows Coffee/Matcha real acceptance: Passed\n- Actual LM Studio `gemma-4-12b-it`: Passed, text-only strict JSON schema + cache/retry/latency evidence recorded\n- WebUI lock / polling / stale Apply / valid Apply / calibration: Passed\n- Final Apply refresh semantics regression: Passed\n- Final Luna high read-only review: confirmed Medium+ = 0\n- Source media unchanged: Yes\n- Production user data modified: No\n- Attribution: Correct\n\nReview conclusion: **VID-8 Phase 3 code + acceptance merge gate passed. PR #81 is merge-ready.**\n\nLinear status moved to **In Review**. Keep VID-8 out of Done until PR #81 is manually merged; after merge, move VID-8 to Done and continue VID-9 / Phase 4.",
+            "attachments": [],
+            "createdAt": "2026-08-08T08:31:21.248Z",
+            "updatedAt": "2026-08-08T08:31:21.195Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "473e21e3-199f-4b8c-b3a2-07949f317d99",
+            "body": "已修正 PR #81 剩餘的 Project Story Settings optimistic concurrency blocker，並 push commit `e6de4f0`（branch `agent/issue-75-phase-3`）。\n\n實作：\n- 新增獨立 `StorySettingsRevisionConflict`，settings `profile_version` 作為 expected_version。\n- 讀取 current settings、檢查 expected version、寫入與版本遞增均在同一個 project lock/commit boundary 內，兩個同版 stale client 同時寫入只會一個成功，另一個 HTTP 409。\n- no-op 不增加 `profile_version`；有效修改只增加 settings profile version +1。\n- Story Settings 仍固定 `commit.record_changed(False)`，不增加 `project_revision`，不使 render approval 失效。\n- API 回傳 settings `profile_version` 與 stale 409 payload；WebUI 傳 `expected_version`，409 顯示 settings version。\n- 新增並發 stale-write regression test，以及 WebUI expected version 傳遞測試。\n\n驗證：\n- Python 全套：536 passed, 2 skipped\n- Story targeted：27 passed\n- Frontend 全套：233 passed\n- Frontend production build：passed\n- Python compile：passed\n- git diff --check：passed\n\nPR #81 目前仍為 Open / Mergeable / Draft，未轉 Ready。",
+            "attachments": [],
+            "createdAt": "2026-08-08T06:11:07.281Z",
+            "updatedAt": "2026-08-08T06:11:07.245Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "8f79d281-c730-42e3-b491-2a8d3f3e1dd8",
+            "body": "已完成 PR #81 review follow-up，已 push commit `5fbb03b`（branch `agent/issue-75-phase-3`），PR 維持 Draft，未轉 Ready。\n\n本次修正：\n- `generate_project_story()` 不再執行 destructive recovery；recovery 僅保留在 UI startup boundary。\n- Story Settings 儲存不再遞增會使既有 approval 失效的 project revision；只有 review/Apply 改變 render state 才觸發 revision/invalidation。\n- Story WebUI 補齊 Creator 全欄位、chapter transition/title-card/notes、視覺 segment cards、跨 chapter reorder/move，以及 raw/normalized/effective audit metadata。\n- story-level locked toggle 納入 dirty guard；polling 在 dirty 狀態不可覆蓋本地鎖定變更，save 後才清除 dirty。\n- 新增/更新 regression tests，涵蓋 recovery 邊界、settings revision、audit、segment reorder、story lock polling。\n\n驗證：\n- Python 全套：535 passed, 2 skipped\n- Story targeted：26 passed\n- Frontend 全套：233 passed\n- Story workspace targeted：7 passed\n- Frontend production build：passed\n- Python compile：passed\n- git diff --check：passed\n\n目前 PR #81：Open / Draft / Mergeable。",
+            "attachments": [],
+            "createdAt": "2026-08-08T05:57:50.004Z",
+            "updatedAt": "2026-08-08T05:57:49.985Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "f8da5f9f-4ddf-476a-ade8-449cd0d6d408",
+            "body": "Hardening implementation已完成並推送：`b58ee13`（PR #81 維持 Open / Draft，未改 Ready）。\n\n已處理：GET/project polling 移除 destructive recovery（recovery 僅 startup boundary）；Apply 重算 current StoryInputSnapshot 並拒絕 stale `input_hash`；`suppressed_segments`/duplicate representative contract；human review 保留 app-owned `chapter_id`；Creator/settings 分離 concurrency API、409 stale、no-op version；StoryInput 移除 filename/display_name 語意依賴並整合 `story_context` provenance；WebUI dirty draft guard 與完整 Story workspace audit/stale/suppression/calibration controls；approved output/approval snapshot/render metadata calibration wiring；publish pointer/status 同一 SQLite transaction；LM Studio strict schema + 最多一次 corrective retry + calls/retry/per-call/total latency audit；新增 Story workspace frontend regression tests。\n\n驗證：Python full `532 passed, 2 skipped`；frontend `33 files / 231 tests passed`；frontend production build passed；Story hardening targeted `23 passed`；changed Python compile passed；`git diff --check` passed。仍保留 merge gate：Windows Travel/Coffee-Matcha real-project acceptance、實際 LM Studio model payload/latency proof、CI latest run 與 final read-only Luna review；因此不改 Ready。",
+            "attachments": [],
+            "createdAt": "2026-08-07T17:56:47.484Z",
+            "updatedAt": "2026-08-07T17:56:47.443Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-9",
+        "uuid": "f254db03-72f0-4451-ba96-ce8d20a07d19",
+        "title": "Phase 4｜低信心雲端複判",
+        "description": "Parent：<issue id=\"defcab2f-3dc9-42a2-967d-9435975958a8\" href=\"https://linear.app/videoai/issue/VID-5/perception-pipeline-vnext感知流程升級\">VID-5</issue>\nGitHub 原始規格：[https://github.com/DystopiaOwO/video-vault-ai/issues/75](<https://github.com/DystopiaOwO/video-vault-ai/issues/75>)\n\n## 啟動狀態\n\n<issue id=\"94bf11b8-041e-4f9c-93f8-d5967a69f125\" href=\"https://linear.app/videoai/issue/VID-8/phase-3專案級故事理解\">VID-8</issue> / PR #81 已完成並合併；merge commit：`56aff213e5a70e26c9ad11bf9f72905540bb9d7a`。\n<issue id=\"f254db03-72f0-4451-ba96-ce8d20a07d19\" href=\"https://linear.app/videoai/issue/VID-9/phase-4低信心雲端複判\">VID-9</issue> 已解除前置阻塞，狀態為 In Progress。\n\n開始實作前必須：\n\n* `git fetch origin`\n* 以 GitHub 即時 metadata 確認 PR #81 `merged=true`\n* 確認 `origin/main` 已包含 merge commit `56aff213e5a70e26c9ad11bf9f72905540bb9d7a`\n* 從最新 `origin/main` 建立 <issue id=\"f254db03-72f0-4451-ba96-ce8d20a07d19\" href=\"https://linear.app/videoai/issue/VID-9/phase-4低信心雲端複判\">VID-9</issue> 專用 branch\n* 不可從 <issue id=\"94bf11b8-041e-4f9c-93f8-d5967a69f125\" href=\"https://linear.app/videoai/issue/VID-8/phase-3專案級故事理解\">VID-8</issue> branch 建 stacked PR\n\n若 PR body、Linear description、comments 或 cached context 與 GitHub 即時 metadata 衝突，以 GitHub metadata 為準；不可因舊文字自行判定 blocked。\n\n## 實作範圍\n\n* 維持 local-first perception。\n* 只有 low-confidence、使用者指定或規則衝突的 window 才能送 optional cloud review。\n* 設定每 clip / project 的 call、frame 與 estimated cost 上限。\n* WebUI 在送出前顯示即將上傳的 frame 數與 provider。\n* cloud unavailable / quota / timeout 時保留 local result，並標記 needs-review，不得冒充複判成功。\n* provider abstraction 保持通用，不把 OpenAI 寫死成 cloud contract。\n\n## 驗收條件\n\n* 不上傳整支影片。\n* 隱私與成本資訊必須明確可見。\n* Cloud failure 不得被標成 successful re-review。\n* stable IDs、human override、source media、production data 均保持不變。\n\n## 狀態同步規則\n\n* 開發中：Linear In Progress、PR Draft\n* 最終 review PASS：Linear In Review、PR Ready + Auto-merge\n* GitHub 實際 `merged=true` 後：<issue id=\"f254db03-72f0-4451-ba96-ce8d20a07d19\" href=\"https://linear.app/videoai/issue/VID-9/phase-4低信心雲端複判\">VID-9</issue> → Done，並解除 <issue id=\"0da7ea31-db57-43cf-be85-1407407fdffe\" href=\"https://linear.app/videoai/issue/VID-10/phase-5音訊感知\">VID-10</issue> blocker",
+        "priority": {
+          "value": 2,
+          "name": "High"
+        },
+        "url": "https://linear.app/videoai/issue/VID-9/phase-4低信心雲端複判",
+        "gitBranchName": "vid-9",
+        "createdAt": "2026-08-07T17:01:57.630Z",
+        "updatedAt": "2026-08-08T13:31:34.308Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-08T13:31:09.121Z",
+        "startedAt": "2026-08-08T08:33:58.535Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "3ebb6642-7cbf-4451-a8d8-39950c81e02f",
+            "title": "VID-9 Phase 4: bounded low-confidence cloud review",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/82"
+          },
+          {
+            "id": "e87f5c88-8ca7-45c9-afa1-a37b90fb11f5",
+            "title": "GitHub Issue #75",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/issues/75"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "9ffd9ed6-7dc9-4466-b9d3-bf3535ad549e",
+              "name": "Todo",
+              "type": "unstarted"
+            },
+            "startedAt": "2026-08-07T17:01:57.630Z",
+            "endedAt": "2026-08-08T08:33:58.549Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-08T08:33:58.549Z",
+            "endedAt": "2026-08-08T13:30:17.711Z"
+          },
+          {
+            "state": {
+              "id": "5483c4af-1579-4f03-8847-229c14bb1a15",
+              "name": "In Review",
+              "type": "started"
+            },
+            "startedAt": "2026-08-08T13:30:17.711Z",
+            "endedAt": "2026-08-08T13:30:29.518Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-08T13:30:29.518Z",
+            "endedAt": "2026-08-08T13:31:09.126Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-08T13:31:09.126Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-5",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-10",
+              "title": "Phase 5｜音訊感知"
+            },
+            {
+              "id": "VID-8",
+              "title": "Phase 3｜專案級故事理解"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "603726d8-65aa-4fcf-9852-a0b2660fd2b4",
+            "body": "### Final Review — PASS / MERGED\n\nPR #82 final reviewed at HEAD `766ec9f4734621a82fd10a57ce16dc0c2b49c5a0`.\n\n- Confirmed Medium+ blockers: 0\n- CI #296 / run `31259379682`: success\n- exact selection/privacy boundary: pass\n- cumulative call/frame/cost caps: pass\n- durable atomic reservation/concurrency/crash accounting: pass\n- ledger migration no double-count: pass\n- retry per-attempt status/audit: pass\n- timeout/provider failure/local-result semantics: pass\n- refresh failure does not cause paid retry: pass\n- source media unchanged; production user data modified = No\n\nPR #82 merged via squash with locked reviewed HEAD. Merge commit: `9744c1c5c02611c8ea6300f4b6295c23b62af854`.\n\nVID-9 → Done. VID-10 blocker removed and VID-10 → In Progress.",
+            "attachments": [],
+            "createdAt": "2026-08-08T13:31:44.868Z",
+            "updatedAt": "2026-08-08T13:31:44.805Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "ebeebe9f-90a3-4267-af98-f829f2486492",
+            "body": "VID-9 最新 ledger/audit blockers 已修正於 PR #82 commit `766ec9f`（維持 Draft，未 merge）。\n\n修正：\n- baseline migration 只處理真正 pre-ledger legacy audit；`ledger_backed` marker 或同 run 已存在 real ledger reservation 時跳過 seed，migration idempotent。\n- 實際 execute → persisted audit → 下一次 usage 保持 exactly 1；2 real reservations + ledger-backed audit 保持 exactly 2。\n- retry 每個 external attempt 分別 finalize outcome；first attempt `failed`、second retry `completed`，不再由後續成功覆寫前次錯誤；兩次 calls/frames/cost 都保留。\n\n驗證：\n- local Python `558 passed, 2 skipped`\n- frontend `35 files / 244 tests passed`\n- `tsc && vite build` passed\n- required CI [31259379682](https://github.com/DystopiaOwO/video-vault-ai/actions/runs/31259379682) 五個 job 全部成功\n- concurrent one-call、crash durability、retry cap、exact selection、timeout、refresh-success regressions 保持 green\n- source media unchanged；production user data modified = No\n\nVID-9 保持 In Progress；PR #82 保持 Draft，等待 review。",
+            "attachments": [],
+            "createdAt": "2026-08-08T13:26:23.266Z",
+            "updatedAt": "2026-08-08T13:26:23.228Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "dd968c0e-39f2-429a-adf7-70ce4ae3519b",
+            "body": "### ChatGPT final re-review — CHANGES REQUIRED\n\nPR #82 / HEAD `9237918825cd42da0c3ab969b55a4146dd679a56`\nCI #295 (`31258721441`) required jobs all green. Atomic pre-call reservation, concurrency blocking, crash durability, and retry counting are materially fixed. Two ledger/audit correctness blockers remain:\n\n1. **Ledger-backed usage is double-counted on the next plan/request.**\n   - Provider attempts are already written as durable rows in `cloud_review_budget_ledger` before network I/O.\n   - After the request, `_cloud_review_execute()` also persists the same attempt totals into `current_cloud_review.usage`.\n   - On the next plan/request, `_cloud_review_scope()` passes that audit as `baseline_by_run`; `usage_for_scope()` calls `_seed_baselines()`, which inserts new `baseline:<run>:<video>:<index>` rows in addition to the existing reservation rows.\n   - Result: the same actual spend is counted twice, so call/frame/cost budget can be exhausted early and UI usage becomes incorrect.\n   - Baseline migration must only seed **pre-ledger legacy audits**, never usage that was already generated from ledger reservations. Add an explicit ledger-backed/migration marker or skip seeding when the scoped run already has real ledger rows; ensure migration remains idempotent.\n\n2. **Retry attempt status audit is incorrect after eventual success.**\n   - `execute_review_plan()` collects all `window_attempts`, but on eventual provider success finalizes every reservation as `completed`.\n   - Example: first `_post()` fails, second succeeds -> both ledger rows become `completed`, hiding the failed first attempt.\n   - Each external attempt must be finalized with its own outcome/error. A later successful retry must not rewrite an earlier failed attempt as completed.\n\nRequired regression gate:\n- execute one cloud review -> persist audit -> call next plan/usage -> usage remains exactly 1 attempt, not 2;\n- legacy pre-ledger audit seeds once and remains idempotent;\n- two real reservations plus persisted ledger-backed audit still count as exactly two;\n- transient first attempt + successful retry -> ledger rows show attempt #1 failed, attempt #2 completed, while total calls/frames/cost remain 2;\n- existing concurrent one-call, crash durability, retry cap, exact selection, timeout and refresh semantics remain green.\n\nKeep VID-9 In Progress and PR #82 Draft until fixed.",
+            "attachments": [],
+            "createdAt": "2026-08-08T13:14:05.270Z",
+            "updatedAt": "2026-08-08T13:14:05.247Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "c5ddc3cb-e543-442d-b440-f8931e95fbc3",
+            "body": "VID-9 final budget blocker fixed in PR #82 commit `9237918`（維持 Draft，未 merge）。\n\n完成：\n- 新增 project/cloud-review 專用 SQLite durable ledger；每個即將發生的 provider attempt 以 serialized `BEGIN IMMEDIATE` atomic reservation，commit 後才允許 network call，且不把長 network call 放進一般 project_commit。\n- reservation 在 provider attempt 前 durable；程序 crash 或 finalize/publish failure 都不會釋放已保留 budget。\n- OpenAI CloudProvider 每次 retry `_post()` 都獨立 reserve，actual calls/frames/cost、reservation UUID、per-window attempt_count 會進 audit，retry 不可突破 hard cap。\n- 保持 exact selection、cost ceiling、timeout、API-success + refresh reject/AbortError semantics。\n\n驗證：\n- local Python `555 passed, 2 skipped`\n- frontend `35 files / 244 tests passed`\n- `tsc && vite build` passed\n- required CI [31258721441](https://github.com/DystopiaOwO/video-vault-ai/actions/runs/31258721441) 全部成功\n- regression 覆蓋 concurrent 1-call reservation、crash/finalize durable accounting、retry actual attempt audit、既有 selection/budget/timeout/refresh tests\n- source media unchanged；production user data modified = No\n\nVID-9 保持 In Progress；PR #82 保持 Draft，等待 review。",
+            "attachments": [],
+            "createdAt": "2026-08-08T13:09:23.062Z",
+            "updatedAt": "2026-08-08T13:09:23.029Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "2c4d880d-c583-4468-a50e-61980d0818ed",
+            "body": "### ChatGPT re-review — CHANGES REQUIRED\n\nPR #82 / HEAD `abfa83a01d81094eeeb01bc89456b3ec0aba14ed`\nCI #294 (`31257809523`) all required jobs green. The previous 4 blockers are materially fixed, but the hard-budget contract still has one confirmed merge blocker.\n\n**Hard budget is not atomic / does not count provider retries.**\n\nCurrent `_cloud_review_execute()` reads current usage, builds a plan, then performs `execute_review_plan()` provider calls **before** entering `project_commit()` and persisting usage. Therefore two concurrent requests with the same revision can both observe the same remaining budget and both spend money; only afterward will one lose the revision race. A process crash after a paid provider call but before usage persistence has the same problem: the spend is forgotten and can be repeated.\n\nAdditionally, the reused `CloudProvider.analyze_window()` performs up to 3 `_post()` attempts, while Phase 4 usage currently charges one `calls` unit / one frame-cost unit per window. Provider retries can therefore exceed the configured call/cost ceilings even in a single request.\n\nRequired fix:\n- Reserve/persist budget atomically **before the first external provider attempt** using a project/cloud-review scoped serialized reservation/ledger. Do not hold the general project commit across a long network call if that violates the lifecycle contract.\n- Reservation must survive concurrent requests and process interruption; attempted/reserved spend must not disappear merely because the response/publish step fails.\n- Define provider-attempt accounting explicitly. Either reserve worst-case retry attempts/cost before execution, or make the Phase 4 adapter use an auditable retry policy whose every external attempt is counted against call/frame/cost budgets.\n- Finalize reservation with outcome/audit after provider completion; failure/timeout still remains needs-review and local result preserved.\n\nRegression gate:\n1. two concurrent requests at a one-call budget -> at most one reaches provider;\n2. crash/failure after provider attempt but before final result persistence -> next request still sees consumed/reserved budget;\n3. provider retry path cannot exceed configured call/cost caps and audit shows actual attempt count;\n4. existing exact-selection, cost ceiling, timeout, refresh-success semantics remain green.\n\nKeep PR #82 Draft and VID-9 In Progress until this is fixed.",
+            "attachments": [],
+            "createdAt": "2026-08-08T12:51:37.299Z",
+            "updatedAt": "2026-08-08T12:51:37.228Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "f041d93b-92f2-49b3-aa36-45dccdfdb32a",
+            "body": "VID-9 Phase 4 review blockers fixed in PR #82 commit `abfa83a` (仍維持 Draft，未 merge)。\n\n完成：\n- `window_uuids` supplied 時改為 exact selection；empty/subset 不會自動加入未勾選 low-confidence/rule-conflict windows。\n- clip/project call、frame、estimated-cost hard caps；cost ceiling 與 current perception generation 累計 usage（含 per-clip）會在 provider call 前 fail closed。\n- CloudReviewWorkspace API-authoritative success/refresh semantics；refresh reject/AbortError 不會覆寫成功、不會自動重送，regression assert cloudReview exactly once。\n- perception cloud-review timeout 傳到實際 provider request；timeout/quota/unavailable 均 failed、local result preserved、project needs-review，不會標 successful review。\n\n驗證：\n- local Python `552 passed, 2 skipped`\n- frontend `35 files / 244 tests passed`\n- `tsc && vite build` passed\n- required CI run [31257809523](https://github.com/DystopiaOwO/video-vault-ai/actions/runs/31257809523) 全部成功（Windows authoritative、Ubuntu portability、Media Smoke、selector、Frontend）\n- source media unchanged；production user data modified = No。\n\nVID-9 保持 In Progress；PR #82 保持 Draft，等待 review。",
+            "attachments": [],
+            "createdAt": "2026-08-08T12:46:10.770Z",
+            "updatedAt": "2026-08-08T12:46:10.520Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "2836dde2-d0f5-456c-8beb-d5ed8c711a7b",
+            "body": "### ChatGPT review — CHANGES REQUIRED\n\nPR #82 / HEAD `396994898a1ef5d2bf4fd16ac71ec39ec2defd71`\nCI #293 (`31253855214`) required jobs all green, but merge gate is not met.\n\nConfirmed blockers:\n\n1. **Selected-window privacy/cost violation** — WebUI says only checked windows are uploaded and sends `window_uuids`, but `build_review_plan(..., selected_window_ids=...)` still includes unselected low-confidence/rule-conflict windows. Deselecting a window therefore does not prevent upload. Existing backend test currently enshrines this wrong behavior and must be changed.\n2. **Budget contract incomplete / resettable** — Linear requires per-clip/project call, frame, and estimated-cost caps. Current config has call/frame caps plus `estimated_cost_per_frame_usd`, but no max cost ceiling. In addition, call/frame budgets are recomputed from zero for every request, so repeated cloud-review requests can bypass the intended clip/project limits. Budget consumption must be persisted/auditable for the current perception generation and enforced before provider calls.\n3. **Successful cloud call can be falsely reported as failed** — `CloudReviewWorkspace.send()` puts API call and `refreshProject()` in one try/catch. If cloud review succeeds but refresh rejects/AbortError occurs, UI says `雲端複判未完成`, encouraging a paid retry. API result must be authoritative; refresh failure must preserve success semantics and only ask the user to refresh.\n4. **Configured timeout is not wired** — Phase 4 exposes `perception.cloud_review.timeout_seconds`, but OpenAI review goes through existing `CloudProvider._post()` with a hard-coded 60s timeout and retry loop. The advertised setting currently has no effect. Wire the configured timeout through and regression-test timeout/failure semantics.\n\nRequired regression coverage:\n- exact selected set is the only set executed when `window_uuids` is supplied (including empty/subset cases)\n- cumulative clip/project call/frame/cost budgets cannot be bypassed by a second request\n- cost ceiling rejects before any provider call\n- API success + refresh reject/AbortError stays success and never causes an automatic second cloud call\n- configured timeout reaches provider/request layer; timeout/quota/unavailable stays failed + local result preserved + needs-review\n\nKeep PR #82 Draft and VID-9 In Progress until fixed and acceptance evidence is updated.",
+            "attachments": [],
+            "createdAt": "2026-08-08T12:20:04.116Z",
+            "updatedAt": "2026-08-08T12:20:04.090Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "84333c2c-b558-4e74-aba3-907a79934007",
+            "body": "Phase 4 implementation 已開始並建立 Draft PR #82：https://github.com/DystopiaOwO/video-vault-ai/pull/82\n\n- branch: agent/vid-9\n- base: origin/main / merge commit 56aff213e5a70e26c9ad11bf9f72905540bb9d7a\n- head: 396994898a1ef5d2bf4fd16ac71ec39ec2defd71\n- scope: local-first bounded cloud review；low-confidence、rule-conflict、explicit window；selected frames only；clip/project call/frame/estimated-cost caps；preflight privacy/provider/cost UI；generic provider contract；failure preserves local result and needs-review audit\n- validation: Python 545 passed, 2 skipped；Frontend 35 files / 242 tests passed；build passed；git diff --check passed\n- real cloud provider、quota/timeout/privacy 與 Windows multi-clip acceptance 尚待以 isolated test data/provider configuration 執行；未修改 source media 或 production user data\n- PR #82 維持 Draft，未 Ready、未 merge。\n\nVID-8 已 Done，已移除 VID-9 的 blocked-by VID-8 關係。",
+            "attachments": [],
+            "createdAt": "2026-08-08T10:56:04.924Z",
+            "updatedAt": "2026-08-08T10:56:04.846Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "863b6e8a-132a-4441-bc71-dad016258ac2",
+            "body": "已開始 VID-9 discovery。已確認需求邊界：local-first；只允許低信心、使用者指定或規則衝突的 window 進入 optional cloud review；上傳前顯示 frame/provider/privacy/cost；每 clip/project 有 call/frame/cost caps；cloud unavailable/quota/timeout 保留 local result 並標記 needs-review；不上传整支影片、不改 stable IDs、human overrides、source media 或 production data；provider contract 維持通用。\n\n目前阻塞：VID-9 規格要求從合併後最新 main 開始且不可建立 stacked PR，但 VID-8 的 PR #81（agent/issue-75-phase-3）仍為 Draft，尚未合併。已完成 repo/provider/perception code inventory；不在 PR #81 上堆疊 VID-9 實作，待 VID-8 合併後建立 vid-9 分支並進入 implementation。",
+            "attachments": [],
+            "createdAt": "2026-08-08T10:38:08.507Z",
+            "updatedAt": "2026-08-08T10:38:08.441Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-10",
+        "uuid": "0da7ea31-db57-43cf-be85-1407407fdffe",
+        "title": "Phase 5｜音訊感知",
+        "description": "Parent：<issue id=\"defcab2f-3dc9-42a2-967d-9435975958a8\" href=\"https://linear.app/videoai/issue/VID-5/perception-pipeline-vnext感知流程升級\">VID-5</issue>\nGitHub 原始規格：[https://github.com/DystopiaOwO/video-vault-ai/issues/75](<https://github.com/DystopiaOwO/video-vault-ai/issues/75>)\n\n## 實作範圍\n\n* 先加入低成本 local audio feature、VAD 與 event candidate。\n* 在可行範圍內辨識 dialogue、ambience、grinding、pouring、matcha whisking、transport、invalid noise 等候選事件。\n* 只有使用者明確允許且確有需要時，才進行 transcription 或使用 cloud audio。\n* 產生 natural-audio `keep / mute / duck` 建議，但不得覆寫使用者既有 audio decision。\n* audio 與 visual evidence 必須使用相同 timeline 與 stable identity。\n\n## 驗收條件\n\n* 維持 local-first，cloud 使用必須是明確 optional。\n* 使用者 audio decision 永遠具有最高優先權。\n* 所有結果都必須 versioned、auditable。\n* 不修改 source media 或 production user data。",
+        "priority": {
+          "value": 2,
+          "name": "High"
+        },
+        "url": "https://linear.app/videoai/issue/VID-10/phase-5音訊感知",
+        "gitBranchName": "vid-10",
+        "createdAt": "2026-08-07T17:02:11.938Z",
+        "updatedAt": "2026-08-08T16:14:41.357Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-08T16:14:41.340Z",
+        "startedAt": "2026-08-08T13:31:33.248Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "f4051b36-0398-4e28-bd93-d3067e0cf403",
+            "title": "VID-10 Phase 5: local audio perception audit",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/83"
+          },
+          {
+            "id": "f3c27092-ccfe-497f-b870-455681491356",
+            "title": "GitHub Issue #75",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/issues/75"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "9ffd9ed6-7dc9-4466-b9d3-bf3535ad549e",
+              "name": "Todo",
+              "type": "unstarted"
+            },
+            "startedAt": "2026-08-07T17:02:11.938Z",
+            "endedAt": "2026-08-08T13:31:33.259Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-08T13:31:33.259Z",
+            "endedAt": "2026-08-08T16:14:09.937Z"
+          },
+          {
+            "state": {
+              "id": "5483c4af-1579-4f03-8847-229c14bb1a15",
+              "name": "In Review",
+              "type": "started"
+            },
+            "startedAt": "2026-08-08T16:14:09.937Z",
+            "endedAt": "2026-08-08T16:14:18.213Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-08T16:14:18.213Z",
+            "endedAt": "2026-08-08T16:14:41.350Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-08T16:14:41.350Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-5",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-9",
+              "title": "Phase 4｜低信心雲端複判"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "0e19189e-5078-485b-b417-9406b5f0456d",
+            "body": "### ChatGPT final review — PASS\n\nPR #83 / reviewed HEAD `499f4822a3af7c05ffc52d1dffb640882a47b7c6`\n\nFinal result: **PASS / Medium+ = 0**.\n\nValidated:\n- `audio_settings.json` is now the single authoritative user audio state; AI keep/duck/mute remains recommendation-only.\n- evidence UI writes the existing audio-state contract (`duck -> lower`), and StoryInput / preview / render resolve from the same effective audio state.\n- perception reruns/stable IDs do not overwrite authoritative audio settings.\n- FFmpeg nonzero + partial PCM cannot report complete success; partial/error provenance and uncovered duration are auditable.\n- real no-audio and max-analysis cap behavior remain explicit/auditable.\n- CI #300 / run `31265289339`: all 5 jobs green.\n- targeted Python 66 passed; frontend 247 passed; production build passed.\n- full local A/B demonstrates the remaining 9 Windows renderer/audio-preview failures reproduce on latest main; no VID-10 regression established.\n- isolated Travel + Coffee/Matcha/Roasting acceptance passed; source media unchanged; production user data unchanged; no cloud audio/transcription.\n\nProceeding to In Review → PR Ready → merge using the reviewed HEAD SHA.",
+            "attachments": [],
+            "createdAt": "2026-08-08T16:14:04.013Z",
+            "updatedAt": "2026-08-08T16:14:03.978Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "088e1abd-a856-44d9-8654-a4a167451feb",
+            "body": "VID-10 / PR #83 review handoff update\n\n- PR: https://github.com/DystopiaOwO/video-vault-ai/pull/83 (維持 Draft)\n- Branch: `agent/vid-10`\n- HEAD: `499f4822a3af7c05ffc52d1dffb640882a47b7c6`\n- Scope: unified audio decision single source (`audio_settings` authoritative; AI recommendation-only; duck→lower; StoryInput/WebUI/preview/render consistent; rerun/stable-ID preservation); FFmpeg no-audio and partial-decode hardening with decode stderr/status and uncovered-duration audit.\n- Targeted Python: 66 passed.\n- Frontend full: 247 passed / 35 files.\n- Production build: passed.\n- Required CI run 31265289339: Frontend, Select PR test layers, Media Smoke Ubuntu, Ubuntu Python 3.13, Windows Python 3.11 all passed.\n- Local full Python A/B: origin/main `9744c1c` 549 passed, 2 skipped, 9 pre-existing Windows renderer/audio-preview E2E failures; PR run 564 passed, 2 skipped, 10 failures including generated pytest-temp encoding artifact. After moving generated artifacts out, encoding test passed and the remaining 9 reproduced on origin/main. This is documented in the PR body, not hidden as pass.\n- Real isolated acceptance root: `C:\\Users\\b3b3b\\AppData\\Local\\Temp\\vid10-acceptance-final-20260808\\acceptance-evidence.json`\n  - Travel: 4/4 real clips succeeded, audio succeeded, StoryInput 4 segments.\n  - Coffee/Matcha/Roasting: 7/7 real clips succeeded, audio succeeded, StoryInput 7 segments.\n  - 184 audio windows; no partial audio results in selected media.\n  - Source media unchanged: Yes (SHA-256/size/mtime).\n  - Production user data modified: No (isolated temp DB/project root).\n  - Attribution: no new external media/provider output; source media read-only.\n- Known limitation: local full Windows renderer/audio-preview baseline has 9 failures reproduced on latest main; real acceptance used the repository mock visual provider and local audio perception, with no cloud audio/transcription request.\n\n可 review；不要 merge/Ready。",
+            "attachments": [],
+            "createdAt": "2026-08-08T15:50:10.089Z",
+            "updatedAt": "2026-08-08T15:50:10.063Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "b7ca0e8c-7cb3-4fec-87d6-686d1829dcf6",
+            "body": "### ChatGPT review — CHANGES REQUIRED (round 2)\n\nPR #83 / HEAD `dd7b2a3a2afdfc74bfcbe0e90663be165b78f045`\n\nPrevious blockers are fixed and validated:\n- real no-audio -> `no_audio`: pass\n- audio choice no longer forces whole-segment `locked=true`: pass\n- >cap audio -> explicit `partial` + WebUI coverage: pass\n- full Python clean A/B: main `558 passed, 2 skipped`; PR `569 passed, 2 skipped`\n- CI #299 / run `31263434029`: green\n\nTwo merge blockers remain:\n\n1. **`user_audio_decision` is a second, non-authoritative user audio state and does not control render.**\n   - PR saves keep/duck/mute into `feedback/segment_review.json` as `user_audio_decision` and WebUI labels it as the user's audio decision.\n   - Existing authoritative project audio decisions live in `audio_settings.json` / `audio_state.py`; `render_manifest.py` calls `effective_segment_audio_settings()` and does not read `user_audio_decision`.\n   - `story_input.py` also still uses only `natural_audio_recommendation`, so a human `user_audio_decision=mute` can coexist with StoryInput seeing AI `keep`.\n   - Result: UI can say user chose mute while preview/render still uses keep/lower from `audio_settings`. That violates VID-10's \"user audio decision highest priority\" contract and creates two conflicting sources of truth.\n\n   Required fix:\n   - Do not maintain a second independent authoritative audio decision channel.\n   - Prefer integrating Phase 5 recommendations with the existing `audio_settings` contract: AI recommendation remains recommendation-only; existing saved audio settings are the effective user decision and always win.\n   - If the evidence panel allows editing, route that explicit user action through the existing audio-state mutation/role contract (with a clear `duck -> lower` mapping if needed), not a disconnected segment-review field.\n   - StoryInput/effective evidence must expose the authoritative effective user decision when one exists, while preserving raw AI recommendation separately.\n   - Perception reruns must never overwrite an existing audio-state decision.\n\n   Regression:\n   - AI recommends keep, existing user audio state=mute -> WebUI/effective StoryInput/render all resolve to user mute; raw AI keep remains auditable.\n   - AI recommends duck, no user override -> recommendation is visible but render settings are not silently mutated.\n   - explicit user edit from evidence UI (if retained) updates the same authoritative audio state used by preview/render.\n   - rerun/stable-ID migration preserves authoritative user audio settings.\n\n2. **FFmpeg nonzero exit with partial PCM can still be reported as complete success.**\n   - `analyze_audio_file()` only handles `returncode != 0` when `pcm` is empty. If FFmpeg decodes some PCM and then exits nonzero, the code proceeds to `analyze_pcm()`.\n   - `analyze_pcm()` currently marks partial only for `max_analysis_seconds` truncation; if the source duration is below the cap but decoding stopped early, it can return `status=succeeded` with analyzed duration shorter than source duration.\n   - This breaks the fail-closed/auditable media contract.\n\n   Required fix:\n   - A nonzero FFmpeg exit must never become complete `succeeded` merely because stdout contains some PCM.\n   - Either fail closed, or persist an explicit partial/failed-decode result with stderr/error provenance and uncovered duration.\n   - More generally, when known source duration exceeds analyzed PCM duration beyond tolerance, never claim full coverage.\n\n   Regression:\n   - simulate/fixture: FFmpeg nonzero + partial PCM -> not `succeeded`; error/partial provenance preserved.\n   - source 10s, analyzed PCM 4s, cap 30s -> explicit partial/uncovered coverage.\n   - normal complete decode remains succeeded; max-analysis cap path remains partial.\n\nKeep PR #83 Draft and VID-10 In Progress. Re-run full Python, frontend/build, required CI, and the existing isolated real-media acceptance after fixes.",
+            "attachments": [],
+            "createdAt": "2026-08-08T15:11:16.591Z",
+            "updatedAt": "2026-08-08T15:11:16.559Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "220ca573-f55a-4a0b-9537-d39459c6b9fe",
+            "body": "## VID-10 review blocker update / handoff\n\nDraft PR #83 remains open and Draft: https://github.com/DystopiaOwO/video-vault-ai/pull/83\n\n- Branch: `agent/vid-10`\n- HEAD: `dd7b2a3a2afdfc74bfcbe0e90663be165b78f045`\n- Base latest main: `9744c1c5c02611c8ea6300f4b6295c23b62af854`\n- Standalone, not stacked; no merge performed.\n\nBlockers fixed:\n- Real FFmpeg no-audio files now persist auditable `status=no_audio`; extraction errors remain fail-closed.\n- Audio decisions persist as `user_audio_decision`/human provenance without sending `locked=true`; unlocked and locked segment states remain unchanged through decision save and stable-ID rerun.\n- Long audio beyond `max_analysis_seconds` is `status=partial` with source/analyzed duration, truncated/partial and needs-review audit; WebUI exposes the uncovered coverage.\n\nValidation:\n- Full Python clean A/B: latest main 558 passed, 2 skipped / 560; PR HEAD 569 passed, 2 skipped / 571.\n- Targeted Python: 36 passed.\n- Frontend: 246 passed / 35 files.\n- Production build: passed.\n- Required CI run #31263434029: all green (Frontend, Windows Python 3.11, Ubuntu Python 3.13, Media Smoke, selector).\n- Real isolated Windows acceptance root/DB: `C:\\\\Users\\\\b3b3b\\\\AppData\\\\Local\\\\Temp\\\\vid10-acceptance-blockers-20260808-2`.\n  - Travel 4 clips: all perception/audio succeeded, `audio-perception-v1`, stable IDs.\n  - Coffee/Matcha/Roasting 7 clips: all perception/audio succeeded, `audio-perception-v1`, stable IDs.\n  - Real FFmpeg extraction used; visual provider was deterministic mock in isolated non-cloud acceptance.\n  - SHA-256/size/mtime before/after: unchanged.\n  - Production user data modified: No.\n\nKnown limitation:\n- 6 GB `coffee_clip_005` intentionally excluded for local resource/time constraints.\n- Browser manual review of every real clip was not part of this CLI acceptance; frontend regressions are green.\n\nPR remains Draft and is ready for review.",
+            "attachments": [],
+            "createdAt": "2026-08-08T15:05:31.341Z",
+            "updatedAt": "2026-08-08T15:05:31.303Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "9b14a4ef-e9b6-4e12-8b36-885f8dea9280",
+            "body": "### ChatGPT review — CHANGES REQUIRED\n\nPR #83 / HEAD `8c9a39f8aca214ac60bfdcaf791d27f64724ca29`\n\nHandoff is now valid and CI #298 (`31261276940`) is green, but VID-10 is not merge-ready. Confirmed blockers:\n\n1. **Real no-audio media is misclassified as extraction failure instead of `no_audio`.**\n   - `analyze_audio_file()` uses `-map 0:a:0?`, but its error parser only recognizes `matches no streams` / `stream map ... audio`.\n   - Actual FFmpeg no-audio behavior can return nonzero + empty PCM with stderr `Output file does not contain any stream` / `Output file #0 does not contain any stream`.\n   - Current code therefore raises `AudioPerceptionError`, and the project records audio `status=failed` for a perfectly valid video that simply has no audio track.\n   - Add a real FFmpeg no-audio regression fixture/path, not only `analyze_pcm(b\"\")`.\n\n2. **Choosing an audio decision forcibly sets the global segment `locked=true`.**\n   - `AudioEvidence.choose()` sends `{ natural_audio_recommendation: value, locked: true }`.\n   - `locked` is the existing whole-segment human override field and is included in StoryInput/human state; it is not an audio-only lock.\n   - A user choosing `keep/duck/mute` must not silently lock unrelated visual/story evidence. Persist the audio decision as an explicit human override while preserving the segment's prior global lock state (or introduce audio-specific provenance/lock semantics if truly required).\n   - Regression: audio decision changes only the audio decision/provenance; an initially unlocked segment remains unlocked; a previously locked segment remains locked.\n\n3. **Long clips are silently partially analyzed but reported `succeeded`.**\n   - Default `max_analysis_seconds=1800` truncates FFmpeg input with `-t`.\n   - Success payload only reports the extracted PCM timeline and has no `truncated/partial`, analyzed/source duration, uncovered tail, or needs-review marker.\n   - For source duration > cap this violates the versioned/auditable timeline contract. Keep the cap if desired, but explicitly report partial coverage (`source_duration_seconds`, `analyzed_duration_seconds`, `truncated=true` / partial status or needs-review reason) and show it in WebUI.\n   - Add regression for a duration greater than the cap.\n\n4. **Full Python suite is currently red and has not been proven baseline-only.**\n   - PR body reports `557 passed, 2 skipped, 9 failed`; previous Linear evidence on the same commit had reported a clean full suite, so the result is inconsistent.\n   - CI #298 runs PR Core (197 passed, 2 skipped, 369 deselected), not the full Windows media/e2e suite.\n   - Run a clean same-environment A/B: latest `main` vs PR HEAD with identical temp root/environment and full Python suite. If main passes and PR fails, fix the regression. If both fail identically, provide exact failing tests/tracebacks and reproducible baseline evidence before treating them as unrelated.\n\nRequired regression gate after fixes:\n- real video with no audio -> auditable `no_audio`, not failed;\n- audio keep/duck/mute does not change unrelated global segment lock state and survives stable-ID rerun/migration;\n- >max_analysis_seconds -> explicit partial/truncated audit + WebUI indication, never silent full success;\n- clean full-suite A/B evidence resolved;\n- existing local-only/no transcription/no cloud, stable identity, Travel + Coffee/Matcha/Roasting acceptance, frontend/build, source immutability and production-data isolation remain green.\n\nKeep VID-10 `In Progress` and PR #83 Draft until fixed.",
+            "attachments": [],
+            "createdAt": "2026-08-08T14:31:02.386Z",
+            "updatedAt": "2026-08-08T14:31:02.351Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "b07ecc3a-48b0-4a66-8745-efd75ae910ad",
+            "body": "## VID-10 Codex → Review handoff complete\n\n- Draft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/83\n- Branch: `agent/vid-10`\n- HEAD: `8c9a39f8aca214ac60bfdcaf791d27f64724ca29`\n- Base: latest `main` at `9744c1c5c02611c8ea6300f4b6295c23b62af854`; standalone PR, not stacked.\n\nImplementation/evidence:\n- Phase 5 local `audio-perception-v1`: PCM/VAD/features, stable audio IDs, event candidates, keep/duck/mute recommendation, persisted audit/run state, project/API/WebUI exposure, explicit locked human decision overlay.\n- Targeted Python: 33 passed.\n- Frontend: 245 passed across 35 files.\n- Production build: passed.\n- Required GitHub CI run #31261276940: all green — Frontend, Windows authoritative Python 3.11, Ubuntu portability Python 3.13, Media Smoke/Ubuntu, and layer selection.\n- Real Windows isolated acceptance: Travel 4 clips and Coffee/Matcha/Roasting 7 clips; all perception/audio runs succeeded with `audio-perception-v1` and stable IDs. Evidence root: `%LOCALAPPDATA%\\\\Temp\\\\vid10-acceptance-20260808`, `source_media_unchanged=true`, `production_user_data_modified=false`.\n- Source media unchanged: Yes.\n- Production user data modified: No.\n\nKnown limitations / unfinished:\n- Full local Python was `557 passed, 2 skipped, 9 failed` out of 568; the failures are in unmodified Windows audio-preview/project-renderer e2e staging tests (empty/missing temporary FFmpeg output or staging files). Required CI is green.\n- The 6 GB `coffee_clip_005` was excluded from real acceptance for local resource/time limits.\n- Browser-level manual review of every real clip was not part of this CLI acceptance; frontend regression coverage is green.\n- PR remains Draft; no merge performed.\n\nThis satisfies the VID-5 handoff fields and is ready for review.",
+            "attachments": [],
+            "createdAt": "2026-08-08T14:12:46.285Z",
+            "updatedAt": "2026-08-08T14:12:46.247Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "ba8c6e19-d547-4e00-a727-187a60c31bb8",
+            "body": "### Review handoff incomplete\n\nUser reported Codex run finished, but GitHub authoritative state currently has no remote `agent/vid-10` branch and no VID-10 Draft PR; PR #83 is not present. Latest Linear evidence is still the earlier local-only vertical slice (`8c9a39f`) which explicitly says branch not pushed / no PR and Windows real acceptance remained pending.\n\nPer VID-5 handoff rule, local completion is not review-ready. VID-10 stays `In Progress` until Codex pushes the dedicated branch, creates a Draft PR from latest main, and records PR URL / HEAD SHA / CI + acceptance evidence here.",
+            "attachments": [],
+            "createdAt": "2026-08-08T13:53:50.373Z",
+            "updatedAt": "2026-08-08T13:53:50.346Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "a6ab8013-b5a0-481c-9d88-0991b2790553",
+            "body": "Phase 5 initial vertical slice started on local branch `agent/vid-10` from latest `origin/main @ 9744c1c`.\n\nImplemented in commit `8c9a39f`:\n- versioned `audio-perception-v1` local PCM features, VAD and event candidates for dialogue / ambience / grinding / pouring / matcha_whisking / transport / invalid_noise;\n- local-only audit explicitly records no transcription/cloud audio and persists with existing `analysis_runs`;\n- stable timeline/segment identity alignment, separate `keep / duck / mute` recommendation, and no mutation of user audio settings;\n- WebUI audio evidence panel with human locked decision overlay while preserving the original AI recommendation.\n\nEvidence:\n- Python full suite: 565 passed, 2 skipped;\n- frontend full suite: 35 files / 245 tests passed;\n- frontend production build: passed;\n- targeted audio/project and WebUI regressions: passed.\n\nNo source media or production user data was modified. Branch is local and not pushed / no PR created yet. Next Phase 5 work remains: real Windows travel/coffee acceptance and any follow-up hardening from review.",
+            "attachments": [],
+            "createdAt": "2026-08-08T13:51:41.510Z",
+            "updatedAt": "2026-08-08T13:51:41.496Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-11",
+        "uuid": "0b064e3d-4d7f-4e8e-b57c-3c7b621c7716",
+        "title": "真實流程驗收 Round 1｜阻塞修正與產品硬化",
+        "description": "來源：2026-08-09 完整真實流程產品驗收（ACCEPTANCE_REPORT.md）。\n\n驗收已從真實 Coffee 素材走過 Doctor → import → perception → story → human review → approval → formal render，但正式 Render 在 Final QC fail-closed，Delivery QA 未能建立，因此沒有合法 final MP4。\n\n此父任務統整本輪驗收暴露的產品 blocker / performance / quality / UX 問題；各子任務修完後重新跑同一套完整真實流程，直到能產生 deliverable_ready 成片。\n\n硬規則：\n\n* 修正不得以放寬 fail-closed、跳過 approval/QC/QA、手動 FFmpeg 或 mock provider 假裝通過。\n* 保留 source media immutable、production data 不修改、stable IDs/human override 優先。\n* 子任務完成後需用 isolated real-media acceptance 驗證。\n* 最終 DoD：真實素材可走完整正式流程並產生 Render Report、Delivery QA run、human final preview、deliverable_ready final MP4。",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-11/真實流程驗收-round-1阻塞修正與產品硬化",
+        "gitBranchName": "vid-11",
+        "createdAt": "2026-08-09T09:31:55.965Z",
+        "updatedAt": "2026-08-19T10:20:15.954Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-19T10:20:15.922Z",
+        "startedAt": "2026-08-09T09:33:26.393Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "96cb7b4b-71f4-4dfb-86de-830bce5f6f68",
+            "title": "[VID-41] Define Editor Workflow v2 contract",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/109"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "9ffd9ed6-7dc9-4466-b9d3-bf3535ad549e",
+              "name": "Todo",
+              "type": "unstarted"
+            },
+            "startedAt": "2026-08-09T09:31:55.965Z",
+            "endedAt": "2026-08-09T09:33:26.402Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-09T09:33:26.402Z",
+            "endedAt": "2026-08-19T10:20:15.936Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-19T10:20:15.936Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-41",
+              "title": "Editor Workflow v2｜從素材匯入到成片的主流程重構"
+            },
+            {
+              "id": "VID-24",
+              "title": "Story generation performance｜32K runtime 下 600s timeout root-cause"
+            },
+            {
+              "id": "VID-25",
+              "title": "AI Editor UX v1｜Simple-first Creative Flow、Style Preview、Timeline Inspector"
+            },
+            {
+              "id": "VID-23",
+              "title": "Story runtime context provisioning｜安全建立足夠 context 的 LM Studio instance"
+            },
+            {
+              "id": "VID-22",
+              "title": "Story Provider runtime context authority｜LM Studio loaded instance freshness"
+            },
+            {
+              "id": "VID-21",
+              "title": "StoryInput context compaction｜移除 per-segment 重複 clip summary"
+            },
+            {
+              "id": "VID-20",
+              "title": "Adaptive sampling rescue｜稀疏 clip evidence sufficiency"
+            },
+            {
+              "id": "VID-19",
+              "title": "Perception capability registry 與 mandatory window planner contract"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-12",
+        "uuid": "22b8e045-bcb3-4e66-9a94-3fa06b0d9359",
+        "title": "Render Final QC｜true-peak 與 A/V tail drift 契約修正",
+        "description": "真實產品驗收的正式 Render blocker。\n\nEvidence：4 次正式 Render Job 全部進入 Final QC 後 fail closed；true-peak target 從 -1 / -3 / -4 dBTP 調整，實際輸出仍持續約高 2 dB，且每次固定出現 A/V tail drift 0.070s。最後 job `f64443145de84030ab2c2ce65fa40c63`，manifest `ffa6020fc2a260066eb33c523e553d435c6c618454ce1b8951eae239006ad93b`。\n\n需釐清並修正：\n\n* loudness / true-peak normalization filter 是否真的套用到 final assembly。\n* segment user audio volume / keep role 與 normalization pipeline 的組合。\n* Render Report/QC 量測點與 policy target 是否一致。\n* 0.070s A/V tail drift 是 encoder/container rounding、chapter card/audio concat 還是 QC tolerance 計算錯誤。\n\n不得以單純放寬 QC threshold 解決。\n\nAcceptance：\n\n* 使用同一組 isolated Coffee 真實素材與正式 approved manifest 流程。\n* 正式 Render Job 成功並產生 final MP4 + Render Report。\n* true peak 符合 manifest/policy，A/V tail 在合理 contract tolerance 內。\n* source/production data unchanged。\n* 接著 Delivery QA 能被正式建立。",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-12/render-final-qctrue-peak-與-av-tail-drift-契約修正",
+        "gitBranchName": "vid-12",
+        "createdAt": "2026-08-09T09:32:09.534Z",
+        "updatedAt": "2026-08-10T14:49:59.432Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-09T11:02:50.314Z",
+        "startedAt": "2026-08-09T09:33:33.331Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "0bdc289b-42eb-4826-8efe-ae972d9b9a2a",
+            "title": "VID-12: enforce final audio peak and tail contracts",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/86"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "9ffd9ed6-7dc9-4466-b9d3-bf3535ad549e",
+              "name": "Todo",
+              "type": "unstarted"
+            },
+            "startedAt": "2026-08-09T09:32:09.534Z",
+            "endedAt": "2026-08-09T09:33:33.344Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-09T09:33:33.344Z",
+            "endedAt": "2026-08-09T11:02:02.178Z"
+          },
+          {
+            "state": {
+              "id": "5483c4af-1579-4f03-8847-229c14bb1a15",
+              "name": "In Review",
+              "type": "started"
+            },
+            "startedAt": "2026-08-09T11:02:02.178Z",
+            "endedAt": "2026-08-09T11:02:22.235Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-09T11:02:22.235Z",
+            "endedAt": "2026-08-09T11:02:50.397Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-09T11:02:50.397Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-11",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-18",
+              "title": "Round 1 最終真實流程驗收重跑｜deliverable_ready DoD"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "429fba76-e11d-4dff-9ee5-76699f61abb7",
+            "body": "Merged successfully. PR #86 live GitHub state is `merged=true`; reviewed HEAD `d428e0e0fb0b3be060538a153e31cca48f31f7ee`; squash merge commit `e5817d940a084974fbad62caa88952fa1943e857`. VID-12 marked Done.",
+            "attachments": [],
+            "createdAt": "2026-08-09T11:03:09.439Z",
+            "updatedAt": "2026-08-09T11:03:09.410Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "0d632e4f-4b4d-45dd-8450-eeb4d5a7746a",
+            "body": "### ChatGPT final review — PASS\n\nPR #86 / reviewed HEAD `d428e0e0fb0b3be060538a153e31cca48f31f7ee`\n\nReview result: no remaining Medium+ blocker found.\n\nConfirmed:\n- no-BGM normalized path no longer stream-copies AAC; it forces the shared audio graph for resample/stereo + `apad` / approved-duration `atrim` / PTS reset without accidentally applying first-pass loudnorm twice;\n- formal loudness remains second-pass and encoded output is re-measured by Final QC;\n- AAC headroom + limiter does not relax Final QC: final LUFS remains checked within ±1.0 LUFS and true peak remains an upper-bound policy;\n- second pass is bounded to approved expected duration;\n- real isolated Coffee acceptance passed Final QC: true peak `-4.55 dBTP` vs `-4.00 dBTP` policy, A/V packet drift `0.011333s`, decode/timestamps valid;\n- Delivery QA was successfully created afterward; its remaining chapter-card black-frame blocker is outside VID-12 audio/tail scope and remains fail-closed;\n- required CI `31307340293` is green; source/production data unchanged per handoff.\n\nProceeding with In Review → Ready → merge using this reviewed HEAD.",
+            "attachments": [],
+            "createdAt": "2026-08-09T11:01:52.613Z",
+            "updatedAt": "2026-08-09T11:01:52.582Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "ad5c5d65-2058-44c2-9471-9bb958ea3c06",
+            "body": "VID-12 review handoff\n\n- Standalone branch: `agent/vid-12`, based directly on `origin/main` `b76fdb5`; not stacked.\n- HEAD: `d428e0e0fb0b3be060538a153e31cca48f31f7ee`\n- Draft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/86\n- Required CI: all passed — Windows authoritative / Python 3.11, Ubuntu portability / Python 3.13, Media Smoke / Ubuntu, Frontend, Select PR test layers.\n\nRoot cause confirmed:\n- Normalized no-BGM final assembly skipped the policy audio graph and copied encoded segment/card AAC.\n- Final QC measures the encoded/decode deliverable, exposing approximately 2 dB AAC intersample peak overshoot that the filter summary did not represent.\n- Concat/card audio plus encoder/container padding was not duration-clamped, causing the fixed 0.070s A/V tail drift.\n\n修正：\n- normalized no-BGM final assembly now forces the policy audio graph with resample/stereo, `apad`, expected-duration `atrim`, and PTS reset.\n- loudnorm is followed by a 2 dB AAC safety-headroom limiter with `level=false`; Final QC remains strict and re-measures the encoded output.\n- second pass is bounded to expected duration.\n- No QC threshold relaxation, QC bypass, or manual FFmpeg remediation.\n\nFormal real Windows isolated Coffee acceptance:\n- Approval snapshot: `approval-ffa6020fc2a26006-0dbbded61041`\n- Render Job: `40966c57f9754abfb80b104cdee0ea01`\n- Final MP4: `vid12_final.mp4`, valid H.264/AAC MP4, 1920x1080/30fps, 48 kHz stereo.\n- Final QC: passed; true peak `-4.55 dBTP` vs `-4.00 dBTP` policy; A/V packet drift `0.011333s`; decode/timestamp checks passed; Render Report `qc_passed=true`.\n- Delivery QA ran: 5 pass, 2 warnings, 1 blocked. The blocked check is intentional chapter-card black-frame detection, unrelated to audio/tail QC; deliverable remains QA-blocked pending the existing black-card policy decision.\n- Source copy unchanged: SHA `6135cb3e0105aeeccf8fe5ceec2f10323d8302d42d00da27b524a221678b6085`, 232,893,552 bytes. Original source unchanged.\n\nTests:\n- Full suite: 620 passed, 2 skipped.\n- Targeted audio/render/QC suite: 51 passed.\n- `compileall` and `git diff --check` passed.",
+            "attachments": [],
+            "createdAt": "2026-08-09T10:04:50.605Z",
+            "updatedAt": "2026-08-09T10:04:50.569Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    }
+  ]
+}
