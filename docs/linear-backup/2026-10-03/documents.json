@@ -1,0 +1,145 @@
+{
+  "exportedAt": "2026-10-03T22:13:00+08:00",
+  "documents": [
+    {
+      "document": {
+        "result": {
+          "meta": {
+            "io.modelcontextprotocol/serverInfo": {
+              "name": "Linear MCP",
+              "title": "Linear",
+              "version": "1.0.0",
+              "websiteUrl": "https://linear.app",
+              "icons": [
+                {
+                  "src": "https://static.linear.app/integrations/mcp/icon.svg",
+                  "mimeType": "image/svg+xml"
+                }
+              ]
+            }
+          },
+          "content": "## Purpose\n\n凡是 Video Vault AI / AI 剪片助手中「理論上未來會新增同類型 sibling implementation」的功能，都必須在首次正式實作時留下可擴充規範，而不是等第二個案例出現才把既有特例重構。\n\n本規範適用於所有目前與未來 roadmap issue，包括但不限於 Creative Brief、Visual Style、Title/Card、framing、grading/LUT、transition/effect、audio policy、BGM strategy、caption/subtitle、renderer、codec/profile、AI model/provider、Perception/Story strategy、QA rule、export target、cache/artifact contract、capability/fallback policy。\n\n核心原則：新增同類 sibling implementation 時，應主要是「註冊 / 宣告 / 新增 schema-compliant implementation + fixtures/tests」，而不是修改一堆 unrelated core logic 或增加 ad-hoc `if/else`。\n\n---\n\n## 1. 判定什麼是水平可擴充點\n\n符合以下任一條件，就視為 horizontal extension point：\n\n* 未來合理會新增更多同類 preset / strategy / policy / provider / renderer / codec / profile / target / role / rule。\n* UI 會出現「選一種」或 AI 會推薦「其中一種」。\n* 不同專案可能選不同 implementation，但上層 workflow 不應因此改寫。\n* 同一資料 contract 可由不同 implementation 消費或產生。\n* 新增一種 implementation 理論上不應改變 Perception / Story / approval 等不相關模組。\n\n如果某功能目前只有一種 implementation，但從產品語意判斷未來明顯可能出現第二種，也要先視為 extension point。\n\n---\n\n## 2. Extension point 必須具備的共同 contract\n\n每一個 extension point 至少必須定義：\n\n* stable internal ID\n* human-visible name/description 與 internal ID 分離\n* schema / contract version\n* supported capabilities / constraints\n* deterministic semantic config\n* compatibility rules\n* migration / deprecation behavior\n* fallback / fail-closed policy\n* provenance / audit fields\n* cache / artifact identity boundary（若影響 pixels/audio/output）\n* preview / runtime parity requirement（若有 preview）\n* registration/listing mechanism\n* fixture + regression test requirements\n\n不得只靠 hard-coded string + scattered branch 判斷功能種類。\n\n---\n\n## 3. Registry-first 原則\n\n若同一類功能可有多個 sibling implementation，優先使用 central registry / catalog / strategy map / provider registry 等單一 source of truth。\n\nRegistry 應負責：\n\n* 列出可用 implementation\n* ID → implementation / metadata resolution\n* schema validation\n* capability compatibility\n* stable version resolution\n* UI/API 可選項 metadata\n* renderer/runtime capability status\n\nUI、API、renderer 不應各自維護一份名稱清單。\n\n新增 sibling implementation 時，不應需要修改 unrelated switch/case scattered across modules。\n\n---\n\n## 4. Semantic contract 與 runtime implementation 分離\n\nPersist / approve 的 source of truth 應是 semantic intent/config，而不是底層命令字串。\n\n例如：\n\n* title style 存 typography/layout/palette/motion tokens，不存任意 FFmpeg drawtext/filter 字串。\n* framing 存 crop/background/reframe intent，不存 Coffee-specific crop coordinates 作為 preset 定義。\n* grading 存 LUT identity / grading intent / transform contract，不把 CLI command 當產品 contract。\n* encoder 存 codec/quality/preset semantic contract，不把 probe stderr 當 semantic identity。\n\nRuntime 將 semantic contract resolve 為具體 FFmpeg / CUDA / renderer execution。\n\n---\n\n## 5. Approved snapshot 必須 materialize\n\n只要使用者有核准 / approval gate，核准時必須保存 fully resolved snapshot：\n\n* selected ID/version\n* resolved semantic values\n* schema/registry version\n* semantic hash\n* relevant asset/model/font/LUT identity\n\n目的：之後 registry default 更新時，舊 approved project 不會 silent 改變。\n\n使用者未 explicit refresh / re-approve 前，舊 approval 應維持原 resolved semantics。\n\n---\n\n## 6. Versioning / migration / deprecation\n\nExtension point 不得假設 schema 永遠不變。\n\n需要明確定義：\n\n* additive compatible change\n* semantic breaking change\n* preset/provider implementation replacement\n* deprecated ID\n* unsupported legacy version\n* migration 是否自動、安全、需 human re-approval\n\n未知 required field / unsupported major version，不得 silent fallback 成 default generic behavior。\n\n若無法安全 migration，必須標記 `needs_migration` / `needs_review` / unsupported，而不是偷偷改輸出。\n\n---\n\n## 7. Capability 與 fallback 規範\n\n每個 extensible implementation 必須宣告所需 capability，例如：\n\n* CUDA filter\n* font/glyph availability\n* LUT asset\n* codec/encoder\n* platform-specific feature\n* AI model modality/context\n\nCapability 不滿足時：\n\n* 使用明確、versioned、documented fallback；或\n* fail closed。\n\n不得 silent omit feature 還回報原 implementation 已執行。\n\nRuntime report 必須記錄 requested vs resolved implementation 與 fallback reason。\n\n---\n\n## 8. Invalidation boundary 必須隨 extension point 定義\n\n每個可擴充 contract 必須標明它改變時會 invalidates 哪些 downstream state。\n\n例如：\n\n* output orientation / title palette：通常 visual/render-only，不應讓 Perception/Story stale。\n* editorial policy：可能讓 Story / storyboard stale。\n* source identity / timing：必須 invalidates render/provenance，某些情況也會 invalidates Story。\n\n不得用「任何設定改變 → 全部重跑」取代正確 dependency graph。\n\n---\n\n## 9. Cache identity 邊界\n\n如果 extension implementation 會實質改變 rendered pixels/audio/artifact，必須進 artifact/cache identity。\n\n但 runtime diagnostics、timing、stderr、GPU utilization 等 transient evidence 不應污染 semantic cache identity。\n\nApproval semantic identity 與 artifact execution/cache identity 必須保持分離。\n\n---\n\n## 10. Preview ↔ Runtime parity\n\n任何有 Preview 的 extension point，都必須做到：\n\n* Preview 使用同一 semantic contract / registry resolver。\n* Preview metadata 保存 stable ID/version/hash。\n* Final runtime 不得重新隨機選 preset/strategy。\n* 有 regression 可以證明 preview resolved settings 與 final runtime resolved settings 等價。\n\n尤其適用於：Visual Style、title/card、grading、framing、transition/effect、caption。\n\n---\n\n## 11. 每新增一個 sibling implementation 的最低 checklist\n\n新增 implementation 時至少要完成：\n\n 1. stable internal ID + version\n 2. schema-compliant semantic definition\n 3. registry registration\n 4. supported capability / platform declaration\n 5. deterministic fallback/failure behavior\n 6. migration/deprecation behavior（若替代舊 implementation）\n 7. representative fixture\n 8. validation/unit tests\n 9. cache/provenance implications\n10. preview/runtime parity test（如適用）\n11. bright/dark/edge cases 或 domain-specific quality gates\n12. audit evidence\n13. 文件更新\n\n新增 sibling implementation 不應要求修改 unrelated Story/Perception 核心流程。\n\n---\n\n## 12. 目前 roadmap 必須套用的 extension points\n\n### Creative Brief\n\n* output aspect/profile\n* framing intent\n* editorial autonomy / policy\n* audio/BGM policy\n* color/grading intent\n\n### Visual Style\n\n* visual style preset\n* title/card style\n* framing treatment\n* grading/LUT\n* transition/effect style\n* caption/subtitle style\n* palette\n* motion presets\n\n### Render\n\n* encoder/codec/profile\n* GPU execution path\n* display geometry policy\n* export/delivery profile\n\n### AI / perception/story\n\n* model/provider\n* perception strategy\n* rescue strategy\n* Story generation/retry strategy\n* context/runtime capability\n\n### QA\n\n* QA check/rule registry\n* severity / threshold policy\n* delivery target-specific QA rules\n\n### Export / integration\n\n* export target\n* project interchange format\n* delivery destination\n\n這份清單不是封閉集合；每個新 issue 在設計 review 時都要重新判斷是否包含新的 horizontal extension point。\n\n---\n\n## 13. Issue / PR Definition of Done addition\n\n每張規劃/實作 issue 在開始 coding 前必須回答：\n\n* 這裡有沒有 horizontal extension point？\n* 若有，stable ID/schema/registry/version 在哪？\n* 第二個 sibling implementation 要新增時，需要改哪些檔案？\n* 是否會迫使修改 unrelated core logic？若會，設計可能還不夠水平可擴充。\n* migration/fallback/invalidation/cache/provenance 怎麼處理？\n* 有沒有測試證明可以新增一個 synthetic sibling implementation，而不加 special-case branch？\n\nPR review 時，若一個明顯可水平擴充的功能只做了 hard-coded first case、沒有留下 contract，視為 design blocker，除非 issue 明確標示為 throwaway spike/prototype。\n\n---\n\n## 14. 避免過度工程化\n\n本規範不是要求所有東西都做 plugin framework。\n\n合理的最小實作可以只是：\n\n* versioned dataclass/schema\n* deterministic registry dictionary\n* resolver interface\n* explicit metadata\n* tests\n\n只有當確實需要 runtime plugins / external packages 時才增加複雜度。\n\n目標是「第二個同類功能容易且安全地加入」，不是抽象化本身。",
+          "structuredContent": null,
+          "isError": false,
+          "resultType": "complete",
+          "id": "c8c64fb4-cf33-4c17-93a5-9f5e43f37b54",
+          "title": "Horizontal Extensibility Contract｜水平擴充設計規範",
+          "icon": null,
+          "color": null,
+          "url": "https://linear.app/videoai/document/horizontal-extensibility-contract水平擴充設計規範-25a9dacc0c87",
+          "slugId": "25a9dacc0c87",
+          "createdAt": "2026-08-17T13:53:58.456Z",
+          "updatedAt": "2026-08-17T13:53:59.448Z",
+          "archivedAt": null,
+          "creator": {
+            "id": "8dffdecd-aedc-4937-8436-13869826da44",
+            "name": "DystopiaOwO"
+          },
+          "updatedBy": {
+            "id": "8dffdecd-aedc-4937-8436-13869826da44",
+            "name": "DystopiaOwO"
+          },
+          "project": {
+            "id": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+            "name": "Video Vault AI"
+          },
+          "initiative": null,
+          "team": null,
+          "issue": null,
+          "display_url": "https://linear.app/videoai/document/horizontal-extensibility-contract水平擴充設計規範-25a9dacc0c87",
+          "display_title": "Horizontal Extensibility Contract｜水平擴充設計規範"
+        },
+        "error": null,
+        "error_data": null,
+        "error_code": null,
+        "classification_id": null,
+        "json_rpc_error_code": null,
+        "error_http_status_code": null,
+        "error_http_headers": null,
+        "internal": {
+          "external_call_time_ms": 375
+        },
+        "clamp_errors": null,
+        "clamp_rewrites": null,
+        "connector_id": "asdk_app_69a089a326dc8191b32a3f2553f5be2c",
+        "connector_name": "Linear",
+        "action_name": "get_document",
+        "is_sync": false
+      },
+      "comments": {
+        "comments": [],
+        "hasNextPage": false
+      }
+    },
+    {
+      "document": {
+        "result": {
+          "meta": {
+            "io.modelcontextprotocol/serverInfo": {
+              "name": "Linear MCP",
+              "title": "Linear",
+              "version": "1.0.0",
+              "websiteUrl": "https://linear.app",
+              "icons": [
+                {
+                  "src": "https://static.linear.app/integrations/mcp/icon.svg",
+                  "mimeType": "image/svg+xml"
+                }
+              ]
+            }
+          },
+          "content": "# Video Vault AI 開發工作流程\n\n## Source of truth\n\n* **Linear Issue**：目前任務、精簡實作範圍、驗收條件、priority 與 status。\n* **GitHub repository**：程式碼、architecture、`AGENTS.md`、tests、CI、branch、commit、Pull Request。\n* **Linked GitHub Issue**：完整歷史背景與深度 product spec。Codex 只有需要時才讀，不要把整份內容複製進初始 prompt。\n\nRepository：[https://github.com/DystopiaOwO/video-vault-ai](<https://github.com/DystopiaOwO/video-vault-ai>)\n\n## 預設任務生命週期\n\n`Todo → In Progress → In Review → Done`\n\n### Todo\n\n任務已定義且沒有 blocker，但尚未開始實作。\n\n### In Progress\n\nCodex 正在實作、跑 local check，或修正 Review finding。\n\n### In Review\n\n已存在 Draft / ready PR，且目前 HEAD 已準備好讓 ChatGPT 網頁版進行 Code Review。CI 應為 green，或只剩已明確記錄的環境型 blocker。\n\n### Done\n\n最新 HEAD 已通過 required CI、GPT Review = `PASS`，且 PR 已 merge 到 `main`。\n\n## Codex 啟動方式\n\n初始 prompt 保持短小：\n\n> 實作 VID-XXX。先讀 Linear Issue，再檢查現有 repository 與 AGENTS.md；只有需要更深背景時才讀 linked GitHub source spec。沿用既有 architecture，不建立平行 pipeline。使用 feature branch，執行相關 tests，建立或更新 Draft PR。GPT Review PASS 前不得 merge。\n\n不要把完整 product history 或 linked GitHub Issue 全文貼進初始 prompt。\n\n## Pull Request contract\n\n每個 implementation PR 必須：\n\n* 在 PR title 或 description 帶入 Linear identifier（`VID-XXX`），讓 Linear 可以關聯。\n* 明確寫出 scope 與 non-scope。\n* 摘要 implementation，不重複整份 source spec。\n* 列出 tests / CI evidence。\n* 明確記錄 known limitations。\n* implementation 與 local verification 完成前維持 Draft。\n\n## GPT 網頁版 Review contract\n\nChatGPT 只擔任唯讀 Reviewer，不直接修改程式碼。Review 最新 PR HEAD 時依序檢查：\n\n1. Linear Issue acceptance criteria。\n2. 必要時讀 linked GitHub source spec。\n3. 既有 repository architecture / contract。\n4. PR diff 與直接受影響的 call chain。\n5. Relevant tests 與 CI evidence。\n\nReview 結果只能是：\n\n* `PASS`：最新 HEAD 已沒有 merge-blocking finding。\n* `CHANGES_REQUIRED`：仍有一個以上具體 finding 需要修正。\n\nFinding 應包含 severity、可定位時的 file/location、problem、impact、required correction。除非會實質影響 correctness 或 maintainability，否則不要為純 style 製造 churn。\n\n## Review / Fix loop\n\n如果結果為 `CHANGES_REQUIRED`：\n\n1. 把 finding 貼到 PR conversation。\n2. Linear Issue 移回或維持 `In Progress`。\n3. Codex 只修 confirmed finding，並沿用同一 PR branch。\n4. Codex push 新 HEAD 並重新跑 relevant checks。\n5. 準備完成後移到 `In Review`。\n6. ChatGPT 對新 HEAD 再 Review 一次。\n\nBranch 只要有新 commit，就不得沿用舊 HEAD 的 `PASS`。\n\n## Merge gate\n\n只有以下條件全部成立才可 merge：\n\n* 最新 HEAD 的 GPT Review = `PASS`。\n* Required CI / checks = green。\n* 沒有 unresolved merge conflict。\n* 沒有 documented blocker 或 failed required acceptance item。\n* PR 沒有因 local/manual acceptance 而刻意維持 Draft。\n\nMerge 後將對應 Linear Issue 移到 `Done`。\n\n## 防止無限 Loop\n\n* 正常 Review / Fix 最多 3 輪；超過後停止自動來回，交由人工決定 unresolved design / implementation conflict。\n* 一般 feature work 不允許 Codex 直接 push `main`。\n* 不允許為了滿足單一 Review finding 而重寫無關 architecture。\n* 除非 task 明確定義安全且使用者同意的 migration，development acceptance 不得修改 source media 或 production user data。",
+          "structuredContent": null,
+          "isError": false,
+          "resultType": "complete",
+          "id": "ddec22ec-ff27-45a2-856e-33ef0aad1a6a",
+          "title": "Codex → GPT Review 工作流程",
+          "icon": null,
+          "color": null,
+          "url": "https://linear.app/videoai/document/codex-gpt-review-工作流程-919df46a2c8d",
+          "slugId": "919df46a2c8d",
+          "createdAt": "2026-08-07T17:00:36.167Z",
+          "updatedAt": "2026-08-07T17:07:01.805Z",
+          "archivedAt": null,
+          "creator": {
+            "id": "8dffdecd-aedc-4937-8436-13869826da44",
+            "name": "DystopiaOwO"
+          },
+          "updatedBy": {
+            "id": "8dffdecd-aedc-4937-8436-13869826da44",
+            "name": "DystopiaOwO"
+          },
+          "project": {
+            "id": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+            "name": "Video Vault AI"
+          },
+          "initiative": null,
+          "team": null,
+          "issue": null,
+          "display_url": "https://linear.app/videoai/document/codex-gpt-review-工作流程-919df46a2c8d",
+          "display_title": "Codex → GPT Review 工作流程"
+        },
+        "error": null,
+        "error_data": null,
+        "error_code": null,
+        "classification_id": null,
+        "json_rpc_error_code": null,
+        "error_http_status_code": null,
+        "error_http_headers": null,
+        "internal": {
+          "external_call_time_ms": 405
+        },
+        "clamp_errors": null,
+        "clamp_rewrites": null,
+        "connector_id": "asdk_app_69a089a326dc8191b32a3f2553f5be2c",
+        "connector_name": "Linear",
+        "action_name": "get_document",
+        "is_sync": false
+      },
+      "comments": {
+        "comments": [],
+        "hasNextPage": false
+      }
+    }
+  ]
+}
