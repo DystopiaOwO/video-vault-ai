@@ -25,7 +25,13 @@
     "projectDocuments": [
       "Horizontal Extensibility Contract｜水平擴充設計規範",
       "Codex → GPT Review 工作流程"
-    ]
+    ],
+    "uploadedAttachmentPayloads": {
+      "count": 3,
+      "textFiles": 1,
+      "imageFiles": 2,
+      "note": "All three non-GitHub Linear-hosted attachment payloads were fetched before team cleanup. Images are stored losslessly as base64 text plus a decode helper."
+    }
   },
   "files": [
     "linear-metadata.json",
@@ -35,6 +41,11 @@
     "issues-03-VID-21-VID-28.json",
     "issues-04-VID-29-VID-36.json",
     "issues-05-VID-37-VID-44.json",
-    "issues-06-VID-45-VID-50.json"
+    "issues-06-VID-45-VID-50.json",
+    "attachments/manifest.json",
+    "attachments/VID-18-E4B-formal-perception-blocker.md",
+    "attachments/VID-49-Coffee-primary-preview-v3.png.base64",
+    "attachments/VID-50-Coffee-primary-preview-v2.png.base64",
+    "restore_attachments.py"
   ]
 }
