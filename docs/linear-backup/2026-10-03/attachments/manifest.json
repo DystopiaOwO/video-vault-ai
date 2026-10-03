@@ -1,0 +1,32 @@
+{
+  "exportedAt": "2026-10-03T22:13:00+08:00",
+  "note": "Image files are stored as raw base64 text to preserve exact bytes without relying on expiring Linear CDN URLs.",
+  "attachments": [
+    {
+      "issue": "VID-18",
+      "id": "8bd3ef1b-7cb3-4921-acea-70f3528cc99f",
+      "kind": "text",
+      "path": "attachments/VID-18-E4B-formal-perception-blocker.md",
+      "chars": 5461,
+      "commit": "b18083476e38638c3f88353ab586ee24c073d384"
+    },
+    {
+      "issue": "VID-49",
+      "id": "83d32b1b-0bed-4124-b166-f8e4a08a4efd",
+      "kind": "image",
+      "mimeType": "image/png",
+      "path": "attachments/VID-49-Coffee-primary-preview-v3.png.base64",
+      "base64Chars": 1081096,
+      "commit": "0fb6fbff4abff8a87fe8a936b37e7913a2eb4b5d"
+    },
+    {
+      "issue": "VID-50",
+      "id": "74ffff8d-d737-4ea1-a753-ed54ea79a0b1",
+      "kind": "image",
+      "mimeType": "image/png",
+      "path": "attachments/VID-50-Coffee-primary-preview-v2.png.base64",
+      "base64Chars": 1105788,
+      "commit": "c552473b158e4d64d877257b0b5824a810cd99e9"
+    }
+  ]
+}
