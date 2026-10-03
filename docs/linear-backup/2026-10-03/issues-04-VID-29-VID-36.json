@@ -1,0 +1,1121 @@
+{
+  "exportedAt": "2026-10-03T22:13:00+08:00",
+  "team": "VID",
+  "issues": [
+    {
+      "issue": {
+        "id": "VID-29",
+        "uuid": "3f8e20e8-b136-4fa5-b3d6-7bae464faa34",
+        "title": "Editorial Policy v1｜把剪輯 craft 變成可版本化決策規則",
+        "description": "## 定位\n\n在 AI Editor UX v1 穩定後，將目前散落在 prompt / Story logic /人工習慣中的剪輯 craft 整理成可版本化、可稽核的 editorial policy，而不是直接複製 CutCraft 規則或把大量硬編碼塞進 Story prompt。\n\n## 初始範圍\n\n針對 Video Vault AI 主要內容型態（Coffee / Matcha / Travel diary）建立 profile-aware editorial rules，例如：\n\n* hard cut / cut-on-action / dissolve 的適用條件\n* shot-role continuity 與避免重複畫面\n* reaction / ambience / handoff 的保留策略\n* pacing 與 segment minimum/maximum duration 的 soft preference\n* J/L cut 未來支援前的 audio continuity policy\n* speed-up / repeated-action 壓縮規則\n* exposure / WB correction 與 creative look 的順序\n* music function、ducking、effects density 的原則\n* transition / overlay 必須有敘事目的，不用特效掩蓋差的 cut\n\n## Architecture\n\n* policy 必須版本化並能記錄哪一版影響 Story / Render decision。\n* hard safety/correctness contract 與 soft editorial preference 分離；soft policy 不可覆寫 source integrity、approval、QC、QA。\n* Story / future planner 可引用 policy，但 human override 永遠可追溯。\n* 先建立 machine-readable schema + 少量高價值規則，不做巨型 prompt 文件。\n\n## Acceptance\n\n至少以 Coffee + Travel 各一個既有真實 project 做 replay，比較 policy 前後 Story decisions；輸出差異需可解釋且 deterministic inputs 不變。不得以降低 QA / Story schema correctness 換取「看起來更會剪」。",
+        "priority": {
+          "value": 4,
+          "name": "Low"
+        },
+        "url": "https://linear.app/videoai/issue/VID-29/editorial-policy-v1把剪輯-craft-變成可版本化決策規則",
+        "gitBranchName": "vid-29",
+        "createdAt": "2026-08-15T13:30:44.272Z",
+        "updatedAt": "2026-08-20T16:57:42.600Z",
+        "archivedAt": null,
+        "completedAt": null,
+        "startedAt": null,
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Backlog",
+        "statusType": "backlog",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "d9ba0036-3950-4261-89f5-deff0ac1b5d8",
+            "title": "CutCraft editorial craft reference",
+            "subtitle": "",
+            "url": "https://github.com/chang416/cutcraft/blob/main/skills/cutcraft/references/editorial-craft.md"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "1e34574f-fb6c-40cf-9b15-bf863c6fb156",
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "startedAt": "2026-08-15T13:30:44.272Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [
+            {
+              "id": "VID-25",
+              "title": "AI Editor UX v1｜Simple-first Creative Flow、Style Preview、Timeline Inspector"
+            }
+          ],
+          "relatedTo": [
+            {
+              "id": "VID-49",
+              "title": "Visual Style Preview correctness｜primary hero 宣稱 chapter-title 但實際 pixels 無可見字卡"
+            },
+            {
+              "id": "VID-48",
+              "title": "Visual Style Preview performance｜600s timeout、primary-first 與 bounded seek"
+            },
+            {
+              "id": "VID-47",
+              "title": "Source fingerprint revalidation｜Windows device identity drift 的安全 content-equal rebind"
+            },
+            {
+              "id": "VID-46",
+              "title": "Visual Style Preview UX/runtime｜「產生真實畫面預覽」無可見反應"
+            },
+            {
+              "id": "VID-45",
+              "title": "Creative Brief UX｜方向卡選擇無明確回饋與確認 CTA 易誤判無反應"
+            },
+            {
+              "id": "VID-43",
+              "title": "WebUI Jobs panel｜mixed updated_at timestamp 排序崩潰"
+            },
+            {
+              "id": "VID-41",
+              "title": "Editor Workflow v2｜從素材匯入到成片的主流程重構"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-30",
+        "uuid": "6c7dbbf4-82b4-426f-8eb4-c924c4bfd6cb",
+        "title": "Story semantic coverage｜mandatory segment 漏段的 corrective retry",
+        "description": "## Authoritative blocker\n\n<issue id=\"b58a43d6-92e8-4ef9-ad84-28290eed18c6\" href=\"https://linear.app/videoai/issue/VID-24/story-generation-performance32k-runtime-下-600s-timeout-root-cause\">VID-24</issue> 已完成 32K / 600s timeout 診斷：根因是 LM Studio OpenAI-compatible Story request 未正確關閉 reasoning。`reasoning_effort: none` 後，同一份 real Coffee 17-segment StoryInput 已可在合理時間完成 strict JSON generation；因此目前不需要先重構成 hierarchical / multi-stage Story planner。\n\nPR #97 corrected formal generation `b5a183c4-e03d-453d-818f-702d3e2492b9` 已不再 timeout，但 project semantic validation fail-closed：輸出遺漏 segment `11cca33b-e182-4c1c-883a-76fedcf958e0`。\n\n目前 code path 有一個明確 contract gap：\n\n* `LocalTextStoryProvider._generate_story()` 的單次 corrective retry 只處理 `_strict_parse()` 的 JSON / structural schema 錯誤。\n* provider 一旦得到 structurally valid JSON 就直接 return。\n* `validate_story_output()` 之後才檢查 project-level semantic coverage：`expected_ids - used - suppressed_ids`；因此「漏掉合法 segment」雖會 fail-closed，卻沒有進入既有的一次 corrective retry。\n\n## Goal\n\n把現有「最多一次 corrective retry」延伸到 Story 的 project semantic contract，讓 structurally valid 但 coverage 不完整的結果能帶著精確錯誤做一次受控修正；仍然 fail-closed，不得自動補造模型沒有決定的故事內容。\n\n## Required behavior\n\n1. 第一個 model output 必須同時經過：\n   * strict JSON / structural schema validation\n   * project semantic validation (`validate_story_output` equivalent)\n2. 若 semantic validation 僅屬可修正輸出錯誤，例如：\n   * expected included segment 遺漏\n   * segment 重複出現在多個 chapter\n   * chapter 與 suppressed_segments 同時引用同一 segment\n   * suppressed representative 未出現在 chapter\n   * invalid / cross-project UUID\n     則最多允許 **1 次** corrective retry。\n3. retry prompt 必須包含 machine-readable / deterministic validation findings，明確指出 missing / duplicate / invalid UUID；不得只說「schema 不符」。\n4. retry 仍須：\n   * 使用同一 snapshot / base revision\n   * 重新計算 <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> context budget\n   * `reasoning_effort=none`\n   * 維持同一 max output / strict response schema\n   * 不增加 timeout 當 workaround\n   * 不改 source / DB / human overrides\n5. 第二次仍不完整時必須 fail-closed，完整保存 first/second attempt coverage audit，不可自行把漏段塞入 chapter。\n\n## Prompt contract\n\nStory system/output contract需明確說明：所有 `human_override.include=true` 的 segment 必須 **exactly once** 出現在 `chapters[].segment_uuids`，或在符合既有 duplicate_group 契約時出現在 `suppressed_segments`；不得無聲省略。\n\n這是 semantic requirement，不應靠 JSON Schema `items` 本身假裝能保證跨 chapter exact-set coverage；authoritative check 仍由程式 validation 執行。\n\n## Audit\n\nProvider / generation audit 至少新增：\n\n* semantic_validation_attempts\n* first_attempt_missing_ids / duplicate_ids / invalid_ids\n* corrective_retry_reason\n* final expected / used / suppressed UUID set summary\n* calls / retries / per-attempt latency / request budget（沿用既有欄位）\n\n不得保存不必要的 raw model chain-of-thought / reasoning text。\n\n## Acceptance\n\n### Unit / regression\n\n* structurally valid JSON 缺 1 個 expected segment → first semantic validation fail → exactly one corrective POST → corrected result PASS。\n* second attempt 仍缺 segment → generation fail-closed，publish=0。\n* duplicate / invalid UUID 能給出精確 corrective finding。\n* corrective retry context budget 超限 → second POST=0，維持 <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> fail-closed。\n* 已完整 first response → calls=1 / retries=0。\n* existing strict parser malformed JSON retry 行為不可退化。\n\n### Real Coffee\n\n在 PR #97 reasoning fix merge baseline 上，用同一 isolated Coffee 17-segment fixture：\n\n* app-owned 32K runtime live verified。\n* `reasoning_effort=none`。\n* Story 在既有 timeout 內完成。\n* expected included UUID coverage = chapters + valid suppressed exact set，無 missing / duplicate / invalid。\n* strict Story validation PASS 並可 publish。\n* source SHA/size/mtime、production DB/config unchanged。\n\n若 Story PASS，立刻繼續 <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> 的 Story review → Apply → approval → formal Render → Final QC → Delivery QA → human preview → `deliverable_ready`，並停在下一個 authoritative blocker。",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-30/story-semantic-coveragemandatory-segment-漏段的-corrective-retry",
+        "gitBranchName": "vid-30",
+        "createdAt": "2026-08-15T13:56:20.585Z",
+        "updatedAt": "2026-08-16T03:03:50.123Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-16T03:03:50.088Z",
+        "startedAt": "2026-08-15T14:21:45.787Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "b1905199-5cc5-4e23-8e2e-8b0fff7b7012",
+            "title": "VID-30 merged baseline",
+            "subtitle": "",
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/commit/4b62c8c9c27d1c348bbadcee82e0efd57d5e044d"
+          },
+          {
+            "id": "98c8f99e-95fc-4de7-b85f-c43f0694b280",
+            "title": "[VID-30] Retry Story semantic coverage failures",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/98"
+          },
+          {
+            "id": "5968f9e5-f11a-40f6-847f-c4eda1cfda1a",
+            "title": "VID-24 merged baseline",
+            "subtitle": "",
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/commit/19e426765cd0ad9faf384112b32022e327088c5c"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "9ffd9ed6-7dc9-4466-b9d3-bf3535ad549e",
+              "name": "Todo",
+              "type": "unstarted"
+            },
+            "startedAt": "2026-08-15T13:56:20.585Z",
+            "endedAt": "2026-08-15T14:21:46.118Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-15T14:21:46.118Z",
+            "endedAt": "2026-08-16T03:03:50.108Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-16T03:03:50.108Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-20",
+              "title": "Adaptive sampling rescue｜稀疏 clip evidence sufficiency"
+            },
+            {
+              "id": "VID-19",
+              "title": "Perception capability registry 與 mandatory window planner contract"
+            },
+            {
+              "id": "VID-24",
+              "title": "Story generation performance｜32K runtime 下 600s timeout root-cause"
+            },
+            {
+              "id": "VID-21",
+              "title": "StoryInput context compaction｜移除 per-segment 重複 clip summary"
+            },
+            {
+              "id": "VID-13",
+              "title": "Story Provider｜context budget preflight 與可解釋失敗"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "e298aca6-6b59-43c3-9a14-e47290bf5fcf",
+            "body": "### Final merge blocker after Real Acceptance PASS\n\nPR #98 HEAD `8faba3a6545d01e2b097641102f8c438747b617e` now passes the authoritative post-VID-20 17-segment Coffee acceptance: calls=2/retries=1, both 32K preflights PASS, final strict + semantic Story PASS, exact 17/17 coverage, Story publish PASS, runtime cleanup PASS, source/production immutability preserved, CI #362 PASS.\n\nOne cache-contract issue remains before merge: this PR materially changes `STORY_SYSTEM_PROMPT` (mandatory exact coverage, concise/non-empty chapter requirements, suppression rules), but `STORY_PROMPT_VERSION` is still `project-story-v1`. Story cache identity uses prompt version, so existing pre-VID-30 cache entries for the same snapshot/provider/model can be reused under the new code without a new model request.\n\nRequired minimal same-PR fix:\n- bump `STORY_PROMPT_VERSION` (e.g. `project-story-v2`) or use an equivalent deterministic prompt-contract fingerprint in cache identity;\n- add regression proving v1 and new prompt contract cannot share cache, while identical new contract still cache-hits;\n- rerun targeted/full/CI on the new HEAD.\n\nNo need to change retry/provider/runtime logic or repeat the expensive 17-segment real acceptance unless this cache-only change unexpectedly affects generation behavior. Keep VID-30 In Progress until the new HEAD is reviewed/merged.",
+            "attachments": [],
+            "createdAt": "2026-08-15T16:50:25.348Z",
+            "updatedAt": "2026-08-15T16:50:25.309Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "4b02cb9f-a940-47e2-a499-c165996af826",
+            "body": "### Real 17-segment retry now reaches POST 2, but acceptance is still blocked\n\nPrevious review corrections are satisfied on PR #98 HEAD `d2fb3e396173ef3f3fe4c14d2791e84123a8cf9e`:\n\n- local strict parser now enforces declared required root/chapter/suppressed fields;\n- corrective retry no longer replays the full prior Story;\n- semantic findings are compact in the retry prompt while full coverage remains auditable;\n- real 17-segment retry preflight now fits: input `30,701`, request `32,749`, live context `32,768`;\n- POST 2 is actually issued;\n- CI #360 PASS.\n\nAuthoritative acceptance still fails because POST 2 returned malformed JSON, so strict+semantic Story did not publish. Do not merge or continue VID-18 yet.\n\nNext work remains on VID-30 until the cause is evidence-backed:\n\n1. Persist safe completion metadata on strict-parse failure: `finish_reason`, prompt/completion/total token usage when available, content length/hash, max_tokens, reasoning_effort, truncation indication. Do not persist reasoning/chain-of-thought.\n2. Reproduce the same post-VID-20 17-segment fixture and classify malformed output as token exhaustion/truncation vs transport/content corruption vs structured-output violation.\n3. Apply only the minimal fix supported by that evidence. No extra retries, timeout increase, context increase, cloud/mock fallback, field removal, or segment auto-insertion.\n4. Add regression for the diagnosed failure mode.\n5. Rerun the exact same 17-segment Coffee acceptance; strict + semantic PASS with exact 17/17 coverage is required before merge.",
+            "attachments": [],
+            "createdAt": "2026-08-15T16:00:22.288Z",
+            "updatedAt": "2026-08-15T16:00:21.386Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "b7ddb703-34cf-4e40-8a3f-9bec1aafcdf5",
+            "body": "### Authoritative 17-segment rerun result — still blocked\n\nThe fixture mismatch is resolved: PR #98 now reran the correct post-VID-20 Coffee fixture with 17 Story segments, including clip_002 rescue UUID `11cca33b-e182-4c1c-883a-76fedcf958e0`. Coverage on the first real response was already exact 17/17 with no missing/duplicate/invalid/conflict IDs.\n\nThe new blocker is the validation/retry contract:\n\n- `_STORY_OUTPUT_JSON_SCHEMA` declares all chapter fields as required, but local `_strict_parse()` only checks unknown chapter keys and does not reject missing required chapter fields.\n- The real first response therefore passed local strict parse even though chapters 3/4 lacked required fields, then got classified later as a semantic validation failure.\n- Corrective retry currently replays the entire previous Story plus findings. Real 17-segment preflight grew from 30,049 input tokens on attempt 1 to 35,195 input / 37,243 request tokens on retry, so VID-13 correctly blocked the second POST against live 32,768.\n\nKeep VID-30 In Progress and PR #98 Draft. Minimal required fix on the same branch:\n\n1. Align `_strict_parse()` with the declared required root/chapter/suppressed fields so structurally incomplete chapters fail structural validation locally.\n2. Compact corrective retry: regenerate from the same authoritative snapshot without replaying the entire previous Story.\n3. Semantic retry prompt should contain only actionable non-empty findings and concise validation errors/reason codes; retain full coverage sets in audit, not prompt.\n4. Preserve one-retry max, `reasoning_effort=none`, strict response schema, VID-13 preflight before retry POST, fail-closed, no timeout/context increase, no auto-inserting segments.\n5. Add regressions for missing required chapter fields, compact near-context retry success when it fits, and preflight blocking when it truly does not fit.\n6. Rerun the same post-VID-20 17-segment Coffee fixture. Required Story strict + semantic PASS before merge. Do not proceed to Apply/Render until PR #98 merges.",
+            "attachments": [],
+            "createdAt": "2026-08-15T15:33:49.350Z",
+            "updatedAt": "2026-08-15T15:33:49.296Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "5a834dec-3603-49e0-bb04-27c8d54d957b",
+            "body": "### Review blocker — Real Coffee fixture mismatch\n\nPR #98 implementation/regressions look aligned with VID-30 and CI #359 is green, but Real Acceptance is not yet authoritative.\n\nVID-30 requires the same post-VID-20 Coffee fixture with **17 Story segments**. Current PR evidence says acceptance used a copy of the **VID-19** DB and produced **16 StoryInput segments**. VID-20 exists specifically because Coffee clip_002 previously had 0 segments until evidence-sufficiency rescue recovered a real mandatory window/segment, so the current 16-segment run can miss the rescued 17th segment and does not cover the same state that exposed the original Story omission.\n\nRequired before merge:\n\n- keep code unchanged unless rerun exposes a real bug;\n- rerun from a post-VID-20/post-VID-24 isolated baseline, or formally regenerate Perception for both Coffee clips;\n- StoryInput must contain the expected 17-segment UUID set, including clip_002 rescued segment;\n- app-owned 32K runtime live verified, `reasoning_effort=none`;\n- strict + semantic Story validation PASS, with exact expected == chapter-used + valid-suppressed coverage and no missing/duplicate/invalid IDs;\n- source SHA/size/mtime and production DB/config unchanged;\n- update PR #98 Real Acceptance evidence.\n\nDo not proceed to Apply/Render inside VID-30. After merge, resume VID-18 downstream formal flow.",
+            "attachments": [],
+            "createdAt": "2026-08-15T15:11:22.268Z",
+            "updatedAt": "2026-08-15T15:11:22.175Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "e414f9f3-6d14-4fab-b638-3df6607a9e35",
+            "body": "VID-30 implementation and acceptance handoff\n\n- Branch: `agent/vid-30`\n- HEAD: `ea709c9f45ef43ef82dfb2138d90512674cac36d`\n- Draft PR: #98 https://github.com/DystopiaOwO/video-vault-ai/pull/98\n- Baseline: `origin/main 19e426765cd0ad9faf384112b32022e327088c5c` (VID-24 / PR #97 merged)\n- Required CI: PASS, run #359\n- Tests: Story/runtime targeted 67 passed; full Python 714 passed, 2 skipped; frontend 262 passed; production build and encoding/diff checks PASS.\n\nRoot cause: structurally valid Story output could omit an included mandatory segment; semantic validation happened after the provider retry boundary, so no corrective retry occurred.\n\nFix: validate semantic coverage after every local Story response; allow at most one deterministic machine-readable corrective retry; re-run VID-13 preflight on the actual retry messages; retain strict schema, reasoning_effort=none, reserved output, fail-closed publish, and no auto-insertion. Audit preserves per-attempt findings, retry reason, final expected/used/suppressed UUID coverage, budgets, calls, retries, and latency.\n\nReal isolated Coffee Story acceptance: PASS on a database copy, source media/production data unchanged. Generation `80a88eae-69a8-4a79-9a9b-f9729368cf55`; StoryInput 16 segments, input hash `254558563c2551054d38650ba4052b2fec2167ee15b744ef388d5dd5a5a43f0`; one actual loopback local Story POST, 0 retry, strict schema PASS, semantic coverage 16/16 exact UUIDs with 0 missing/duplicate/invalid; gemma-4-12b-it, live context 32768, estimated input 27773, reserved output 2048, reasoning_effort=none, total latency 28.567s; app-owned runtime load/live verification/cleanup PASS, external instance preserved, no cloud/model download/persistent config mutation.\n\nVID-30 scope complete; formal downstream Apply/Render/QA remains outside this PR. PR stays Draft for review.",
+            "attachments": [],
+            "createdAt": "2026-08-15T14:54:34.709Z",
+            "updatedAt": "2026-08-15T14:54:34.642Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "32686177-db76-4f31-88b2-ec5adc813e99",
+            "body": "VID-30 implementation started and Draft PR #98 opened.\n\n- Baseline: origin/main / merged VID-24 commit 19e426765cd0ad9faf384112b32022e327088c5\n- Branch: agent/vid-30\n- HEAD: ea709c9f45ef43ef82dfb2138d90512674cac36d\n- Root cause fixed: semantic validation previously happened after provider retry boundary.\n- Added max-one semantic corrective retry with deterministic missing/duplicate/invalid/conflict findings.\n- VID-13 preflight is rerun for the actual retry messages; second overflow blocks before POST.\n- First/second semantic coverage, final UUID summary, request budgets and retry reason are audited.\n- Second incomplete output remains fail-closed with 0 publish.\n- Story/runtime targeted: 67 passed; full Python: 714 passed, 2 skipped; frontend 262 passed; build PASS.\n- Required CI and isolated real Coffee acceptance are pending.\n- VID-30 does not change timeout, provider routing, gates, production data/config, or source media.",
+            "attachments": [],
+            "createdAt": "2026-08-15T14:47:08.033Z",
+            "updatedAt": "2026-08-15T14:47:07.979Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-31",
+        "uuid": "af040022-b934-471a-97ef-4ac9c4784789",
+        "title": "Render performance｜source ffprobe 去重與 fast metadata path",
+        "description": "## Observation\n\n<issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> formal Render on latest main `4b62c8c9c27d1c348bbadcee82e0efd57d5e044d` shows extremely high segment latency. Code review confirms the hot path:\n\n* `project_renderer.render_project()` loops all manifest segments and calls `render_segment(...)` independently.\n* `segment_renderer.render_segment()` calls `probe_media(ffprobe_path, source)` for every cache miss.\n* `media_probe.probe_media()` always invokes ffprobe with `-count_frames -count_packets -show_streams -show_format`.\n* `-count_frames/-count_packets` can force a full media scan. Multiple segments referencing the same large source therefore repeat the same expensive scan.\n* `render_segment()` only requires source probe metadata such as duration / has_audio to validate source bounds and build the FFmpeg command; it does not require frame/packet counts for this source-side step.\n* `validate_segment_output()` also uses the same deep `probe_media()` although its QC checks only stream presence, resolution, fps, pixel format, audio format and duration.\n\nThis is a performance defect/inefficiency, not a current <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> gate failure. Do not modify or interrupt the already-running formal <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> Render. Implement after the current Render reaches terminal state.\n\n## Goal\n\nRemove redundant full-source ffprobe scans from segment rendering without weakening Render, Final QC, Delivery QA, source immutability or cache correctness.\n\n## Required design\n\n### 1. Separate fast metadata probe from deep counting probe\n\nAdd an explicit fast media probe path for render metadata that does **not** use `-count_frames` / `-count_packets`.\n\nFast probe must still provide all fields required by render/QC contracts:\n\n* duration\n* video/audio presence\n* width/height\n* fps\n* pixel format\n* codec metadata as currently required\n* audio sample rate/channels\n* color metadata\n* stream indexes/start/end metadata where available from headers\n\nDo not silently change callers that genuinely require decoded frame/packet counts. If any existing authoritative QA contract needs counts, keep a separate deep/counting probe for that path.\n\n### 2. Job-scoped unique-source probe reuse\n\nFor one formal `render_project()` job, probe each unique immutable source at most once for source-side render metadata, then reuse that `MediaProbe` for all segments referencing the same source.\n\nPreferred API shape:\n\n* `render_project()` builds a source probe registry/cache keyed by deterministic source identity/path.\n* `render_segment()` may accept an already-validated `source_probe` (or probe resolver/cache) instead of always invoking ffprobe itself.\n* standalone `render_segment()` callers remain supported and can self-probe when no precomputed probe is provided.\n\nDo not key only on basename. Preserve source identity / approved manifest provenance.\n\n### 3. Source mutation safety\n\nDo not weaken immutable-source guarantees.\n\nBefore reusing a cached probe, source identity must remain bound to approved/current source evidence (e.g. exact approved source path + existing fingerprint/size/mtime contract as appropriate in the current architecture).\n\nA changed/replaced source must never reuse stale metadata.\n\n### 4. Segment output QC\n\nEvaluate `validate_segment_output()` separately. It currently calls the same counting probe even though the checks do not use frame_count.\n\nUse fast metadata probe here if doing so preserves every current segment QC assertion.\n\nDo not remove:\n\n* video/audio stream check\n* target resolution\n* fps\n* pixel format\n* audio sample rate/channels\n* duration tolerance\n\n### 5. Preserve deep QA\n\nFinal QC / Delivery QA must retain all existing authoritative evidence and full-decode/counting behavior where required.\n\nThis task is an optimization only; it must not convert deep QA into metadata-only QA.\n\n## Audit / observability\n\nAdd enough render-job evidence to verify optimization, for example:\n\n* unique_source_count\n* source_probe_calls\n* source_probe_cache_hits\n* probe mode (`fast_metadata` / `deep_counting`)\n* optional probe latency per unique source\n\nDo not add raw media payload retention.\n\n## Regression tests\n\nAt minimum:\n\n1. Multiple segments referencing the same source in one render job -> source fast ffprobe called exactly once.\n2. Segments referencing two sources -> exactly two source probe calls.\n3. Standalone `render_segment()` without supplied probe still works and self-probes once.\n4. Source duration bounds are still fail-closed.\n5. Source mutation / changed identity cannot reuse stale probe.\n6. Segment output QC retains all existing media-format/duration failures using fast probe.\n7. Deep/counting probe remains available for callers that require `frame_count`/packet evidence.\n8. Existing segment cache hit/miss and encoder contracts do not regress.\n\n## Performance acceptance\n\nUse the same Coffee-style render fixture with repeated segments from the same large source.\n\nDemonstrate:\n\n* source-side full counting scans during segment render: 0\n* source fast metadata probes: number of unique source files, not number of segments\n* formal segment outputs are byte/provenance compatible with current render contract where deterministic, or media/QC-equivalent where encoder output is nondeterministic\n* Final QC / Delivery QA behavior unchanged\n\nRecord before/after probe call counts and elapsed probe time.\n\n## Non-goals\n\n* no gate bypass\n* no Final QC weakening\n* no Delivery QA weakening\n* no source fingerprint weakening\n* no render architecture rewrite\n* no parallel rendering in this issue\n* no changing encoder quality/settings\n* do not restart the currently-running <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> acceptance Render solely for this optimization",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-31/render-performancesource-ffprobe-去重與-fast-metadata-path",
+        "gitBranchName": "vid-31",
+        "createdAt": "2026-08-16T04:31:15.394Z",
+        "updatedAt": "2026-08-16T13:26:59.551Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-16T05:27:32.173Z",
+        "startedAt": "2026-08-16T04:42:23.648Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "abb65f27-0770-474c-96ce-fc4518da0d88",
+            "title": "VID-31 merged baseline",
+            "subtitle": "",
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/commit/f40d43b9e409ef7ee45fc0faf8c05b0b58e98a08"
+          },
+          {
+            "id": "4b36f6d4-3a61-497b-860f-cf92e6e764ba",
+            "title": "[VID-31] Deduplicate render source probes",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/99"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "1e34574f-fb6c-40cf-9b15-bf863c6fb156",
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "startedAt": "2026-08-16T04:31:15.394Z",
+            "endedAt": "2026-08-16T04:42:23.668Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-16T04:42:23.668Z",
+            "endedAt": "2026-08-16T05:27:32.202Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-16T05:27:32.202Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-39",
+              "title": "Formal Render display geometry｜尊重 SAR / DAR / rotation / Display Matrix，避免 framing 失真"
+            },
+            {
+              "id": "VID-38",
+              "title": "Formal Render GPU pipeline｜NVDEC → CUDA filters → NVENC"
+            },
+            {
+              "id": "VID-37",
+              "title": "Delivery QA audio provenance｜separate approval semantic identity from render cache identity"
+            },
+            {
+              "id": "VID-36",
+              "title": "Formal Render segment cache must bind resolved encoder contract"
+            },
+            {
+              "id": "VID-35",
+              "title": "Render Performance v2｜H.264 / HEVC / AV1 NVENC benchmark 與 re-encode 最小化"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "8d4f4943-5544-48ab-aff5-19ad815e16dc",
+            "body": "### Scope override — user explicitly chose optimization now\n\nSupersedes the issue-description note that said not to interrupt the currently-running VID-18 Render. The user explicitly chose to stop/abandon that Render because the confirmed repeated deep ffprobe scans make completion impractically slow.\n\nImplement VID-31 now. The abandoned Render job `7def7ade1159467a8d7aaaed708f201f` is neither PASS nor FAIL; cancel/stop it through the existing official job-control path if it is still running. After this fix merges, VID-18 will start a new formal Render from the already-approved revision if approval snapshot validation still passes.",
+            "attachments": [],
+            "createdAt": "2026-08-16T04:42:41.808Z",
+            "updatedAt": "2026-08-16T04:42:41.755Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-32",
+        "uuid": "52ee49da-6210-478c-a0ec-4f8ee08f2a85",
+        "title": "Formal Delivery QA blocker｜chapter cards produce interior black intervals",
+        "description": "## Authoritative blocker\n\n<issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> formal acceptance on latest main `f40d43b9e409ef7ee45fc0faf8c05b0b58e98a08` stopped at formal Delivery QA.\n\n* approval snapshot valid: `approval-17c4220bcbab6bc6-f5eea7980b19`\n* approved revision: 8\n* manifest hash: `17c4220bcbab6bc63de35988f9f363ef00decb20f5f0ffee9b02b88dde2b0215`\n* Render job: `ee81f4e703774c4ab4eeaf9f67104e32`\n* Render Report / Final QC: PASS\n* Delivery QA: `ab4ead49a99842a7b054993ec5139bcc`, `qa_blocked`\n\n## Minimal reproduction\n\nThe approved visual timeline contains 3 chapter cards, each 1.5 seconds. `visual_compositor._render_card()` generates cards from an explicit `color=c=black@0.85` lavfi source. Formal Delivery QA v1 detects two interior black intervals:\n\n* output `14.533333s`, duration `1.5s`\n* output `84.066667s`, duration `1.5s`\n\nThe first `0.0s` / `1.533333s` interval is classified as an edge fade; the two interior intervals are classified as `interior_long_black_count=2` and block on `black_block_seconds=1.0`. Evidence: QA run `ab4ead49a99842a7b054993ec5139bcc`, `evidence/black_flash.json`, `REPORT.md`, and black-flash contact sheet.\n\n## Required scope\n\nResolve the visual compositor / visual timeline / Delivery QA contract mismatch so approved chapter cards do not produce unintended authoritative interior black intervals. Preserve fail-closed Delivery QA, do not lower thresholds, do not manually FFmpeg, and do not change source media or production data. Add regression proving chapter-card render passes the existing black-frame contract while preserving chapter text, duration, provenance, and stable IDs.\n\nDo not treat this as a human warning acceptance; the current check is high-severity blocked. <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> remains In Progress until formal Render → Final QC → Delivery QA → human preview completes.",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-32/formal-delivery-qa-blockerchapter-cards-produce-interior-black",
+        "gitBranchName": "vid-32",
+        "createdAt": "2026-08-16T06:10:54.300Z",
+        "updatedAt": "2026-08-16T13:27:18.727Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-16T07:27:08.452Z",
+        "startedAt": "2026-08-16T06:10:54.357Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "a96b8f82-a40d-4697-a6fc-594665ce2192",
+            "title": "[VID-32] Prevent chapter cards from triggering black-frame QA",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/100"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-16T06:10:54.300Z",
+            "endedAt": "2026-08-16T07:27:08.462Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-16T07:27:08.462Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-27",
+              "title": "Visual Style Preview｜用真實素材先核准字幕與視覺方向"
+            },
+            {
+              "id": "VID-38",
+              "title": "Formal Render GPU pipeline｜NVDEC → CUDA filters → NVENC"
+            },
+            {
+              "id": "VID-36",
+              "title": "Formal Render segment cache must bind resolved encoder contract"
+            },
+            {
+              "id": "VID-33",
+              "title": "Render NVENC capability probe｜避免合法 GPU 被 16x16 probe 誤判"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "f5f0b540-a0c0-4157-a85c-1a8ebbbe42e3",
+            "body": "### Merged\n\nPR #100 reviewed clean and squash-merged.\n\n- Final PR HEAD: `1a03627221d732f17e60458ff52866750be861ef`\n- CI #372 / run `31933686354`: PASS\n- Merged main SHA: `44776a99cce95f18f12b579c9e86262155614a89`\n- `VISUAL_RENDER_CACHE_VERSION=visual-render-cache-v2`\n- `VISUAL_COMPOSITION_VERSION=visual-composition-v1` unchanged\n- pre-fix black-card cache cannot hit under v2; repeated v2 render can hit\n- real `0x20242a` chapter-card render produces no event under the unchanged formal blackdetect contract\n- approval visual timeline identity remains unchanged\n\nVID-32: Done. VID-18 may resume with a new formal Render after validating the existing revision-8 approval snapshot on the merged main.",
+            "attachments": [],
+            "createdAt": "2026-08-16T07:27:23.783Z",
+            "updatedAt": "2026-08-16T07:27:23.753Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "7dc8096d-1871-47e4-92ce-130dea313c79",
+            "body": "VID-32 review follow-up / PR #100 updated\n\n- Base/main: cb7c807aef54413314bd2b656eca61f4e6d59a20\n- HEAD: 1a03627221d732f17e60458ff52866750be861ef\n- PR remains Draft: https://github.com/DystopiaOwO/video-vault-ai/pull/100\n- Added independent VISUAL_RENDER_CACHE_VERSION=visual-render-cache-v2 to visual_cache_key(); VISUAL_COMPOSITION_VERSION remains visual-composition-v1.\n- Same visual item/profile: renderer-cache-v1 key != v2 key; old v1 artifact misses under v2; repeated v2 render hits.\n- Approval identity regression: resolution_version/hash, stable IDs and duration unchanged. No Delivery QA threshold/gate change.\n- Real rendered 0x20242a chapter-card blackdetect regression has no event under the existing contract.\n- Local validation: targeted 95 passed; full Python 764 passed, 2 skipped; frontend 262 passed; frontend build PASS; diff-check/UTF-8 PASS.\n- GitHub Actions run 31933686354: all required jobs PASS, including Windows authoritative.\n- Full Coffee formal Render intentionally not rerun per review scope; prior Delivery QA blocker remains the post-merge acceptance handoff.",
+            "attachments": [],
+            "createdAt": "2026-08-16T07:25:07.952Z",
+            "updatedAt": "2026-08-16T07:25:07.907Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "c75c98ef-72fc-44e3-b124-864b76cf0bb7",
+            "body": "### Review handoff after VID-33 merge\n\nVID-33 is now merged on main `cb7c807aef54413314bd2b656eca61f4e6d59a20`.\n\nPR #100 still has one correctness blocker before merge:\n\n- `_render_card()` changed chapter-card pixels from full black to `0x20242a`;\n- visual-card cache identity was not changed;\n- the existing VID-18 workspace can therefore reuse the pre-fix pure-black chapter-card cache and still fail Delivery QA.\n\nDo **not** bump `VISUAL_COMPOSITION_VERSION`: that would alter the approved visual timeline/resolution identity and stale revision 8.\n\nRequired correction on the same PR:\n- add/bump a renderer/cache-only contract version used by `visual_cache_key()` or equivalent cache identity;\n- old black-card cache must miss under the new renderer;\n- approved visual timeline identity/hash must stay unchanged;\n- regression proving old cache cannot masquerade as new dark-neutral card;\n- update/rebase branch onto current main `cb7c807aef54413314bd2b656eca61f4e6d59a20`, preserving VID-33 NVENC semantics;\n- rerun targeted/full CI.\n\nAfter PR #100 is reviewed+merged, VID-18 can rerun a new formal Render using the same valid revision-8 approval snapshot if the product still considers it current.",
+            "attachments": [],
+            "createdAt": "2026-08-16T07:12:11.083Z",
+            "updatedAt": "2026-08-16T07:12:11.001Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-33",
+        "uuid": "069af1e3-ef10-4d53-a96c-f5f8d36fb29f",
+        "title": "Render NVENC capability probe｜避免合法 GPU 被 16x16 probe 誤判",
+        "description": "## Evidence\n\nFormal Render job `ee81f4e703774c4ab4eeaf9f67104e32` on main `f40d43b9e409ef7ee45fc0faf8c05b0b58e98a08` resolved:\n\n* requested: `auto`\n* implementation: `libx264`\n* fallback_reason: `nvenc_probe_failed`\n* FFmpeg: `9.0-full_build-www.gyan.dev`\n* all 17 segments: `encoder_used=libx264`\n* final assembly: `libx264`\n\nSame host/binary evidence:\n\n* FFmpeg path: `C:\\\\Users\\\\b3b3b\\\\AppData\\\\Local\\\\Microsoft\\\\WinGet\\\\Packages\\\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\\\ffmpeg-9.0-full_build\\\\bin\\\\ffmpeg.exe`\n* `h264_nvenc` is listed\n* GPU: NVIDIA GeForce RTX 5070 Ti\n* Driver/KMD: 610.62\n* CUDA UMD: 13.3\n* `16x16` original probe: exit `-22`, `Frame Dimension less than the minimum supported value`\n* `128x128`: same minimum-dimension failure\n* `256x256`: exit `0`\n* `1920x1080`: exit `0`\n* real-like 1080p with `-preset p5 -rc vbr -cq 23`: exit `0`\n\nSeparate contract evidence:\n\n* requested diagnostic command with `-rc cq` fails before device initialization: FFmpeg reports `Unable to parse \"rc\" option value \"cq\"`\n* this is distinct from the 16x16 probe fixture defect and must not be conflated with GPU/driver failure.\n\n## Scope\n\nUse a legal small probe frame, preferably 256x256, with the actual supported NVENC option contract. Preserve explicit unsupported-device fallback and add regression coverage for small-frame failure versus valid probe success. Do not change Final QC/Delivery QA, source media, production data, or thresholds in this issue.",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-33/render-nvenc-capability-probe避免合法-gpu-被-16x16-probe-誤判",
+        "gitBranchName": "vid-33",
+        "createdAt": "2026-08-16T06:33:47.459Z",
+        "updatedAt": "2026-08-16T10:55:33.057Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-16T07:11:00.031Z",
+        "startedAt": "2026-08-16T06:33:47.508Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "c80b76db-4db9-4860-96b2-019c914ec4ca",
+            "title": "[VID-33] Fix NVENC capability probe contract",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/101"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-16T06:33:47.459Z",
+            "endedAt": "2026-08-16T07:11:00.039Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-16T07:11:00.039Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [
+            {
+              "id": "VID-35",
+              "title": "Render Performance v2｜H.264 / HEVC / AV1 NVENC benchmark 與 re-encode 最小化"
+            }
+          ],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-32",
+              "title": "Formal Delivery QA blocker｜chapter cards produce interior black intervals"
+            },
+            {
+              "id": "VID-38",
+              "title": "Formal Render GPU pipeline｜NVDEC → CUDA filters → NVENC"
+            },
+            {
+              "id": "VID-36",
+              "title": "Formal Render segment cache must bind resolved encoder contract"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "7f9790c6-22d3-4b06-9b13-5b22f14c5f6a",
+            "body": "### Merged\n\nPR #101 reviewed clean and squash-merged.\n\n- Final PR HEAD: `0ba6a02d58bc2261b577c151f72423a4ad6e42b0`\n- CI #370: Frontend / selector / Media Smoke / Ubuntu portability / Windows authoritative all PASS\n- Merged main SHA: `cb7c807aef54413314bd2b656eca61f4e6d59a20`\n- VID-33: Done\n\nFinal contract:\n- 256x256 representative NVENC capability probe\n- `h264_nvenc -preset p5 -rc vbr -cq 23`\n- `ENCODER_CONTRACT_VERSION=2`\n- structured bounded NVENC probe audit persisted to Render Report/API\n- diagnostic stderr excluded from semantic contract/cache identity\n- CPU fallback remains fail-closed and auditable.\n\nNo formal Coffee rerun was required for this focused fix.",
+            "attachments": [],
+            "createdAt": "2026-08-16T07:11:14.598Z",
+            "updatedAt": "2026-08-16T07:11:14.574Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "0f0ed671-ea16-44e4-bfb3-ca877311366e",
+            "body": "Review blocker addressed on the same PR.\n\n- New HEAD: `0ba6a02d58bc2261b577c151f72423a4ad6e42b0`\n- `_nvenc_probe()` now returns structured audit: attempted, geometry, result, returncode, bounded stderr_tail (max 2000 chars), failure_class, timed_out, start_failed.\n- OSError and TimeoutExpired remain CPU fail-closed with audit evidence.\n- Auto fallback retains `libx264 / nvenc_probe_failed`.\n- Audit is persisted in `encoder_contract.nvenc_probe`, top-level Render Report `encoder_probe_audit`, and safe API DTO.\n- Semantic `contract_hash` explicitly excludes diagnostic fields; differing stderr tails produce the same hash.\n- `ENCODER_CONTRACT_VERSION` remains 2.\n\nValidation:\n- targeted encoder/report/project tests: 33 passed\n- full Python: 760 passed, 2 skipped\n- frontend: 262 passed\n- frontend build: PASS\n- real-host audit: 256x256, pass, returncode 0, h264_nvenc\n- diff-check / UTF-8: PASS\n- PR #101 new CI run: Frontend, selector, Media Smoke, Ubuntu portability, Windows authoritative all PASS\n\nPR #101 remains OPEN + Draft; no formal Coffee rerun or merge.",
+            "attachments": [],
+            "createdAt": "2026-08-16T07:09:33.476Z",
+            "updatedAt": "2026-08-16T07:09:33.462Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "e481efd2-2382-48be-9c2b-19238ca8dcf3",
+            "body": "### Review blocker — probe diagnostics still discarded\n\nPR #101 HEAD `7e057afb560f367c48fb36402fde5bd6aa0dfc3f` has the correct core fix and CI #369 is green:\n\n- 16x16 -> 256x256 NVENC probe\n- invalid `-rc cq` -> supported `-rc vbr -cq 23`\n- `ENCODER_CONTRACT_VERSION` 1 -> 2\n- real-host NVENC probe PASS / formal 1080p argument encode exit 0\n\nHowever, `_nvenc_probe()` still returns only bool and discards `returncode` / stderr. This leaves the explicit VID-33 observability acceptance unmet; future `nvenc_probe_failed` cases would again require manual reproduction.\n\nHold merge. Required correction on the same PR:\n\n- structured probe evidence: attempted, 256x256 geometry, result, returncode, bounded stderr tail, timeout/start-failure classification;\n- expose it in Render Report / encoder audit, especially on auto CPU fallback;\n- diagnostic text must remain audit-only and must not make encoder cache identity nondeterministic;\n- regressions for failed probe evidence + successful h264_nvenc resolution.\n\nNo full Coffee rerun required for this correction; retain current real-host 256x256 + VBR/CQ acceptance.",
+            "attachments": [],
+            "createdAt": "2026-08-16T06:55:06.227Z",
+            "updatedAt": "2026-08-16T06:55:06.195Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "05829af5-bea5-4aac-8d77-7158cd8b62fc",
+            "body": "CI completed for PR #101:\n\n- Select PR test layers: PASS\n- Frontend: PASS\n- Ubuntu portability / Python 3.13: PASS\n- Windows authoritative / Python 3.11: PASS\n- Media Smoke / Ubuntu: SKIPPED by workflow selector\n\nPR remains OPEN + Draft, head is still `7e057afb560f367c48fb36402fde5bd6aa0dfc3f`.",
+            "attachments": [],
+            "createdAt": "2026-08-16T06:53:18.193Z",
+            "updatedAt": "2026-08-16T06:53:18.178Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "786b97ac-6399-4513-87e9-3842bf7ffd0c",
+            "body": "Implementation complete on branch `agent/vid-33`.\n\n- HEAD: `7e057afb560f367c48fb36402fde5bd6aa0dfc3f`\n- Draft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/101\n- Probe changed from 16x16 to 256x256 with representative NVENC options.\n- NVENC contract changed from invalid `-rc cq` to supported `-rc vbr -cq 23`.\n- `ENCODER_CONTRACT_VERSION` bumped `1 -> 2` to invalidate old contract/cache identities.\n- Existing CPU fallback and explicit encoder paths preserved.\n- Targeted: 41 passed\n- Full Python: 755 passed, 2 skipped\n- Real host probe: `True`; auto resolves `h264_nvenc` / `vbr`\n- Real 1080p formal-argument NVENC null encode: exit 0\n- Frontend: 262 passed; production build PASS\n- diff-check / UTF-8: PASS\n\nNo formal Coffee Render rerun, no source/production data changes, and no merge performed. Required CI is currently pending on PR #101.",
+            "attachments": [],
+            "createdAt": "2026-08-16T06:51:03.540Z",
+            "updatedAt": "2026-08-16T06:51:03.495Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "68479cdb-e140-40fb-b5fb-4c09afcce23a",
+            "body": "### ChatGPT review after diagnosis\n\nDiagnosis is sufficient to establish **two distinct product defects**, both in VID-33 scope:\n\n1. **Capability probe geometry defect**\n   - current 16x16 probe fails on the RTX 5070 Ti with `Frame Dimension less than the minimum supported value`;\n   - 128x128 also fails;\n   - 256x256 and 1920x1080 succeed;\n   - therefore `auto` falsely resolved `libx264` even though NVENC is healthy.\n\n2. **Formal NVENC option-contract defect**\n   - current `encoder_contract.py` resolves NVENC with `rate_control=\"cq\"` and emits `-rc cq -cq 23`;\n   - same-host/same-FFmpeg diagnostic shows `-rc cq` is rejected before device initialization (`Unable to parse \"rc\" option value \"cq\"`);\n   - therefore changing only the probe to 256x256 would expose a second failure: auto would select `h264_nvenc`, then formal encoding would fail on the invalid option contract.\n\nImplementation must therefore fix both, minimally and in the same focused VID-33 PR:\n- permanent capability probe uses a legal small geometry, 256x256 unless stronger evidence requires otherwise;\n- resolve the actual supported NVENC RC contract for FFmpeg 9.0 / `h264_nvenc` and use that contract consistently in both the representative probe and formal encoder arguments;\n- do not guess the replacement RC mode: derive it from `ffmpeg -h encoder=h264_nvenc` / same-host successful command evidence;\n- retain quality intent comparable to current CQ 23 semantics as closely as supported, with explicit deterministic contract fields;\n- bump `ENCODER_CONTRACT_VERSION` because emitted formal FFmpeg arguments materially change; old approved/render cache identities must not masquerade under the new encoder contract;\n- regression: 16/128 geometry failure vs 256 success, unsupported NVENC -> CPU fallback, valid NVENC -> h264_nvenc, and emitted formal NVENC arguments must be accepted by a representative real FFmpeg probe;\n- add safe probe diagnostics (returncode + bounded stderr tail + geometry/result), without environment dump;\n- no VID-32 / Delivery QA changes and no full 17-segment rerun just to prove this implementation.\n\nThere is currently no VID-33 GitHub branch or PR, so implementation has not started yet.",
+            "attachments": [],
+            "createdAt": "2026-08-16T06:37:18.145Z",
+            "updatedAt": "2026-08-16T06:37:18.090Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-34",
+        "uuid": "75b96332-9458-488d-a143-a4d07d55fa09",
+        "title": "NVENC capability probe｜避免合法 GPU 被誤判為不可用",
+        "description": "## Context\n\n<issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> formal Render succeeded on main `f40d43b9e409ef7ee45fc0faf8c05b0b58e98a08`, but the current encoder auto-resolution path may have fallen back to CPU before rendering if `_nvenc_probe()` failed. The current probe only returns a boolean and discards stderr, so the actual reason cannot be audited after the fact.\n\nCurrent `_nvenc_probe()` uses a very small synthetic source (`16x16`, one frame, `h264_nvenc`). On RTX 50-series / newer NVENC stacks, this probe shape itself may be invalid even when normal NVENC encoding works.\n\nThis issue is separate from <issue id=\"52ee49da-6210-478c-a0ec-4f8ee08f2a85\" href=\"https://linear.app/videoai/issue/VID-32/formal-delivery-qa-blockerchapter-cards-produce-interior-black\">VID-32</issue> (chapter-card / Delivery QA black interval). Do not mix the fixes.\n\n## Goal\n\nDetermine whether <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> actually rendered with `h264_nvenc` or CPU fallback, identify the exact NVENC probe failure if any, and fix the capability probe only if it can falsely reject a working GPU.\n\n## Required diagnosis\n\n1. Inspect the completed <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> Render job `ee81f4e703774c4ab4eeaf9f67104e32` and record:\n   * encoder_contract.requested\n   * encoder_contract.implementation\n   * encoder_contract.fallback_reason\n   * preset / rate-control / quality\n   * ffmpeg_version\n   * actual segment `encoder_used` values\n   * final composition/re-encode encoder where applicable.\n2. On the same Windows host and same FFmpeg binary, reproduce the existing probe exactly and retain:\n   * exact command\n   * exit code\n   * stdout/stderr\n   * `ffmpeg -version`\n   * `ffmpeg -encoders` presence of `h264_nvenc`\n   * `nvidia-smi` GPU + driver evidence.\n3. Run a realistic short NVENC probe (e.g. 1080p `testsrc2`, 1 second, `h264_nvenc`, preset p5, rc cq, cq 23, yuv420p).\n4. Classify the root cause:\n   * FFmpeg build lacks NVENC\n   * driver / NVENC API mismatch\n   * CUDA/device/session initialization failure\n   * option/profile/pixel-format incompatibility\n   * tiny 16x16 probe fixture defect\n   * other evidenced failure.\n\n## If the current 16x16 probe is the defect\n\nImplement a minimal capability-probe correction only:\n\n* use a small but valid representative geometry (prefer 128x128 or 256x256; do not use 1080p for the permanent probe unless necessary)\n* yuv420p\n* h264_nvenc\n* compatible representative encoder options\n* minimal frame count/duration\n* preserve fast startup.\n\nAdd regression proving:\n\n* old tiny probe can fail while representative probe passes -> auto resolves `h264_nvenc`\n* real unsupported NVENC still resolves `libx264`\n* explicit CPU/NVENC behavior remains unchanged.\n\n## Observability\n\nIf code changes are required, make NVENC capability evidence auditable in encoder contract / Render Report:\n\n* attempted\n* probe geometry/shape\n* returncode\n* short stderr tail\n* result\n* ffmpeg version\n\nDo not store huge stderr, environment variables, or sensitive machine data.\n\nIf auto fallback occurs, report must clearly expose:\n\n* `implementation=libx264`\n* `fallback_reason=nvenc_probe_failed`\n* probe returncode and stderr tail.\n\n## Non-goals\n\n* no <issue id=\"52ee49da-6210-478c-a0ec-4f8ee08f2a85\" href=\"https://linear.app/videoai/issue/VID-32/formal-delivery-qa-blockerchapter-cards-produce-interior-black\">VID-32</issue> changes\n* no Delivery QA threshold changes\n* no encoder quality redesign\n* no parallel rendering\n* no driver/FFmpeg upgrade before evidence collection\n* no full 17-segment Render rerun just for diagnosis\n\n## Handoff\n\nFirst return diagnosis evidence. If it is only an environment problem, no PR is required. If it is a product defect, create a focused Draft PR under this issue and return for review.",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-34/nvenc-capability-probe避免合法-gpu-被誤判為不可用",
+        "gitBranchName": "vid-34",
+        "createdAt": "2026-08-16T06:35:56.898Z",
+        "updatedAt": "2026-08-16T06:36:14.357Z",
+        "archivedAt": null,
+        "completedAt": null,
+        "startedAt": "2026-08-16T06:35:57.019Z",
+        "canceledAt": "2026-08-16T06:36:13.283Z",
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Duplicate",
+        "statusType": "duplicate",
+        "labels": [],
+        "attachments": [],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-16T06:35:56.898Z",
+            "endedAt": "2026-08-16T06:36:13.293Z"
+          },
+          {
+            "state": {
+              "id": "0fab4989-4370-49e6-8354-fd52df13e5ec",
+              "name": "Canceled",
+              "type": "canceled"
+            },
+            "startedAt": "2026-08-16T06:36:13.293Z",
+            "endedAt": "2026-08-16T06:36:14.302Z"
+          },
+          {
+            "state": {
+              "id": "a9c8b57d-2a03-44ae-858d-aa2f8a5d5c59",
+              "name": "Duplicate",
+              "type": "duplicate"
+            },
+            "startedAt": "2026-08-16T06:36:14.302Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [],
+          "duplicateOf": {
+            "id": "VID-33",
+            "title": "Render NVENC capability probe｜避免合法 GPU 被 16x16 probe 誤判"
+          }
+        }
+      },
+      "comments": {
+        "comments": [],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-35",
+        "uuid": "3fa4f7c5-d0d6-4af4-b8cb-4870e0381c24",
+        "title": "Render Performance v2｜H.264 / HEVC / AV1 NVENC benchmark 與 re-encode 最小化",
+        "description": "## Motivation\n\n<issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> exposed that render latency materially affects the usability of the product. <issue id=\"af040022-b934-471a-97ef-4ac9c4784789\" href=\"https://linear.app/videoai/issue/VID-31/render-performancesource-ffprobe-去重與-fast-metadata-path\">VID-31</issue> removed repeated full-source ffprobe/SHA work, and <issue id=\"069af1e3-ef10-4d53-a96c-f5f8d36fb29f\" href=\"https://linear.app/videoai/issue/VID-33/render-nvenc-capability-probe避免合法-gpu-被-16x16-probe-誤判\">VID-33</issue> is fixing NVENC capability/encoder-contract defects. After Round 1 closes, run a dedicated performance pass instead of assuming a newer codec is automatically faster.\n\nThe goal is **minimum end-to-end render wall time at acceptable quality**, while also measuring output size and compatibility.\n\n## Current pipeline observations\n\nCurrent formal render can include these video stages:\n\n1. per-segment encode\n2. timeline assembly (currently re-encodes video when a formal encoder contract is present)\n3. visual/lower-third composition where required (video re-encode required for overlays)\n4. loudness second pass — already uses `-c:v copy`; do not regress this\n5. Final QC / Delivery QA — validation only, do not weaken\n\nTherefore codec choice is only one part of the performance problem. This issue must also identify and remove **unnecessary repeated video encode passes** where the output is already codec/profile compatible.\n\n## Scope A — stage-level benchmark instrumentation\n\nAdd safe timing/audit evidence for one formal render job:\n\n* segment_encode_ms total + per segment\n* visual_card_ms\n* timeline_assembly_ms\n* lower_third_overlay_ms\n* loudness_analysis_ms\n* loudness_second_pass_ms\n* final_qc_ms\n* delivery_qa_ms (if measured from downstream harness)\n* total_render_ms\n* cache hits/misses\n* encoder implementation / codec / preset / RC mode\n* output size / bitrate / duration\n\nDo not persist raw media or sensitive machine data.\n\nUse the Coffee acceptance fixture as the first reproducible benchmark.\n\n## Scope B — codec capability matrix\n\nOn the authoritative Windows host after <issue id=\"069af1e3-ef10-4d53-a96c-f5f8d36fb29f\" href=\"https://linear.app/videoai/issue/VID-33/render-nvenc-capability-probe避免合法-gpu-被-16x16-probe-誤判\">VID-33</issue>:\n\nDetect actual FFmpeg/NVENC support and supported options for:\n\n* H.264: `h264_nvenc`\n* HEVC/H.265: `hevc_nvenc`\n* AV1: `av1_nvenc`\n\nDo not assume support from GPU model alone; verify the exact installed FFmpeg + driver runtime.\n\nFor each supported codec, establish a deterministic encoder contract and probe it before benchmarking.\n\n## Scope C — apples-to-apples benchmark\n\nBenchmark H.264 NVENC vs HEVC NVENC vs AV1 NVENC using the same representative material and resolution/FPS.\n\nRecord at minimum:\n\n* wall time\n* encode FPS / speed multiple if available\n* GPU encoder utilization where safely available\n* output bytes\n* average bitrate\n* decoded duration / A/V validity\n* objective quality proxy: SSIM/PSNR; VMAF only if the installed FFmpeg provides libvmaf without adding a new heavy dependency\n\nRun at multiple quality points if needed to find roughly comparable visual quality/file size; do not compare arbitrary CQ values as if they were equivalent across codecs.\n\nThe benchmark must answer separately:\n\n1. fastest encoder at acceptable quality\n2. smallest file at acceptable quality\n3. best compatibility\n\n## Scope D — render presets\n\nBased on measured evidence, support product-facing output presets rather than one hard-coded codec. Proposed semantics (final names may change):\n\n* **Compatibility** — H.264 / AVC\n* **Efficient** — HEVC / H.265\n* **Web / Compact** — AV1\n\nDo **not** make HEVC or AV1 the default merely because compression is better. The default must be chosen from measured render time + compatibility + quality evidence.\n\nEncoder/codec choice must be part of:\n\n* encoder contract hash/version\n* segment cache identity\n* final render cache identity\n* Render Report\n* Delivery QA binding\n\nNo old H.264 cache may masquerade as HEVC/AV1 output.\n\n## Scope E — eliminate avoidable re-encode passes\n\nAudit every video-encoding stage after segment cache generation.\n\n### Timeline assembly\n\nCurrent timeline assembly re-encodes when `profile + encoder_contract` are supplied even when all segment/visual-card inputs may already have identical codec/profile/fps/pixel-format/color metadata.\n\nDetermine whether a safe `concat + -c:v copy` path is possible when:\n\n* all sequence inputs have a verified identical codec contract\n* no video filter is required at assembly\n* timestamps/keyframe/container behavior remains formally valid\n* Final QC / Delivery QA still pass\n\nIf any invariant is not provable, retain re-encode and explain why.\n\n### Lower thirds / visual overlays\n\nOverlay stages genuinely require rendering affected video. Investigate whether overlay work can be folded into an existing unavoidable encode pass so the full timeline is not encoded twice.\n\nDo not introduce a giant render-architecture rewrite in the first PR; produce evidence and split follow-up work if needed.\n\n### Loudness\n\nKeep the current `-c:v copy` second-pass behavior. Add regression so future codec work cannot accidentally re-encode video during loudness normalization.\n\n## Scope F — optional parallelism investigation\n\nAfter NVENC is healthy, measure whether sequential per-segment rendering underutilizes the GPU.\n\nOnly if evidence shows useful headroom, propose bounded parallel segment encoding (e.g. 2 workers initially). This is an investigation/follow-up, not an automatic requirement.\n\nMust consider:\n\n* NVENC session/resources\n* source disk I/O\n* VRAM\n* cancellation semantics\n* deterministic cache publication\n* progress accounting\n\nDo not implement uncontrolled concurrency.\n\n## Acceptance criteria\n\n1. Produce a stage-level baseline for the Coffee fixture on working H.264 NVENC.\n2. Produce verified H.264 / HEVC / AV1 capability + benchmark matrix for all supported codecs.\n3. No codec comparison claims without measured wall time, output size and quality evidence.\n4. Identify every full video re-encode pass in the formal pipeline and classify it as required vs avoidable.\n5. Implement at least the low-risk avoidable re-encode optimization(s), if evidence proves correctness, with cache/provenance contracts updated.\n6. Preserve Final QC, Delivery QA, source immutability, cancellation and fail-closed behavior.\n7. Full test suite + authoritative Windows real-media acceptance.\n8. Render Report clearly exposes codec and performance audit.\n\n## Non-goals\n\n* no QA threshold weakening\n* no source media mutation\n* no replacing formal render with manual FFmpeg\n* no assuming AV1/H.265 is faster without benchmark\n* no changing <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> while Round 1 is still being closed\n* no large parallel-render rewrite without evidence\n\n## Scheduling\n\nBacklog until <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> / <issue id=\"069af1e3-ef10-4d53-a96c-f5f8d36fb29f\" href=\"https://linear.app/videoai/issue/VID-33/render-nvenc-capability-probe避免合法-gpu-被-16x16-probe-誤判\">VID-33</issue> are complete. This is a post-Round-1 performance initiative and must not destabilize the current acceptance run.",
+        "priority": {
+          "value": 2,
+          "name": "High"
+        },
+        "url": "https://linear.app/videoai/issue/VID-35/render-performance-v2h264-hevc-av1-nvenc-benchmark-與-re-encode-最小化",
+        "gitBranchName": "vid-35",
+        "createdAt": "2026-08-16T06:51:16.850Z",
+        "updatedAt": "2026-08-19T09:10:41.373Z",
+        "archivedAt": null,
+        "completedAt": null,
+        "startedAt": null,
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Backlog",
+        "statusType": "backlog",
+        "labels": [],
+        "attachments": [],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "1e34574f-fb6c-40cf-9b15-bf863c6fb156",
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "startedAt": "2026-08-16T06:51:16.850Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [
+            {
+              "id": "VID-33",
+              "title": "Render NVENC capability probe｜避免合法 GPU 被 16x16 probe 誤判"
+            },
+            {
+              "id": "VID-18",
+              "title": "Round 1 最終真實流程驗收重跑｜deliverable_ready DoD"
+            }
+          ],
+          "relatedTo": [
+            {
+              "id": "VID-31",
+              "title": "Render performance｜source ffprobe 去重與 fast metadata path"
+            },
+            {
+              "id": "VID-41",
+              "title": "Editor Workflow v2｜從素材匯入到成片的主流程重構"
+            },
+            {
+              "id": "VID-38",
+              "title": "Formal Render GPU pipeline｜NVDEC → CUDA filters → NVENC"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "9e62a46e-ea57-495a-b050-77ff67b18c83",
+            "body": "### Scope update from VID-18\n\nVID-18 now requires the formal segment pipeline to adopt `NVDEC -> CUDA filters -> NVENC` before Round 1 closes. Preserve the existing NVENC-only full Coffee render (`3621.793s` for 87.517313s output) as the pre-NVDEC baseline.\n\nVID-35 should therefore treat the coming NVDEC/CUDA formal run as the new GPU-pipeline baseline before comparing H.264 / HEVC / AV1. Codec benchmarking must not conflate codec choice with decode/filter offload gains.",
+            "attachments": [],
+            "createdAt": "2026-08-16T10:54:50.478Z",
+            "updatedAt": "2026-08-16T10:54:50.442Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "dd42998b-7a5f-4b59-9ea2-164152bb1a7c",
+            "body": "Authoritative baseline captured from VID-18 post-VID36 formal Render `a1eef04442f74adeb603b1b6f11b2ba9`: 87.517313 s output, 3621.793 s wall-clock (~60.36 min, ~41.38x real-time), 30,922,417 bytes, 17/17 fresh v5 segment artifacts encoded with `h264_nvenc`, NVENC final assembly, 2 fast source probes + 15 reuse hits, 0 source-side deep counting scans. Important: segment commands still decode/filter/audio/mux on CPU (no `-hwaccel cuda` / NVDEC evidence), so VID-35 must stage-profile before assuming HEVC/AV1 will materially reduce total wall time.",
+            "attachments": [],
+            "createdAt": "2026-08-16T10:51:02.463Z",
+            "updatedAt": "2026-08-16T10:51:02.404Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-36",
+        "uuid": "3ab58c7c-56b9-4bf2-a838-f78cdd67e6a4",
+        "title": "Formal Render segment cache must bind resolved encoder contract",
+        "description": "<issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> formal acceptance blocker found on latest main 44776a99cce95f18f12b579c9e86262155614a89.\n\nRoot cause:\nsegment_cache.cache_key_payload() includes raw settings.encoder=\"auto\" but not the resolved semantic encoder contract/hash. Existing segment cache artifacts created by the prior CPU render therefore hit during a new formal Render resolved as h264_nvenc.\n\nReal evidence:\n\n* formal Render job: 146948603ca6409f8550b589373ac34f\n* resolved job encoder: requested=auto, implementation=h264_nvenc, version=2, p5, vbr, quality=23, 256x256 probe PASS\n* Render Report has 17/17 segment cache_hit=true\n* all 17 segment report entries say encoder_used=libx264\n* all 17 cache metadata entries say encoder_used=libx264 and have no encoder contract version/hash binding\n* final assembly log/output uses h264_nvenc, so this does not prove the 17 segment encodes used NVENC\n* Render Report source probe audit: unique_source_count=0, source_probe_calls=0, cache_hits=0; <issue id=\"af040022-b934-471a-97ef-4ac9c4784789\" href=\"https://linear.app/videoai/issue/VID-31/render-performancesource-ffprobe-去重與-fast-metadata-path\">VID-31</issue> unique-source fast-probe evidence is therefore not demonstrated for this run because segment cache bypassed the probe path\n* final Render Report/QC and Delivery QA completed, but acceptance must not treat the run as <issue id=\"069af1e3-ef10-4d53-a96c-f5f8d36fb29f\" href=\"https://linear.app/videoai/issue/VID-33/render-nvenc-capability-probe避免合法-gpu-被-16x16-probe-誤判\">VID-33</issue> segment-NVENC / <issue id=\"af040022-b934-471a-97ef-4ac9c4784789\" href=\"https://linear.app/videoai/issue/VID-31/render-performancesource-ffprobe-去重與-fast-metadata-path\">VID-31</issue> probe acceptance\n* Delivery QA run 031e8126d2404aaf94f7ae1da12f382c had 0 blocked, 6 pass, 2 warning; no human preview performed\n\nRequired focused fix:\nbind resolved encoder semantic contract/version/hash into segment rendered-artifact cache identity and reject legacy cache metadata that cannot prove the matching contract. Preserve <issue id=\"af040022-b934-471a-97ef-4ac9c4784789\" href=\"https://linear.app/videoai/issue/VID-31/render-performancesource-ffprobe-去重與-fast-metadata-path\">VID-31</issue> source probe reuse and <issue id=\"52ee49da-6210-478c-a0ec-4f8ee08f2a85\" href=\"https://linear.app/videoai/issue/VID-32/formal-delivery-qa-blockerchapter-cards-produce-interior-black\">VID-32</issue> visual cache behavior. Then rerun only a new formal Render/QA after code review; do not manually delete or reuse CPU artifacts as NVENC evidence.\n\nNo source media or production DB/config was modified. No manual FFmpeg or threshold workaround.",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-36/formal-render-segment-cache-must-bind-resolved-encoder-contract",
+        "gitBranchName": "vid-36",
+        "createdAt": "2026-08-16T08:43:29.147Z",
+        "updatedAt": "2026-08-18T12:39:54.167Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-16T09:21:42.423Z",
+        "startedAt": "2026-08-16T08:43:29.243Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "e8c4a51b-b49d-4185-b2f2-64dfde118391",
+            "title": "[VID-36] Bind segment cache to resolved encoder contract",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/102"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-16T08:43:29.147Z",
+            "endedAt": "2026-08-16T09:21:42.433Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-16T09:21:42.433Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-32",
+              "title": "Formal Delivery QA blocker｜chapter cards produce interior black intervals"
+            },
+            {
+              "id": "VID-31",
+              "title": "Render performance｜source ffprobe 去重與 fast metadata path"
+            },
+            {
+              "id": "VID-33",
+              "title": "Render NVENC capability probe｜避免合法 GPU 被 16x16 probe 誤判"
+            },
+            {
+              "id": "VID-27",
+              "title": "Visual Style Preview｜用真實素材先核准字幕與視覺方向"
+            },
+            {
+              "id": "VID-38",
+              "title": "Formal Render GPU pipeline｜NVDEC → CUDA filters → NVENC"
+            },
+            {
+              "id": "VID-37",
+              "title": "Delivery QA audio provenance｜separate approval semantic identity from render cache identity"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "c8f97a16-66f8-4ca6-8753-0db14463c197",
+            "body": "### Merged\n\nPR #102 reviewed clean and squash-merged.\n\n- Final PR HEAD: `b01901c2d20bce293b09b7c19a568ffc3a38281a`\n- CI #374 / run `31937803117`: PASS\n- Merged main SHA: `bab4198082c78c3f324964f6b993e0f1e3a7c3c4`\n- `SEGMENT_RENDERER_CONTRACT_VERSION=5`\n- resolved encoder cache identity binds contract version/hash/implementation\n- legacy/raw `auto` artifacts cannot satisfy resolved formal contracts\n- `nvenc_probe` diagnostics remain outside semantic cache identity\n- cache metadata now proves encoder contract binding and `encoder_used`\n\nVID-36: Done.",
+            "attachments": [],
+            "createdAt": "2026-08-16T09:21:55.493Z",
+            "updatedAt": "2026-08-16T09:21:55.469Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "beda4e63-f7da-4321-bad8-087c1455c2b4",
+            "body": "## VID-36 implementation handoff\n\nImplementation completed on dedicated branch `agent/vid-36` from main baseline `44776a99cce95f18f12b579c9e86262155614a89`.\n\nPR: https://github.com/DystopiaOwO/video-vault-ai/pull/102 (Draft)\nHEAD: `b01901c2d20bce293b09b7c19a568ffc3a38281a`\n\n### Changes\n\n- Bumped `SEGMENT_RENDERER_CONTRACT_VERSION` v4 → v5.\n- Added deterministic `encoder_cache_identity` to segment cache payloads.\n  - Formal/resolved binding includes encoder contract version, semantic contract hash, and implementation.\n  - Raw-request callers retain explicit `raw_request` identity and cannot share with resolved contract-bound artifacts.\n- Persisted cache metadata includes encoder contract binding/version/hash/implementation and `encoder_used`.\n- `_valid_cache()` rejects missing/mismatched contract evidence and rejects resolved cache artifacts whose `encoder_used` differs from the resolved implementation.\n- NVENC probe diagnostics remain outside the semantic contract hash/cache identity.\n- VID-31 source probe registry and VID-33 contracted fail-closed behavior unchanged.\n\nChanged files:\n- `src/video_vault/segment_cache.py`\n- `src/video_vault/segment_renderer.py`\n- `tests/test_segment_cache.py`\n- `tests/test_segment_renderer.py`\n\n### Validation\n\n- Targeted cache/renderer: 30 passed.\n- Earlier targeted cache/renderer/project/media/encoder set: 59 passed.\n- Full Python: 769 passed, 2 skipped.\n- Frontend: 262 passed.\n- Frontend production build: passed.\n- `git diff --check`: passed.\n- UTF-8 check: passed.\n- No full Coffee Render rerun, no source media or production DB/config changes.\n\n### GitHub Actions CI\n\nAll required PR checks passed:\n- Select PR test layers: pass\n- Frontend: pass\n- Media Smoke / Ubuntu: pass\n- Ubuntu portability / PR Core/Targeted / Python 3.13: pass\n- Windows authoritative / PR Core/Targeted / Python 3.11: pass\n\nReady for ChatGPT code review. PR remains Draft; no merge performed.",
+            "attachments": [],
+            "createdAt": "2026-08-16T09:02:11.527Z",
+            "updatedAt": "2026-08-16T09:02:11.413Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "644d3bb4-0e73-459b-9898-5be6e42a5ae2",
+            "body": "### Implementation review / required cache contract\n\nRoot cause confirmed in current main `44776a99cce95f18f12b579c9e86262155614a89`:\n\n- `segment_cache.cache_key_payload()` currently includes only raw `settings.encoder` (`auto`) and `SEGMENT_RENDERER_CONTRACT_VERSION=4`.\n- `segment_renderer.render_segment()` already validates and uses resolved `settings.encoder_contract`, but the cache key is computed before render from a payload that does not bind that semantic contract.\n- Therefore old CPU artifacts created under `auto` can hit a later `auto -> h264_nvenc` formal job.\n\nUse the existing semantic `encoder_contract.contract_hash` as the authoritative cache identity. That hash already excludes diagnostic-only `nvenc_probe` evidence, so probe stderr/result text must NOT be separately hashed.\n\nRequired focused implementation:\n\n1. Bump `SEGMENT_RENDERER_CONTRACT_VERSION` (v4 -> v5 or equivalent) because rendered-artifact cache identity changes.\n2. In `cache_key_payload()` when `settings.encoder_contract` is present, include a deterministic resolved encoder identity, at minimum:\n   - encoder contract version\n   - encoder contract hash\n   - implementation (for audit/readability)\n   Do not hash `nvenc_probe` diagnostics directly.\n3. Preserve non-formal / legacy no-contract rendering behavior with an explicit raw-request identity where appropriate, but a formal contract-bound artifact must never share a key with an unbound/raw-`auto` artifact.\n4. Persist resolved encoder contract version/hash/implementation in segment cache metadata so Render Report/cache audit can prove which contract produced a hit.\n5. `_valid_cache()` must reject legacy metadata/artifacts that cannot prove the current resolved contract. Do not delete caches manually; key/metadata contract should make old CPU artifacts miss naturally.\n6. Preserve VID-31 `SourceProbeRegistry` behavior: after old CPU cache misses, the 17-segment Coffee rerun should exercise source probing normally (2 unique sources, fast probes/reuse) rather than reintroducing deep scans/SHA hot path.\n7. Preserve VID-33 formal fail-closed behavior: a contracted `h264_nvenc` segment may not silently fallback to libx264.\n\nRequired regressions:\n\n- same segment/profile/source + raw `encoder=auto`, but CPU resolved contract vs NVENC resolved contract -> different segment cache keys;\n- same semantic encoder contract with different `nvenc_probe.stderr_tail` / diagnostic evidence -> same segment cache key;\n- legacy v4/unbound `auto` cache artifact does not hit under v5 resolved NVENC contract;\n- repeated render with identical v5 NVENC semantic contract does hit;\n- cache metadata records encoder contract version/hash/implementation and `encoder_used=h264_nvenc` for new NVENC artifact;\n- explicit CPU contract remains deterministic and separately keyed;\n- VID-31 source probe reuse tests remain PASS;\n- VID-33 encoder contract tests remain PASS.\n\nDo not change Delivery QA thresholds, visual cache, source media, approval snapshot, or production data. Do not rerun the full Coffee formal Render until implementation + PR review/CI are complete.\n\nAfter implementation, open a Draft PR for VID-36 and sync HEAD, changed files, targeted/full tests and CI back here.",
+            "attachments": [],
+            "createdAt": "2026-08-16T08:46:17.813Z",
+            "updatedAt": "2026-08-16T08:46:17.733Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    }
+  ]
+}
