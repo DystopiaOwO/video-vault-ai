@@ -1,0 +1,40 @@
+{
+  "exportedAt": "2026-10-03T22:13:00+08:00",
+  "source": {
+    "linearWorkspace": "videoai",
+    "teamKey": "VID",
+    "project": "Video Vault AI",
+    "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838"
+  },
+  "backupBranch": "backup/linear-vid-2026-10-03",
+  "verification": {
+    "issueCount": 46,
+    "uniqueIssueCount": 46,
+    "expectedRange": "VID-5..VID-50",
+    "missingIssueIds": [],
+    "duplicateIssueIds": [],
+    "statusCounts": {
+      "Done": 38,
+      "In Progress": 3,
+      "Backlog": 4,
+      "Duplicate": 1
+    },
+    "commentCount": 250,
+    "attachmentRefs": 54,
+    "issueDocumentRefs": 0,
+    "projectDocuments": [
+      "Horizontal Extensibility Contract｜水平擴充設計規範",
+      "Codex → GPT Review 工作流程"
+    ]
+  },
+  "files": [
+    "linear-metadata.json",
+    "documents.json",
+    "issues-01-VID-05-VID-12.json",
+    "issues-02-VID-13-VID-20.json",
+    "issues-03-VID-21-VID-28.json",
+    "issues-04-VID-29-VID-36.json",
+    "issues-05-VID-37-VID-44.json",
+    "issues-06-VID-45-VID-50.json"
+  ]
+}
