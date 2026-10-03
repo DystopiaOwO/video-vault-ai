@@ -1,0 +1,1322 @@
+{
+  "exportedAt": "2026-10-03T22:13:00+08:00",
+  "team": "VID",
+  "issues": [
+    {
+      "issue": {
+        "id": "VID-37",
+        "uuid": "6170ce99-f62a-4dee-b0ee-4eb0f3262f20",
+        "title": "Delivery QA audio provenance｜separate approval semantic identity from render cache identity",
+        "description": "## Authoritative blocker\n\n<issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> post-VID36 formal Render `a1eef04442f74adeb603b1b6f11b2ba9` is technically successful and proves the intended GPU/cache fixes:\n\n* approval currentity PASS, revision 8\n* 17/17 fresh segment artifacts, `cache_hit=false`\n* 17/17 `encoder_used=h264_nvenc`\n* segment cache contract v5, encoder contract v2\n* <issue id=\"af040022-b934-471a-97ef-4ac9c4784789\" href=\"https://linear.app/videoai/issue/VID-31/render-performancesource-ffprobe-去重與-fast-metadata-path\">VID-31</issue> source probe behavior PASS: 2 fast probes + 15 reuse hits, 0 source-side deep counting scans\n* Render Report / Final QC PASS\n* black_flash PASS, interior long black count 0\n\nDelivery QA run `0efe329e483e43258218f0fb1d8509fd` blocks only on `audio` provenance because all 17 reported segment cache keys differ from the keys recomputed from the approved manifest.\n\n## Root cause\n\n`delivery_qa._audio_render_provenance()` currently treats `build_segment_cache_key(manifest, segment)` as approval→render provenance identity and compares it byte-for-byte to `render_report.segments[*].cache_key`.\n\nAfter <issue id=\"3ab58c7c-56b9-4bf2-a838-f78cdd67e6a4\" href=\"https://linear.app/videoai/issue/VID-36/formal-render-segment-cache-must-bind-resolved-encoder-contract\">VID-36</issue>, this is no longer a valid invariant:\n\n* segment cache key is now a **rendered-artifact cache identity**;\n* v5 intentionally includes runtime `encoder_cache_identity`;\n* formal Render uses `resolved_contract` + encoder contract version/hash/implementation;\n* approved manifest exists before runtime encoder resolution and therefore recomputes as `raw_request` identity.\n\nThus an unchanged approved segment/audio contract deterministically mismatches whenever runtime-only encoder/cache contract fields differ. This will also break legitimate future H.264 / HEVC / AV1 or encoder/cache contract upgrades if cache keys remain the approval provenance key.\n\n## Required design\n\nSeparate two identities:\n\n1. **Approval-semantic segment/audio provenance identity**\n   * stable across runtime encoder/cache implementation changes;\n   * derived only from immutable approved semantics actually relevant to proving the approved edit/audio was rendered;\n   * ordered and deterministic.\n2. **Rendered-artifact cache identity**\n   * remains free to include encoder contract, renderer/cache version, diagnostics-excluded semantic contract hashes, etc.;\n   * used only for artifact reuse/invalidation, not approval provenance.\n\nThe approval-semantic identity should cover at minimum, using existing authoritative approved evidence where available:\n\n* segment ID / UUID and order\n* approved source identity/fingerprint binding\n* source in/out\n* speed / timeline duration semantics\n* effective audio role\n* audio volume/fade contract\n* relevant approved audio/profile fields that affect segment audio output\n\nRuntime-only fields must NOT affect it:\n\n* resolved encoder implementation/contract\n* encoder probe diagnostics\n* segment renderer/cache contract version\n* artifact path/cache key\n* transient execution metadata\n\n## Render Report contract\n\nFormal Render must emit/record the same approval-semantic identity for each segment from the actual manifest inputs it rendered.\n\nDelivery QA must compare the ordered approved semantic identities vs ordered rendered semantic identities exactly and fail closed on:\n\n* count mismatch\n* missing identity\n* reordering\n* source/timing/speed/audio semantic mutation\n\nDo not simply stop checking provenance and do not downgrade mismatches to warning.\n\nKeep render cache key evidence separately in the report for artifact/cache auditability.\n\n## Compatibility / migration\n\n* Do not mutate or backfill the existing revision-8 approval snapshot manually.\n* Prefer a deterministic identity computable from the existing approved manifest/snapshot plus authoritative source fingerprint fields, so the current accepted revision can remain valid if product currentity permits.\n* If a schema/version field is required for the new provenance contract, version it explicitly.\n* A runtime encoder change alone must not require re-approval.\n\n## Required regressions\n\n 1. Same approved segment/audio semantics, raw approval manifest vs resolved NVENC runtime contract -> provenance identity equal.\n 2. Same semantics with different `nvenc_probe.stderr_tail`, encoder implementation/cache contract version -> provenance identity equal.\n 3. Change audio role/volume/fade -> identity differs and Delivery QA blocks.\n 4. Change source in/out or speed -> identity differs and blocks.\n 5. Change source approved fingerprint -> identity differs and blocks.\n 6. Reorder segments -> ordered comparison blocks.\n 7. Missing/extra Render Report segment -> blocks.\n 8. Render cache keys may legitimately differ while semantic provenance passes.\n 9. Existing BGM fingerprint/provenance validation remains unchanged and fail-closed.\n10. <issue id=\"3ab58c7c-56b9-4bf2-a838-f78cdd67e6a4\" href=\"https://linear.app/videoai/issue/VID-36/formal-render-segment-cache-must-bind-resolved-encoder-contract\">VID-36</issue> segment cache tests remain PASS; do not weaken resolved encoder cache binding.\n\n## Acceptance / rerun boundary\n\nAfter implementation + PR review/CI, do **not** immediately rerender the 60-minute Coffee job if the existing output/report can be safely re-evaluated by the corrected Delivery QA against immutable evidence. First determine whether a Delivery-QA-only rerun on successful Render `a1eef04442f74adeb603b1b6f11b2ba9` is authoritative under product contracts.\n\n* If yes: rerun only a NEW Delivery QA against that unchanged output/report.\n* If no because the Render Report lacks the new semantic provenance evidence and it cannot be derived without changing the report contract: explain exactly why a new Render is required before doing it.\n\nNo manual FFmpeg, DB patch, approval mutation, cache deletion, threshold weakening, or special-case whitelist for this run.",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-37/delivery-qa-audio-provenanceseparate-approval-semantic-identity-from",
+        "gitBranchName": "vid-37",
+        "createdAt": "2026-08-16T10:52:32.402Z",
+        "updatedAt": "2026-08-18T12:39:54.167Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-16T11:22:42.248Z",
+        "startedAt": "2026-08-16T10:52:32.479Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "1f3e89cc-11e8-4706-96d5-62382f0c8c06",
+            "title": "[VID-37] Separate approval provenance from segment cache keys",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/103"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-16T10:52:32.402Z",
+            "endedAt": "2026-08-16T11:22:42.256Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-16T11:22:42.256Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-7",
+              "title": "正式輸出 QA｜自動媒體檢查與交付閘門"
+            },
+            {
+              "id": "VID-31",
+              "title": "Render performance｜source ffprobe 去重與 fast metadata path"
+            },
+            {
+              "id": "VID-36",
+              "title": "Formal Render segment cache must bind resolved encoder contract"
+            },
+            {
+              "id": "VID-27",
+              "title": "Visual Style Preview｜用真實素材先核准字幕與視覺方向"
+            },
+            {
+              "id": "VID-39",
+              "title": "Formal Render display geometry｜尊重 SAR / DAR / rotation / Display Matrix，避免 framing 失真"
+            },
+            {
+              "id": "VID-38",
+              "title": "Formal Render GPU pipeline｜NVDEC → CUDA filters → NVENC"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "5b61689a-1227-4e2a-8cf8-4b77822ddaea",
+            "body": "### Merged\n\nPR #103 reviewed clean and squash-merged.\n\n- final PR HEAD: `03e8bf16a7acab60656d5ee732249021422e61fa`\n- CI #376 / run `31943846045`: PASS\n- merged main SHA: `fbc65caebc50549fdd747ffbb092c575ebb4c086`\n- provenance contract: `segment-approval-provenance-v1`\n- Delivery QA now gates on ordered approval-semantic provenance, not render cache keys\n- encoder/cache/runtime diagnostics remain excluded from approval identity\n- BGM provenance and VID-36 resolved encoder cache binding remain fail-closed\n\nExisting NVENC-only Render `a1eef04442f74adeb603b1b6f11b2ba9` cannot be authoritatively re-QA'd to PASS because its immutable Render Report predates VID-37 and lacks per-segment provenance evidence. No old report mutation/backfill is allowed.\n\nVID-37: Done. Next implementation issue: VID-38.",
+            "attachments": [],
+            "createdAt": "2026-08-16T11:23:02.669Z",
+            "updatedAt": "2026-08-16T11:23:02.627Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "ccd23175-e571-4f85-bc40-971be5883268",
+            "body": "VID-37 implementation / review handoff complete.\n\n- Branch: `agent/vid-37`\n- Draft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/103\n- HEAD: `03e8bf16a7acab60656d5ee732249021422e61fa`\n- Baseline main: `bab4198082c78c3f324964f6b993e0f1e3a7c3c4`\n\nImplemented `segment-approval-provenance-v1` as a separate deterministic identity. It binds ordered segment UUID, approved source fingerprint, source in/out, speed/timeline duration semantics, audio role/volume/fades, and relevant approved audio/profile semantics. It deliberately excludes encoder implementation/contract, NVENC diagnostics, segment renderer/cache contract, cache key, and artifact path.\n\nFormal Render Report now records per-segment provenance version/hash. Delivery QA performs ordered exact semantic provenance comparison; `cache_key` remains present for artifact/cache audit only and is not used as approval identity. BGM provenance and VID-36 resolved encoder cache binding are unchanged.\n\nTests:\n- targeted provenance/approval/render/Delivery QA: 36 passed\n- broader render/QA targeted suite: 106 passed\n- full Python: 774 passed, 2 skipped\n- frontend: 262 passed\n- frontend production build: PASS\n- git diff --check / UTF-8 / compileall: PASS\n- required CI run 31943846045: all green, including Windows authoritative, Ubuntu portability, Media Smoke, Select PR layers, and Frontend.\n\nQA-only regression assessment for immutable Render `a1eef04442f74adeb603b1b6f11b2ba9`: cannot produce an authoritative PASS. The existing immutable Render Report has 17 segment entries but no `approval_provenance_version/hash` evidence, so the new fail-closed QA path blocks on missing provenance. No rerender, DB/cache mutation, source-media mutation, or production-data change was made. A new formal Render is required after this contract is accepted to generate the provenance evidence.\n\nVID-38/NVDEC was not started and no full Coffee Render was run. PR remains Draft for review.",
+            "attachments": [],
+            "createdAt": "2026-08-16T11:20:17.106Z",
+            "updatedAt": "2026-08-16T11:20:16.683Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "797cd274-74bf-4c50-a9fb-1411cf8fda13",
+            "body": "### VID-18 DoD update affects rerun boundary\n\nVID-18 now explicitly requires the formal segment pipeline to move to `NVDEC -> CUDA filters -> NVENC`, backed by isolated Coffee smoke evidence (~15.1x wall-clock improvement for the tested 8s 4K HEVC source slice).\n\nTherefore after VID-37 implementation/review, do not spend a long acceptance cycle trying to close VID-18 solely by re-evaluating the old NVENC-only output. It is still useful to prove the provenance fix with targeted tests and, if cheap/authoritative, a Delivery-QA-only regression against the existing immutable output, but the final VID-18 deliverable must come from the later GPU decode/filter/encode formal pipeline.\n\nKeep VID-37 focused: provenance identity only. Do not mix NVDEC/CUDA implementation into this PR.",
+            "attachments": [],
+            "createdAt": "2026-08-16T10:54:44.460Z",
+            "updatedAt": "2026-08-16T10:54:44.404Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-38",
+        "uuid": "0498d23c-b4fb-4d41-8956-95062cf3feee",
+        "title": "Formal Render GPU pipeline｜NVDEC → CUDA filters → NVENC",
+        "description": "## Goal\n\nMake the formal segment Render pipeline use GPU decode + GPU video filters + GPU encode on supported NVIDIA systems:\n\n`NVDEC -> CUDA filters -> NVENC`\n\nThis is now part of <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> Round 1 deliverable DoD, not merely a future performance experiment.\n\n## Existing evidence\n\n<issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> isolated Coffee smoke on the same Windows/NVIDIA host demonstrated:\n\n* source: 4K HEVC 10-bit Coffee, first 8 seconds\n* output: H.264 1920x1080 yuv420p 30fps, same h264_nvenc p5/vbr/cq23 intent\n* CPU decode + CPU scale + NVENC: 22.185s\n* NVDEC + `scale_cuda` + NVENC: 1.471s\n* \\~15.1x wall-clock improvement\n* GPU command used `-hwaccel cuda -hwaccel_output_format cuda` and `scale_cuda=1920:1080:format=yuv420p`\n* output decoded successfully; RTX 5070 Ti / driver 610.62\n\nThe current full formal Render `a1eef04442f74adeb603b1b6f11b2ba9` proves 17/17 NVENC encode but still decodes/scales/filter-processes on CPU and took 3621.793s for an 87.517313s output. Preserve that as the pre-NVDEC baseline.\n\n## Required design\n\nAdd a versioned formal GPU execution contract distinct from approval semantics. On a supported NVIDIA path, segment rendering should use hardware decode and CUDA-compatible filters while retaining the existing approved output/profile semantics.\n\nAt minimum define/persist audit evidence for:\n\n* decode requested / implementation (`nvdec` vs CPU)\n* hardware device/API\n* filter path requested / implementation (`cuda` vs CPU)\n* concrete GPU filter chain used\n* encoder implementation / existing encoder contract\n* whether any stage fell back and why\n* bounded diagnostics for failed capability/compatibility probes\n\nRuntime GPU execution details belong in render/cache identity where they materially change the rendered artifact, but must not pollute approval-semantic provenance identity (see <issue id=\"6170ce99-f62a-4dee-b0ee-4eb0f3262f20\" href=\"https://linear.app/videoai/issue/VID-37/delivery-qa-audio-provenanceseparate-approval-semantic-identity-from\">VID-37</issue>).\n\n## Capability / compatibility\n\nDo not assume every source/filter combination can remain entirely in CUDA frames.\n\nFormal implementation must explicitly handle source and filter compatibility, including current Coffee HEVC 10-bit input. If an approved video operation is not available in CUDA, either:\n\n1. use a documented, deterministic transfer/CPU-filter path with explicit audit evidence, or\n2. fail/fallback according to a versioned execution policy.\n\nDo not silently claim `gpu_pipeline` when frames were downloaded and the material transform happened on CPU.\n\n## Cache identity\n\nSegment artifact cache identity must distinguish materially different execution contracts. Existing <issue id=\"3ab58c7c-56b9-4bf2-a838-f78cdd67e6a4\" href=\"https://linear.app/videoai/issue/VID-36/formal-render-segment-cache-must-bind-resolved-encoder-contract\">VID-36</issue> resolved encoder binding remains intact.\n\nAdd the GPU decode/filter execution contract/version to cache identity if required so a CPU-decode artifact cannot masquerade as proof of the new formal GPU pipeline.\n\nDo not manually clear cache as acceptance evidence.\n\n## Fallback semantics\n\nFor `auto` mode, CPU fallback is allowed only if explicitly specified by the formal execution contract and must be visible in Render Report. For <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> final acceptance on the RTX 5070 Ti host, the 17 Coffee segments must actually demonstrate the expected GPU decode/filter path; a silent or wholesale CPU fallback does not satisfy this child.\n\nExisting formal NVENC fail-closed rules remain unchanged.\n\n## Output / QA invariants\n\nDo not weaken or change:\n\n* approved timeline/content semantics\n* profile dimensions/fps/pixel format/audio contract\n* source immutability\n* Render Report / Final QC checks\n* Delivery QA thresholds\n* <issue id=\"52ee49da-6210-478c-a0ec-4f8ee08f2a85\" href=\"https://linear.app/videoai/issue/VID-32/formal-delivery-qa-blockerchapter-cards-produce-interior-black\">VID-32</issue> visual behavior\n* <issue id=\"6170ce99-f62a-4dee-b0ee-4eb0f3262f20\" href=\"https://linear.app/videoai/issue/VID-37/delivery-qa-audio-provenanceseparate-approval-semantic-identity-from\">VID-37</issue> provenance design\n\nFinal output must remain valid under the same current Final QC and Delivery QA contracts.\n\n## Required implementation evidence\n\nBefore a full Coffee Render, use isolated deterministic A/B fixtures/smokes to prove:\n\n* CPU decode/filter + same NVENC output path works\n* NVDEC/CUDA-filter + same NVENC output path works\n* output stream contract matches expected 1080p H.264/yuv420p/30fps target\n* representative duration/timestamp/audio behavior remains valid\n* unsupported GPU decode/filter condition produces explicit fallback/failure evidence\n* cache identity differs appropriately between CPU execution and GPU execution contracts\n* repeated identical GPU contract can legally hit cache\n\n## Required regressions\n\nAt minimum cover:\n\n 1. supported NVIDIA source -> execution resolves NVDEC + CUDA filter + NVENC.\n 2. emitted FFmpeg command uses hardware decode/output frames and CUDA filter chain correctly.\n 3. unsupported/missing CUDA/NVDEC -> explicit deterministic fallback/failure audit, never silent.\n 4. source/pixel-format combination requiring conversion is handled deterministically.\n 5. CPU vs GPU execution contract cannot share an artifact cache identity when implementation differs materially.\n 6. identical GPU semantic execution contract remains deterministic/cacheable.\n 7. runtime diagnostic text does not make semantic cache identity nondeterministic.\n 8. <issue id=\"069af1e3-ef10-4d53-a96c-f5f8d36fb29f\" href=\"https://linear.app/videoai/issue/VID-33/render-nvenc-capability-probe避免合法-gpu-被-16x16-probe-誤判\">VID-33</issue> encoder contract tests remain PASS.\n 9. <issue id=\"3ab58c7c-56b9-4bf2-a838-f78cdd67e6a4\" href=\"https://linear.app/videoai/issue/VID-36/formal-render-segment-cache-must-bind-resolved-encoder-contract\">VID-36</issue> segment cache resolved encoder tests remain PASS.\n10. <issue id=\"af040022-b934-471a-97ef-4ac9c4784789\" href=\"https://linear.app/videoai/issue/VID-31/render-performancesource-ffprobe-去重與-fast-metadata-path\">VID-31</issue> source fast-probe/reuse remains PASS.\n11. Final QC/output stream fixture remains PASS.\n\n## Acceptance sequence\n\nDo not run the full \\~60-minute Coffee formal Render merely to prove implementation before PR review.\n\nSequence:\n\n1. implement focused Draft PR\n2. isolated Coffee A/B / targeted media smoke\n3. targeted + full tests / Windows CI\n4. ChatGPT review + merge\n5. only after <issue id=\"6170ce99-f62a-4dee-b0ee-4eb0f3262f20\" href=\"https://linear.app/videoai/issue/VID-37/delivery-qa-audio-provenanceseparate-approval-semantic-identity-from\">VID-37</issue> and this child are both merged, perform one new authoritative <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> Coffee Formal Render -> Render Report / Final QC -> new Delivery QA -> human preview\n\nFinal <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> render must capture stage-level timing and GPU execution audit. Compare against the pre-NVDEC baseline 3621.793s without inventing estimates.",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-38/formal-render-gpu-pipelinenvdec-cuda-filters-nvenc",
+        "gitBranchName": "vid-38",
+        "createdAt": "2026-08-16T10:55:33.057Z",
+        "updatedAt": "2026-08-17T17:06:32.621Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-16T13:02:07.029Z",
+        "startedAt": "2026-08-16T10:55:33.233Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "7a8b7ae9-ba4f-4b4e-ac2a-e31fa2a8263f",
+            "title": "[VID-38] GPU segment execution contract",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/104"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-16T10:55:33.057Z",
+            "endedAt": "2026-08-16T13:02:07.041Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-16T13:02:07.041Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-35",
+              "title": "Render Performance v2｜H.264 / HEVC / AV1 NVENC benchmark 與 re-encode 最小化"
+            },
+            {
+              "id": "VID-33",
+              "title": "Render NVENC capability probe｜避免合法 GPU 被 16x16 probe 誤判"
+            },
+            {
+              "id": "VID-36",
+              "title": "Formal Render segment cache must bind resolved encoder contract"
+            },
+            {
+              "id": "VID-31",
+              "title": "Render performance｜source ffprobe 去重與 fast metadata path"
+            },
+            {
+              "id": "VID-32",
+              "title": "Formal Delivery QA blocker｜chapter cards produce interior black intervals"
+            },
+            {
+              "id": "VID-37",
+              "title": "Delivery QA audio provenance｜separate approval semantic identity from render cache identity"
+            },
+            {
+              "id": "VID-27",
+              "title": "Visual Style Preview｜用真實素材先核准字幕與視覺方向"
+            },
+            {
+              "id": "VID-39",
+              "title": "Formal Render display geometry｜尊重 SAR / DAR / rotation / Display Matrix，避免 framing 失真"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "32515785-b4eb-40f8-b9e6-0a3705585553",
+            "body": "### Merged\n\nPR #104 reviewed clean after the final-cache currentity fix and squash-merged.\n\n- final PR HEAD: `3ef5570984d4ee432423dc80d45df67f8b69a05f`\n- CI #379 / run `31947903806`: all jobs PASS\n- merged main SHA: `6efd19a8fe2afa354e092af5c1a74ad177f3a72e`\n- GPU execution contract: version `1`\n- final cache now binds current ordered resolved GPU contracts + expected segment cache keys\n- CPU-fallback auto artifact -> current NVDEC/CUDA = MISS\n- same current NVDEC/CUDA = HIT\n- diagnostics/timing do not affect semantic identity\n- VID-31 probe registry reuse preserved\n- VID-37 approval provenance unchanged\n\nReal Coffee A/B on the formal segment path:\n- CPU: 24.588s\n- NVDEC/CUDA: 1.938s (~12.7x faster)\n- both: H.264 1920x1080 yuv420p 30fps, 240 frames, 8.000000s, BT.709/tv, AAC 48k stereo\n- bitrate differs but stream/profile/frame/audio semantics match\n\nVID-38: Done.",
+            "attachments": [],
+            "createdAt": "2026-08-16T13:02:26.618Z",
+            "updatedAt": "2026-08-16T13:02:26.562Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "b16dc5e0-5de1-4cfd-8ad8-2dc77fa63ca8",
+            "body": "## VID-38 review blocker fixed\n\n- PR #104: https://github.com/DystopiaOwO/video-vault-ai/pull/104\n- Branch: `agent/vid-38`\n- HEAD: `3ef5570`\n- Base: `fbc65caebc50549fdd747ffbb092c575ebb4c086`\n- PR remains Draft; no full 17-segment Coffee Render was run.\n\n### Final-cache currentity\n\nBefore accepting an existing final cache, the same job-scoped `SourceProbeRegistry` and `GPUExecutionRegistry` now resolve every ordered manifest segment against current source/profile/host state. The implementation exact-compares:\n\n- report GPU contract version/hash/implementation vs current resolved ordered contracts\n- report ordered segment IDs/cache keys vs current expected segment artifact keys\n\nThe same registries are reused if the cache misses and rendering continues, preserving VID-31 fast unique-source probe reuse.\n\nRegressions cover:\n- old auto/CPU fallback -> current NVDEC/CUDA: final cache MISS\n- same current NVDEC/CUDA: HIT\n- diagnostic/stderr differences with the same semantic hash: HIT\n- changed semantic hash or expected segment cache key: MISS\n- source probe registry reuse\n- VID-36 cache identity and VID-37 approval provenance unchanged\n\n### Real isolated Coffee A/B follow-up\n\nSame 4K HEVC 10-bit source, same 8-second formal `render_segment()` path and h264_nvenc p5/vbr/cq23 contract:\n\n- CPU: 24.588s, cache key `cc54142e...`\n- NVDEC/CUDA: 1.938s, cache key `c75c4322...`\n- repeated NVDEC/CUDA: `cache_hit=true`, same key\n- CPU/GPU both: H.264 1920x1080 yuv420p, 30/1, 240 frames, 8.000000s\n- both: color_space=bt709, color_primaries=bt709, color_transfer=bt709, color_range=tv\n- both: AAC 48000 Hz stereo, audio duration 7.946896s\n- container bitrate: CPU 1,690,552 bps; GPU 4,564,237 bps. This is recorded as a bitrate difference; no stream/profile/frame/audio contract mismatch remains.\n- GPU audit: `implementation=nvdec_cuda`, `decode_used=nvdec`, `filter_used=cuda`, RTX 5070 Ti, capability probe PASS.\n\n### Validation\n\n- Targeted final-cache/GPU/segment/project/provenance/QC: 72 passed\n- Project renderer/media-probe e2e: 18 passed\n- Full Python: 784 passed, 2 skipped\n- Frontend: 262 passed\n- Frontend production build: PASS\n- compileall, UTF-8, git diff --check: PASS\n- CI run `31947903806`: Frontend, Media Smoke / Ubuntu, Ubuntu portability / Python 3.13, Windows authoritative / Python 3.11, and Select PR test layers all PASS\n\nReady for ChatGPT review.",
+            "attachments": [],
+            "createdAt": "2026-08-16T12:48:17.276Z",
+            "updatedAt": "2026-08-16T12:48:17.208Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "3a2a1ce7-12bc-49a2-93cb-6ca9dbd0631c",
+            "body": "### ChatGPT review blocker — final render cache is not bound to current resolved GPU execution\n\nPR #104 HEAD `1e8721a3951cb44592f9afcb6dd8dba4e184f942` has the intended segment-level GPU execution contract and segment-cache binding, and CI is green. However, do not merge yet.\n\n`project_renderer._final_cache_miss_reason()` no longer recomputes/compares the current resolved per-segment artifact identity. It only checks GPU execution contract version, requested mode, evidence presence, and non-empty segment cache keys.\n\nThat allows this incorrect sequence:\n\n1. `gpu_execution=auto`, CUDA temporarily unavailable -> formal Render explicitly falls back to CPU decode/filter + NVENC and publishes a final cache.\n2. CUDA later becomes available.\n3. Same approved render is requested.\n4. Final cache can still hit because request remains `auto` and old report has v1 GPU evidence.\n5. Render returns before current `GPUExecutionRegistry.resolve()` / segment cache currentity, so old CPU-decode output masquerades as the currently expected NVDEC/CUDA execution.\n\nThis violates VID-38 cache semantics.\n\nRequired fix:\n- bind final-cache currentity to the **currently resolved ordered per-segment GPU execution semantic contracts** and corresponding expected segment artifact keys;\n- ideally resolve with the same job-scoped `SourceProbeRegistry` + `GPUExecutionRegistry` before final-cache acceptance, then reuse those registries if rendering proceeds, preserving VID-31 probe dedupe;\n- CPU-fallback `auto` artifact -> current NVDEC/CUDA must MISS;\n- identical current NVDEC/CUDA -> HIT;\n- diagnostics/timing/stderr must not affect identity;\n- approval provenance remains unchanged;\n- no manual cache deletion.\n\nAdd regressions for CPU-fallback→GPU-available miss and GPU→same-GPU hit.\n\nNon-blocking evidence follow-up: current real A/B output sizes differ materially (CPU 1,770,042 B vs GPU 4,789,167 B). Include frame count/bitrate and color metadata (`color_space`, primaries, transfer, range) in the next A/B report to confirm output-profile semantics are unchanged; only change implementation if evidence shows a contract mismatch.\n\nPR comment with the same blocker is recorded on #104.",
+            "attachments": [],
+            "createdAt": "2026-08-16T12:22:45.931Z",
+            "updatedAt": "2026-08-16T12:22:45.899Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "384bcdbe-d3f8-48e4-9e8f-f80afe9dfb58",
+            "body": "## VID-38 implementation handoff\n\n- Base: `fbc65caebc50549fdd747ffbb092c575ebb4c086`\n- Branch: `agent/vid-38`\n- Draft PR: [#104](https://github.com/DystopiaOwO/video-vault-ai/pull/104)\n- HEAD: `1e8721a3951cb44592f9afcb6dd8dba4e184f942`\n\n### Implementation\n\nAdded versioned GPU execution contract `1` for formal segment rendering. When the resolved encoder is h264_nvenc and the source/profile are supported, the emitted path is NVDEC -> CUDA filter -> h264_nvenc, with `-hwaccel cuda`, `-hwaccel_output_format cuda`, and `scale_cuda=1920:1080:format=yuv420p`. Unsupported/unavailable paths have structured, bounded capability evidence and deterministic explicit CPU fallback; there is no silent fallback.\n\nVID-37 approval provenance remains semantic-only. GPU execution fields, device, diagnostics, renderer/cache contract, and timing do not enter approval provenance. VID-36 resolved encoder binding remains required. CPU/GPU segment cache identities differ; identical GPU contracts cache-hit deterministically; diagnostic stderr changes do not change semantic cache identity. VID-31 source fast-probe/reuse remains in the hot path. Final QC and Delivery QA contracts were not changed.\n\n### Real isolated Coffee A/B\n\nSame 4K HEVC 10-bit Coffee source, 8-second slice, final_1080p, same h264_nvenc p5/vbr/cq23 contract:\n\n- CPU decode/filter + NVENC: 22.715s, 1,770,042 bytes.\n- NVDEC + scale_cuda + NVENC: 1.883s, 4,789,167 bytes.\n- Measured speedup: 12.1x.\n- GPU resolved audit: `implementation=nvdec_cuda`, `decode_used=nvdec`, `filter_used=cuda`, `hardware_api=cuda`, RTX 5070 Ti; output H.264 1920x1080 yuv420p 30fps with valid A/V.\n- Repeated identical GPU run: cache hit with the same key.\n- Source SHA/size/mtime and production data unchanged.\n\nNo full 17-segment Coffee Formal Render was run, per VID-38 stop rule.\n\n### Validation\n\n- Targeted media/render/provenance/QC: 68 passed.\n- Full Python: 781 passed, 2 skipped.\n- Frontend: 262 passed.\n- Frontend production build: PASS.\n- compileall, UTF-8, and git diff --check: PASS.\n- Required CI run 31946559081: all five jobs PASS, including Windows authoritative Python 3.11 and Ubuntu Python 3.13.\n\nPR remains Draft and is ready for ChatGPT review.",
+            "attachments": [],
+            "createdAt": "2026-08-16T12:19:32.186Z",
+            "updatedAt": "2026-08-16T12:19:51.443Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "a6daf825-a39f-4f78-b981-ef3e6c3f34e6",
+            "body": "### Ready to start after VID-37 merge\n\nLatest authoritative main: `fbc65caebc50549fdd747ffbb092c575ebb4c086`.\n\nVID-37 is merged and establishes `segment-approval-provenance-v1`. Preserve it: GPU execution/cache contract changes in VID-38 must not change approval-semantic provenance.\n\nImplement VID-38 as a focused Draft PR from this main. Validate with isolated Coffee A/B + targeted/media tests first; do not run the full formal Coffee Render before review/merge. The final full VID-18 Render happens only after VID-38 is merged.",
+            "attachments": [],
+            "createdAt": "2026-08-16T11:23:09.921Z",
+            "updatedAt": "2026-08-16T11:23:09.845Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-39",
+        "uuid": "66e173bd-af97-40a4-98b6-cdb661c2217d",
+        "title": "Formal Render display geometry｜尊重 SAR / DAR / rotation / Display Matrix，避免 framing 失真",
+        "description": "## Human-preview blocker\n\n<issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> 最終 human preview 明確失敗：成品畫面 framing / 顯示幾何與原始素材播放器看到的畫面不一致。使用者提供對照截圖；不是剪輯方向，也不是單純 90°/180° rotation 問題。\n\n目前 `MediaProbe` 只保存 coded width/height，沒有 sample_aspect_ratio、display_aspect_ratio、rotation、Display Matrix。<issue id=\"0498d23c-b4fb-4d41-8956-95062cf3feee\" href=\"https://linear.app/videoai/issue/VID-38/formal-render-gpu-pipelinenvdec-cuda-filters-nvenc\">VID-38</issue> CUDA path 又直接使用 `scale_cuda=<target_w>:<target_h>`，因此目前 product 可能把 coded geometry 當 display geometry。\n\n## Goal\n\n建立 deterministic display-geometry contract，讓正式 Render 尊重 source 的實際顯示幾何，並讓 CPU / NVDEC+CUDA path 產生一致 framing。\n\n## Required investigation\n\n對 <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> authoritative Coffee sources 做 read-only ffprobe inventory：\n\n* coded width / height\n* sample_aspect_ratio (SAR)\n* display_aspect_ratio (DAR)\n* `tags.rotate`\n* `side_data_list` / Display Matrix rotation\n* stream/container orientation metadata\n* FFmpeg CPU decode default autorotate 行為\n* `-hwaccel cuda -hwaccel_output_format cuda` 下 autorotate / display matrix 行為\n\n同時對比：\n\n* source player screenshot / representative source frame\n* current formal segment output frame\n* current final output frame\n\n不要先假設固定旋轉角度，也不要硬編碼 Coffee 特例。\n\n## Required design\n\n`MediaProbe` / source probe contract 應保存 normalized display geometry，至少：\n\n* coded_width / coded_height\n* sar\n* dar / normalized display width-height ratio\n* rotation degrees / display matrix provenance\n\nRender 必須根據 display geometry 決定：\n\n* autorotate / transpose / CUDA-compatible transform\n* preserve-aspect scale\n* crop / pad policy（不得 silent stretch）\n\nGPU path 不得直接把非等比例 display geometry 強制 `scale_cuda=1920:1080`。\n\n如果 CUDA 無法安全表達所需 transform：\n\n* 明確 mixed/CPU fallback，或 fail closed\n* audit 實際 execution path\n* 不得宣稱 full CUDA framing correctness\n\n## Cache / provenance\n\nDisplay geometry / transform 會影響 pixels，必須進 render artifact cache identity。\n不得進 <issue id=\"6170ce99-f62a-4dee-b0ee-4eb0f3262f20\" href=\"https://linear.app/videoai/issue/VID-37/delivery-qa-audio-provenanceseparate-approval-semantic-identity-from\">VID-37</issue> approval semantic provenance，除非 approved visual semantics 本身明確綁 display transform。\n\n舊錯誤 geometry artifact 必須自然 MISS，不人工清 cache。\n\n## QA\n\n新增 representative frame geometry regression：\n\n* source displayed framing vs rendered framing 的 aspect/transform contract 可驗證\n* portrait / landscape / non-square-pixel / rotated metadata fixtures\n* CPU vs GPU output geometry一致\n* no silent stretch\n\nFinal QC / Delivery QA 應至少能 audit source display geometry → render transform → output geometry；不要再只驗 output=1920x1080 就算 PASS。\n\n## Acceptance\n\n先用 <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> Coffee source 做小片段/單幀 A/B，確認與使用者第二張對照圖的 framing 方向一致，再跑完整 Coffee Render。\n\n不要重跑 Perception / Story / Apply / Approval。\n不要先跑完整 17-segment Render。",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-39/formal-render-display-geometry尊重-sar-dar-rotation-display-matrix避免",
+        "gitBranchName": "vid-39",
+        "createdAt": "2026-08-16T13:26:58.308Z",
+        "updatedAt": "2026-08-17T00:47:24.589Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-17T00:47:24.574Z",
+        "startedAt": "2026-08-16T13:26:58.899Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "29043306-dde7-4781-b869-41743bd8b1fa",
+            "title": "[VID-39] Respect source display geometry in segment rendering",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/105"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-16T13:26:58.308Z",
+            "endedAt": "2026-08-17T00:47:24.583Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-17T00:47:24.583Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-7",
+              "title": "正式輸出 QA｜自動媒體檢查與交付閘門"
+            },
+            {
+              "id": "VID-31",
+              "title": "Render performance｜source ffprobe 去重與 fast metadata path"
+            },
+            {
+              "id": "VID-38",
+              "title": "Formal Render GPU pipeline｜NVDEC → CUDA filters → NVENC"
+            },
+            {
+              "id": "VID-37",
+              "title": "Delivery QA audio provenance｜separate approval semantic identity from render cache identity"
+            },
+            {
+              "id": "VID-26",
+              "title": "Creative Brief｜一次完成 AI 建議與創意核准"
+            },
+            {
+              "id": "VID-27",
+              "title": "Visual Style Preview｜用真實素材先核准字幕與視覺方向"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "edf48a67-ca95-40aa-a11a-7a2599b2f191",
+            "body": "### ChatGPT final review — merged\n\nPR #105 final HEAD `cd063f67f1537de2f0298b7f25a419a3e1b039d1` accepted and squash-merged.\n\nMain SHA: `c5acae8d84f6cb8f0c91f67b6db2642d9ed4ecd6`\n\nAccepted evidence:\n- Coffee Display Matrix ±90° root cause/fix proven\n- MediaProbe preserves coded/display geometry, SAR/DAR, rotation and Display Matrix\n- no silent stretch; unsafe transforms use explicit CPU fallback\n- standalone non-square SAR normalized before composition\n- rotated + non-square SAR real FFmpeg smoke proves post-autorotate reciprocal SAR handling\n- equivalent canonical upright square-pixel fixture produces equivalent formal-render output\n- output SAR=1:1 / DAR correct\n- display geometry execution/cache identity deterministic; stale wrong geometry artifacts miss naturally\n- VID-37 approval provenance remains isolated\n- CI run 31982543259 / #385 all green\n\nVID-39 Done. Do not run full Coffee yet; VID-18 still requires early target-orientation/framing decision plus visual-treatment work (VID-26 → VID-27) before another final human-preview render.",
+            "attachments": [],
+            "createdAt": "2026-08-17T00:47:57.367Z",
+            "updatedAt": "2026-08-17T00:47:57.318Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "c4f61ac6-38cc-47ee-a078-421ae4c06c98",
+            "body": "VID-39 review blocker completed at PR #105 HEAD `cd063f67f1537de2f0298b7f25a419a3e1b039d1`.\n\nRoot cause was reproduced with a real FFmpeg MP4: coded 720x480, SAR=4:3, video-track Display Matrix rotation=-90. FFmpeg default autorotate changes the post-autorotate frame to 480x720 with reciprocal SAR=3:4; using the original 4:3 before composition could distort framing.\n\nMinimal generic fix: quarter-turn rotations now swap SAR axes after autorotate and before display-geometry composition, then normalize to setsar=1. The GPU display contract records `sar_normalization_axis=post_autorotate` for deterministic semantic/cache invalidation. DISPLAY_GEOMETRY_CONTRACT_VERSION remains 2 and SEGMENT_RENDERER_CONTRACT_VERSION remains 6. No Coffee-specific rotation or full Coffee Render was used.\n\nReal media smoke passed: rotated source display DAR=1:2 and canonical upright 360x720 SAR=1:1 DAR=1:2 produced equivalent formal product-renderer outputs at 160x90, final SAR=1:1 DAR=16:9, RGB equivalence/orientation checks passed, and no stretch/aspect error was observed. Rotated-SAR cache/execution contract hash changes deterministically.\n\nValidation: targeted tests 58 passed; media smoke 6 passed; full Python 796 passed, 2 skipped; frontend 38 files / 262 tests passed; production build passed; diff/UTF-8 checks passed; GitHub Actions run `31982543259` passed with all five jobs green. PR #105 remains Draft. No VID-26/27 work, no full 17-segment Render, no Story/Perception/Apply/Approval rerun, source/production data unchanged.",
+            "attachments": [],
+            "createdAt": "2026-08-17T00:39:47.945Z",
+            "updatedAt": "2026-08-17T00:39:47.912Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "bfe89415-a1c7-4a99-a7a6-73c55f4a005e",
+            "body": "### Final review check — rotated + non-square SAR needs one real media smoke\n\nThe standalone non-square SAR blocker is resolved correctly at HEAD `3c8aa77ade12b7e939cdcc94f03f77c5032a5a5c`:\n\n- display-pixel normalization occurs before composition\n- synthetic `720x480 SAR=4:3` matches equivalent `960x480 SAR=1:1` pixel output\n- final SAR/DAR are correct\n- cache semantic contract v2 invalidates old framing artifacts\n- Coffee Display Matrix regression remains PASS\n- CI #383 / `31959361790` all green\n\nOne narrow VID-39 geometry edge still lacks authoritative pixel evidence:\n\n`rotation != 0` + `SAR != 1:1`.\n\nThe current unit test only proves deterministic CPU fallback and command construction. The CPU path relies on FFmpeg default autorotate, then `_display_geometry_normalization_filter(probe)` still uses the original probed SAR. After a 90-degree display transform, the effective pixel-axis/SAR semantics may differ, so command-string evidence alone is not enough to claim no stretch.\n\nRequired before merge:\n\n- add ONE tiny real FFmpeg media smoke for a rotated + non-square-SAR fixture.\n- compare rendered output against an equivalent canonical upright square-pixel fixture or another pixel-grounded expected geometry.\n- prove output orientation, framing, DAR and SAR=1:1 are correct / no stretch.\n- if current filter is already correct, no implementation change is needed.\n- if it fails, fix the normalization to account for post-autorotate geometry and keep the contract deterministic.\n- no full Coffee render; no VID-26/27 work.\n\nThen rerun targeted media/geometry tests + CI and stop for review.",
+            "attachments": [],
+            "createdAt": "2026-08-16T16:54:10.451Z",
+            "updatedAt": "2026-08-16T16:54:10.417Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "c5d22548-e747-4c2a-ba29-23fd76fd31ee",
+            "body": "VID-39 review blocker resolved\n\nHEAD: 3c8aa77ade12b7e939cdcc94f03f77c5032a5a5c\nDraft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/105\n\nSAR normalization:\n- Before: autorotate -> setsar=1 -> scale/crop/pad\n- After: autorotate -> scale=ceil(iw*SAR/2)*2:ih:eval=init,setsar=1 -> scale/crop/pad -> final setsar=1\n- Non-square SAR is converted to display pixel width before composition.\n- New display geometry contract version = 2; sar_normalization = display_pixel_width_before_composition.\n- SEGMENT_RENDERER_CONTRACT_VERSION remains 6.\n- Old geometry contract/cache hash differs from current, so stale wrong framing artifacts miss naturally.\n\nRegression evidence:\n- Synthetic 720x480 SAR=4:3 / DAR=2:1 -> final 160x90 SAR=1:1 / DAR=16:9.\n- Pixel evidence confirms 160x80 content with 5px top/bottom background.\n- Equivalent 960x480 SAR=1:1 fixture produces identical first RGB frame.\n- preserve_aspect_pad and crop_to_fill normalize SAR before composition.\n- Rotated + non-square SAR remains deterministic CPU fallback.\n- Coffee Display Matrix ±90 regression remains passing.\n\nValidation:\n- targeted geometry/media/renderer/cache: 57 passed\n- media smoke: 5 passed\n- full Python: 794 passed, 2 skipped\n- frontend: 38 files / 262 tests passed\n- frontend production build: PASS\n- diff check / UTF-8: PASS\n- GitHub Actions CI 31959361790: all 5 jobs PASS\n- no full 17-segment Coffee Render; no VID-26; no Story/Perception/Apply/Approval rerun\n- source media and production data unchanged\n\nPR remains Draft for ChatGPT review.",
+            "attachments": [],
+            "createdAt": "2026-08-16T16:44:47.192Z",
+            "updatedAt": "2026-08-16T16:44:47.134Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "298ae9e0-bcb3-4a9d-ae89-ccc9d22d5baf",
+            "body": "### ChatGPT review blocker — preserve non-square-pixel display geometry\n\nPR #105 Coffee root cause/fix is correct for the current ±90° Display Matrix sources, but one VID-39 acceptance edge is still unsafe.\n\nCurrent CPU fallback filter order is effectively:\n\n`autorotate(default) -> setsar=1 -> scale/pad or scale/crop -> ... -> setsar=1`\n\nFor `sample_aspect_ratio != 1:1`, setting SAR to 1 **before** the aspect-preserving scale can discard the source display aspect that `MediaProbe.display_ratio` correctly calculated. Existing tests prove the probe reads SAR (including 4:3), but do not prove rendered framing/DAR remains correct for non-square-pixel sources.\n\nRequired before merge:\n\n- preserve the normalized display geometry through the first scale/crop decision; do not destroy SAR semantics early.\n- acceptable approaches include an explicit display-normalization scale using SAR-aware dimensions, or another deterministic filter order that produces square-pixel output while preserving source DAR.\n- final output may still end at `setsar=1`; the problem is doing it before geometry normalization.\n- add render-command/media regression for at least:\n  1. landscape non-1:1 SAR source -> landscape target, expected DAR preserved\n  2. rotated + non-1:1 SAR fixture if supported by contract\n  3. CPU vs equivalent canonical display geometry produces same framing\n- no silent stretch.\n- keep Coffee Display Matrix fix and contract v6 behavior unchanged.\n- no full 17-segment Render yet.\n\nUpdate the same PR #105 and stop for review.",
+            "attachments": [],
+            "createdAt": "2026-08-16T16:07:58.876Z",
+            "updatedAt": "2026-08-16T16:07:58.839Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "dfdb9776-7e39-481d-94f6-9c8699647f5e",
+            "body": "VID-39 implementation/CI update\n\nHEAD: 9f1048eb93ff42b23686d645f71f73e34fb357c6\nDraft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/105\n\nReview follow-up:\n- Ubuntu Media Smoke initially failed because the new bare -autorotate CLI flag is parsed incompatibly by the runner's FFmpeg 6.x, producing Invalid file index 0 before input registration.\n- Removed that unnecessary explicit flag. CPU FFmpeg default autorotate remains enabled; MediaProbe/display-geometry policy and CPU fallback contract are unchanged.\n- This preserves deterministic early orientation resolution: portrait-in-landscape defaults to preserve_aspect_pad; explicit crop_to_fill/background policies remain available; no source-specific crop.\n\nValidation:\n- targeted media/GPU/segment/cache: 55 passed\n- full Python: 789 passed, 2 skipped\n- frontend: 38 files / 262 tests passed\n- frontend production build: PASS\n- git diff --check and UTF-8 checks: PASS\n- GitHub Actions CI 31952069099: all 5 jobs PASS, including Media Smoke / Ubuntu and Windows authoritative\n- no full 17-segment Render; no Story/Perception/Apply/Approval rerun\n- source media and production data unchanged\n\nPR remains Draft for review.",
+            "attachments": [],
+            "createdAt": "2026-08-16T14:16:38.250Z",
+            "updatedAt": "2026-08-16T14:16:38.216Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "c782a468-2a91-4204-a1a9-6d59ade7717a",
+            "body": "## VID-39 root-cause inventory + focused fix\n\n- Baseline main: `6efd19a8fe2afa354e092af5c1a74ad177f3a72e`\n- Branch / Draft PR: `agent/vid-39`, PR #105\n- HEAD: `5fd18b6`\n\n### Authoritative Coffee source geometry\n\n1. clip_001 source:\n   - coded visible `3840x2160`, coded height `2176`\n   - SAR absent in ffprobe, normalized `1:1`\n   - Display Matrix rotation `-90`\n   - normalized display geometry `2160x3840`, DAR `9:16`\n   - codec HEVC, `yuv420p10le`, ~59.696 fps, bt2020/PQ\n\n2. clip_002 source:\n   - coded visible `1920x1080`, coded height `1088`\n   - SAR absent in ffprobe, normalized `1:1`\n   - Display Matrix rotation `+90`\n   - normalized display geometry `1080x1920`, DAR `9:16`\n   - codec HEVC, `yuv420p10le`, ~30.017 fps, bt2020/PQ\n\n### Root cause\n\n- CPU FFmpeg default autorotate produced source1 `2160x3840` / source2 `1080x1920`.\n- Current VID-38 CUDA path used `-hwaccel cuda -hwaccel_output_format cuda` plus `scale_cuda=1920:1080`; representative source1 produced a sideways `1920x1080` frame and retained `-90` display-matrix side data.\n- Existing final/segment outputs were `1920x1080`, SAR/DAR `1:1`/`16:9`, no rotation; this explains the human-preview framing mismatch.\n- MediaProbe previously lost coded-vs-display metadata; GPU resolver used coded ratio; direct scale_cuda could silently stretch.\n\n### Focused implementation\n\n- MediaProbe now persists coded dimensions, SAR, normalized DAR/ratio, display dimensions, rotation, Display Matrix and provenance.\n- GPU resolver uses displayed ratio and explicitly falls back to CPU for unsafe rotation/SAR/aspect transforms with auditable reason.\n- CPU path makes autorotate and SAR normalization explicit and supports deterministic `preserve_aspect_pad`, `crop_to_fill`, and `background` policies.\n- Display geometry/policy is included in the GPU semantic contract, Render Report per-segment evidence and segment cache identity; segment renderer contract bumped `5 -> 6`.\n- VID-37 approval-semantic provenance remains isolated.\n\n### Representative acceptance\n\nOnly an isolated 8-second product segment was rendered; no full Coffee Render or AI gate rerun.\n\n- source canonical frame: upright portrait\n- old CPU artifact: upright portrait content letterboxed\n- old NVDEC/CUDA artifact: sideways/stretched\n- fixed product segment: upright portrait with deterministic side background, SAR/DAR `1:1`/`16:9`\n- resolver audit: `requires_cpu_display_matrix_transform`\n- source probe: 1 fast metadata call, no source full-file hash in the render hot path\n- source/production data unchanged\n\n### Tests\n\n- targeted media/GPU/segment/cache: `52 passed`\n- full Python: `789 passed, 2 skipped`\n- frontend: `38 files / 262 tests passed`\n- frontend production build: PASS\n- diff/UTF-8 checks: PASS\n- no full 17-segment Render; no Story/Perception/Apply/Approval rerun\n\nVID-18 remains blocked at human-preview display correctness; this PR is Draft for review.",
+            "attachments": [],
+            "createdAt": "2026-08-16T14:02:08.410Z",
+            "updatedAt": "2026-08-16T14:02:08.342Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-40",
+        "uuid": "18a7a130-9a21-4265-98f6-e35bcf672ac8",
+        "title": "Simple-first Editor UX｜Progressive Disclosure 與三步創意流程",
+        "description": "## 目標\n\n把目前 Creative Brief + Visual Style Preview 從「控制項優先」改成「結果優先」：\n\n**AI 推薦 → 真實 Preview → 一鍵採用；只有不滿意時才展開詳細設定。**\n\n這是接下來優先於 Timeline Inspector 的 UX 重構，不新增新的剪輯 engine 能力。\n\n## 主流程（Simple mode）\n\n首頁/主要 creative flow 只保留三個高價值步驟：\n\n### 1. 影片方向\n\n只顯示：\n\n* 橫向 16:9\n* 直向 9:16\n* AI 推薦 badge + 一句理由\n\n主要 CTA：`採用推薦方向` 或直接點另一方向。\n\nframing strategy 不直接攤開；只顯示人話摘要，例如：\n\n`直向素材將優先裁切，必要時使用模糊背景補齊。`\n\n### 2. 視覺風格 Preview\n\n直接顯示真實素材 Preview cards：\n\n* Diary Natural（Recommended）\n* Clean Minimal\n* Cinematic\n\n每張卡只顯示：\n\n* 真實畫面\n* style 名稱\n* 1 句描述\n* Recommended badge（若適用）\n\n主要 CTA：`使用這個風格`。\n\n不要在主畫面同時顯示 font / weight / anchor / readability / motion 等 controls。\n\n### 3. 確認\n\n顯示單行或 compact summary，例如：\n\n`16:9 · Diary Natural · 直向素材自動補背景 · Overlay 字卡`\n\n主要 CTA：`確認並開始剪輯`。\n\n## Advanced / Progressive Disclosure\n\nSimple flow 每一步可有 `詳細設定` / `微調`，預設收起。\n\nAdvanced 使用 accordion 分組，避免一次展開所有 controls。\n\n建議 group：\n\n* 畫面配置：crop / background / preserve full frame\n* 視覺與調色：grading / LUT summary + available look controls\n* 字卡：title style / position / readability / motion\n* 字幕：只保留入口與摘要；字幕審核、字型 registry、caption workflow 由獨立字幕任務負責\n* 技術資訊：capability/provenance/debug，只在更深層 diagnostic 區\n\n主流程不得要求使用者理解 internal contract ID。\n\n## One source of truth\n\nSimple 與 Advanced 必須操作既有 <issue id=\"537ca3ee-e421-4404-8149-4d4baee0f20c\" href=\"https://linear.app/videoai/issue/VID-26/creative-brief一次完成-ai-建議與創意核准\">VID-26</issue> / <issue id=\"ed771ad6-fea2-497e-94be-d3fd29275b0c\" href=\"https://linear.app/videoai/issue/VID-27/visual-style-preview用真實素材先核准字幕與視覺方向\">VID-27</issue> 同一份 persisted semantic contracts。\n\n禁止：\n\n* 建立 `simple_settings` 第二份設定資料\n* Simple CTA 直接繞過正式 approval\n* UI-only recommendation state 被當成 approved state\n\n`採用推薦` 必須等價於：\n\n1. resolve current AI recommendation\n2. materialize exact semantic contract\n3. 需要 Preview 的項目先產生/驗證 preview evidence\n4. human click\n5. 正式 approval persistence\n\n## State / invalidation\n\n* Advanced 任一 pixel-affecting override 改變 → 舊 Visual Style preview evidence stale，要求重新 Preview。\n* 純 disclosure 展開/收合不影響 semantic hash。\n* visual-only changes 不 stale Story / Perception。\n* Creative Brief visual contract 改變時 Visual Style currentity 維持既有 fail-closed 規則。\n\n## 字幕任務邊界\n\n本任務不重新設計：\n\n* 字幕審核 workflow\n* 中文字幕字型清單 / font registry\n* caption timing/text editing\n* subtitle renderer contract\n\n若字幕獨立任務新增設定，本任務只要求它可透過同一 Simple/Advanced disclosure contract 插入，不讓主畫面變密集。\n\n## Horizontal Extensibility Contract\n\n這裡有理論上可以水平增加的東西：設定 section / summary item / advanced control group。\n\n建立最小 versioned disclosure metadata contract，例如：\n\n* section_id（stable）\n* schema/version\n* human label\n* disclosure_level: primary / advanced / diagnostic\n* order\n* capability/enabled state\n* summary resolver identity\n* affected semantic domain / invalidation class\n\n前端由 metadata 決定 section placement/order/state；不要在主容器散落 `if section === ...`。\n\n不要求 generic plugin framework。\n\n至少提供一個 synthetic sibling section fixture，證明可加入 Advanced 與 summary，而不修改主流程核心 branch。\n\n## UI quality\n\n* desktop 首屏要有明確視覺層級與足夠留白。\n* 不要卡片、select、badge 全部擠在一起。\n* Progressive disclosure 展開前，Advanced controls 不佔主要視覺空間。\n* 內部名稱轉成使用者語言；例如 `background_treatment` → `模糊背景補齊`。\n* Technical provenance/hash 不放在一般主流程；仍可在 diagnostic/debug drill-down 取得。\n\n## Acceptance\n\n以 authoritative Coffee project 驗收：\n\n 1. 首屏不再看到 <issue id=\"537ca3ee-e421-4404-8149-4d4baee0f20c\" href=\"https://linear.app/videoai/issue/VID-26/creative-brief一次完成-ai-建議與創意核准\">VID-26</issue>/27 現有整排 Advanced selects。\n 2. 從未設定狀態開始，一般路徑最多 3 個主要決策：方向 → style → 確認。\n 3. AI recommendation 清楚但不自動替 human 核准。\n 4. Visual Style 必須先看真實 Preview 才能 approve。\n 5. 展開 Advanced 可修改 framing/title/grading；收起後 summary 即時反映 effective persisted values。\n 6. 修改 Advanced 後舊 preview 失效，不能用 stale preview approve。\n 7. refresh / restart 後 semantic state 正確；不需要保存純 UI accordion state。\n 8. Story/Perception identity 不因 visual-only UI 操作改變。\n 9. synthetic setting section 透過 disclosure metadata 加入，不需修改主流程 special-case。\n10. frontend responsive/build/tests PASS。\n\n## Scope guard\n\n本任務只重構 UI / UX orchestration 與 disclosure metadata。\n\n不要：\n\n* full Coffee Render\n* 重跑 Perception / Story / Apply\n* 實作 Timeline Inspector\n* 實作 Editorial Policy\n* 擴字幕 engine\n* 修改 source media\n* 弱化 approval/currentity/provenance contracts",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-40/simple-first-editor-uxprogressive-disclosure-與三步創意流程",
+        "gitBranchName": "vid-40",
+        "createdAt": "2026-08-19T05:57:40.589Z",
+        "updatedAt": "2026-08-20T13:55:54.012Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-19T08:33:53.168Z",
+        "startedAt": "2026-08-19T05:57:40.739Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "b8e46846-cde6-4821-9156-ec02c1a47b66",
+            "title": "[VID-40] Implement simple-first creative flow",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/108"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-19T05:57:40.589Z",
+            "endedAt": "2026-08-19T08:33:53.179Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-19T08:33:53.179Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-25",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [
+            {
+              "id": "VID-28",
+              "title": "Timeline Inspector｜Filmstrip + Waveform + Perception drill-down"
+            }
+          ],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-18",
+              "title": "Round 1 最終真實流程驗收重跑｜deliverable_ready DoD"
+            },
+            {
+              "id": "VID-26",
+              "title": "Creative Brief｜一次完成 AI 建議與創意核准"
+            },
+            {
+              "id": "VID-27",
+              "title": "Visual Style Preview｜用真實素材先核准字幕與視覺方向"
+            },
+            {
+              "id": "VID-48",
+              "title": "Visual Style Preview performance｜600s timeout、primary-first 與 bounded seek"
+            },
+            {
+              "id": "VID-46",
+              "title": "Visual Style Preview UX/runtime｜「產生真實畫面預覽」無可見反應"
+            },
+            {
+              "id": "VID-45",
+              "title": "Creative Brief UX｜方向卡選擇無明確回饋與確認 CTA 易誤判無反應"
+            },
+            {
+              "id": "VID-44",
+              "title": "Storage Workspace UX｜Artifact 明細預設收合與類型彙總"
+            },
+            {
+              "id": "VID-41",
+              "title": "Editor Workflow v2｜從素材匯入到成片的主流程重構"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "1174e6ea-73d6-4e69-ad91-c2434f859f75",
+            "body": "### ChatGPT final acceptance — MERGED\n\nVID-40 驗收完成，沒有再擴 scope。\n\n- Accepted HEAD: `8af95ab19228d8f8ddd24d9fd16de0e6317456e1`\n- CI #405 / run `32231603240`: PASS\n- PR #108 已 Ready 並以 exact HEAD squash merge\n- Merged main SHA: `d023eb6881d30391fd0b0226f145e9a9e89e1dac`\n\nFinal accepted contracts：\n- Simple-first：方向 → 真實風格 Preview → 確認\n- Primary style chooser 收斂為 Diary Natural / Clean Minimal / Cinematic\n- 單一 top-level 詳細設定 + section-level progressive disclosure\n- disclosure metadata / summary / exact semantic editor target\n- Primary + Advanced 共用單一 page-level Visual Style pending draft\n- pixel-affecting override 會清 stale preview batch/identity；重新 Preview 才恢復 approval\n- Creative Brief visual-only currentity 仍由既有 `visual_contract_hash` fail-closed，不需要推進 Story/Perception revision\n- 字幕 engine / Timeline / Editorial Policy 均未擴入本任務\n\nVID-40 Done。",
+            "attachments": [],
+            "createdAt": "2026-08-19T08:34:25.331Z",
+            "updatedAt": "2026-08-19T08:34:25.258Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "0ddfec52-1041-4b00-a3e2-9ab61f122d3e",
+            "body": "### ChatGPT review round 4 — BLOCKED（最後 currentity gap）\n\nHEAD `f6cc3eb5bbd96fd649b44b67d3fdac9a9fa34190`，CI #404 / run `32229671390` PASS。shared VisualStyleDraftController 與 primary/title/grading 跨 surface continuity 已接受。\n\n剩 1 個最後 blocker：pixel-affecting override 目前只清 selected preview variant/hash，**舊 `variants` batch 還留著**。主畫面仍會顯示舊 hero；human 再點舊 hero 時 `selectVariant()` 會把舊 `preview_variant_id / preview_plan_hash` 寫回新的 override draft，Approval 又會亮起。\n\n後端 VID-27 evidence validation 應仍會 fail-closed，但 UI 不應讓 stale human-visible pixels 再次成為 current approval candidate。\n\n修法可採最簡單方案：任何 pixel-affecting shared override 改變時，同時清 `variants`，主卡回 placeholder，直到用 exact shared overrides 重新 Preview；或為 variant batch 綁 deterministic draft semantic identity，stale batch 不可選。不要複製 backend semantic rules。\n\nRegression：preview → 改 anchor/motion → ids + old batch currentity 失效 → 點舊 primary 不能重啟 approval → exact overrides re-preview → 新 hero/evidence → approve exact new variant/hash。Accordion open/close 不 invalidate。\n\nPR comment：`5339269680`。同 PR/branch 修；不擴字幕、Timeline、Editorial Policy，不跑 full Coffee Render / Perception / Story / Apply。",
+            "attachments": [],
+            "createdAt": "2026-08-19T08:04:43.014Z",
+            "updatedAt": "2026-08-19T08:04:42.993Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "be2b86ee-aea2-422e-a8bb-9b2c8d729e19",
+            "body": "### ChatGPT review round 3 — BLOCKED\n\nHEAD `9371aa1b065ac24f169f79e63396c9d4185dbfa2`, CI #403 / run `32226711801` PASS。Round-2 的 section-level progressive disclosure / exact target navigation 接受。\n\n最後 blocker：**Visual Style pending edit / preview state 被拆成多個 component-local instances。**\n\n`VisualStylePreviewWorkspace` 目前自己的 local state 包含 selected / overrides / variants / selectedPreviewVariantId / selectedPreviewPlanHash / selectedTitleRole。Step 2 primary 是一個 instance，而 Advanced grading/title 各自另外 mount 新 instance。\n\n實際後果：\n- 主畫面選 Cinematic，Advanced title/grading 可能仍以 approved/default style 初始化。\n- Advanced 改 title override 後重新 Preview，variants / preview identity 留在 Advanced instance；主三張 Preview cards 看不到。\n- Advanced mode 本身不顯示 Preview，因此 human 沒真正看到剛生成的 authoritative pixels。\n- 回 Step 2 再 Preview，primary instance 可能用自己的空 overrides，丟掉剛才 Advanced 微調。\n\n要求改為單一 page-level shared Visual Style draft/controller：primary + Advanced 共用 selected style、bounded overrides、variants、selected preview variant/hash/title role。Advanced override 要 invalidate shared preview；重新 Preview 用 shared overrides 並讓 human 真正看到結果；approval 使用最後 human 看到的 exact shared variant/hash。\n\nRegression 要覆蓋 primary Cinematic → Advanced defaults仍為 Cinematic、Advanced override → shared preview invalidated、re-preview API exact overrides → primary/shared preview 更新、跨 title/grading 不丟 state、approve exact returned evidence。\n\nPR comment `5338886542`。同 PR/branch 修；不擴字幕/Timeline/Editorial Policy，不跑 full Coffee Render / Perception / Story / Apply。",
+            "attachments": [],
+            "createdAt": "2026-08-19T07:26:43.763Z",
+            "updatedAt": "2026-08-19T07:26:43.743Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "65a107f4-442c-4cce-8fcc-78dac484753f",
+            "body": "### VID-40 review round 4 implementation handoff\n\n- Branch: `agent/vid-40`\n- PR: #108 (Draft, Open, Mergeable)\n- HEAD: `8af95ab19228d8f8ddd24d9fd16de0e6317456e1`\n\n#### Blocker and fix\n\n根因是 `patchOverride()` / `patchNestedOverride()` 只清空 selected preview plan/variant identity，卻保留舊的 `variants`。因此語意 override 改變後，舊 hero 仍可被重新選回，造成過期預覽看似仍可核准。\n\n修正為每次 scalar 或 nested semantic override mutation 同時清空：\n\n- `variants=[]`\n- `selectedPreviewPlanHash=\"\"`\n- `selectedPreviewVariantId=\"\"`\n\n重新預覽會使用更新後的 override payload，只有新 response 的 exact plan/variant identity 才能恢復 approval。\n\n保留的語意：\n\n- 同一批次、override 未變更時，Diary/Clean/Cinematic style switch 仍可用。\n- disclosure open/close 與 extra evidence 不會清空或改寫 draft。\n- Creative Brief currentity refresh 會清空 variants/preview IDs，舊批次不能跨 revision 存活。\n- 不重跑 Coffee Render / Perception / Story / Apply。\n\n#### Regression evidence\n\n- scalar override：A 預覽可核准；anchor 改變後舊 hero 消失、variants/IDs 清空、approval disabled；重新預覽得到 B 並以 B 的 exact identity 核准。\n- nested readability/motion override：舊 hero 消失且 approval disabled。\n- currentity refresh：variants/IDs 清空。\n- 同批次 style switch 與既有 shared controller / approval / provenance / cache contract regressions 保留。\n\n#### Validation\n\n- targeted frontend: 15 passed\n- full frontend: 42 files / 279 passed\n- frontend production build: PASS\n- full Python: 846 passed, 2 skipped\n- `git diff --check`: PASS\n- UTF-8 / replacement-character check: PASS\n- required CI run `32231603240`: PASS\n  - Frontend: PASS\n  - Ubuntu portability / PR Core/Targeted / Python 3.13: PASS\n  - Windows authoritative / PR Core/Targeted / Python 3.11: PASS\n  - Select PR test layers: PASS\n  - Media Smoke: skipped by workflow policy\n\nPR 保持 Draft，交回 ChatGPT review。",
+            "attachments": [],
+            "createdAt": "2026-08-19T07:12:37.382Z",
+            "updatedAt": "2026-08-19T08:18:11.635Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "d32c933b-8b18-48fe-a60e-42eb70db5f6c",
+            "body": "### ChatGPT review round 2 — BLOCKED\n\nHEAD `016a94fffd139947304ae162ff4fa938340ef951`, CI #402 / run `32225298350` green。Round-1 的 3-style primary grouping、registry labels、summary resolver、overlay/standalone summary、synthetic sibling 都接受。\n\n剩 1 個產品/架構 blocker：**Progressive Disclosure 目前只有入口變成一個，但打開後內容仍然是 flat control wall。**\n\n目前 outer `詳細設定` 一開，active child 就因 `showAdvanced=true` 直接把整包 advanced controls 全顯示；下面同時又列 framing / grading / title / captions / diagnostic section accordions。Section accordion 沒有真正擁有自己的 controls。\n\n另外 `open_semantic_editor@1` 目前只 resolve 成 broad step：grading/title 都是 `style`，metadata target 沒有真正被 consume 成「打開哪一個 exact section」。\n\n要求同 PR / branch 修：\n- 保持只有一個 top-level `詳細設定`。\n- outer Advanced 打開時，所有 section 預設仍 closed，不直接顯示 font/weight/anchor/motion 等 controls。\n- `畫面配置` accordion 只顯示 framing controls。\n- `視覺與調色` 只顯示 grading/look controls。\n- `字卡` 只顯示 title controls。\n- `open_semantic_editor@1` 要能 navigate + open/focus exact semantic section；grading/title target 必須可區分。\n- unknown/unavailable target explicit unavailable。\n- controls 仍操作既有 VID-26/27 persisted semantic state，不建立第二份設定。\n- 加 frontend regressions：outer Advanced alone 不露 controls；title/framing 分區互不污染；exact target navigation；top-level `詳細設定` exactly one。\n\nPR comment：`5338645373`。\n\n不擴字幕 engine、Timeline、Editorial Policy；不跑 full Coffee Render / Perception / Story / Apply。",
+            "attachments": [],
+            "createdAt": "2026-08-19T06:59:29.947Z",
+            "updatedAt": "2026-08-19T06:59:29.912Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "19a6060a-669b-44f5-8f11-afc1dfdae744",
+            "body": "VID-40 review round 1 修正已完成並推送同一 branch / Draft PR。\n\n- Branch: agent/vid-40\n- PR: https://github.com/DystopiaOwO/video-vault-ai/pull/108\n- HEAD: 016a94fffd139947304ae162ff4fa938340ef951\n- Baseline: 9c40caeb5eb90919d96926f1f4cc1322435cc4b7\n\n本輪 evidence：\n- VID-27 variant matrix 以 deterministic hero policy 分組；Simple primary exactly 3 張 public style cards：Diary Natural / Clean Minimal / Cinematic。\n- bright/dark、chapter/location、animated、standalone comparison 改由「查看更多預覽」呈現，不污染 primary surface。\n- CreativeFlowWorkspace 是唯一「詳細設定」擁有者；child Creative Brief / Visual Style 不再顯示第二個 toggle。\n- disclosure metadata 版本化為 summary_resolver@1 / open_semantic_editor@1，含 include_in_final_summary / summary_order；主流程由 resolver metadata 驅動。\n- unknown resolver/action 明確顯示 unavailable。\n- final summary 讀 approved effective semantics：standalone = 獨立字卡畫面，overlay = 疊在影片上。\n- framing/style label 來自既有 registry/API；synthetic audio_policy_test 可進 Advanced 與 final summary，不需新增主流程 special-case。\n- project API editor_disclosure metadata regression 已補。\n\nValidation：\n- targeted Python 59 passed\n- full Python 846 passed, 2 skipped\n- targeted frontend 11 passed\n- full frontend 42 files / 273 tests passed\n- frontend production build PASS\n- encoding check / git diff --check PASS\n- 未跑 full Coffee Render、Perception、Story、Apply；未修改 source / production data\n\nPR 維持 Draft，等待 review / required CI。",
+            "attachments": [],
+            "createdAt": "2026-08-19T06:53:26.880Z",
+            "updatedAt": "2026-08-19T06:53:26.830Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "7f09b7b2-3725-431a-8527-4beaf4dcda67",
+            "body": "### ChatGPT review round 1 — BLOCKED\n\nHEAD `433a5e1798bbae1a55d41fa33e362ef08bc404b0`, CI #401 / run `32222587456` green. Simple-first 方向與既有 VID-26/27 contract 保留是正確的，但目前還不適合 merge。\n\nBlockers：\n\n1. Compact Visual Style 仍把 VID-27 全部 preview variants 直接 render 成主卡片；VID-27 本來會產生 bright/dark × public styles/standalone comparison × chapter/location roles + animated evidence。Simple 主畫面必須收斂成每個 public style 一張 chooser card（Diary / Clean / Cinematic），額外 frame/role/animation evidence 放到 selected-style detail / progressive disclosure。\n2. Advanced 入口重複：compact Creative Brief / Visual Style 各自有「詳細設定」，CreativeFlowWorkspace 下方又常駐一個「詳細設定與更多資訊」。同一步只留一套清楚的 progressive-disclosure affordance。\n3. disclosure metadata 還不是 authoritative：`summary_resolver` 沒被真正 consume，主 component 仍用 `summaryFor(sectionId)` 與 `ADVANCED_STEP_TARGETS` hard-code framing/grading/title 等。依 Horizontal Extensibility Contract，需最小 summary/action resolver contract；synthetic sibling 必須能進 Advanced + final summary，不改主流程 special-case branch。\n4. final summary 有 correctness 問題：目前 composition 直接 hard-code「疊在影片上」，approved standalone 會顯示錯。Framing/title 也應由 current approved semantic contract + registry human labels resolve，不要靠手寫 ID mapping。\n\n完整 acceptance/regression 已留在 PR #108 comment `5338341559`。\n\n同一 branch/PR 修；不擴字幕 engine、Timeline、Editorial Policy，不跑 full Coffee Render / Perception / Story / Apply，不 patch DB/source，不弱化 approval/currentity。",
+            "attachments": [],
+            "createdAt": "2026-08-19T06:22:20.057Z",
+            "updatedAt": "2026-08-19T06:22:19.998Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "df8d5448-8f8c-421a-8cfe-0e43a8627951",
+            "body": "VID-40 implementation handoff\n\n- Baseline/main: 9c40caeb5eb90919d96926f1f4cc1322435cc4b7\n- Branch: agent/vid-40\n- Draft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/108\n- HEAD: 433a5e1798bbae1a55d41fa33e362ef08bc404b0\n\n完成內容：\n- 新增 versioned editor disclosure contract：editor-disclosure-v1 / editor-disclosure-registry-v1\n- project detail API 提供 disclosure metadata\n- Creative Brief + Visual Style 改為三步 simple flow：方向 → 真實預覽風格 → 確認\n- Advanced 預設收起，技術資訊移到 diagnostic；既有 Creative Brief / Visual Style persisted semantic contract 與 approval API 保持唯一 source of truth\n- Visual Style 仍要求真實 preview evidence 才能核准\n- pixel-affecting override 仍沿用既有 stale preview/currentity contract\n- synthetic audio_policy_test sibling 可由 metadata 出現在 Advanced，不需主流程 special-case branch\n- 未開始 VID-27 以外新字幕功能、Timeline、Editorial Policy、Perception/Story/Apply 或完整 Coffee Render\n\n驗證：\n- targeted Python：59 passed\n- full Python：846 passed, 2 skipped\n- frontend full：41 files / 269 tests passed\n- frontend production build：PASS\n- UTF-8 encoding check：PASS\n- git diff --check：PASS\n- 真實 local UI smoke：首屏只顯示當前 primary step；Advanced collapsed；未變更 source/production data\n\n保持 Draft，交 ChatGPT review。",
+            "attachments": [],
+            "createdAt": "2026-08-19T06:14:45.031Z",
+            "updatedAt": "2026-08-19T06:14:44.948Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-41",
+        "uuid": "4fa12f54-8bd5-4af5-9727-afceb8f4a888",
+        "title": "Editor Workflow v2｜從素材匯入到成片的主流程重構",
+        "description": "## 定位\n\n重新設計 Video Vault AI 的整體使用流程，不只是在既有 Creative Brief / Visual Style 上做 UI 簡化。\n\n目標是把目前偏「pipeline / contract 導向」的操作，改成真正的 **AI 剪片助手工作流**：\n\n**素材進來 → AI 自動理解與整理 → 使用者只在高價值節點做決策 → AI 產生可看的剪輯結果 → 使用者進入對應 Workspace 微調 → 最後核准與輸出。**\n\n現有 Perception、Creative Brief、Story、Visual Style、Audio、Render、QC、Approval、Provenance 等後端能力原則上保留；本任務先重新決定「什麼時候出現、誰先誰後、哪些自動、哪些必須人工確認」。\n\n## 為什麼需要獨立 Workflow v2\n\n<issue id=\"18a7a130-9a21-4265-98f6-e35bcf672ac8\" href=\"https://linear.app/videoai/issue/VID-40/simple-first-editor-uxprogressive-disclosure-與三步創意流程\">VID-40</issue> 目前只負責現有 Creative Brief + Visual Style 的 Simple-first / Progressive Disclosure，不應承擔整個產品流程重排。\n\nWorkflow v2 需要重新評估：\n\n* Project 首頁到底顯示什麼\n* 匯入素材後哪些分析自動開始\n* Perception / transcription / audio analysis 的先後與併行關係\n* AI 何時產生第一版 Story / rough cut\n* 使用者何時決定影片方向、長度、風格\n* Timeline Inspector 是主流程還是 drill-down\n* 字幕何時生成、何時審核、與 rough cut timing 如何互相影響\n* 調色 / BGM / Audio / Title / Subtitle 應該是獨立 Workspace 還是同一 Review 階段\n* Approval 應該有哪些 checkpoint，避免每一層 contract 都要求使用者理解\n* Preview / Draft / Final Render 的差異與成本\n\n## Product principles\n\n1. **Result-first**：先給 AI 建議或可看的結果，不先給一堆參數。\n2. **Progressive disclosure**：一般流程只出現必要決策，詳細設定再展開。\n3. **Workspace-oriented**：需要人工精修的能力進獨立 Workspace，而不是塞進主流程表單。\n4. **One source of truth**：新流程只能 orchestration 現有 persisted semantic contracts，不建立第二套 UI-only 狀態。\n5. **Human-in-the-loop at value points**：人工確認應集中在真正影響創作方向或成片的節點。\n6. **Cheap preview before expensive render**：能用 proxy / local preview 解決的，不先跑完整 render。\n7. **AI-first but reversible**：AI 可以自動完成大量工作，但每個人工改動都可追蹤、可撤回、可重新生成受影響部分。\n\n## 必須納入的新能力\n\n### Subtitle Workspace\n\n字幕不是單一輸出選項，而是正式 editing workspace：\n\n* transcription / word timestamp\n* 繁中自動斷句\n* cue timeline\n* waveform\n* 文字直接編輯\n* split / merge\n* 拖曳 start/end\n* 即時樣式預覽\n* 約 10 組可再散布的開源繁中文字型\n* 使用者匯入 TTF / OTF\n* safe zone\n* search / replace\n* undo / redo\n* AI 校字 / 專有名詞 / 斷句建議\n\nUX 可借鑑 WhatSub 等 browser-based subtitle editor 的操作概念，但所有程式碼、UI 與資料模型獨立實作，不依賴 WhatSub。\n\n## 與既有工作關係\n\n* <issue id=\"667da9da-b54d-4cf7-b1a2-a8034eef3256\" href=\"https://linear.app/videoai/issue/VID-25/ai-editor-ux-v1simple-first-creative-flowstyle-previewtimeline\">VID-25</issue>：現有 AI Editor UX epic，視 Workflow v2 結論決定保留、縮小或重新定位。\n* <issue id=\"18a7a130-9a21-4265-98f6-e35bcf672ac8\" href=\"https://linear.app/videoai/issue/VID-40/simple-first-editor-uxprogressive-disclosure-與三步創意流程\">VID-40</issue>：目前 Simple-first Creative Flow 可繼續作為局部 UX 原則與元件驗證，但不可反過來限制 Workflow v2。\n* <issue id=\"aa20b1ac-06a1-47fa-b137-39e4c3159fc4\" href=\"https://linear.app/videoai/issue/VID-28/timeline-inspectorfilmstrip-waveform-perception-drill-down\">VID-28</issue>：Timeline Inspector 先保留，不急著實作；等 Workflow v2 決定它在主流程的位置。\n* <issue id=\"3f8e20e8-b136-4fa5-b3d6-7bae464faa34\" href=\"https://linear.app/videoai/issue/VID-29/editorial-policy-v1把剪輯-craft-變成可版本化決策規則\">VID-29</issue>：Editorial Policy 等 Workflow v2 基本穩定後再做。\n\n## 第一階段 DoD：流程設計，不急著改 engine\n\n先完成一份可實作的 Workflow v2 contract：\n\n* 新主流程階段與順序\n* 每個階段輸入 / 輸出\n* 自動執行 vs 人工 checkpoint\n* Workspace 資訊架構\n* semantic state ownership\n* stale / invalidation 邊界\n* Preview / Draft / Final render 層級\n* 各既有 VID 任務的保留 / 合併 / 重排清單\n* Subtitle Workspace 在流程中的確切位置\n\n完成後再拆 implementation issues；不要在流程未定前一次改完整產品。",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-41/editor-workflow-v2從素材匯入到成片的主流程重構",
+        "gitBranchName": "vid-41",
+        "createdAt": "2026-08-19T05:59:04.991Z",
+        "updatedAt": "2026-08-19T14:35:37.361Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-19T10:20:15.923Z",
+        "startedAt": "2026-08-19T05:59:05.121Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "98f228ac-beaa-4ed4-b7e7-942608c32a30",
+            "title": "[VID-41] Define Editor Workflow v2 contract",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/109"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-19T05:59:04.991Z",
+            "endedAt": "2026-08-19T10:20:15.938Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-19T10:20:15.938Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-16",
+              "title": "Story Apply UX｜成功後 stale generation 狀態同步"
+            },
+            {
+              "id": "VID-18",
+              "title": "Round 1 最終真實流程驗收重跑｜deliverable_ready DoD"
+            },
+            {
+              "id": "VID-26",
+              "title": "Creative Brief｜一次完成 AI 建議與創意核准"
+            },
+            {
+              "id": "VID-27",
+              "title": "Visual Style Preview｜用真實素材先核准字幕與視覺方向"
+            },
+            {
+              "id": "VID-35",
+              "title": "Render Performance v2｜H.264 / HEVC / AV1 NVENC benchmark 與 re-encode 最小化"
+            },
+            {
+              "id": "VID-11",
+              "title": "真實流程驗收 Round 1｜阻塞修正與產品硬化"
+            },
+            {
+              "id": "VID-15",
+              "title": "Perception publish gate｜multi-frame evidence skipped 不得假性成功"
+            },
+            {
+              "id": "VID-28",
+              "title": "Timeline Inspector｜Filmstrip + Waveform + Perception drill-down"
+            },
+            {
+              "id": "VID-25",
+              "title": "AI Editor UX v1｜Simple-first Creative Flow、Style Preview、Timeline Inspector"
+            },
+            {
+              "id": "VID-29",
+              "title": "Editorial Policy v1｜把剪輯 craft 變成可版本化決策規則"
+            },
+            {
+              "id": "VID-40",
+              "title": "Simple-first Editor UX｜Progressive Disclosure 與三步創意流程"
+            },
+            {
+              "id": "VID-45",
+              "title": "Creative Brief UX｜方向卡選擇無明確回饋與確認 CTA 易誤判無反應"
+            },
+            {
+              "id": "VID-44",
+              "title": "Storage Workspace UX｜Artifact 明細預設收合與類型彙總"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "5fa7e256-d90f-4e43-9e96-f2ec3095f5fd",
+            "body": "### VID-41 accepted / merged\n\nFinal review accepted.\n\n- Accepted HEAD: `84dc9263281e658b3d730ffea271864a0addcf45`\n- CI: #409 / `32238378990` PASS\n- PR #109: merged via squash\n- main: `41486358700a65453e9afcd17c69f5e6ca170a7f`\n- Scope remained docs-only: `docs/workflow_v2_contract.md`\n\nAccepted contract guarantees:\n\n- Workflow stage/readiness/next_action are derived projections, never an independent source of truth.\n- Result-first flow includes a cheap playable Draft / Rough-cut Preview before detailed Workspace editing.\n- Pre-Story Simple Creative Intent separates visual-only direction/aspect/resolution/framing from Story-relevant duration/pacing/high-level intent/instructions.\n- 16:9 ↔ 9:16 does not stale Story/Perception; it stales visual/Draft Preview/downstream approval/render identities as appropriate.\n- Source Transcript and Caption Track have separate identities/currentity semantics.\n- WorkflowDescriptor defines minimal horizontal extensibility without a universal plugin runtime.\n- Review confirmation preserves VID-16: candidate Story → atomic Apply → exact applied revision/currentity → formal Approval → Formal Render, fail-closed.\n- VID-11/18/25/26/27/28/29/35/40/41/42 remap is documented; no Linear relation migration was performed in this issue.\n\nVID-41 Round 1 design contract is complete. Future implementation should be split into focused issues from Section 14 rather than reopening this parent contract unless a true contract regression is found.",
+            "attachments": [],
+            "createdAt": "2026-08-19T10:20:54.831Z",
+            "updatedAt": "2026-08-19T10:20:54.777Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "74358fac-0267-4dbc-be98-465e844dfe26",
+            "body": "### ChatGPT review Round 2 — two contract-correctness blockers\n\nHEAD `69076b3fce6582f2ec598d508c8108d3d5f5e3cc`; CI #408 / `32237258009` PASS. Round-1 design blockers otherwise accepted. Keep PR #109 Draft and docs-only.\n\nBefore merge, fix only these two contradictions:\n\n1. **Output direction/framing currentity:** the contract currently makes direction both Story-relevant and visual/render-only. Preserve the accepted VID-26 invariant: output direction/aspect/resolution/framing remain visual/render-only and do not stale Story/Perception by themselves. They may still appear in the Pre-Story Simple Creative Intent UI, but StoryInput consumes only fields explicitly Story-relevant (Round 1: target duration, pacing, high-level story intent, plus existing Story instructions). Direction changes should stale visual preview / approval-render currentity as appropriate, not Story.\n\n2. **VID-16 Apply → Approval boundary:** Story generation/storyboard draft and Draft Preview are not yet the authoritative applied project revision. Define sequence explicitly: reviewed draft → atomic Apply succeeds and returns exact current project/storyboard revision → Approval validates/approves that exact applied revision → Formal Render. Failed/stale Apply cannot advance. If UX uses one `[確認這個版本]` click, it may orchestrate Apply then Approval sequentially only fail-closed; it cannot treat draft/preview as already applied or approved. Update stage table, human checkpoint wording, Coffee journey, semantic ownership and VID map to include VID-16.\n\nNo runtime/schema/UI changes, no VID-42/28/29 work, no Coffee rerun.",
+            "attachments": [],
+            "createdAt": "2026-08-19T09:32:12.016Z",
+            "updatedAt": "2026-08-19T09:32:11.955Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "7cefa2cb-8291-43e5-b4fe-15be75b428bd",
+            "body": "### ChatGPT review Round 1 — design blockers\n\nPR #109 / HEAD `b5ec1d9d46d8fd760d080a14fc953f9782c82505` scope is clean and CI #407 (`32234572896`) passes. Keep PR Draft; do not implement runtime yet.\n\nBefore merging the Workflow v2 parent contract, revise the design for these blockers:\n\n1. Workflow stage/readiness/next-action must be a **derived projection** from authoritative domain states, not an independently mutable persisted `current_stage`. A cached/materialized projection is allowed only with source identities/version and deterministic recomputation.\n2. Define a genuinely **watchable first AI result**: valid Story/storyboard should produce a cheap, non-authoritative Draft/Rough-cut Preview before the user enters detailed Review. It must not imply Apply/approval/Formal Render.\n3. Place **target duration / pacing / high-level Story intent before Story generation** using Simple-first AI recommendation + bounded human override. Style may remain Stage 5 because it is primarily visual/render semantics.\n4. Split **authoritative transcript** from **caption track** semantics. Caption-only typo/proper-noun/layout/timing edits must not silently rewrite transcript or stale Story; an explicit transcript correction changes transcript identity and stales Story only when transcript participates in StoryInput.\n5. Add the missing **Horizontal Extensibility Contract** for stages/workspaces/analysis jobs/review capabilities/checkpoints/preview tiers: stable id/version, owner/domain, dependencies/readiness inputs, main-path/disclosure role, invalidation class, requiredness/capability, fail-closed unknown handling, plus a synthetic sibling example. Do not build a universal plugin framework.\n6. Complete the existing-issue remap. At minimum include VID-11/18, VID-25, VID-28, VID-29, VID-35, VID-40, VID-42 with retain/reposition/supersede/defer and dependency/blocking treatment. Do not duplicate issues.\n\nThis remains documentation/design-only. No engine/schema/runtime implementation, no VID-42/28/29 coding, no Coffee rerun.",
+            "attachments": [],
+            "createdAt": "2026-08-19T09:10:41.241Z",
+            "updatedAt": "2026-08-19T09:10:41.161Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "9bf8e51d-8221-495b-b3ac-7164ec3b760d",
+            "body": "### VID-41 Round 2 review correction handoff\n\n沿用 `agent/vid-41` / PR #109，未建立新 issue 或 PR。\n\n- HEAD: `84dc9263281e658b3d730ffea271864a0addcf45`\n- Draft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/109\n- 只修改：`docs/workflow_v2_contract.md`\n\n本輪修正：\n\n- 明確拆分 Creative Brief 語意：\n  - visual/render-only：output direction、aspect ratio、resolution、framing strategy\n  - Story-relevant：target duration、pacing、high-level Story intent、must_keep、exclude、desired sequence、user summary、schema-declared Story instructions\n- 16:9 → 9:16 不重跑 Perception / Story，只讓 visual contract、Visual Style/Draft Preview pixels、Approval、Render/cache identities stale；可沿用同一 Story/storyboard candidate 重新產生 cheap Draft Preview。\n- target duration / pacing / Story intent 變更會使 StoryInput、Story、Draft Preview、Apply、Approval stale。\n- 明確加入 VID-16 boundary：Story candidate → Draft Preview → Review confirmation → atomic Apply → exact applied revision/currentity → formal Approval → Formal Render。\n- Apply 與 Approval 保持兩個 authoritative contracts；單一 `確認這個版本` CTA 可以 sequentially orchestration，但 Apply fail 就停止且不得呼叫 Approval。\n- Story Generation Store、Storyboard/Apply revision、Draft Preview、Approval Snapshot、Formal Render identity 完全分離。\n- 補充 Apply stale、Apply success 後 Approval validation failure、visual direction change、target duration change 四個 failure/currentity cases。\n- VID-26 改為 mixed Creative Brief domain；VID-16 納入 active VID remap。\n- Coffee journey 加入 atomic Apply、exact revision verification、formal Approval；UI 可顯示「正在套用這個版本」但不必暴露工程術語。\n- 文件末尾補上 6 個 correctness acceptance answers。\n\nScope 保持：\n\n- docs-only\n- 無 runtime、DB schema、WebUI、unrelated tests、AI gate、Coffee Render、VID-42/28/29 implementation\n- source media / production data unchanged\n\nValidation：\n\n- UTF-8 / replacement-character：PASS\n- `git diff --check`：PASS\n- Required CI run `32238378990`：PASS\n  - Frontend：PASS\n  - Ubuntu portability / PR Core/Targeted / Python 3.13：PASS\n  - Windows authoritative / PR Core/Targeted / Python 3.11：PASS\n  - Select PR test layers：PASS\n  - Media Smoke：workflow policy skipped\n\nVID-41 保持 In Progress，PR #109 保持 Draft，停止交回 ChatGPT review。",
+            "attachments": [],
+            "createdAt": "2026-08-19T08:54:11.191Z",
+            "updatedAt": "2026-08-19T09:40:05.593Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-42",
+        "uuid": "bf98f67c-bb56-436f-9fc8-c79d49aa36af",
+        "title": "Subtitle Workspace v1｜逐字稿、時間軸、繁中字型與人工校正",
+        "description": "## 目標\n\n在 Workflow v2 中建立正式 Subtitle Workspace，讓字幕從「輸出時附加的樣式」升級成可人工審核與修改的 editing layer。\n\nUX 借鑑 WhatSub 等 browser-based subtitle editor 的操作概念，但所有程式碼、UI、資料模型與渲染 contract 皆獨立實作，不依賴或複製 WhatSub。\n\n## 核心資料層\n\n建立 versioned caption track / cue contract，至少保留：\n\n* language（第一版 zh-TW）\n* transcript revision\n* cue id\n* cue start / end\n* cue text\n* word-level timestamps\n* manual edit provenance\n* style reference / optional cue-level override\n\nword timestamp 必須保留，支援重新斷句、split/merge、逐字高亮與 transcript-based editing。\n\n## Transcription / 中文斷句\n\n* speech-to-text provider contract\n* word timestamp\n* 繁中 punctuation normalization\n* 中文語意斷句\n* 避免把詞拆開\n* 過長 cue / 過短孤句偵測\n* 可重新產生 cue，但不得覆蓋已核准人工修改而不提示\n* 專有名詞 / 使用者字典的擴充點\n\n## Subtitle Workspace UX\n\n主畫面至少包含：\n\n* 影片 preview\n* waveform\n* caption cue timeline\n* cue list / text editor\n* 點 cue 跳到時間\n* 直接修改文字\n* drag cue start/end\n* split cue\n* merge cue\n* delete / restore\n* search / replace\n* undo / redo\n* safe-zone overlay\n* style preview\n\n需要與 Workflow v2 的 Simple-first 原則配合：主流程只顯示字幕是否啟用、AI 推薦 style summary 與「進入字幕校正」入口；完整控制只在 Workspace 出現。\n\n## Font Library v1\n\n內建約 10 個適合繁體中文影片字幕的開源 font families，必須逐一確認可再散布授權與 notice 義務。\n\n預期包含不同用途：\n\n* 萬用黑體\n* 明體\n* 圓體\n* 手寫\n* 文楷\n* 粗 display\n* 復古 / 人文\n* pixel / retro\n\n要求：\n\n* family 與 weight 分離\n* 不依賴 Windows 已安裝字型\n* registry 記錄 stable id / family / version / source / license / files / checksum\n* runtime 可確定解析到指定 font，不可 silent fallback\n* 支援使用者匯入 TTF / OTF\n* bundled/downloaded font 授權資訊進 THIRD_PARTY_NOTICES / font registry\n\n## Style / Render contract\n\n盡量延伸既有 <issue id=\"ed771ad6-fea2-497e-94be-d3fd29275b0c\" href=\"https://linear.app/videoai/issue/VID-27/visual-style-preview用真實素材先核准字幕與視覺方向\">VID-27</issue> Visual / Title Style semantic contract，不建立第二套互不相容的字幕樣式系統。\n\n至少支援：\n\n* font family\n* weight\n* size\n* text / outline / shadow / background colors\n* outline width\n* background surface\n* alignment / anchor / margins\n* line width / max lines\n* safe-zone policy\n\nPreview 與 Final Render 必須使用同一 resolved semantic style，避免 WebUI 看起來與輸出不同。\n\n## AI 輔助\n\n第一版 contract 預留：\n\n* AI 錯字檢查\n* 專有名詞修正建議\n* 重新斷句建議\n* 根據影片類型推薦 subtitle preset\n* 根據畫面重要區域建議位置\n\nAI 建議不得直接覆寫人工已核准字幕。\n\n## 與其他任務關係\n\n* Workflow v2 決定 Subtitle Workspace 在整體流程中的確切 checkpoint。\n* <issue id=\"ed771ad6-fea2-497e-94be-d3fd29275b0c\" href=\"https://linear.app/videoai/issue/VID-27/visual-style-preview用真實素材先核准字幕與視覺方向\">VID-27</issue> 現有 title / caption style contract 優先重用。\n* <issue id=\"aa20b1ac-06a1-47fa-b137-39e4c3159fc4\" href=\"https://linear.app/videoai/issue/VID-28/timeline-inspectorfilmstrip-waveform-perception-drill-down\">VID-28</issue> Timeline Inspector 的 waveform / timeline primitives 若可共用，應抽共用元件，不做兩套 timeline。\n\n## DoD\n\n* 真實 zh-TW 語音素材可產生 word-level transcript + cues。\n* WebUI 可以完成至少文字修改、split/merge、拖時間與播放定位。\n* 10 組 font families 具明確來源/授權/版本資訊且可穩定 preview/render。\n* 使用者可匯入 TTF/OTF。\n* Preview 與 Final Render 字幕位置/字型/尺寸/描邊一致。\n* 修改字幕只 stale subtitle/render 相關 evidence，不無故 stale Perception / Story。\n* refresh / restart 後 caption edits 與 provenance 完整保存。\n* frontend/backend tests + Windows 真實流程驗收 PASS。",
+        "priority": {
+          "value": 2,
+          "name": "High"
+        },
+        "url": "https://linear.app/videoai/issue/VID-42/subtitle-workspace-v1逐字稿時間軸繁中字型與人工校正",
+        "gitBranchName": "vid-42",
+        "createdAt": "2026-08-19T05:59:31.704Z",
+        "updatedAt": "2026-08-20T16:57:42.600Z",
+        "archivedAt": null,
+        "completedAt": null,
+        "startedAt": null,
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Backlog",
+        "statusType": "backlog",
+        "labels": [],
+        "attachments": [],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "1e34574f-fb6c-40cf-9b15-bf863c6fb156",
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "startedAt": "2026-08-19T05:59:31.704Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-41",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-25",
+              "title": "AI Editor UX v1｜Simple-first Creative Flow、Style Preview、Timeline Inspector"
+            },
+            {
+              "id": "VID-27",
+              "title": "Visual Style Preview｜用真實素材先核准字幕與視覺方向"
+            },
+            {
+              "id": "VID-28",
+              "title": "Timeline Inspector｜Filmstrip + Waveform + Perception drill-down"
+            },
+            {
+              "id": "VID-49",
+              "title": "Visual Style Preview correctness｜primary hero 宣稱 chapter-title 但實際 pixels 無可見字卡"
+            },
+            {
+              "id": "VID-48",
+              "title": "Visual Style Preview performance｜600s timeout、primary-first 與 bounded seek"
+            },
+            {
+              "id": "VID-47",
+              "title": "Source fingerprint revalidation｜Windows device identity drift 的安全 content-equal rebind"
+            },
+            {
+              "id": "VID-46",
+              "title": "Visual Style Preview UX/runtime｜「產生真實畫面預覽」無可見反應"
+            },
+            {
+              "id": "VID-45",
+              "title": "Creative Brief UX｜方向卡選擇無明確回饋與確認 CTA 易誤判無反應"
+            },
+            {
+              "id": "VID-44",
+              "title": "Storage Workspace UX｜Artifact 明細預設收合與類型彙總"
+            },
+            {
+              "id": "VID-43",
+              "title": "WebUI Jobs panel｜mixed updated_at timestamp 排序崩潰"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-43",
+        "uuid": "5de0d54f-859b-473c-b015-89487b8acfdb",
+        "title": "WebUI Jobs panel｜mixed updated_at timestamp 排序崩潰",
+        "description": "## Context\n\n<issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> 最終 Coffee 視覺核准 checkpoint 在 latest main `41486358700a65453e9afcd17c69f5e6ca170a7f` 被 WebUI 主頁本身阻塞。\n\nIsolated workspace：\n`C:\\Users\\b3b3b\\Documents\\AI剪片助手\\video-vault-ai-vid18-acceptance-4b62c8c`\n\n開啟：\n`http://127.0.0.1:8765/?project_id=1`\n\nserver 於 `src/video_vault/ui.py::_jobs_panel()` 失敗：\n\n`TypeError: '<' not supported between instances of 'float' and 'str'`\n\n目前實作直接：\n\n`sorted(jobs, key=lambda j: j.get('updated_at', 0), reverse=True)`\n\n而實際 jobs payload 同時存在 numeric Unix timestamp 與 string timestamp。\n\n## Goal\n\n讓 WebUI jobs panel 對合法歷史/現行 job timestamp representation 都能 deterministic 排序，不修改 job semantic state、不 patch DB/JOBS payload。\n\n## Required implementation\n\n* 建立單一 presentation-level timestamp sort-key normalizer / parser。\n* 至少接受：\n  * `int` / `float` Unix seconds\n  * ISO-8601 string，含 timezone offset 與 `Z`\n  * missing / empty / invalid value\n* 所有合法值轉成同一 sortable scalar / tuple。\n* invalid/missing 必須有 deterministic fallback，不可讓 panel crash。\n* 不要 in-place rewrite `jobs` / `JOBS` / persisted DB。\n* 保持 newest-first。\n* ties 必須 deterministic；若現有 input order 要靠 Python stable sort 保留，測試明確鎖定。\n* 不要 producer-specific `if kind == ...` 分支。\n\n## Horizontal extensibility\n\n這裡有理論上可水平增加的 job producer。未來 background jobs 可能來自不同 domain / persistence layer，因此 timestamp normalization 應集中在 presentation boundary，而不是每新增一種 job 就修改 `_jobs_panel()` special-case。\n\n不需要建立 generic job framework。\n\n## Regression tests\n\n至少覆蓋：\n\n1. numeric + ISO string mixed list 不 crash。\n2. newest-first ordering 正確。\n3. `Z` / `+08:00` 等 timezone string 可比較。\n4. invalid / missing timestamp deterministic fallback。\n5. equal timestamps ordering deterministic / stable。\n6. `_jobs_panel()` 能完整 render HTML，原 status/progress/stop button semantics 不變。\n\n若發現 job serialization API 可以合理地統一 timestamp format，可以另外補 producer regression，但仍不得依賴資料 migration 才能讓舊 payload 正常顯示。\n\n## Scope guard\n\n不要：\n\n* 修改 Coffee DB / job payload 來繞過 bug\n* Creative Brief autoapproval\n* Visual Style autoapproval\n* 產生 Visual Style Preview\n* Perception / Story / Apply / Approval rerun\n* Formal Render / Final QC / Delivery QA\n* <issue id=\"bf98f67c-bb56-436f-9fc8-c79d49aa36af\" href=\"https://linear.app/videoai/issue/VID-42/subtitle-workspace-v1逐字稿時間軸繁中字型與人工校正\">VID-42</issue> / <issue id=\"aa20b1ac-06a1-47fa-b137-39e4c3159fc4\" href=\"https://linear.app/videoai/issue/VID-28/timeline-inspectorfilmstrip-waveform-perception-drill-down\">VID-28</issue> / <issue id=\"3f8e20e8-b136-4fa5-b3d6-7bae464faa34\" href=\"https://linear.app/videoai/issue/VID-29/editorial-policy-v1把剪輯-craft-變成可版本化決策規則\">VID-29</issue>\n* unrelated render-job shutdown failure\n\n## Acceptance\n\n修正 merge 後，用原 isolated <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> workspace 重新開：\n\n`http://127.0.0.1:8765/?project_id=1`\n\n主頁必須正常 render，Creative Brief checkpoint 可由 human 操作；此 issue 本身不替 human 做 Creative Brief / Visual Style 決策。\n\n完成後更新本 issue + <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> handoff，附 latest HEAD、tests、CI，停止交 ChatGPT review。",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-43/webui-jobs-panelmixed-updated-at-timestamp-排序崩潰",
+        "gitBranchName": "vid-43",
+        "createdAt": "2026-08-19T12:41:51.666Z",
+        "updatedAt": "2026-08-19T13:24:22.531Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-19T13:24:22.520Z",
+        "startedAt": "2026-08-19T12:41:51.886Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "e2900a1b-7bab-44f6-87d5-b5227a738d4b",
+            "title": "[VID-43] Fix mixed job timestamp sorting",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/110"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-19T12:41:51.666Z",
+            "endedAt": "2026-08-19T13:24:22.527Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-19T13:24:22.527Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-28",
+              "title": "Timeline Inspector｜Filmstrip + Waveform + Perception drill-down"
+            },
+            {
+              "id": "VID-42",
+              "title": "Subtitle Workspace v1｜逐字稿、時間軸、繁中字型與人工校正"
+            },
+            {
+              "id": "VID-29",
+              "title": "Editorial Policy v1｜把剪輯 craft 變成可版本化決策規則"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "ebee6f2f-fcd3-4664-938f-319a1d7f36ac",
+            "body": "### ChatGPT final review — accepted / merged\n\n- Accepted HEAD: `7263ad74c49dea51539d5ceba1915f38ca0c987e`\n- CI: #412 / `32255693979` PASS\n- PR #110: squash merged\n- main: `f7514184936dfdec2f799a8f48738a09ae3706eb`\n\nAccepted behavior:\n- mixed numeric / timezone-aware ISO `updated_at` no longer crashes `_jobs_panel()`\n- `Z` / explicit offsets normalize on one UTC timeline\n- invalid/missing/naive/non-finite/bool/object values fail to oldest sentinel instead of raising\n- newest-first + stable tie behavior preserved\n- no DB/JOBS/payload mutation and no producer-specific branching\n- isolated VID-18 page and jobs API smoke returned HTTP 200\n- Creative Brief / Visual Style human gate state remained unchanged\n\nHorizontal extensibility check accepted: future job producers reuse one presentation-boundary timestamp normalizer; no generic job plugin framework was introduced.\n\nVID-43 is complete. Resume parent VID-18 at the Coffee Creative Brief human checkpoint; do not rerun Perception/Story because of this UI fix.",
+            "attachments": [],
+            "createdAt": "2026-08-19T13:24:47.718Z",
+            "updatedAt": "2026-08-19T13:24:47.672Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "e27dfe13-eb5b-43d0-a48f-06ed5e0bd471",
+            "body": "VID-43 implementation and validation complete.\n\n- Branch: `agent/vid-43`\n- Draft PR: #110\n- HEAD: `7263ad74c49dea51539d5ceba1915f38ca0c987e`\n- Base: `41486358700a65453e9afcd17c69f5e6ca170a7f`\n- CI #32255693979: all required jobs PASS, including Windows authoritative Python 3.11.\n- Root cause: `_jobs_panel()` sorted raw mixed Unix-second numbers and timezone-aware ISO strings, causing `TypeError`.\n- Fix: one presentation-boundary `_job_updated_at_sort_key()`; finite numeric and timezone-aware ISO values normalize to UTC seconds; invalid/missing/naive/non-finite/bool/object values use an oldest sentinel; stable ties preserved; no producer/DB/payload mutation.\n- Producer inventory covered legacy `time.time()`, perception numeric presentation, and persistent RenderJob ISO timestamps.\n- Local validation: targeted UI 17 passed; full Python 850 passed, 2 skipped; frontend 279 passed; production build, UTF-8, and diff checks passed.\n- Isolated VID-18 smoke: page and `/api/jobs?project_id=1` HTTP 200 with mixed timestamps; no timestamp TypeError.\n- The first CI selector issue (all tests deselected because `test_ui_static.py` was auto-marked `pr_core`) was fixed by moving the regression to `tests/test_ui_job_timestamp.py`.\n\nNo source media or production DB/config changed. No Creative Brief/Visual Style approval, Perception, Story, Apply, Approval, Formal Render, Final QC, or Delivery QA was run.",
+            "attachments": [],
+            "createdAt": "2026-08-19T13:07:09.750Z",
+            "updatedAt": "2026-08-19T13:07:09.716Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "38203333-82bd-4c0b-a1e4-41f02a1e9fd0",
+            "body": "## VID-43 implementation handoff\n\n- baseline `origin/main`: `41486358700a65453e9afcd17c69f5e6ca170a7f`\n- branch: `agent/vid-43`\n- Draft PR: [#110](https://github.com/DystopiaOwO/video-vault-ai/pull/110)\n- current HEAD: `6dc5d56aea7884142669ea4a0b0511274f9ab320`\n\n### Root cause\n\nLegacy in-memory UI jobs emit numeric Unix seconds via `time.time()`; Perception presentation exposes a numeric run-id value; persisted Render Jobs emit timezone-aware ISO-8601 strings via `utc_now()`. `_jobs_panel()` sorted raw values, so mixed `float`/string payloads raised Python 3 `TypeError`.\n\n### Fix\n\nAdded one presentation-boundary `_job_updated_at_sort_key()`:\n\n- finite int/float Unix seconds\n- timezone-aware ISO-8601 with `Z` and explicit offset\n- UTC scalar normalization\n- invalid/missing/naive/non-finite/bool/object values use oldest sentinel\n- stable tie ordering\n- no producer-specific branches\n- no mutation of Jobs payload, DB, or isolated Coffee state\n\n### Evidence\n\n- targeted UI: 17 passed\n- full Python: 850 passed, 2 skipped\n- frontend: 279 passed\n- production build: PASS\n- UTF-8: PASS\n- git diff --check: PASS\n- isolated VID-18 page: HTTP 200\n- `/api/jobs?project_id=1`: HTTP 200 with mixed numeric and ISO timestamps\n- Creative Brief remains `needs_confirmation`\n- Visual Style remains `needs_confirmation`\n- no timestamp TypeError\n\n### Scope\n\n`WEBUI CHECKPOINT RENDER PASS`\n\n`COFFEE CREATIVE BRIEF NOT APPROVED`\n\n`VISUAL STYLE PREVIEW NOT GENERATED`\n\n`FORMAL RENDER NOT RUN`\n\nNo Perception/Story/Apply/Approval/Render/QC/QA action was performed. No source, production DB, or Coffee human-gate state was changed. Required GitHub checks are currently pending.",
+            "attachments": [],
+            "createdAt": "2026-08-19T12:57:35.704Z",
+            "updatedAt": "2026-08-19T12:57:35.495Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-44",
+        "uuid": "a26505a9-26e1-4c95-9334-00177eee6ead",
+        "title": "Storage Workspace UX｜Artifact 明細預設收合與類型彙總",
+        "description": "## Context\n\n目前 `StorageWorkspace` 會在主畫面直接逐筆 render 最多 30 個 artifact：\n\n* `source_media`\n* `render_cache`\n* 未來還會有 preview / subtitle / audio / QA 等 artifact\n\nCoffee 真實驗收頁面已出現大量重複卡片，把 Creative Brief / Visual Style 等高價值決策往下推，與 <issue id=\"667da9da-b54d-4cf7-b1a2-a8034eef3256\" href=\"https://linear.app/videoai/issue/VID-25/ai-editor-ux-v1simple-first-creative-flowstyle-previewtimeline\">VID-25</issue> / <issue id=\"18a7a130-9a21-4265-98f6-e35bcf672ac8\" href=\"https://linear.app/videoai/issue/VID-40/simple-first-editor-uxprogressive-disclosure-與三步創意流程\">VID-40</issue> / <issue id=\"4fa12f54-8bd5-4af5-9727-afceb8f4a888\" href=\"https://linear.app/videoai/issue/VID-41/editor-workflow-v2從素材匯入到成片的主流程重構\">VID-41</issue> 的 Simple-first / Progressive Disclosure 原則衝突。\n\nCurrent implementation:\n\n`web/src/workspaces/storage/StorageWorkspace.tsx`\n\n目前直接：\n\n`(summary?.artifacts || []).slice(0, 30).map(...)`\n\n每個 artifact 都直接顯示 type / size / lifecycle / reference / pin button。\n\n## Goal\n\n把 Storage 從主流程中的「逐筆技術清單」改成：\n\n**摘要 → 類型彙總 → 明細 drill-down**\n\n一般使用者不應在主畫面先看到數十個 artifact 卡片。\n\n## Required UX\n\n### Default collapsed summary\n\nStorage Workspace 預設只顯示 compact summary，例如：\n\n* 已使用：2.5 GB\n* 可清理：約 60 MB\n* 受保護：2.4 GB\n* Artifact：N 個\n* 已釘選：N 個\n\n並提供一個明確入口：\n\n`查看儲存明細`\n\n或 equivalent。\n\n主畫面預設不得逐筆列出 artifact。\n\n### Type aggregation\n\n展開第一層後，先依 artifact semantic type 聚合，例如：\n\n* 來源素材｜2 個｜2.51 GB\n* Render Cache｜18 個｜420 MB\n* Draft Preview｜N 個｜XX MB\n* Subtitle Cache｜N 個｜XX MB\n\n每組至少顯示：\n\n* human label\n* count\n* total size\n* protected / referenced / pinned summary where useful\n\n### Per-artifact drill-down\n\n只有使用者再展開某一 type group 時，才列出單筆 artifact。\n\n單筆操作才顯示：\n\n* lifecycle\n* referenced / unreferenced\n* pin/unpin\n* artifact-specific details\n\n不要讓每個 artifact 在主畫面直接出現一個按鈕。\n\n## Copy / semantics\n\n目前 `釘選輸出` 對 `source_media` 很不合理。\n\n修正文案：\n\n* generic artifact action：`釘選` / `解除釘選`\n* 或依 semantic capability 顯示更精確文案\n\n但不要讓 `source_media` 被描述成「輸出」。\n\n如果某 artifact type 不應允許 user pin，應由 capability/metadata 決定，而不是 UI 用 type-name hard-code。\n\n## Cleanup actions\n\n`建立清理預覽` / `執行清理計畫` 保留，但應屬 Storage workspace 的進階操作，不應比 Creative Brief / Review 更搶視覺優先級。\n\n清理安全 contract 不變：\n\n* source\n* approval\n* formal output\n* pinned\n* referenced artifacts\n\n不得因 UX 重構而改變 retention semantics。\n\n## Horizontal extensibility\n\n這裡有理論上可以水平增加的東西：YES。\n\n未來 artifact types 會增加，例如：\n\n* source_media\n* render_cache\n* draft_preview\n* visual_style_preview\n* subtitle_cache\n* transcript\n* audio_preview\n* bgm_analysis\n* QA evidence\n* export artifact\n\n因此第一版應建立最小 presentation descriptor / resolver contract，至少可提供：\n\n* type id\n* human label\n* display order\n* group/category\n* pinnable / action capability\n* disclosure level\n\n新增 sibling artifact type 不應要求在 `StorageWorkspace` 核心 JSX 增加新的 `if type === ...` 分支。\n\n不需要 universal artifact plugin framework。\n\n可以是小 registry / metadata resolver + synthetic sibling regression。\n\n## Simple-first boundary\n\nStorage 不是 primary creative flow。\n\nProject main UX 應優先：\n\nCreative Intent / Brief\n→ Preview / Review\n→ human decision\n\nStorage details 必須是 Advanced / maintenance drill-down。\n\n不要因本任務重構整個 App navigation；只需讓 Storage 區塊本身符合 progressive disclosure。\n\n## Scope guard\n\n不要：\n\n* 修改 retention / cleanup safety rules\n* delete artifact\n* patch Coffee DB\n* Creative Brief approval\n* Visual Style approval\n* Visual Style Preview generation\n* Perception / Story / Apply / Approval rerun\n* Formal Render / Final QC / Delivery QA\n* <issue id=\"bf98f67c-bb56-436f-9fc8-c79d49aa36af\" href=\"https://linear.app/videoai/issue/VID-42/subtitle-workspace-v1逐字稿時間軸繁中字型與人工校正\">VID-42</issue> subtitle implementation\n* <issue id=\"aa20b1ac-06a1-47fa-b137-39e4c3159fc4\" href=\"https://linear.app/videoai/issue/VID-28/timeline-inspectorfilmstrip-waveform-perception-drill-down\">VID-28</issue> Timeline implementation\n* Workflow v2 runtime implementation\n\n## Regression / DoD\n\n至少：\n\n1. 30 個 artifact 時，default view 不再 render 30 張 item card。\n2. Default view 只看得到 compact storage summary + disclosure affordance。\n3. 展開後先看到 type aggregation。\n4. 再展開 type 才看到 individual artifacts。\n5. source_media 不再顯示 `釘選輸出`。\n6. pin/unpin mutation semantics 保持不變。\n7. cleanup preview/execute semantics 保持不變。\n8. unknown / synthetic new artifact type 能透過同一 descriptor/resolver 出現在 aggregation，不需 core JSX special-case。\n9. Coffee isolated project 頁面視覺 smoke：Storage 不再把 Creative Brief checkpoint 往下推成數十張 artifact cards。\n\n## Handoff\n\n建立 focused Draft PR。\n\n完成後更新本 issue，附：\n\n* baseline main\n* branch / PR / HEAD\n* before/after UX summary\n* horizontal extensibility mechanism\n* tests / build / CI\n* Coffee page smoke\n\n明確聲明：\n\n`COFFEE CREATIVE BRIEF STATE NOT CHANGED`\n`VISUAL STYLE STATE NOT CHANGED`\n`FORMAL RENDER NOT RUN`\n\n保持 Draft，停止交 ChatGPT review。",
+        "priority": {
+          "value": 2,
+          "name": "High"
+        },
+        "url": "https://linear.app/videoai/issue/VID-44/storage-workspace-uxartifact-明細預設收合與類型彙總",
+        "gitBranchName": "vid-44",
+        "createdAt": "2026-08-19T14:31:31.835Z",
+        "updatedAt": "2026-08-20T16:57:42.600Z",
+        "archivedAt": null,
+        "completedAt": null,
+        "startedAt": "2026-08-19T14:31:32.003Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "In Progress",
+        "statusType": "started",
+        "labels": [],
+        "attachments": [],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-19T14:31:31.835Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-25",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-18",
+              "title": "Round 1 最終真實流程驗收重跑｜deliverable_ready DoD"
+            },
+            {
+              "id": "VID-28",
+              "title": "Timeline Inspector｜Filmstrip + Waveform + Perception drill-down"
+            },
+            {
+              "id": "VID-40",
+              "title": "Simple-first Editor UX｜Progressive Disclosure 與三步創意流程"
+            },
+            {
+              "id": "VID-41",
+              "title": "Editor Workflow v2｜從素材匯入到成片的主流程重構"
+            },
+            {
+              "id": "VID-42",
+              "title": "Subtitle Workspace v1｜逐字稿、時間軸、繁中字型與人工校正"
+            },
+            {
+              "id": "VID-49",
+              "title": "Visual Style Preview correctness｜primary hero 宣稱 chapter-title 但實際 pixels 無可見字卡"
+            },
+            {
+              "id": "VID-48",
+              "title": "Visual Style Preview performance｜600s timeout、primary-first 與 bounded seek"
+            },
+            {
+              "id": "VID-47",
+              "title": "Source fingerprint revalidation｜Windows device identity drift 的安全 content-equal rebind"
+            },
+            {
+              "id": "VID-46",
+              "title": "Visual Style Preview UX/runtime｜「產生真實畫面預覽」無可見反應"
+            },
+            {
+              "id": "VID-45",
+              "title": "Creative Brief UX｜方向卡選擇無明確回饋與確認 CTA 易誤判無反應"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [],
+        "hasNextPage": false
+      }
+    }
+  ]
+}
