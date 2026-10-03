@@ -1,0 +1,996 @@
+{
+  "exportedAt": "2026-10-03T22:13:00+08:00",
+  "team": "VID",
+  "issues": [
+    {
+      "issue": {
+        "id": "VID-45",
+        "uuid": "98fb2fea-f29c-4edf-af9a-0bda7378b23a",
+        "title": "Creative Brief UX｜方向卡選擇無明確回饋與確認 CTA 易誤判無反應",
+        "description": "## Context\n\n<issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> Coffee 真實 human checkpoint 已能正常開啟，但使用者在 Creative Brief Step 1 點 `16:9 / 9:16` 方向卡時回報「按了按鈕沒反應」。\n\n現行 compact UI 的方向卡其實是 hidden radio + `<label>`：\n\n* recommendation 會在 initial render 就預選（Coffee 目前為 9:16）\n* 點已選的推薦卡不會產生新的視覺/文字 feedback\n* 真正送出 Creative Brief 的 CTA 在方向卡下方：`採用推薦方向` / `使用此方向並繼續`\n* current test 只確認頁面存在 CTA，沒有驗 direction card interaction → visible selection → exact save CTA flow\n\n對一般使用者而言，卡片長得像可執行按鈕，但點擊後若 selection 沒變或 CTA 不在當下視野，就像完全沒有反應。這違反 <issue id=\"667da9da-b54d-4cf7-b1a2-a8034eef3256\" href=\"https://linear.app/videoai/issue/VID-25/ai-editor-ux-v1simple-first-creative-flowstyle-previewtimeline\">VID-25</issue>/<issue id=\"18a7a130-9a21-4265-98f6-e35bcf672ac8\" href=\"https://linear.app/videoai/issue/VID-40/simple-first-editor-uxprogressive-disclosure-與三步創意流程\">VID-40</issue>/<issue id=\"4fa12f54-8bd5-4af5-9727-afceb8f4a888\" href=\"https://linear.app/videoai/issue/VID-41/editor-workflow-v2從素材匯入到成片的主流程重構\">VID-41</issue> Simple-first / result-first UX。\n\n## Goal\n\n讓 Step 1 的 human interaction 無歧義：\n\n**選方向 → 明確看到目前選擇 → 一個立即可見、語意清楚的確認 CTA → save 成功後進 Style**。\n\n方向選擇本身仍不可自動 approval；必須保留 explicit human confirmation。\n\n## Required behavior\n\n### 1. Direction cards are truthful selection controls\n\n整張 16:9 / 9:16 卡都必須可點擊。\n\n點另一張卡後立即可見：\n\n* selected border/state 切換\n* selected human-readable text，例如 `目前選擇：16:9` / `目前選擇：9:16`\n* accessible radio/selection state 正確\n\n若點的是已選中的卡，不能讓使用者覺得死按鈕；至少持續有清楚 `已選擇` state / check indicator / selected summary。\n\n不要求點卡片就直接 save/approve。\n\n### 2. Primary confirmation CTA must be adjacent and obvious\n\n方向卡後面立即放一個 primary CTA，不要讓使用者需要猜還要往很下面找。\n\n推薦值時文案建議：\n\n`採用 9:16 推薦並繼續`\n\n若改選 16:9：\n\n`使用 16:9 並繼續`\n\n或 equivalent human-readable wording。\n\n不要同時放兩顆讓人判斷哪顆該按的 primary-like CTA。\n\nSimple mode 應是一個 primary confirmation action；Advanced framing 仍可使用自己的 `套用畫面配置`。\n\n### 3. Save interaction feedback\n\n點 primary CTA 後必須立即：\n\n* disable duplicate submit\n* 顯示 `儲存中…` / `正在套用…`\n\n成功：\n\n* refresh exact current project\n* Creative Brief status = approved\n* Step 1 → Step 2 Visual Style\n* human-readable success feedback\n\n失敗：\n\n* stay at Step 1\n* 明確可見 error\n* 不假裝切 Step 2\n* 不留下 fake approved state\n\n### 4. Recommendation preselection semantics\n\nAI recommendation 可以 initial preselect，Coffee 目前 recommendation 是 9:16。\n\n但 preselected != approved。\n\nUI 必須同時讓人看懂：\n\n* `AI 推薦`\n* `目前選擇`\n* `待人工確認`\n\n不要因 initial selection 已等於 recommendation 而讓人以為已完成。\n\n### 5. Exact semantic payload\n\n確認 CTA 必須沿用既有 `saveCreativeBrief()` contract：\n\n* selected exact output contract\n* current framing strategies\n* correct approval source (`recommendation` vs `human_override`)\n* current project revision\n\n不要建立第二份 frontend-only approval state。\n\n## Regression tests\n\n至少新增真實 interaction tests：\n\n 1. initial recommendation = 9:16 時，9:16 清楚顯示 selected，但 status 仍 `待人工確認`。\n 2. click 16:9 card → selected state 移到 16:9，human summary/CTA 同步變 16:9。\n 3. click back 9:16 → selected state 回到 9:16。\n 4. whole card click（不是只點 1px hidden input）有效。\n 5. keyboard/radio accessibility state truthful。\n 6. recommendation selection → confirm calls `saveCreativeBrief()` with exact recommended output + `recommendation` approval source。\n 7. human override → confirm calls exact alternate output + `human_override`。\n 8. saving state prevents duplicate submit。\n 9. API failure stays Step 1 and shows visible error。\n10. success refreshes project and moves to Visual Style only after authoritative approved state / successful response path。\n\n## UX smoke\n\n使用原 <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> isolated Coffee project：\n\n`C:\\Users\\b3b3b\\Documents\\AI剪片助手\\video-vault-ai-vid18-acceptance-4b62c8c`\n\nWebUI：\n`http://127.0.0.1:8765/?project_id=1`\n\n要求 human 能在不理解 radio/contract 的情況下完成：\n\n1. 看懂 AI 推薦 9:16\n2. 改點 16:9，明確看到 selection 改變\n3. 再回 9:16，明確看到 selection 改變\n4. 看到單一 primary confirmation CTA\n\nSmoke 階段不要真的替 human approve Coffee；可用 test fixture/dev-safe path 驗 save interaction，正式 Coffee state 保持 `needs_confirmation` 交回 human。\n\n## Horizontal extensibility\n\n這裡有理論上可以水平增加的 output contracts：YES。\n\n未來可能加入 square / custom social output。\n\n方向卡與 CTA wording 必須由 output contract registry metadata/materialized option 驅動，不可 hard-code `if 16:9 / if 9:16` 作核心流程。\n\n第一版至少保留：\n\n* exact output_contract_id\n* label/aspect\n* recommendation match\n* selected state\n* confirm action resolver\n\n新增 sibling output contract 不應重寫 Creative Brief core interaction branch。\n\n不需要 generic plugin framework。\n\n## Scope guard\n\n不要：\n\n* autoapprove Coffee\n* patch Coffee DB\n* rerun Perception / Story\n* Visual Style Preview generation\n* Apply / Formal Approval\n* Formal Render / QC / Delivery QA\n* <issue id=\"bf98f67c-bb56-436f-9fc8-c79d49aa36af\" href=\"https://linear.app/videoai/issue/VID-42/subtitle-workspace-v1逐字稿時間軸繁中字型與人工校正\">VID-42</issue> / <issue id=\"aa20b1ac-06a1-47fa-b137-39e4c3159fc4\" href=\"https://linear.app/videoai/issue/VID-28/timeline-inspectorfilmstrip-waveform-perception-drill-down\">VID-28</issue> / <issue id=\"3f8e20e8-b136-4fa5-b3d6-7bae464faa34\" href=\"https://linear.app/videoai/issue/VID-29/editorial-policy-v1把剪輯-craft-變成可版本化決策規則\">VID-29</issue> implementation\n* Workflow v2 runtime\n* 把 <issue id=\"a26505a9-26e1-4c95-9334-00177eee6ead\" href=\"https://linear.app/videoai/issue/VID-44/storage-workspace-uxartifact-明細預設收合與類型彙總\">VID-44</issue> Storage UX 混進同一 PR\n\n## Handoff\n\n建立 focused Draft PR。\n\n完成後更新 VID-45 + <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue>，附：\n\n* baseline main\n* branch / PR / HEAD\n* before/after interaction behavior\n* exact selection/save regressions\n* Coffee human-safe smoke\n* tests/build/CI\n\n明確寫：\n\n`COFFEE CREATIVE BRIEF NOT APPROVED BY TEST/SMOKE`\n`VISUAL STYLE STATE NOT CHANGED`\n`FORMAL RENDER NOT RUN`\n\n保持 Draft，停止交 ChatGPT review。",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-45/creative-brief-ux方向卡選擇無明確回饋與確認-cta-易誤判無反應",
+        "gitBranchName": "vid-45",
+        "createdAt": "2026-08-19T14:35:37.361Z",
+        "updatedAt": "2026-08-19T15:24:01.973Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-19T15:19:07.399Z",
+        "startedAt": "2026-08-19T14:35:37.569Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "93fae2d9-25a6-4b42-9c15-e881fedf403b",
+            "title": "[VID-45] Fix Creative Brief direction interaction",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/111"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-19T14:35:37.361Z",
+            "endedAt": "2026-08-19T15:19:07.416Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-19T15:19:07.416Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-26",
+              "title": "Creative Brief｜一次完成 AI 建議與創意核准"
+            },
+            {
+              "id": "VID-44",
+              "title": "Storage Workspace UX｜Artifact 明細預設收合與類型彙總"
+            },
+            {
+              "id": "VID-42",
+              "title": "Subtitle Workspace v1｜逐字稿、時間軸、繁中字型與人工校正"
+            },
+            {
+              "id": "VID-25",
+              "title": "AI Editor UX v1｜Simple-first Creative Flow、Style Preview、Timeline Inspector"
+            },
+            {
+              "id": "VID-29",
+              "title": "Editorial Policy v1｜把剪輯 craft 變成可版本化決策規則"
+            },
+            {
+              "id": "VID-28",
+              "title": "Timeline Inspector｜Filmstrip + Waveform + Perception drill-down"
+            },
+            {
+              "id": "VID-41",
+              "title": "Editor Workflow v2｜從素材匯入到成片的主流程重構"
+            },
+            {
+              "id": "VID-40",
+              "title": "Simple-first Editor UX｜Progressive Disclosure 與三步創意流程"
+            },
+            {
+              "id": "VID-46",
+              "title": "Visual Style Preview UX/runtime｜「產生真實畫面預覽」無可見反應"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "37374784-47a2-408c-9da8-b3e18e474d05",
+            "body": "### ChatGPT final review — accepted / merged\n\n- Accepted HEAD: `80e0e1d23e84e00b3e04ca233ffe54bbf57cf6bf`\n- CI #414 / `32268416080`: PASS\n- PR #111: squash merged\n- merged main: `84d085639e2006706bdb41dd3d6be8207bca5a3f`\n\nAccepted behavior:\n- full-card direction selection with visible selected/check state\n- recommendation remains pending human confirmation, not frontend approval\n- one registry-driven primary CTA\n- exact recommendation vs human_override approval source preserved\n- duplicate submit blocked; component-visible failure remains on Step 1\n- no Coffee semantic state mutation during test/smoke\n\nImportant correction discovered during human review: the screenshoted no-response control was not the Step-1 direction card. It was Step-2 `產生真實畫面預覽`. VID-45 remains a valid UX improvement, but the current VID-18 blocker is now Visual Style Preview generation interaction/runtime and will be handled separately.\n\nVID-45 is complete.",
+            "attachments": [],
+            "createdAt": "2026-08-19T15:19:22.168Z",
+            "updatedAt": "2026-08-19T15:19:22.088Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "a8e9791b-f9d9-4543-8d79-1475528dae0a",
+            "body": "VID-45 implementation handoff\n\nBaseline:\n- origin/main: f7514184936dfdec2f799a8f48738a09ae3706eb\n- branch: agent/vid-45\n- Draft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/111\n- HEAD: 80e0e1d23e84e00b3e04ca233ffe54bbf57cf6bf\n\nUX changes:\n- Compact Creative Brief direction cards are full hit targets with native radio semantics, visible selected check, selected card treatment, and live 「目前選擇」 summary.\n- AI recommendation remains preselected but status remains 「待人工確認」; it is not frontend approval.\n- One registry-driven primary CTA now changes with selection: recommendation uses 「採用 {aspect ratio} 推薦並繼續」, override uses 「使用 {aspect ratio} 並繼續」.\n- Existing saveCreativeBrief payload/signature is preserved; recommendation vs human_override is resolved from selected registry output, current project_revision is passed, authoritative refresh precedes onApproved.\n- Save busy state disables the CTA and duplicate submission; failed save remains Step 1 with component-visible alert.\n\nValidation:\n- targeted CreativeFlow: 11 passed\n- frontend: 284 passed / 42 files\n- frontend production build: PASS\n- full Python: 850 passed, 2 skipped\n- git diff --check and UTF-8 scan: PASS\n- CI run 32268416080: Ubuntu Python 3.13 PASS; Windows Python 3.11 PASS; Frontend PASS; test-layer selection PASS; Media Smoke skipped by workflow.\n\nCoffee boundary:\n- COFFEE CREATIVE BRIEF NOT APPROVED BY TEST/SMOKE.\n- VISUAL STYLE STATE NOT CHANGED.\n- FORMAL RENDER NOT RUN.\n- The requested isolated workspace was inspected at http://127.0.0.1:8765/?project_id=1, but its current authoritative state was already Creative Brief approved and Visual Style, not needs_confirmation. Therefore no direction-card click or save was performed and no state was altered.\n- Smoke server was stopped after inspection.",
+            "attachments": [],
+            "createdAt": "2026-08-19T15:13:20.720Z",
+            "updatedAt": "2026-08-19T15:13:20.664Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-46",
+        "uuid": "ce656230-6df3-44c6-a59e-a99ab82704d4",
+        "title": "Visual Style Preview UX/runtime｜「產生真實畫面預覽」無可見反應",
+        "description": "## Context\n\n<issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> Coffee 真實 human checkpoint 已進入 Creative Flow **Step 2 / 3 Visual Style**。使用者實際點擊 `產生真實畫面預覽` 後回報沒有可見反應。\n\n這是目前真正的 Coffee blocker；先前 <issue id=\"98fb2fea-f29c-4edf-af9a-0bda7378b23a\" href=\"https://linear.app/videoai/issue/VID-45/creative-brief-ux方向卡選擇無明確回饋與確認-cta-易誤判無反應\">VID-45</issue> 把截圖誤判成 Step-1 direction interaction，但 <issue id=\"98fb2fea-f29c-4edf-af9a-0bda7378b23a\" href=\"https://linear.app/videoai/issue/VID-45/creative-brief-ux方向卡選擇無明確回饋與確認-cta-易誤判無反應\">VID-45</issue> 本身已正常驗收合併。最新 main：`84d085639e2006706bdb41dd3d6be8207bca5a3f`。\n\nCurrent frontend：\n`web/src/workspaces/creative/VisualStylePreviewWorkspace.tsx`\n\n`preview()` 目前：\n\n* `setBusy(true)`\n* call `api.previewVisualStyles(projectId, false, overrides)`\n* success 才 materialize variants\n* `ok:false` / exception 只透過 App-level `setMessage()` 回報\n* finally 立刻 `setBusy(false)`\n\n所以如果 real API 快速失敗，使用者在 Visual Style 區塊可能只看到按鈕瞬間恢復，體感像完全沒反應。\n\nBackend endpoint：\n`POST /api/project/visual-style/preview`\n→ `preview_visual_styles(...)`\n\n本 issue 不先假定是 frontend-only；必須使用 authoritative Coffee isolated workspace 重現 actual request/response 與 server-side outcome。\n\n## Authoritative Coffee workspace\n\n`C:\\Users\\b3b3b\\Documents\\AI剪片助手\\video-vault-ai-vid18-acceptance-4b62c8c`\n\nWebUI：\n`http://127.0.0.1:8765/?project_id=1`\n\n目前 handoff 已確認 Coffee 已在 Creative Brief approved / Visual Style stage。不要把歷史 `needs_confirmation` comment 當 current source of truth；執行時重新 read actual project/API state。\n\n## Goal\n\n讓 human 點 `產生真實畫面預覽` 後必定得到 truthful, local feedback：\n\n1. request 已開始\n2. 目前正在產生\n3. 成功：三個 primary style 的真實 preview pixels 出現\n4. 失敗：Visual Style 區塊內直接顯示原因與可採取動作\n\n並找出 Coffee real endpoint 為什麼目前沒有產生可見 result。\n\n## Required diagnosis — real flow first\n\n不要先改 code。\n\n先用 latest main + isolated Coffee workspace 重現：\n\n1. GET project detail，記錄：\n   * project revision\n   * Creative Brief status / visual contract hash\n   * Visual Style status/recommendation\n   * existing preview evidence count/currentity\n2. 從實際 WebUI 點 `產生真實畫面預覽`，記錄：\n   * button 是否轉 `處理中…`\n   * browser request 是否送出\n   * HTTP status\n   * JSON response\n   * duration\n   * server log/exception\n3. 若 UI interaction 不可靠，可用相同 CSRF/API contract 做一次 direct product endpoint call 作診斷，但不可繞過產品 endpoint直接呼叫 renderer。\n4. 確認 response 是：\n   * `ok:true` + variants\n   * `ok:false` + code/error\n   * HTTP error\n   * hanging/timeout\n   * server exception\n   * success but frontend state/render failure\n\n把 root cause 先寫進 Linear/PR body，再修。\n\n## Allowed Coffee action\n\nHuman 已明確點擊要求產生 preview，因此本 issue **允許用 production Visual Style Preview endpoint 產生 Coffee preview evidence**。\n\n但不允許：\n\n* Visual Style auto-approval\n* Story/Perception rerun\n* Apply / Formal Approval\n* Formal Render / QC / QA\n* DB patch\n* source mutation\n\n如果 endpoint 在修正後成功，可以保留產生出的 current preview evidence，讓 human 下一步直接選 Diary Natural / Clean Minimal / Cinematic。\n\n## Frontend feedback contract\n\n無論 root cause 是哪裡，Visual Style Step 2 至少補：\n\n### Idle\n\n`產生真實畫面預覽`\n\n### Running\n\n按鈕 disabled + `正在產生真實預覽…`\n\n並在區塊內有 `role=status`/可見 progress copy，例如：\n`正在以真實素材產生 Diary Natural / Clean Minimal / Cinematic 預覽，可能需要一些時間。`\n\n### Error\n\nVisual Style 區塊內顯示 `role=alert`：\n\n* human-readable error\n* backend code/details 可放 Advanced/technical text\n* CTA 可重新嘗試\n\n不能只依賴 App-level global message。\n\n### Success\n\n* variants materialized\n* primary cards 顯示 actual pixels\n* clear `預覽已完成` local status\n* approval button 只有 exact selected current evidence 才可用\n\n## Timeout / long-running semantics\n\n先量 real Coffee endpoint latency。\n\n若 preview generation 本來就是同步、可能超過一般互動等待：\n\n* 第一版可以保留 sync endpoint，只要 UI 有 truthful running state且不誤導\n* 若實測會長到不合理/瀏覽器或 server 有 timeout，再提出 focused async job 化，不要本 issue 自動擴成 generic job framework\n\n不要在沒有量測前重寫成 background queue。\n\n## Real preview correctness\n\n若 endpoint 成功，必須確認至少 primary styles：\n\n* Diary Natural\n* Clean Minimal\n* Cinematic\n\n使用：\n\n* approved Creative Brief\n* true Coffee source/proxy frame\n* current geometry/SAR/DAR/rotation\n* framing\n* actual grading/LUT\n* title overlay semantics\n\n不要 mock / placeholder / manual FFmpeg bypass。\n\n## Regression tests\n\n至少：\n\n1. click Preview CTA → immediate running state visible + duplicate click disabled\n2. `ok:false` → component-local visible alert; button returns retryable idle state\n3. thrown ApiError → component-local visible alert\n4. success with variants → local completed status + hero pixels render\n5. no variants on `ok:true` → explicit `沒有產生可用預覽` fail/needs-attention state；不要靜默成功\n6. exact current preview plan/variant remains required for approval\n7. compact Step 2 and Advanced re-preview share the same feedback/currentity behavior where reasonable\n\n## Horizontal extensibility\n\n「這裡有沒有理論上可以水平增加的東西？」YES：未來 preview producer/style/role/animated evidence 都會增加。\n\n但 feedback state 應綁 `preview request lifecycle`，不可對 Diary/Cinematic 各寫 special-case。\n\n新增 style/variant 不應要求改 Preview CTA lifecycle logic。\n\n不需要 generic preview plugin framework。\n\n## Scope guard\n\n不要：\n\n* 修改 <issue id=\"a26505a9-26e1-4c95-9334-00177eee6ead\" href=\"https://linear.app/videoai/issue/VID-44/storage-workspace-uxartifact-明細預設收合與類型彙總\">VID-44</issue> Storage UX\n* <issue id=\"bf98f67c-bb56-436f-9fc8-c79d49aa36af\" href=\"https://linear.app/videoai/issue/VID-42/subtitle-workspace-v1逐字稿時間軸繁中字型與人工校正\">VID-42</issue> Subtitle\n* <issue id=\"aa20b1ac-06a1-47fa-b137-39e4c3159fc4\" href=\"https://linear.app/videoai/issue/VID-28/timeline-inspectorfilmstrip-waveform-perception-drill-down\">VID-28</issue> Timeline\n* <issue id=\"3f8e20e8-b136-4fa5-b3d6-7bae464faa34\" href=\"https://linear.app/videoai/issue/VID-29/editorial-policy-v1把剪輯-craft-變成可版本化決策規則\">VID-29</issue> Editorial Policy\n* Workflow v2 runtime\n* Perception / Story rerun\n* Coffee Creative Brief 改值\n* Visual Style approval\n* Apply / Formal Approval\n* Formal Render / Final QC / Delivery QA\n* DB patch / source mutation\n\n## Handoff\n\n建立 focused Draft PR。完成後更新 VID-46 + <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue>，附：\n\n* latest main\n* branch / PR / exact HEAD\n* real Coffee request/response + measured duration\n* root cause\n* frontend local feedback behavior\n* actual preview evidence/variant IDs if successfully generated\n* whether 3 primary Coffee previews are human-viewable\n* tests/build/CI\n\n明確寫：\n`COFFEE VISUAL STYLE NOT AUTO-APPROVED`\n`PERCEPTION/STORY NOT RERUN`\n`FORMAL RENDER NOT RUN`\n\n保持 Draft，停止交 ChatGPT review。",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-46/visual-style-preview-uxruntime產生真實畫面預覽無可見反應",
+        "gitBranchName": "vid-46",
+        "createdAt": "2026-08-19T15:24:01.973Z",
+        "updatedAt": "2026-08-20T13:55:54.012Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-19T17:08:22.879Z",
+        "startedAt": "2026-08-19T15:24:02.288Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "16b468c7-eb32-459b-b653-1332074c6743",
+            "title": "[VID-46] Fix Visual Style preview feedback and real Coffee generation",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/112"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-19T15:24:01.973Z",
+            "endedAt": "2026-08-19T17:08:22.891Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-19T17:08:22.891Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-40",
+              "title": "Simple-first Editor UX｜Progressive Disclosure 與三步創意流程"
+            },
+            {
+              "id": "VID-27",
+              "title": "Visual Style Preview｜用真實素材先核准字幕與視覺方向"
+            },
+            {
+              "id": "VID-29",
+              "title": "Editorial Policy v1｜把剪輯 craft 變成可版本化決策規則"
+            },
+            {
+              "id": "VID-45",
+              "title": "Creative Brief UX｜方向卡選擇無明確回饋與確認 CTA 易誤判無反應"
+            },
+            {
+              "id": "VID-28",
+              "title": "Timeline Inspector｜Filmstrip + Waveform + Perception drill-down"
+            },
+            {
+              "id": "VID-42",
+              "title": "Subtitle Workspace v1｜逐字稿、時間軸、繁中字型與人工校正"
+            },
+            {
+              "id": "VID-44",
+              "title": "Storage Workspace UX｜Artifact 明細預設收合與類型彙總"
+            },
+            {
+              "id": "VID-48",
+              "title": "Visual Style Preview performance｜600s timeout、primary-first 與 bounded seek"
+            },
+            {
+              "id": "VID-47",
+              "title": "Source fingerprint revalidation｜Windows device identity drift 的安全 content-equal rebind"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "81b44900-120b-42cd-a14a-157ede324c17",
+            "body": "### ChatGPT final review — accepted / merged\n\n- Accepted HEAD: `a1364d9d8e34c574080a727fc0eace4d71ce03d2`\n- CI #417 / `32279190278`: PASS\n- PR #112: exact-head squash merged\n- merged main: `7f34bf4d1d4274215276e385b936518584cb0974`\n\nAccepted contracts:\n- Visual Style preview has local idle/running/success/error feedback and retry.\n- Semantic scalar/nested overrides clear stale variants, exact preview evidence, and completed lifecycle feedback.\n- Same unchanged preview batch style switching remains valid.\n- Preview success is registry-driven and requires every enabled public primary style to have a usable current static hero with URL + preview plan hash + preview variant ID.\n- Partial/empty responses fail closed and cannot leave approval enabled.\n- Future public sibling style coverage proves no hard-coded current style list.\n\nCoffee remains intentionally blocked by source currentity. Read-only inventory shows both Coffee sources have identical size/mtime/inode/ctime versus persisted fingerprint; only Windows device identity differs (`6786001706560286241` persisted vs `750284321` current). Persisted SHA exists but no current full SHA was computed in VID-46, so `source_changed` was not bypassed.\n\nNo Visual Style approval, Perception/Story rerun, Apply, Formal Render, QC, QA, DB/source mutation performed.\n\nVID-46 complete. Follow-up source identity revalidation/rebind is separate.",
+            "attachments": [],
+            "createdAt": "2026-08-19T17:09:17.629Z",
+            "updatedAt": "2026-08-19T17:09:17.582Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "1fe4323d-c757-44f0-909f-ee41fe50344c",
+            "body": "CI 已完成：GitHub Actions #417（run `32279190278`）全部 required checks PASS；Media Smoke 依 layer selection skipped。\n\n最終 HEAD：`a1364d9d8e34c574080a727fc0eace4d71ce03d`\n- Ubuntu portability / Python 3.13：PASS\n- Windows authoritative / Python 3.11：PASS\n- Frontend：PASS\n- Select PR test layers：PASS\n- PR #112 維持 Draft，等待 review。",
+            "attachments": [],
+            "createdAt": "2026-08-19T17:05:54.126Z",
+            "updatedAt": "2026-08-19T17:05:54.114Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "2a6b17df-5620-4a0e-a9c7-bc774688a1ce",
+            "body": "VID-46 review round 1 correction completed，branch `agent/vid-46`，HEAD `a1364d9d8e34c574080a727fc0eace4d71ce03d`，PR #112 維持 Draft。\n\n已修正：\n- Visual Style semantic scalar/nested override 會清除 variants、preview evidence 與 lifecycle success/error，重置為 idle；同一批次 selectVariant 保留可用 hero。\n- success 改為 registry-driven：每個 enabled public primary style 都必須具備 matching style ID、非空 URL、preview plan hash、preview variant ID、static hero；partial/empty response fail-closed，不顯示成功、不保留可選 partial hero、不允許 approval。\n- success 訊息使用 registry count，不再 hard-code 三種風格。\n- Creative Flow 測試 fixture 已補齊完整 public-style evidence。\n\n驗證：\n- Visual Style + Creative Flow targeted：23 passed\n- Frontend full：289 passed\n- Production build：passed\n- Python full：850 passed，2 skipped\n- diff-check / UTF-8：passed\n- CI：本 HEAD 的新 run 等待中\n\nCoffee source currentity 維持 fail-closed：兩筆 persisted fingerprint 僅做 read-only 比對；size/mtime/inode/ctime 相同，但 current Windows device identity 與 persisted 不同。未計算新 SHA，未修改 DB/source/config/fingerprint，未 rebind/reimport；因此仍是 `source_changed`。\n\nSOURCE_CHANGED NOT BYPASSED\nSOURCE FINGERPRINT NOT MUTATED\nCOFFEE VISUAL STYLE NOT APPROVED\nPERCEPTION/STORY NOT RERUN\nFORMAL RENDER NOT RUN",
+            "attachments": [],
+            "createdAt": "2026-08-19T17:01:24.753Z",
+            "updatedAt": "2026-08-19T17:01:24.703Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "91c9900b-3b2e-4215-a716-8c913203281b",
+            "body": "### ChatGPT review — Round 1\n\nReviewed latest PR #112 HEAD `513e96bf5b2e43f4c158e76c9f5afb101da29611`; CI #416 / `32275666471` PASS.\n\nAccepted diagnosis: Coffee Preview CTA sends the real product request and current authoritative Coffee state fails closed with `source_changed`. Do not weaken that gate in VID-46.\n\nTwo lifecycle correctness blockers remain before merge:\n\n1. Semantic preview-invalidating mutations (`patchOverride` / `patchNestedOverride`, and equivalent paths) clear variants/evidence but currently leave preview lifecycle=`success`; UI can falsely show `預覽已完成` while no current evidence exists. Reset lifecycle with evidence invalidation while preserving valid unchanged same-batch style switching.\n\n2. `ok:true` + any non-empty variant list currently marks success. Success must be registry-driven completeness: every enabled public `primaryStyles` entry must have a usable current hero/pixel + required preview identity. Partial output must be visible needs-attention/error. Do not hard-code the current three style IDs.\n\nAlso add read-only exact persisted-vs-current source mismatch inventory to the handoff (contract/version, size, mtime_ns, source_identity fields, persisted SHA where already stored). No source rebind/hash rewrite/DB patch/Perception/Story in this PR.\n\nPR comment: 5345160745. Keep Draft.",
+            "attachments": [],
+            "createdAt": "2026-08-19T16:40:47.569Z",
+            "updatedAt": "2026-08-19T16:40:47.524Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "271f3ec0-586e-45cb-80fb-58ad820cf591",
+            "body": "CI update: Select PR test layers PASS; Frontend PASS; Ubuntu portability / PR Core/Targeted / Python 3.13 PASS; Media Smoke / Ubuntu SKIPPED by layer selection; Windows authoritative / PR Core/Targeted / Python 3.11 is still pending/in progress on GitHub Actions. Local validation remains green: 850 Python passed (2 skipped), 287 frontend passed, production build passed.",
+            "attachments": [],
+            "createdAt": "2026-08-19T16:27:24.586Z",
+            "updatedAt": "2026-08-19T16:27:24.564Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "43c62195-3467-4dcd-aaef-2814ebd1ad20",
+            "body": "## VID-46 handoff\n\n- Branch: `agent/vid-46`\n- Draft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/112\n- HEAD: `513e96bf5b2e43f4c158e76c9f5afb101da29611`\n- Baseline: `origin/main=84d085639e2006706bdb41dd3d6be8207bca5a3f`\n\n### Read-only real Coffee reproduction\n\nUsing the isolated VID-18 Coffee library with the VID-46 code server, the real CTA/product endpoint was called with the normal CSRF plus Origin/Referer contract:\n\n- HTTP 200\n- `ok=false`\n- `code=source_changed`\n- error: persisted source identity does not match the current source file identity\n\nThis is the existing fail-closed currentity contract. I did not patch the DB, source path, source media, production data, or config. No real variants were published, no Visual Style was auto-approved, and no Perception/Story/Apply/Approval/Formal Render/Final QC/Delivery QA was run.\n\n### Implementation\n\n- Shared Visual Style preview lifecycle: idle/running/success/error in the draft controller.\n- Visible local running status with elapsed time on success.\n- Visible local alert with retry on endpoint failure.\n- `ok=true` with empty `variants` is a visible failure.\n- Stale preview variants and exact approval evidence are cleared before each attempt/failure.\n- Primary CTA and Advanced re-preview share the lifecycle and block duplicate requests.\n\n### Validation\n\n- Visual Style targeted: 10 passed\n- Frontend full: 287 passed\n- Frontend production build: passed\n- Python full: 850 passed, 2 skipped\n- `git diff --check`: passed\n- UTF-8 checks: passed\n- GitHub CI is queued on PR #112\n\nStatus: implementation is ready for review; real Coffee preview remains blocked by the authoritative source identity mismatch above.",
+            "attachments": [],
+            "createdAt": "2026-08-19T16:24:21.873Z",
+            "updatedAt": "2026-08-19T16:24:21.810Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-47",
+        "uuid": "d21c6166-1874-4acb-b203-6e425f9f1601",
+        "title": "Source fingerprint revalidation｜Windows device identity drift 的安全 content-equal rebind",
+        "description": "## Context\n\n<issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> Coffee Visual Style Preview 已進入真實 product endpoint，但被既有 fail-closed source currentity 擋住：`POST /api/project/visual-style/preview` → `ok=false`, `code=source_changed`。\n\n<issue id=\"ce656230-6df3-44c6-a59e-a99ab82704d4\" href=\"https://linear.app/videoai/issue/VID-46/visual-style-preview-uxruntime產生真實畫面預覽無可見反應\">VID-46</issue> 已完成 UI feedback 修正並 merge；目前 main `7f34bf4d1d4274215276e385b936518584cb0974`。\n\nRead-only inventory 對兩筆 Coffee source 顯示：\n\n* persisted fingerprint contract / SHA 均存在\n* size：persisted == current\n* mtime_ns：persisted == current\n* inode：persisted == current\n* ctime_ns：persisted == current\n* **只有 Windows** `source_identity.device` **不同**\n  * persisted: `6786001706560286241`\n  * current: `750284321`\n\n目前 `persisted_fingerprint_for_stat()` 要求 stat identity 完全一致，因此直接 `source_changed`。不能因為看起來像 environment/device drift 就放寬 gate；必須重新驗 full content SHA。\n\n## Goal\n\n建立一個最小、通用、fail-closed 的 **source fingerprint revalidation/rebind** contract：\n\n1. fast stat identity 完全匹配時維持現有 zero-full-hash fast path。\n2. stat identity mismatch 時，只有 explicit/expensive product action 可以做 full-file SHA revalidation。\n3. current SHA **必須等於既有 persisted SHA** 才能將同一 `project_media_uuid` 的 fingerprint stat identity rebind 到 current file identity。\n4. SHA 不同、hash 中途 source 改變、fingerprint 不合法或 source missing → 保持 `source_changed`，不得 rebind。\n5. content-equal rebind 不得重跑 Perception/Story；它只是 verified physical/stat identity refresh，不是新素材。\n\n## Design boundary\n\n不要修改 `persisted_fingerprint_for_stat()` 的 strict fast-path semantics。它仍應只回答「persisted stat identity 是否直接 current」。\n\n新增 focused revalidation helper/operation，例如 equivalent：\n\n`revalidate_and_rebind_source_fingerprint(...)`\n\n流程：\n\n* load persisted fingerprint\n* validate contract + persisted SHA\n* inspect current `source_stat()`\n* if strict fast path matches → no-op current\n* otherwise resolve/compute current full SHA through existing single-flight hashing infrastructure\n* compare `current.sha256 == persisted.sha256`\n* mismatch → fail closed `source_changed`\n* match → persist a new fingerprint carrying current stat identity + same SHA for the same project media binding\n\n不要把「有 SHA」直接當成 current；一定要 hash current bytes。\n\n## Product integration\n\n至少讓 Visual Style Preview 的 explicit generation path 能在 strict stat mismatch 時走這個 safe revalidation path，而不是直接永久 `source_changed`。\n\n同樣的 helper 應可被未來 explicit Render / thumbnail / other source-consuming product actions reuse；不要寫 Coffee-specific 或 Visual-Style-specific fingerprint logic。\n\nRead-only project/status paths仍不得因 source drift 自動 full-hash 大檔案。\n\n## Persistence / atomicity\n\nrebind 只能更新 source fingerprint identity/provenance；不得：\n\n* 換 `project_media_uuid`\n* 新建 video/source\n* reimport\n* 改 source bytes/path\n* patch Perception/Story outputs\n\nPersist 必須 atomic；若 hash/validation/persist 任一步失敗，不可留下半套 fingerprint。\n\n先 inventory 現有 `project_videos.source_fingerprint_json` 的 write path 與 project revision semantics，再選最小一致做法。\n\n不要把 content-equal rebind 誤當 Story-relevant mutation。\n\n## Currentity semantics\n\n若 full SHA 相同且 rebind 成功：\n\n* Perception remains current\n* Story remains current\n* existing analysis semantic results remain reusable\n* source media UUID remains unchanged\n\n但所有直接綁舊 stat fingerprint identity 的 preview/render/cache/approval evidence，必須依現有 currentity contract重新驗證；不得假裝舊 evidence 自動 current。\n\nCoffee 目前沒有 current Visual Style preview evidence，因此成功 rebind 後可重新呼叫 production Visual Style Preview endpoint產生新的 evidence。\n\n## Required regressions\n\n至少：\n\n1. strict current fingerprint：不 full-hash、不 rewrite。\n2. only device identity drift + identical content SHA：revalidation PASS，rebind current identity，same SHA / same project_media_uuid。\n3. inode/ctime/path identity drift + identical content：若 contract允許 relocation/rebind，SHA 相同才 PASS。\n4. same size + same mtime but bytes changed：SHA mismatch → `source_changed`，no mutation。\n5. hash during source mutation：existing `SourceFingerprintChangedError` fail closed，no mutation。\n6. malformed/missing persisted SHA：不可 rebind。\n7. concurrent revalidation uses existing single-flight full hash behavior，不做重複大檔 hash。\n8. normal read/status path仍不 full-hash。\n9. synthetic second producer/caller reuse同一 helper，證明不是 Visual Style special-case。\n\n## Horizontal extensibility\n\n「這裡有沒有理論上可以水平增加的東西？」YES：未來 thumbnail、Visual Style Preview、Draft Preview、Formal Render、QA/provenance 都會消費 source currentity。\n\n第一版只需要共享 source-currentity revalidation helper + tests；不要 universal source plugin framework。\n\n## Coffee acceptance\n\n修正後使用 authoritative workspace：\n\n`C:\\Users\\b3b3b\\Documents\\AI剪片助手\\video-vault-ai-vid18-acceptance-4b62c8c`\n\n對兩筆 source：\n\n1. 透過正式 revalidation path 計算 current SHA。\n2. 必須逐筆證明 current SHA == persisted SHA，才允許 rebind。\n3. rebind 後重新呼叫 production `/api/project/visual-style/preview`。\n4. 成功則保留 current preview evidence，確認 Diary Natural / Clean Minimal / Cinematic 三個 public primary hero 均可 human-view。\n\n不要 autoapprove Visual Style。\n\n## Scope guard\n\n不要：\n\n* 放寬成只比較 size/mtime\n* 忽略 SHA mismatch\n* 手工 DB patch\n* 手工更新 fingerprint JSON\n* source mutation/copy/touch mtime\n* reimport\n* Perception rerun\n* Story rerun\n* Apply / Formal Approval\n* Formal Render / QC / Delivery QA\n* <issue id=\"a26505a9-26e1-4c95-9334-00177eee6ead\" href=\"https://linear.app/videoai/issue/VID-44/storage-workspace-uxartifact-明細預設收合與類型彙總\">VID-44</issue> / <issue id=\"bf98f67c-bb56-436f-9fc8-c79d49aa36af\" href=\"https://linear.app/videoai/issue/VID-42/subtitle-workspace-v1逐字稿時間軸繁中字型與人工校正\">VID-42</issue> / <issue id=\"aa20b1ac-06a1-47fa-b137-39e4c3159fc4\" href=\"https://linear.app/videoai/issue/VID-28/timeline-inspectorfilmstrip-waveform-perception-drill-down\">VID-28</issue> / <issue id=\"3f8e20e8-b136-4fa5-b3d6-7bae464faa34\" href=\"https://linear.app/videoai/issue/VID-29/editorial-policy-v1把剪輯-craft-變成可版本化決策規則\">VID-29</issue>\n\n## Handoff\n\n建立 focused Draft PR。更新本 issue + <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue>，附：\n\n* baseline main / branch / PR / exact HEAD\n* source-currentity contract\n* full-hash revalidation evidence\n* persisted SHA vs current SHA per Coffee source\n* whether rebind occurred\n* same project_media_uuid proof\n* Perception/Story currentity proof\n* real Coffee Preview endpoint result\n* generated preview variant IDs / 3 primary human-viewable status\n* tests/build/CI\n\n明確寫：\n\n`SOURCE SHA VERIFIED BEFORE REBIND`\n`PERCEPTION/STORY NOT RERUN`\n`COFFEE VISUAL STYLE NOT AUTO-APPROVED`\n`FORMAL RENDER NOT RUN`\n\n保持 Draft，停止交 ChatGPT review。",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-47/source-fingerprint-revalidationwindows-device-identity-drift-的安全",
+        "gitBranchName": "vid-47",
+        "createdAt": "2026-08-19T17:10:09.914Z",
+        "updatedAt": "2026-08-20T13:55:54.012Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-20T13:53:20.672Z",
+        "startedAt": "2026-08-19T17:10:10.137Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "b875f73e-de76-4b89-b6fa-c9f3842c9b17",
+            "title": "[VID-47] Add safe source fingerprint revalidation and rebind",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/113"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-19T17:10:09.914Z",
+            "endedAt": "2026-08-20T13:53:20.712Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-20T13:53:20.712Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-14",
+              "title": "WebUI / API 效能｜thumbnail source fingerprint 重複雜湊"
+            },
+            {
+              "id": "VID-44",
+              "title": "Storage Workspace UX｜Artifact 明細預設收合與類型彙總"
+            },
+            {
+              "id": "VID-28",
+              "title": "Timeline Inspector｜Filmstrip + Waveform + Perception drill-down"
+            },
+            {
+              "id": "VID-46",
+              "title": "Visual Style Preview UX/runtime｜「產生真實畫面預覽」無可見反應"
+            },
+            {
+              "id": "VID-42",
+              "title": "Subtitle Workspace v1｜逐字稿、時間軸、繁中字型與人工校正"
+            },
+            {
+              "id": "VID-29",
+              "title": "Editorial Policy v1｜把剪輯 craft 變成可版本化決策規則"
+            },
+            {
+              "id": "VID-48",
+              "title": "Visual Style Preview performance｜600s timeout、primary-first 與 bounded seek"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "a2da8be7-19d5-48d8-9cad-863678efaa04",
+            "body": "Status transition requested after exact-head merge: VID-47 is complete; remaining Preview latency is a separate blocker and must not keep the source-revalidation issue open.",
+            "attachments": [],
+            "createdAt": "2026-08-20T13:54:13.778Z",
+            "updatedAt": "2026-08-20T13:54:13.751Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "fc7a5a02-475c-4fbf-99e7-7b00090cd4d4",
+            "body": "### ChatGPT final review — accepted / merged\n\n- Accepted HEAD: `b0d30bd582af361127069daad00d5a4eb0c0d3e4`\n- CI #420 / `32375565273`: PASS\n- PR #113 exact-head squash merged\n- merged main: `2009c3ef1eec0630201bac17a572b265613250dc`\n\nAccepted source-currentity contract:\n- strict stat match remains zero-hash/zero-write fast path\n- stat/device identity drift requires explicit full SHA revalidation\n- rebind only when current SHA exactly equals persisted SHA and source remains stable through hashing\n- rebind is atomic, preserves project_media_uuid/video_id/project revision/Story semantics\n- malformed evidence, SHA mismatch, source mutation, missing binding, or concurrent incompatible change fail closed\n- Visual Style source-consuming path uses the shared helper; ordinary read/status paths remain hash-free\n\nReal Coffee proof:\n- `951f3319-35b4-53cb-8ba9-c238fb2df41e`: SHA `8433c84f44870a97c4aa722d2b9bf1e7a9b5743c9dc73458375933c37e07fda5`, persisted == current, safely rebound\n- `17893453-b646-5278-8442-696bb5b95864`: SHA `6135cb3e0105aeeccf8fe5ceec2f10323d8302d42d00da27b524a221678b6085`, persisted == current, safely rebound\n- project revision remains 8\n- Story generation `0806c197-0287-44dc-a83e-0660d93f04dc` unchanged\n- Perception/Story not rerun\n\nThe remaining VID-18 blocker is now separate: production Visual Style Preview is too slow. One synchronous request reached 600s and produced only 6 partial artifacts, so three primary styles were not returned and Visual Style remains needs_confirmation. Follow-up performance issue required; do not weaken completeness/currentity gates.",
+            "attachments": [],
+            "createdAt": "2026-08-20T13:53:45.805Z",
+            "updatedAt": "2026-08-20T13:53:45.778Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "25a4832c-cd3e-4779-8940-684388b1e0a6",
+            "body": "VID-47 implementation and acceptance handoff\n\n- Baseline/main: 7f34bf4d1d4274215276e385b936518584cb0974\n- Branch: agent/vid-47\n- Draft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/113\n- HEAD: b0d30bd582af361127069daad00d5a4eb0c0d3e4\n\nImplementation:\n- Generic source fingerprint revalidation preserves the strict stat fast path (zero hash/zero DB write).\n- On device/stat identity drift, existing single-flight SHA-256 is required; rebind is allowed only after exact SHA equality and stable post-hash stat.\n- Project-media fingerprint rebind is atomic and preserves project_media_uuid, video_id, source bytes/path, project revision, and Story semantics.\n- Visual Style source-consuming provenance uses the shared helper; read/status paths remain hash-free.\n\nReal Coffee:\n- media 951f3319-35b4-53cb-8ba9-c238fb2df41e: persisted/current SHA 8433c84f44870a97c4aa722d2b9bf1e7a9b5743c9dc73458375933c37e07fda5, match=true, rebound=true.\n- media 17893453-b646-5278-8442-696bb5b95864: persisted/current SHA 6135cb3e0105aeeccf8fe5ceec2f10323d8302d42d00da27b524a221678b6085, match=true, rebound=true.\n- Exactly two full hashes; media UUIDs unchanged; project revision remained 8; Story 0806c197-0287-44dc-a83e-0660d93f04dc unchanged.\n\nValidation:\n- Full Python: 856 passed, 2 skipped.\n- Targeted source/visual/regression: 54 passed.\n- Frontend: 289 passed across 42 files; production build passed.\n- compileall, encoding, diff check passed.\n- CI run 32375565273: Windows authoritative PASS, Ubuntu portability PASS, Frontend PASS, selector PASS.\n\nAuthoritative blocker:\nThe actual production Visual Style Preview endpoint was invoked with the two real Coffee sources, but the client timed out at 600 seconds after only 6 partial artifacts (Diary Natural/Clean Minimal partial; no complete Cinematic/full three-style response). Visual Style remains needs_confirmation. It was stopped fail-closed; no auto-approval and no Perception/Story/Apply/Approval/Render/QC/QA rerun.\n\nSOURCE SHA VERIFIED BEFORE REBIND\nPERCEPTION/STORY NOT RERUN\nCOFFEE VISUAL STYLE NOT AUTO-APPROVED\nFORMAL RENDER NOT RUN",
+            "attachments": [],
+            "createdAt": "2026-08-20T13:44:11.876Z",
+            "updatedAt": "2026-08-20T13:44:11.780Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-48",
+        "uuid": "13f623d0-6d87-40ba-b46d-a2c1c60b064b",
+        "title": "Visual Style Preview performance｜600s timeout、primary-first 與 bounded seek",
+        "description": "## Context\n\n<issue id=\"d21c6166-1874-4acb-b203-6e425f9f1601\" href=\"https://linear.app/videoai/issue/VID-47/source-fingerprint-revalidationwindows-device-identity-drift-的安全\">VID-47</issue> 已安全解決 Coffee source identity drift 並 merge；目前 main `2009c3ef1eec0630201bac17a572b265613250dc`。\n\nAuthoritative Coffee source 已逐筆 full-SHA 驗證 persisted == current，兩筆 `project_media_uuid` 不變，project revision 仍為 8，Story generation `0806c197-0287-44dc-a83e-0660d93f04dc` 不變；Perception/Story 沒有 rerun。\n\n現在真正 blocker 是 production Visual Style Preview latency：\n\n* 正式 `/api/project/visual-style/preview` request 在 Coffee workspace 跑到 600 秒 client timeout。\n* 只產出 6 個 partial artifacts；Diary Natural / Clean Minimal 有部分 evidence，Cinematic 尚未完成，三個 public primary style 沒有完整 response。\n* <issue id=\"ce656230-6df3-44c6-a59e-a99ab82704d4\" href=\"https://linear.app/videoai/issue/VID-46/visual-style-preview-uxruntime產生真實畫面預覽無可見反應\">VID-46</issue> completeness gate 正確 fail-closed，Visual Style 仍 `needs_confirmation`。\n\n### 已確認的 production workload\n\n目前 `preview_visual_styles()`：\n\n* 選 bright + dark/complex 共最多 2 個 representative frames。\n* 固定生成 4 個 style：Diary Natural、Clean Minimal、Cinematic、Standalone Card Compare。\n* 每個 frame × 每個 style × 2 title roles（chapter + location/lower-third）→ 最多 16 張 static preview。\n* 第一個 representative frame 還對每個 style 生成一支 animated preview → 再 4 個 MP4。\n* 單次同步 request 最多約 20 個 true artifacts，即使 Simple-first 主畫面只需要三個 public primary hero。\n\n另外 `render_true_frame_preview()` / `render_animated_title_preview()` 現在把 `-ss` 放在 `-i` 後：對真實長素材可能每個 artifact 都從前面 accurate-decode 到 target timestamp；相同 timestamp 又被不同 style / title role 重複解碼。\n\n這與 Coffee「600 秒只完成 6 個」高度吻合。\n\n## Goal\n\n讓 Simple-first Visual Style 的第一次 human decision 變成真正可用：\n\n`產生真實畫面預覽`\n→ 在合理互動時間內先回傳所有 enabled public primary styles 的 current hero pixels\n→ human 可比較並選 style\n→ extended evidence 只有在需要時再產生。\n\n不要用「提高 timeout」掩蓋問題，也不要一開始就把整個流程改成 generic async queue。\n\n## Required diagnosis first\n\n在修改前先對 authoritative Coffee workspace 做 profiling。至少記錄：\n\n* representative frame timestamps/source IDs\n* 每個 artifact 的 style / title role / static-or-animated\n* cache hit/miss\n* FFmpeg elapsed per artifact\n* seek timestamp\n* source resolution/codec/duration\n* output geometry\n* total planned artifact count\n* 哪一步在 600 秒內最耗時\n\n把 baseline timeline 放進 PR body / Linear handoff。\n\n## 1. Primary-first preview contract\n\nSimple-first primary request 不應先生成所有 diagnostic/extended evidence。\n\n正式拆成至少兩個 scope（名稱可依 architecture）：\n\n### `primary`\n\n主 CTA `產生真實畫面預覽` 使用。\n\n只生成 human 第一次比較所必需的 current public primary hero：\n\n* registry-derived enabled public primary styles\n* 目前預期 Diary Natural / Clean Minimal / Cinematic，但禁止 hard-code ID\n* 每個 style 至少一個 true static chapter-title hero\n* 使用真實 Coffee frame、approved Creative Brief、current geometry/framing、actual LUT/grading/title semantics\n* exact `preview_plan_hash` / `preview_variant_id` / source evidence\n\n<issue id=\"ce656230-6df3-44c6-a59e-a99ab82704d4\" href=\"https://linear.app/videoai/issue/VID-46/visual-style-preview-uxruntime產生真實畫面預覽無可見反應\">VID-46</issue> completeness gate仍要求每個 public primary style 都有 usable hero 才成功。\n\nStandalone comparison、dark frame、location role、animated evidence不應阻塞 first-look primary response。\n\n### `extended`\n\n只有 human 點 `查看更多預覽`、進 Advanced、或某 semantic override 需要該類 evidence 時才產生。\n\n可包含：\n\n* dark/complex frame\n* location/lower-third role\n* animated title preview\n* standalone comparison\n* future diagnostic evidence\n\n必須沿用同一 registry/currentity/evidence contract，不得建立第二套 style semantics。\n\n若 extended 已部分 cache，可 reuse。\n\n## 2. Bounded accurate seek\n\n不要繼續讓每個 Preview artifact 對長素材從 0 decode 到 target timestamp。\n\n建立集中式 preview seek strategy/helper，供 static + animated preview 共用。\n\n要求：\n\n* 真實長素材使用 bounded fast/accurate seek（例如 input-side seek / bounded pre-roll + residual accurate seek，exact implementation 由實測決定）。\n* 不得因優化而拿錯 representative frame。\n* synthetic/short-GOP fixtures 仍能穩定輸出，不可重現過去 empty image stream 問題。\n* static 與 animated 使用一致的 timestamp contract。\n* 不改 Formal Render 的 frame/timeline semantics；這是 Preview source sampling optimization。\n\n先比較至少：\n\nA. current output-side-only seek\nB. candidate bounded seek\n\n對 deterministic fixture 驗 target-frame correctness；可用 exact hash（若 deterministic）或明確 pixel/timestamp tolerance contract。\n\n## 3. Avoid redundant source decode where safe\n\nProfile 後若同一 source/timestamp 被多個 style/role 重複 decode 是主要成本，允許加入最小 preview-source-frame/cache reuse。\n\n但必須：\n\n* source identity + timestamp + geometry/currentity 綁定\n* 不用 mock / placeholder\n* 不繞過 actual grading / framing / title render plan\n* 不拿舊 source identity cache 當 current\n\n不要為此做 universal media cache framework。\n\n如果 bounded seek + primary-first 已足夠達標，可不做這層。\n\n## 4. Frontend progressive disclosure\n\nPrimary CTA：\n\n`產生真實畫面預覽`\n\n只等待 primary batch。\n\n成功後三張（registry count）hero 立即 human-viewable。\n\n`查看更多預覽`：\n\n* 若 extended evidence 尚未 current，點擊時才 request extended scope。\n* 顯示 local running/error/success feedback。\n* extended failure 不應把已 current 的 primary heroes 偽裝成 stale，除非 shared semantic currentity 本身已變。\n\nSemantic override（title position/readability/motion/grading/framing）仍依 <issue id=\"18a7a130-9a21-4265-98f6-e35bcf672ac8\" href=\"https://linear.app/videoai/issue/VID-40/simple-first-editor-uxprogressive-disclosure-與三步創意流程\">VID-40</issue>/46 contract清除其 affected current evidence；不能用舊 primary/extended evidence approval。\n\n## 5. Approval boundary\n\n不得降低 <issue id=\"ce656230-6df3-44c6-a59e-a99ab82704d4\" href=\"https://linear.app/videoai/issue/VID-46/visual-style-preview-uxruntime產生真實畫面預覽無可見反應\">VID-46</issue> exact evidence gate。\n\nPrimary style selection / approval 至少仍綁：\n\n* current source identity\n* Creative Brief visual contract\n* Visual Style snapshot\n* exact preview plan hash\n* exact preview variant ID\n\n若某 human-selected semantic（例如 motion）需要 animated evidence 才能 truthful preview-first，則在該 override path 明確要求/生成對應 current extended evidence；不要因此讓所有人第一次按 Preview 就先生成全部 20 個 artifacts。\n\n## 6. Partial artifacts / retry\n\n現有 partial files/evidence 可以作 deterministic cache reuse，只要 currentity identity完全匹配。\n\n但：\n\n* incomplete batch不能回 success\n* partial evidence不能繞過 approval completeness/currentity\n* retry 必須能從 safe cache 繼續，而不是每次重做全部已 current artifact\n* force=true semantics仍需明確\n\n不要求本 issue 做大規模 batch transaction/job framework。\n\n## Performance acceptance — real Coffee\n\nAuthoritative workspace：\n\n`C:\\Users\\b3b3b\\Documents\\AI剪片助手\\video-vault-ai-vid18-acceptance-4b62c8c`\n\nPrimary request 必須：\n\n* 經 production endpoint，不可 direct renderer bypass\n* 產生全部 enabled public primary heroes\n* Diary Natural / Clean Minimal / Cinematic 均 human-viewable（以 current registry 為準）\n* 不 timeout\n* target：在本機 Coffee workspace **<= 90 秒** 完成 primary response；若實測仍超過，STOP 並提出具數據的下一個 bottleneck，不得只是調高 client timeout。\n\n記錄：\n\n* cold run elapsed\n* cache/retry elapsed\n* artifact count\n* per-artifact timing\n* cache hits\n\nExtended scope不阻塞本輪 human style selection；需證明可 lazy request且不破壞 primary currentity即可。\n\n## Required regressions\n\n至少：\n\n 1. primary scope只要求 registry enabled public primary heroes，不生成 standalone/internal/diagnostic sibling。\n 2. synthetic future fourth public primary style只靠 registry加入；primary completeness自動要求第 4 個，不改 core branch。\n 3. extended style/role新增不改 primary core flow。\n 4. primary partial response fail-closed。\n 5. extended failure不抹掉仍 current 的 primary batch。\n 6. semantic override只失效 affected preview evidence/lifecycle；same unchanged batch style switching仍可 reuse。\n 7. bounded seek在 deterministic long-GOP/long-duration fixture命中正確 target frame。\n 8. short/synthetic fixture仍可輸出，避免 empty frame regression。\n 9. static + animated seek contract一致。\n10. cache hit不重新 decode current source artifact。\n\n## Horizontal extensibility\n\n「這裡有沒有理論上可以水平增加的東西？」YES：\n\n* public primary styles\n* extended styles\n* title roles\n* representative frame classes\n* animated evidence kinds\n* future subtitle/effect preview evidence\n\n使用 registry-driven `preview scope / evidence descriptor` 的最小 contract即可；不要 generic plugin framework。\n\n第一個 implementation要留下 synthetic sibling regression，證明新增 future primary/extended evidence不需要 Coffee-specific/core special-case。\n\n## Scope guard\n\n不要：\n\n* autoapprove Coffee Visual Style\n* Perception rerun\n* Story rerun\n* Apply / Formal Approval\n* Formal Render / Final QC / Delivery QA\n* source rebind/fingerprint再改\n* DB patch\n* source mutation\n* 提高 timeout當成修正\n* 直接改 generic background job queue，除非 primary-first + bounded seek 後仍有量測證據需要另切 issue\n* <issue id=\"a26505a9-26e1-4c95-9334-00177eee6ead\" href=\"https://linear.app/videoai/issue/VID-44/storage-workspace-uxartifact-明細預設收合與類型彙總\">VID-44</issue> / <issue id=\"bf98f67c-bb56-436f-9fc8-c79d49aa36af\" href=\"https://linear.app/videoai/issue/VID-42/subtitle-workspace-v1逐字稿時間軸繁中字型與人工校正\">VID-42</issue> / <issue id=\"aa20b1ac-06a1-47fa-b137-39e4c3159fc4\" href=\"https://linear.app/videoai/issue/VID-28/timeline-inspectorfilmstrip-waveform-perception-drill-down\">VID-28</issue> / <issue id=\"3f8e20e8-b136-4fa5-b3d6-7bae464faa34\" href=\"https://linear.app/videoai/issue/VID-29/editorial-policy-v1把剪輯-craft-變成可版本化決策規則\">VID-29</issue> / Workflow v2 runtime\n\n## Handoff\n\n建立 focused Draft PR。更新本 issue + <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue>，附：\n\n* latest baseline main\n* branch / PR / exact HEAD\n* baseline Coffee timing/profile\n* planned artifact count before/after\n* seek strategy before/after\n* primary vs extended contract\n* registry/synthetic sibling proof\n* cold primary Coffee elapsed\n* cached retry elapsed\n* three current primary preview IDs / URLs\n* human-viewable yes/no per style\n* tests/build/CI\n\n明確寫：\n\n`PRIMARY PREVIEW COMPLETES WITHOUT 600S TIMEOUT`\n`COFFEE VISUAL STYLE NOT AUTO-APPROVED`\n`PERCEPTION/STORY NOT RERUN`\n`FORMAL RENDER NOT RUN`\n\n保持 Draft，停止交 ChatGPT review。",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-48/visual-style-preview-performance600s-timeoutprimary-first-與-bounded",
+        "gitBranchName": "vid-48",
+        "createdAt": "2026-08-20T13:55:54.012Z",
+        "updatedAt": "2026-08-20T16:57:42.600Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-20T14:30:15.892Z",
+        "startedAt": "2026-08-20T13:55:54.212Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "9efadbcd-e803-414c-b146-ddf6ee04b776",
+            "title": "[VID-48] Make Visual Style preview primary-first and bounded",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/114"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-20T13:55:54.012Z",
+            "endedAt": "2026-08-20T14:30:15.903Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-20T14:30:15.903Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-29",
+              "title": "Editorial Policy v1｜把剪輯 craft 變成可版本化決策規則"
+            },
+            {
+              "id": "VID-47",
+              "title": "Source fingerprint revalidation｜Windows device identity drift 的安全 content-equal rebind"
+            },
+            {
+              "id": "VID-42",
+              "title": "Subtitle Workspace v1｜逐字稿、時間軸、繁中字型與人工校正"
+            },
+            {
+              "id": "VID-46",
+              "title": "Visual Style Preview UX/runtime｜「產生真實畫面預覽」無可見反應"
+            },
+            {
+              "id": "VID-28",
+              "title": "Timeline Inspector｜Filmstrip + Waveform + Perception drill-down"
+            },
+            {
+              "id": "VID-44",
+              "title": "Storage Workspace UX｜Artifact 明細預設收合與類型彙總"
+            },
+            {
+              "id": "VID-40",
+              "title": "Simple-first Editor UX｜Progressive Disclosure 與三步創意流程"
+            },
+            {
+              "id": "VID-49",
+              "title": "Visual Style Preview correctness｜primary hero 宣稱 chapter-title 但實際 pixels 無可見字卡"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "c4004578-4a5c-4b43-90aa-33475483e9b7",
+            "body": "Final bookkeeping follows merge; no further code changes required in this issue.",
+            "attachments": [],
+            "createdAt": "2026-08-20T14:31:26.472Z",
+            "updatedAt": "2026-08-20T14:31:26.457Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "90e50879-9742-455c-bdbd-6b6b413186bc",
+            "body": "(automation note) PR #114 is merged exact-head and VID-48 is ready for Done.",
+            "attachments": [],
+            "createdAt": "2026-08-20T14:31:09.800Z",
+            "updatedAt": "2026-08-20T14:31:09.682Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "f4435157-88e4-4873-9ad2-04cac344f481",
+            "body": "Status transition: implementation, real Coffee performance acceptance, and exact-head CI are accepted. Move VID-48 to Done; remaining work is human Visual Style selection under VID-18.",
+            "attachments": [],
+            "createdAt": "2026-08-20T14:30:58.073Z",
+            "updatedAt": "2026-08-20T14:30:58.005Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "4bc65072-bef1-4273-b776-77ed51a8493d",
+            "body": "### ChatGPT final review — accepted / merged\n\n- Accepted HEAD: `3e0a972f5f338f76a73e233f97ce99b65e3ef2b8`\n- CI #422 / `32379490793`: PASS\n- PR #114: exact-head squash merged\n- merged main: `19c15b53c15f5cfbda1f2512af851b3851a05efb`\n\nAccepted contracts:\n- Visual Style Preview is split into registry-driven `primary` and lazy `extended` scopes.\n- Primary only generates the enabled public primary heroes required for the first human comparison; current registry returns Diary Natural / Clean Minimal / Cinematic without hard-coded UI branches.\n- Primary remains fail-closed unless every public primary style has a real static hero with current file, preview plan hash, and preview variant ID.\n- Extended evidence no longer blocks first-look selection and failure does not erase current primary evidence.\n- Static + animated preview use shared `bounded-pre-roll-v1`; long-GOP smoke verifies exact frame equivalence against the previous full-decode reference.\n- Horizontal sibling behavior is registry-driven; future public primary styles automatically participate in completeness.\n\nReal Coffee acceptance:\n- production primary response: `39.480s`, `ok=true`, 3/3 primary heroes\n- same-contract retry: `7.525s`, 3/3 cache hits\n- no 600s timeout\n- no Visual Style auto-approval\n- Perception/Story not rerun\n- Formal Render not run\n\nVID-48 complete. Human Visual Style selection is now the next VID-18 checkpoint.",
+            "attachments": [],
+            "createdAt": "2026-08-20T14:30:32.386Z",
+            "updatedAt": "2026-08-20T14:30:32.341Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "b79c1da9-a924-4cbb-999f-a5dd0e626217",
+            "body": "CI 已完成：GitHub Actions run `32379490793` 全部 required jobs PASS：\n- Frontend\n- Media Smoke / Ubuntu\n- Ubuntu portability / PR Core/Targeted / Python 3.13\n- Windows authoritative / PR Core/Targeted / Python 3.11\n- Select PR test layers\n\nPR #114 維持 Draft，HEAD `3e0a972f5f338f76a73e233f97ce99b65e3ef2b8`。Real isolated Coffee primary evidence 維持：39.480s cold/current、7.525s same-contract cache retry、3/3 primary heroes。未執行完整 Coffee Render，也未重跑 Story / Apply / Approval。",
+            "attachments": [],
+            "createdAt": "2026-08-20T14:23:28.532Z",
+            "updatedAt": "2026-08-20T14:23:28.511Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "f5ccdbd7-1eea-4a04-a333-1abe3a74a621",
+            "body": "VID-48 implementation / acceptance handoff\n\n- Baseline main: `2009c3ef1eec0630201bac17a572b265613250dc`\n- Branch: `agent/vid-48`\n- Draft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/114\n- HEAD: `3e0a972f5f338f76a73e233f97ce99b65e3ef2b8`\n\n修正：\n- Preview 改為 registry-derived `primary` / lazy `extended` scope；primary 僅產生 Diary Natural、Clean Minimal、Cinematic 的單一真實 chapter-title hero。\n- primary incomplete fail-closed；extended 失敗不清除既有 primary evidence。\n- static / animated 共用 `bounded-pre-roll-v1` seek contract，保留 frame accuracy 並限制 long-GOP decode。\n- 新增真實 long-GOP FFmpeg frame equivalence smoke、primary completeness、registry sibling、前端 lazy extended / failure isolation regression。\n\nReal isolated Coffee primary evidence（project 1；未重跑 Story / Perception / Apply / Approval / Render / QC / QA）：\n- 冷啟動/目前 cache：39.480s，`ok=true`，3/3 primary variants。\n- 同 contract retry：7.525s，3/3 cache hit。\n- report：`C:\\Users\\b3b3b\\Documents\\AI剪片助手\\video-vault-ai-vid18-acceptance-4b62c8c\\vid48-primary-preview.json`\n\n驗證：\n- Python 859 passed, 2 skipped\n- Visual Style targeted 35 passed\n- Frontend targeted 14 passed\n- Frontend full 291 passed / 42 files\n- frontend production build PASS\n- diff-check / UTF-8 PASS\n- GitHub CI currently running; no full Coffee Render performed.\n\n保持 Draft，等待 review / CI。",
+            "attachments": [],
+            "createdAt": "2026-08-20T14:20:27.900Z",
+            "updatedAt": "2026-08-20T14:20:27.863Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-49",
+        "uuid": "444a5bf4-57e3-41a1-820e-c67833da585a",
+        "title": "Visual Style Preview correctness｜primary hero 宣稱 chapter-title 但實際 pixels 無可見字卡",
+        "description": "## Context\n\n<issue id=\"13f623d0-6d87-40ba-b46d-a2c1c60b064b\" href=\"https://linear.app/videoai/issue/VID-48/visual-style-preview-performance600s-timeoutprimary-first-與-bounded\">VID-48</issue> 已完成並 merge，production primary Visual Style Preview 可在 Coffee workspace 39.480s 內產生 3/3 public-primary heroes，same-contract retry 7.525s cache hit。\n\nHuman 現在真的看到三個 Style Preview：Diary Natural / Clean Minimal / Cinematic。三張都使用同一個 Coffee representative frame，調色差異可見；這點符合公平比較需求。\n\n但 human review 發現新的 correctness blocker：三張 primary hero UI 都標示 `字卡預覽`，backend evidence 也以 `title_role=chapter_title` 生成，但實際 hero pixels 裡看不到任何 chapter title / text overlay。\n\n因此目前 Preview 只能 truthful 比較 grading/look，不能 truthful 比較 <issue id=\"ed771ad6-fea2-497e-94be-d3fd29275b0c\" href=\"https://linear.app/videoai/issue/VID-27/visual-style-preview用真實素材先核准字幕與視覺方向\">VID-27</issue> 原本要求的 title overlay semantics；不得在此狀態下要求 human 核准 Visual Style。\n\n## Goal\n\n找出為什麼 production `chapter_title` Preview evidence 沒有產生人眼可見的 title pixels，修到 primary hero 真正顯示 production title treatment，再讓 human 重新比較三個 style。\n\n不要先假設是字型問題；必須從 production artifact / render plan / FFmpeg command / output pixels 逐層診斷。\n\n## Required diagnosis first\n\n使用 authoritative Coffee workspace：\n\n`C:\\Users\\b3b3b\\Documents\\AI剪片助手\\video-vault-ai-vid18-acceptance-4b62c8c`\n\n對目前三個 primary hero evidence 逐一讀：\n\n* visual_style_id\n* preview_variant_id\n* preview_plan_hash\n* preview_kind\n* title_role\n* title_text\n* representative source/timestamp\n* output path\n* output dimensions\n* visual_render_plan\n* filter_graph / filter_complex\n* resolved title style id\n* font resolver result / actual font path or installed family evidence\n* anchor / safe-area / x/y\n* font size / line height / weight\n* text color / alpha\n* surface overlay color / alpha\n* grading/LUT contract\n\n並比對真正 PNG pixels。\n\n## Must determine exact failure class\n\n至少排查：\n\nA. `title_text` 根本沒有進 materialized render plan\nB. render plan 有 text，但 filter graph 沒包含 drawtext/title renderer\nC. filter graph 有 title renderer，但 font resolve 失敗或 fallback 不實際可用\nD. drawtext 有執行，但座標落在 output frame 外 / safe-area 算錯\nE. text/surface alpha 或顏色導致實際不可見\nF. primary hero cache 命中了舊的 pre-title artifact，但 evidence identity 沒有綁 title-render semantics\nG. FFmpeg/title path回報成功但實際 pixel output等同 no-title frame\nH. 其他有 production evidence 的根因\n\n先證明 root cause，再改。\n\n## Truthful preview contract\n\n若 variant 宣稱：\n\n`title_role = chapter_title`\n\n那 human-viewable pixels 必須真的包含該 title treatment。\n\n不能只靠 metadata / preview_plan_hash 宣稱。\n\n至少對 title-bearing preview 增加可驗證的 pixel-level regression / smoke：\n\n* render 同一 source frame 的 no-title baseline\n* render chapter-title preview\n* title-bearing output 必須和 baseline 有 deterministic visible pixel delta，且 delta 位於 expected title/surface region\n\n不要用 OCR 當 correctness gate。\n\n## Cache identity\n\n如果 root cause 包含舊 cache artifact 被錯誤 reuse：\n\npreview cache identity 必須至少綁定所有會改變可見 title pixels 的 semantic identity，例如既有 contract中應有的：\n\n* title_role\n* title text identity\n* resolved title style semantic hash\n* font resolver identity / fallback outcome（依現有架構合理綁定）\n* anchor / size / palette / surface / motion where relevant\n* render plan semantic hash\n\n修正後 old invisible artifact 不得 masquerade current。\n\n不要無條件清全 cache；用 contract/version/hash 正確失效。\n\n## Production renderer parity\n\nPrimary Preview 必須走和 Formal Render 一致的 title semantics/renderer contract。\n\n可以有 Preview sampling/seek/resolution差異，但不得建立另一套『簡化字卡』邏輯。\n\n如果 Formal Render 與 Preview title renderer目前不同，先 inventory，再把共用 contract 收斂到最小正確 shared path。\n\n## Font handling\n\n若是 font 問題：\n\n* 沿用 <issue id=\"ed771ad6-fea2-497e-94be-d3fd29275b0c\" href=\"https://linear.app/videoai/issue/VID-27/visual-style-preview用真實素材先核准字幕與視覺方向\">VID-27</issue> `FontResolver` / installed-only contract\n* CJK/English fallback 必須 deterministic、audited\n* 不下載字型\n* 不把不存在字型名硬塞 FFmpeg\n* resolve failure 要 fail closed 或明確 fallback，不得產一張無字 PNG 還回 success\n\n## Geometry / safe area\n\n若是位置問題：\n\n必須對 9:16 Coffee output 驗：\n\n* canonical square-pixel output\n* correct 1080x1920 display geometry\n* chapter title expected anchor region\n* title bounding box在畫面內\n* safe area不超界\n\n也補 16:9 synthetic sibling，避免 portrait-only special case。\n\n## Required regressions\n\n至少：\n\n1. `chapter_title` preview：actual visible title pixel delta exists vs no-title baseline.\n2. `location_title` /另一個 existing title role sibling：同一 renderer contract可見，不需新增 role-specific core branch.\n3. 9:16 safe-area/title bbox在 frame內.\n4. 16:9 synthetic sibling也正確.\n5. missing/unresolvable font：不得 silent success with invisible text.\n6. title semantic change：old preview cache不能被當 current.\n7. grading-only style differences仍保留，三個 primary hero仍可公平用同一 representative frame比較.\n8. primary completeness gate除了 file/hash/id，也必須確保 title-bearing hero通過可見 title-render evidence contract；不要硬-coded Coffee pixel coordinates.\n\n## Horizontal extensibility\n\n「這裡有沒有理論上可以水平增加的東西？」YES。\n\n未來會增加：\n\n* chapter_title\n* section_title\n* location_title\n* date_time_title\n* lower_third\n* caption/subtitle\n* 新 title style / font fallback / motion preset\n\n第一版必須留下最小 shared title-render visibility contract + synthetic sibling regression。\n\n不要建立 universal text plugin framework。\n\n## Real Coffee acceptance\n\n修正後從 latest main 對 authoritative Coffee workspace重新產生 primary Preview（product endpoint，不可 direct renderer bypass）。\n\n要求：\n\n* Diary Natural：人眼可看到 chapter title overlay\n* Clean Minimal：人眼可看到 chapter title overlay\n* Cinematic：人眼可看到 chapter title overlay\n* 三張仍使用可比較的同一 representative frame\n* actual grading差異保留\n* 9:16 framing/geometry正常\n* 新 preview IDs / plan hashes current\n\n最後截一張 WebUI 同時包含三張 primary hero 的 screenshot，供 human review。\n\nSTOP at human gate。\n\n不要 autoapprove Visual Style。\n\n## Scope guard\n\n不要：\n\n* autoapprove Coffee Visual Style\n* Perception rerun\n* Story rerun\n* Apply / Formal Approval\n* Formal Render / Final QC / Delivery QA\n* source mutation/reimport\n* DB patch\n* <issue id=\"a26505a9-26e1-4c95-9334-00177eee6ead\" href=\"https://linear.app/videoai/issue/VID-44/storage-workspace-uxartifact-明細預設收合與類型彙總\">VID-44</issue> / <issue id=\"bf98f67c-bb56-436f-9fc8-c79d49aa36af\" href=\"https://linear.app/videoai/issue/VID-42/subtitle-workspace-v1逐字稿時間軸繁中字型與人工校正\">VID-42</issue> / <issue id=\"aa20b1ac-06a1-47fa-b137-39e4c3159fc4\" href=\"https://linear.app/videoai/issue/VID-28/timeline-inspectorfilmstrip-waveform-perception-drill-down\">VID-28</issue> / <issue id=\"3f8e20e8-b136-4fa5-b3d6-7bae464faa34\" href=\"https://linear.app/videoai/issue/VID-29/editorial-policy-v1把剪輯-craft-變成可版本化決策規則\">VID-29</issue>\n* Workflow v2 runtime\n* 為了讓文字出現而 manual Photoshop / screenshot overlay / external composition\n\n## Handoff\n\nFocused Draft PR。更新本 issue + <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue>，附：\n\n* baseline main / branch / PR / exact HEAD\n* three current bad preview IDs\n* root cause classification\n* render plan + font/geometry evidence\n* before no-title vs title pixel proof\n* cache/currentity fix if any\n* 9:16 + 16:9 regressions\n* real Coffee regenerated preview IDs\n* human-viewable chapter title yes/no per style\n* WebUI screenshot path/attachment\n* tests/build/CI\n\n明確寫：\n\n`TITLE OVERLAY PIXELS VERIFIED VISIBLE`\n`COFFEE VISUAL STYLE NOT AUTO-APPROVED`\n`PERCEPTION/STORY NOT RERUN`\n`FORMAL RENDER NOT RUN`\n\n保持 Draft，停止交 ChatGPT review。",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-49/visual-style-preview-correctnessprimary-hero-宣稱-chapter-title-但實際",
+        "gitBranchName": "vid-49",
+        "createdAt": "2026-08-20T16:57:42.600Z",
+        "updatedAt": "2026-08-21T15:11:39.970Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-21T14:57:58.632Z",
+        "startedAt": "2026-08-20T16:57:42.761Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "83d32b1b-0bed-4124-b166-f8e4a08a4efd",
+            "title": "VID-49 Coffee primary preview v3",
+            "subtitle": "Three primary styles on the same isolated Coffee frame; title pixel evidence PASS for all.",
+            "url": "https://uploads.linear.app/1a499334-ee4b-4bfc-85ca-ce15d217997b/0723f639-f1d7-4dcb-ad45-edd2a9f56515/231a3aec-ddfb-428c-b53f-801cd7a88d36?signature=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwYXRoIjoiLzFhNDk5MzM0LWVlNGItNGJmYy04NWNhLWNlMTVkMjE3OTk3Yi8wNzIzZjYzOS1mMWQ3LTRkY2ItYWQ0NS1lZGQyYTlmNTY1MTUvMjMxYTNhZWMtZGRmYi00MjhjLWI1M2YtODAxY2Q3YTg4ZDM2IiwiaWF0IjoxNzkxMDM3MTE2LCJleHAiOjE3OTEwMzc0MTZ9._19Tk789TxpaAousN_8lW4kLjnVNwHMEfzrxppFLsSw"
+          },
+          {
+            "id": "135653b0-75c4-4b22-958c-69062ba5dbc5",
+            "title": "[VID-49] Prove visible primary title previews",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/115"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-20T16:57:42.600Z",
+            "endedAt": "2026-08-21T14:57:58.653Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-21T14:57:58.653Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-42",
+              "title": "Subtitle Workspace v1｜逐字稿、時間軸、繁中字型與人工校正"
+            },
+            {
+              "id": "VID-27",
+              "title": "Visual Style Preview｜用真實素材先核准字幕與視覺方向"
+            },
+            {
+              "id": "VID-48",
+              "title": "Visual Style Preview performance｜600s timeout、primary-first 與 bounded seek"
+            },
+            {
+              "id": "VID-28",
+              "title": "Timeline Inspector｜Filmstrip + Waveform + Perception drill-down"
+            },
+            {
+              "id": "VID-44",
+              "title": "Storage Workspace UX｜Artifact 明細預設收合與類型彙總"
+            },
+            {
+              "id": "VID-29",
+              "title": "Editorial Policy v1｜把剪輯 craft 變成可版本化決策規則"
+            },
+            {
+              "id": "VID-50",
+              "title": "Title Design 微調｜Chapter title 縮小約 15% 並收斂底板"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "2ae237e3-9811-44bd-b9ce-58e4f5588c10",
+            "body": "### ChatGPT final review — accepted / merged\n\n- Accepted HEAD: `ac1d2038db9a385a755372c650b74fb1d8f8e102`\n- CI #426 / `32488921379`: PASS\n- PR #115 exact-head squash merged\n- merged main: `f1e066b9ed86ec16ea1649821dc4684e62f23927`\n\nAccepted correctness contract:\n- production `chapter_title` preview must carry visible title pixel evidence, not metadata-only claims\n- title evidence is persisted and required by primary completeness/currentity validation\n- Preview-only deterministic sample time fixes fade/fade_rise visibility without changing Formal Render frame-clock semantics\n- installed font resolution now checks required glyph coverage and fails closed when no legal installed font can render the title\n- preview cache identity is versioned as `visual-preview-render-v3`, so pre-fix invisible artifacts cannot masquerade as current\n- same representative Coffee frame remains used across Diary Natural / Clean Minimal / Cinematic for fair grading comparison\n\nReal Coffee human-view evidence reviewed:\n- 3/3 primary styles visibly show the chapter-title treatment\n- 1080x1920 portrait geometry\n- title bbox x=36, y=1418, width=878, height=348, in_frame=true\n- Microsoft JhengHei installed-font evidence with coverage check\n- contact sheet attachment reviewed\n\nNo Visual Style was auto-approved. Perception/Story were not rerun and Formal Render was not run.\n\nVID-49 complete; next VID-18 checkpoint is human Visual Style selection.",
+            "attachments": [],
+            "createdAt": "2026-08-21T14:58:23.098Z",
+            "updatedAt": "2026-08-21T14:58:23.051Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "fb2c323f-0aea-40d2-990b-9fb47d57bacf",
+            "body": "VID-49 final handoff update\n\nPR #115（Draft）\nLatest HEAD: ac1d2038db9a385a755372c650b74fb1d8f8e102\nCI: #32488921379 PASS\n\nCI evidence:\n- Windows authoritative / PR Core/Targeted / Python 3.11: PASS\n- Ubuntu portability / PR Core/Targeted / Python 3.13: PASS\n- Frontend tests/build: PASS\n- Select PR test layers: PASS\n- Media Smoke / Ubuntu: skipped by workflow selection\n\nThe first CI run #32488240870 exposed five Ubuntu-only fake-renderer tests that assumed a Windows CJK font. The follow-up commit isolates those fake-renderer tests behind a synthetic font identity; the production installed-font coverage check and fail-closed behavior are unchanged.\n\nReal Coffee isolated primary preview evidence remains PASS:\n- POST /api/project/visual-style/preview, scope=primary\n- Diary Natural / Clean Minimal / Cinematic: 3/3 title pixel evidence PASS\n- 1080x1920 (9:16), same representative frame at 32.675531s\n- title-pixel-evidence-v1, in_frame=true\n- title bbox x=36, y=1418, width=878, height=348\n- first run 3/3 cache miss; second run 3/3 cache hit\n- visual-preview-render-v3\n- evidence image attached as vid49-coffee-primary-preview-v3.png\n\nLocal validation:\n- targeted visual/media/render/QA: 139 passed\n- full Python: 863 passed, 2 skipped\n- frontend: 291 passed\n- production build: PASS\n- UTF-8 check: PASS\n- git diff --check: PASS\n\nNo Perception, Story, Apply, Approval, Formal Render, Final QC, or Delivery QA was rerun. No style was auto-approved.\n\nRequired handoff:\n- TITLE OVERLAY PIXELS VERIFIED VISIBLE\n- COFFEE VISUAL STYLE NOT AUTO-APPROVED\n- PERCEPTION/STORY NOT RERUN\n- FORMAL RENDER NOT RUN\n\nWaiting for human visual selection/approval; keep PR Draft and VID-49 In Progress.",
+            "attachments": [],
+            "createdAt": "2026-08-21T13:55:01.604Z",
+            "updatedAt": "2026-08-21T13:55:01.554Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "81ba8a57-8b44-45ad-a2d8-003a2361e77b",
+            "body": "VID-49 implementation / real acceptance handoff\n\nPR: https://github.com/DystopiaOwO/video-vault-ai/pull/115\nBranch: agent/vid-49\nHEAD: 47966a763dc3e95b4e7d0b3d9c823628eb7b0591\nBase: origin/main 19c15b53c15f5cfbda1f2512af851b3851a05efb\nPR remains Draft; CI was pending at handoff time.\n\nRoot cause confirmed:\n- Animated chapter_title previews were sampled at t=0, so fade/fade_rise alpha was zero.\n- Output-side seek left FFmpeg title-clock behavior implementation-dependent.\n- system-sans could resolve to Segoe UI without CJK glyph coverage, producing tofu for Traditional Chinese.\n- Preview cache identity lacked a version for the corrected preview execution contract.\n- A single backslash-n in the drawtext text value rendered as /n on the Windows FFmpeg build and clipped the readable title.\n\nImplemented:\n- Deterministic 0.35s sample for animated static previews; formal render keeps the frame clock semantics.\n- PTS reset before the shared preview graph.\n- title-pixel-evidence-v1 compares rendered pixels against a no-title baseline inside a deterministic title bbox; validation and primary completeness fail closed without a positive delta.\n- Persisted title_render_evidence_json with bbox, in-frame, changed pixels, font identity, and sample time.\n- Installed TrueType/TTC cmap coverage check for CJK/English text; unresolved legal font fails closed.\n- Actual newline filter contract and word-aware title wrapping.\n- Preview execution cache contract bumped to visual-preview-render-v3; old artifacts miss naturally.\n\nReal isolated Coffee primary preview:\n- Workspace: C:/Users/b3b3b/Documents/AI剪片助手/video-vault-ai-vid18-acceptance-4b62c8c\n- Product endpoint: POST /api/project/visual-style/preview, scope=primary\n- Project revision remained 8; no Perception, Story, Apply, Approval, Formal Render, Final QC, or Delivery QA rerun.\n- Diary Natural, Clean Minimal, Cinematic: same representative Coffee frame at 32.675531s, 1080x1920 (9:16).\n- First v3 run: 3/3 cache miss and regenerated.\n- Second v3 run: 3/3 cache hit.\n- All 3: title-pixel-evidence-v1 status=pass, in_frame=true, bbox x=36 y=1418 width=878 height=348.\n- changed pixels: 305540 / 305540 / 305533.\n- Resolved installed fonts: C:/WINDOWS/Fonts/msjh.ttc and msjhbd.ttc; coverage_checked=true.\n- Contact sheet attached: vid49-coffee-primary-preview-v3.png.\n- Persisted source stats matched the two stored source fingerprints; source media was not modified.\n\nValidation:\n- targeted visual/media/render/QA: 139 passed\n- full Python: 863 passed, 2 skipped\n- frontend: 291 passed\n- frontend production build: PASS\n- UTF-8 source/test check: PASS\n- git diff --check: PASS\n\nTITLE OVERLAY PIXELS VERIFIED VISIBLE\nCOFFEE VISUAL STYLE NOT AUTO-APPROVED\nPERCEPTION/STORY NOT RERUN\nFORMAL RENDER NOT RUN\nHuman visual style approval is still required; no style was auto-approved.",
+            "attachments": [],
+            "createdAt": "2026-08-21T13:45:02.776Z",
+            "updatedAt": "2026-08-21T13:45:02.717Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-50",
+        "uuid": "0e1a9fa5-6a8f-4b76-b717-e359c0f6301f",
+        "title": "Title Design 微調｜Chapter title 縮小約 15% 並收斂底板",
+        "description": "## Context\n\n<issue id=\"444a5bf4-57e3-41a1-820e-c67833da585a\" href=\"https://linear.app/videoai/issue/VID-49/visual-style-preview-correctnessprimary-hero-宣稱-chapter-title-但實際\">VID-49</issue> 已完成 truthful Visual Style Preview，Coffee 的 Diary Natural / Clean Minimal / Cinematic 三組 primary hero 都能正確顯示 chapter title overlay，且 human 已看到同一個 9:16 representative frame 的比較。\n\n目前 human feedback：字卡整體可以再小約 10\\~20%。這不是 correctness blocker，而是 Human Visual Style approval 前的最後一個 design refinement。\n\n目前 contact sheet 顯示：\n\n* chapter title 佔畫面下方比例稍大\n* 黑/深色 readability surface 高度偏高\n* `咖啡日記 / Coffee Diary` 被換行成三行，英文 `Coffee` / `Diary` 分開，視覺稍重\n\n## Goal\n\n以現有 Diary Natural / Clean Minimal / Cinematic title semantics 為基礎，把 chapter title 的視覺佔比降低約 15%（可接受 10\\~20% 範圍內的 deterministic preset），同時讓 readability surface/padding 隨文字尺寸同步縮小，保持可讀性與 safe-area。\n\nHuman 最終仍要看重新產生的三組 Coffee Preview 後才能核准 Visual Style。\n\n## Design target\n\n優先採用約 15% 縮小：\n\n* chapter title font size 約現值 ×0.85\n* line-height 可略收緊，但不可造成 CJK/English clipping\n* surface padding / bbox 高度跟著縮，不要只縮字而保留大底板\n* 盡量把 `Coffee Diary` 保持完整英文副標，不要拆成 `Coffee` / `Diary` 兩行\n* 中文主標仍清楚，英文可作較輕副標；若現有 renderer 尚未支援真正雙層 typography，先用最小 shared wrapping/size semantics達成兩行，不要為 Coffee 建專用 renderer\n* anchor / safe-area / title-pixel-evidence-v1 / installed-font coverage 保持有效\n\n## Scope\n\n只修改 Title Design semantic defaults / wrapping/layout contract 中必要的部分。\n\n不要：\n\n* autoapprove Visual Style\n* 改 Creative Brief\n* Perception / Story rerun\n* Apply / Formal Approval\n* Formal Render / Final QC / Delivery QA\n* DB patch\n* Coffee-specific hard-code\n* Subtitle Workspace\n\n## Horizontal extensibility\n\n「這裡有沒有理論上可以水平增加的東西？」YES。\n\n未來 title roles / style presets / output directions 都會共用 size、line-height、padding、safe-area 與 wrapping semantics。這次變更必須由 title style/role contract 驅動，不得寫 `if Coffee` 或只針對 9:16 chapter_title 的魔法座標。\n\n至少保留 16:9 synthetic sibling regression，證明同一縮放/layout contract可水平使用。\n\n## Required regressions\n\n1. chapter title preset/default 的 effective font size 約縮小 10\\~20%，target 約 15%。\n2. readability surface / bbox 隨 title size 同步收斂。\n3. `咖啡日記 / Coffee Diary` 在 1080x1920 盡量維持兩行，`Coffee Diary` 不拆字詞。\n4. 9:16 bbox 完整在 safe-area/frame內。\n5. 16:9 synthetic sibling 同 contract有效。\n6. title-pixel-evidence-v1 仍 PASS。\n7. CJK/English installed font coverage 仍 PASS；不可因縮放/換行 fallback 成不可見字。\n8. title semantic change 必須自然讓舊 preview cache stale/currentity mismatch，不可沿用 <issue id=\"444a5bf4-57e3-41a1-820e-c67833da585a\" href=\"https://linear.app/videoai/issue/VID-49/visual-style-preview-correctnessprimary-hero-宣稱-chapter-title-但實際\">VID-49</issue> 舊 hero 當新設計。\n9. 三個 primary styles 繼續使用同一 representative frame 公平比較 grading。\n\n## Real Coffee acceptance\n\n使用 authoritative workspace：\n`C:\\Users\\b3b3b\\Documents\\AI剪片助手\\video-vault-ai-vid18-acceptance-4b62c8c`\n\n從 production endpoint 重產 `scope=primary`，要求：\n\n* Diary Natural / Clean Minimal / Cinematic 3/3 current\n* chapter title 肉眼可見\n* title 區塊比 <issue id=\"444a5bf4-57e3-41a1-820e-c67833da585a\" href=\"https://linear.app/videoai/issue/VID-49/visual-style-preview-correctnessprimary-hero-宣稱-chapter-title-但實際\">VID-49</issue> contact sheet 明顯更輕、更小\n* 9:16 geometry/framing正常\n* 同 representative frame\n* `Coffee Diary` 不被拆成 Coffee / Diary 兩行（若在 shared renderer 可合理達成）\n\n最後附一張三組同框 WebUI/contact sheet screenshot，STOP at human gate，不得自動核准 Visual Style。",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-50/title-design-微調chapter-title-縮小約-15percent-並收斂底板",
+        "gitBranchName": "vid-50",
+        "createdAt": "2026-08-21T15:11:39.970Z",
+        "updatedAt": "2026-08-21T16:08:13.716Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-21T16:08:13.694Z",
+        "startedAt": "2026-08-21T15:11:40.130Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "74ffff8d-d737-4ea1-a753-ed54ea79a0b1",
+            "title": "VID-50 Coffee primary preview v2",
+            "subtitle": "Diary Natural / Clean Minimal / Cinematic on the same isolated Coffee frame; title refined about 15% with pixel evidence PASS.",
+            "url": "https://uploads.linear.app/1a499334-ee4b-4bfc-85ca-ce15d217997b/48d00e70-fa35-448c-b861-a49e7934418e/194f5c68-9c9b-43b2-b867-fa952961b7eb?signature=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwYXRoIjoiLzFhNDk5MzM0LWVlNGItNGJmYy04NWNhLWNlMTVkMjE3OTk3Yi80OGQwMGU3MC1mYTM1LTQ0OGMtYjg2MS1hNDllNzkzNDQxOGUvMTk0ZjVjNjgtOWM5Yi00M2IyLWI4NjctZmE5NTI5NjFiN2ViIiwiaWF0IjoxNzkxMDM3MTE3LCJleHAiOjE3OTEwMzc0MTd9.5sRxGgjAMGPSyOBRjY-cUIvKS381IZcXzYKAepawCsY"
+          },
+          {
+            "id": "00e401da-9492-4da5-a7f5-d83555ba0690",
+            "title": "[VID-50] Refine chapter title scale and surface",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/116"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-21T15:11:39.970Z",
+            "endedAt": "2026-08-21T16:08:13.707Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-21T16:08:13.707Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-27",
+              "title": "Visual Style Preview｜用真實素材先核准字幕與視覺方向"
+            },
+            {
+              "id": "VID-49",
+              "title": "Visual Style Preview correctness｜primary hero 宣稱 chapter-title 但實際 pixels 無可見字卡"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "b13ba778-7565-458f-8323-b54f00229a1f",
+            "body": "### ChatGPT final review — accepted / merged\n\n- Accepted HEAD: `6069b64835f61675e1184009148cdae17d20513b`\n- CI #429 / `32499797714`: PASS\n- PR #116 exact-head squash merged\n- merged main: `9f6d85918fe0883b9dddd8c2ce61558d2e6df213`\n\nAccepted design contract:\n- chapter title role uses `title-layout-v2`, not Coffee-specific logic\n- portrait title size 88px → 75px (-14.77%); landscape 56px → 47px (-16.07%)\n- surface padding 18px → 14px and line-height 1.18 → 1.12\n- Coffee preview wraps to exactly two lines: `咖啡日記 /` + `Coffee Diary`\n- 9:16 bbox contracts from 878×348 to 870×196 and remains in-frame/safe\n- old preview identities naturally stale via semantic/plan changes; no cache deletion or DB patch\n- 16:9 synthetic sibling uses the same title-role contract\n\nReal Coffee contact sheet reviewed: title treatment is visibly lighter/smaller, `Coffee Diary` remains intact, and Diary Natural / Clean Minimal / Cinematic still use the same representative frame for fair grading comparison.\n\nNo Visual Style was auto-approved. Perception/Story were not rerun and Formal Render was not run.\n\nVID-50 complete; next VID-18 checkpoint is human Visual Style selection.",
+            "attachments": [],
+            "createdAt": "2026-08-21T16:08:24.643Z",
+            "updatedAt": "2026-08-21T16:08:24.608Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "0680c94c-cbe8-4b2c-b491-7baabdba1fcf",
+            "body": "VID-50 completed on Draft PR #116.\n\n- Baseline/latest main: f1e066b9ed86ec16ea1649821dc4684e62f23927\n- Branch: agent/vid-50\n- HEAD: 6069b64835f61675e1184009148cdae17d20513b\n- PR: https://github.com/DystopiaOwO/video-vault-ai/pull/116\n- CI run 32499797714: Ubuntu portability PASS, Windows authoritative PASS, Frontend PASS, Select PR test layers PASS; Media Smoke skipped by workflow condition.\n\nImplementation:\n- shared title-role contract \"title-layout-v2\"\n- chapter effective font scale 0.85x\n- portrait 88px -> 75px (14.77%); landscape 56px -> 47px (16.07%)\n- surface padding 18px -> 14px; line-height 1.18 -> 1.12\n- shared wrapping: \"咖啡日記 /\" + \"Coffee Diary\", exactly two portrait lines, English words kept intact\n- no Coffee-specific branch; 16:9 synthetic sibling regression passes\n- preview plan/semantic identity changes naturally; no cache deletion or DB patch\n\nReal Coffee product acceptance:\n- endpoint POST /api/project/visual-style/preview, scope=primary, force=true then force=false\n- same representative frame 32.675531s\n- Diary variant 690ed177e25433552db27a220d5f1bad, plan ae45ac93d4e9486fd10d443f973efea25c7dc2d4200d680707e134380fba62d8\n- Clean variant 6ccc8496213d67870f2876e29dd30a1d, plan d01ec1e3a3b6880f5302f0bd01d68d8df09773f45df03692141c135fa270267a\n- Cinematic variant 605992111b1ae7afccf5fb0c57611b0b, plan 1e4f1c222d73f7522eeff6007afad2ca45c01219041406de6565eea0e4a0af17\n- first POST 3/3 v2 cache misses/regenerated; second POST 3/3 cache hits\n- all title-pixel-evidence-v1 PASS, bbox x=40 y=1570 w=870 h=196, in_frame=true, changed_pixels=170520, CJK/English coverage PASS\n- contact sheet attachment: VID-50 Coffee primary preview v2; SHA-256 cd3c31af725c21047165dbe64753ee169bb9df22cb0ae8682278b9b20806f1a7; asset URL https://uploads.linear.app/1a499334-ee4b-4bfc-85ca-ce15d217997b/48d00e70-fa35-448c-b861-a49e7934418e/194f5c68-9c9b-43b2-b867-fa952961b7eb?signature=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwYXRoIjoiLzFhNDk5MzM0LWVlNGItNGJmYy04NWNhLWNlMTVkMjE3OTk3Yi80OGQwMGU3MC1mYTM1LTQ0OGMtYjg2MS1hNDllNzkzNDQxOGUvMTk0ZjVjNjgtOWM5Yi00M2IyLWI4NjctZmE5NTI5NjFiN2ViIiwiaWF0IjoxNzkxMDM3MTE3LCJleHAiOjE3OTEwMzc0MTd9.5sRxGgjAMGPSyOBRjY-cUIvKS381IZcXzYKAepawCsY\n\nValidation:\n- targeted visual/style/renderer/project/render/QC: 141 passed\n- full Python: 865 passed, 2 skipped\n- frontend: 291 passed\n- production build, encoding, diff checks: PASS\n- initial Ubuntu fixture-only font failure was corrected with the existing synthetic font fixture; rerun CI is green\n\nTITLE SCALE REFINED ~15%\nCOFFEE VISUAL STYLE NOT AUTO-APPROVED\nPERCEPTION/STORY NOT RERUN\nFORMAL RENDER NOT RUN\n\nPR remains Draft; stopped for human visual review.",
+            "attachments": [],
+            "createdAt": "2026-08-21T15:57:36.906Z",
+            "updatedAt": "2026-08-21T15:57:36.863Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    }
+  ]
+}
