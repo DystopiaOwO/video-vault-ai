@@ -1,0 +1,1499 @@
+{
+  "exportedAt": "2026-10-03T22:13:00+08:00",
+  "team": "VID",
+  "issues": [
+    {
+      "issue": {
+        "id": "VID-21",
+        "uuid": "8251d7ae-1d0a-4529-9a15-04f4ff587bec",
+        "title": "StoryInput context compaction｜移除 per-segment 重複 clip summary",
+        "description": "<issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> 在 <issue id=\"b50df54d-156e-4375-926e-b6e2258969f9\" href=\"https://linear.app/videoai/issue/VID-20/adaptive-sampling-rescue稀疏-clip-evidence-sufficiency\">VID-20</issue> 合併後，兩支 Coffee formal Perception 均 PASS；Story generation 隨即在 <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> context preflight 正確 fail-closed。\n\n## Authoritative blocker\n\n* latest merged main: `49faa3f71e7cf6651072e0cd73ad2fa6c7ff9d23`\n* isolated Coffee storyboard: 17 segments\n* generation UUID: `1ef6b2fa-23c4-4bcf-ad8c-935f0672f180`\n* provider/model: `local_text / gemma-4-12b-it`\n* context capacity: 32,768 (`lmstudio.loaded_instance.contextLength`)\n* reserved output: 2,048\n* available input: 30,720\n* estimated input: 175,850\n* `request_allowed=false`, reason `estimated_input_exceeds_context`\n* HTTP Story generation POST = 0\n\n## Root cause to verify/fix\n\nCurrent `build_story_input_snapshot()` builds `ai_summary_by_video` by joining every `frames.vision_summary` for a clip, then injects that clip-wide concatenated string into each segment as `ai_visual_summary`. For a clip with many perception frames/windows this repeats the same large clip summary once per segment, while `clips[]` also carries the clip summary. This creates N× redundant StoryInput growth unrelated to the actual 17-segment story planning need.\n\n## Scope\n\n1. Measure/audit StoryInput bytes by top-level section and per segment before changing behavior; prove the dominant duplication source.\n2. StoryInput `segments[]` must use bounded segment-level perception/story evidence (segment visual summary/action/shot role/tags/quality/human override) rather than repeating the full clip-wide concatenation on every segment.\n3. Clip-level context may remain in `clips[]`, but must be deterministic and bounded/aggregated; do not repeat raw/all frame summaries per segment.\n4. Preserve all required semantics:\n   * stable `segment_uuid` and exact ordering\n   * user summary / human override priority\n   * story profile / creator profile / project intent\n   * must_keep / exclude guidance / desired sequence/pacing\n   * audio effective state\n   * StoryInput hash/stale semantics\n5. Do not weaken <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> context preflight, falsify token estimates, increase/assume model context, switch cloud provider, or silently truncate mandatory human instructions.\n6. If compaction must drop optional AI detail, make the policy explicit, deterministic, auditable, and prioritize human/user-authored fields over AI-derived redundant detail.\n7. Cache/input hash must change when any retained story-relevant content changes, but not because removed duplicate representation changes independently.\n\n## Regressions\n\n* multi-segment same-clip input does not repeat identical clip-wide frame-summary blob per segment.\n* segment-specific visual/action context remains distinct and preserved.\n* human override/user summary/must_keep/exclude/desired sequence remain intact.\n* deterministic repeat snapshot/hash.\n* story-relevant segment change invalidates hash; irrelevant removed duplicate representation does not create false semantic divergence.\n* large synthetic project shows payload growth approximately proportional to segment-level bounded evidence, not `segments × all-frame-summary`.\n* <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> unknown/oversize context still fails before HTTP; sufficient compact request is allowed.\n\n## Real acceptance\n\nUse latest main + this branch, isolated real Coffee project.\n\n* reuse/rerun formal Perception as needed; both clips must remain PASS.\n* build 17-segment StoryInput and record before/after section byte audit.\n* Story request must fit the real 32,768 context only if the actual compact request truly fits <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> preflight; no estimator bypass.\n* if preflight PASS: actual local Story POST > 0, provider audit recorded, strict Story schema/validation PASS.\n* then continue <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> through human review/Apply → approval → formal Render → Render Report/Final QC → Delivery QA → human final preview → `deliverable_ready`.\n* if another authoritative gate fails, stop there with evidence; do not mark <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> / <issue id=\"0b064e3d-4d7f-4e8e-b57c-3c7b621c7716\" href=\"https://linear.app/videoai/issue/VID-11/真實流程驗收-round-1阻塞修正與產品硬化\">VID-11</issue> Done.\n* source SHA/size/mtime unchanged; production data/config unchanged.\n\nHandoff: dedicated branch from latest `origin/main`, Draft PR, HEAD/tests/CI/real acceptance evidence in PR + Linear.",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-21/storyinput-context-compaction移除-per-segment-重複-clip-summary",
+        "gitBranchName": "vid-21",
+        "createdAt": "2026-08-11T14:47:39.683Z",
+        "updatedAt": "2026-08-15T13:56:21.399Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-13T02:22:48.994Z",
+        "startedAt": "2026-08-11T14:47:39.816Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "281aaaf1-e91a-4af6-bb9b-95c0fb76d6ad",
+            "title": "VID-21: bound StoryInput visual evidence",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/94"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-11T14:47:39.683Z",
+            "endedAt": "2026-08-13T02:16:19.070Z"
+          },
+          {
+            "state": {
+              "id": "5483c4af-1579-4f03-8847-229c14bb1a15",
+              "name": "In Review",
+              "type": "started"
+            },
+            "startedAt": "2026-08-13T02:16:19.070Z",
+            "endedAt": "2026-08-13T02:22:30.235Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-13T02:22:30.235Z",
+            "endedAt": "2026-08-13T02:22:49.018Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-13T02:22:49.018Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-20",
+              "title": "Adaptive sampling rescue｜稀疏 clip evidence sufficiency"
+            },
+            {
+              "id": "VID-13",
+              "title": "Story Provider｜context budget preflight 與可解釋失敗"
+            },
+            {
+              "id": "VID-11",
+              "title": "真實流程驗收 Round 1｜阻塞修正與產品硬化"
+            },
+            {
+              "id": "VID-30",
+              "title": "Story semantic coverage｜mandatory segment 漏段的 corrective retry"
+            },
+            {
+              "id": "VID-22",
+              "title": "Story Provider runtime context authority｜LM Studio loaded instance freshness"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "4d5e4c95-3e2f-4531-b2fa-b377cff02780",
+            "body": "Merged confirmed: PR #94 `merged=true`; squash merge commit `894f2bce24b9e9e9686e547bca79ab0fb76c21cc`. VID-21 Done. VID-18 / VID-11 remain In Progress because Story runtime context metadata is the next authoritative blocker.",
+            "attachments": [],
+            "createdAt": "2026-08-13T02:23:45.020Z",
+            "updatedAt": "2026-08-13T02:23:44.985Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "372d57df-5068-4486-838b-62bdb2cf22eb",
+            "body": "## PASS — PR #94 HEAD `5777855a6e9a85387458d7c4f89ac8444faf6a2f`\n\nVID-21 scope 驗收通過：\n\n- `segments[]` 已移除 N× 重複的 clip-wide frame summary，改為 bounded segment-level visual/action/shot-role/tag/quality evidence。\n- `clips[]` 保留 deterministic + bounded clip overview；human-authored project/clip/segment instructions 未被 truncation。\n- 同一 17-segment Coffee StoryInput 從 `172,779 B` 降至 `26,756 B`（約 -84.5%）；segment UUID/order 完全一致。\n- StoryInput hash deterministic；story-relevant segment / retained clip evidence 變更會 invalid；被 bounded policy 排除的重複 AI representation 不造成假 semantic divergence。\n- VID-13 context preflight 未放寬，unknown/oversize 仍 fail-closed before HTTP。\n- targeted 75 pass；full Python 684 pass / 2 skip；frontend 262 pass + build；required CI `31659671964` 全綠。\n- Formal Perception 兩支 Coffee 均維持 PASS；source SHA/size/mtime、storyboard/project-plan、production data/config unchanged。\n\n新的 authoritative blocker 與本 PR scope 分離：compact request 在 persisted/configured `32,768` context 下 preflight PASS，但 LM Studio JIT-loaded `gemma-4-12b-it` 實際 instance `contextLength=8,192`，prompt `8,833` tokens，endpoint 回 `exceed_context_size_error`。下一步應修 Story Provider context metadata freshness / loaded-instance authority；不得回頭放寬 VID-13 或再任意壓縮 mandatory human input。",
+            "attachments": [],
+            "createdAt": "2026-08-13T02:22:12.010Z",
+            "updatedAt": "2026-08-13T02:22:11.978Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "3460a04e-ed2d-4bfc-a64b-52e336b84f0a",
+            "body": "## VID-21 review handoff\n\n- Base: `49faa3f71e7cf6651072e0cd73ad2fa6c7ff9d23`\n- Branch: `agent/vid-21` (standalone)\n- HEAD: `5777855a6e9a85387458d7c4f89ac8444faf6a2f`\n- Draft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/94\n- Required CI: https://github.com/DystopiaOwO/video-vault-ai/actions/runs/31659671964 — Frontend, Windows authoritative Python 3.11, Ubuntu portability Python 3.13 all PASS; media smoke skipped by changed-file policy.\n\n### Fix / validation\n\n`segments[]` now uses deterministic bounded segment-level visual/action/shot-role/tag/quality context instead of repeating the whole clip frame-summary blob per segment. `clips[]` keeps a bounded deterministic overview. Stable UUID/order, human overrides/instructions, audio state, and StoryInput hash/stale semantics remain intact.\n\n- Story/Project targeted: `75 passed`\n- full Python: `684 passed, 2 skipped`\n- Frontend: `38 files / 262 tests passed`\n- build + diff check: PASS\n\n### Same 17-segment Coffee audit\n\n- Before: total `172,779 B`; clips `5,605 B`; segments `164,840 B`; first clip's `4,506 B` summary repeated in 16 segments and represented twice per segment.\n- After: total `26,756 B` (`-84.5%`); clips `2,073 B`; segments `22,033 B`; exact same 17 ordered UUIDs; all 17 retain distinct segment evidence; mandatory human data preserved; hash `88138f4a54bfc74428b099548efa3900d103dfff13caace6401ed8668f952f46`.\n\nDoctor `--full`: `ok=true`, 25 pass / 0 blocked / 1 warning / 5 skipped; E4B behavior `verified_by_behavior`, loopback only; Story metadata reported 32,768; Windows long path PASS; no cloud/paid/config mutation/model download.\n\nFormal Perception stayed PASS:\n\n- clip 001 run `1450522e-1e3a-4516-bfb2-bd096bc8b44e`: 16 mandatory / 16 actual calls / 16 results / 16 segments, exact UUID coverage.\n- clip 002 run `97209361-0bc6-4c09-a27b-655cbdbcc942`: one real rescued candidate, 1 mandatory / 1 actual call / 1 result / 1 segment, exact UUID coverage.\n\n### First authoritative blocker — stopped as required\n\nCompact Story preflight used configured capacity 32,768 and passed (`estimated_input=29,719`, reserved output 2,048). Formal WebUI made one local POST. LM Studio then JIT-loaded `gemma-4-12b-it` with actual `contextLength=8,192`; authoritative log reports `n_prompt_tokens=8,833`, `n_ctx=8,192`, `exceed_context_size_error`. Generation `536b2cc1-8aa0-4a53-86a6-1b887036607a` failed HTTP 400.\n\nRoot cause is stale configured/persisted context capacity versus the actual loaded instance. No retry, context increase, cloud switch, threshold relaxation, or data patch was performed. Story schema did not pass, so Apply → approval → formal Render/Final QC → Delivery QA → preview → deliverable_ready were not started. VID-18 and VID-11 remain not Done.\n\nBoth source files' SHA-256/size/mtime match before exactly; storyboard/project-plan hashes unchanged; production data/config unchanged. Only the isolated DB records the failed generation audit. PR remains Draft for review.",
+            "attachments": [],
+            "createdAt": "2026-08-13T02:16:12.960Z",
+            "updatedAt": "2026-08-13T02:16:12.892Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-22",
+        "uuid": "8e45c876-4361-41ea-a2e1-858fffdbd076",
+        "title": "Story Provider runtime context authority｜LM Studio loaded instance freshness",
+        "description": "<issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> 在 <issue id=\"8251d7ae-1d0a-4529-9a15-04f4ff587bec\" href=\"https://linear.app/videoai/issue/VID-21/storyinput-context-compaction移除-per-segment-重複-clip-summary\">VID-21</issue> 合併後，17-segment Coffee StoryInput 已由 172,779 B 壓至 26,756 B，且 <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> preflight 在 configured/persisted 32,768 context 下 PASS；但正式 local Story POST 被 LM Studio 實際 JIT-loaded 8,192 context 擋下。此 child 修正 local Story Provider 對 runtime context capacity 的 authority/freshness，避免 stale config 讓 preflight 假通過。\n\n## Authoritative baseline\n\n* latest merged main: `894f2bce24b9e9e9686e547bca79ab0fb76c21cc`\n* Story generation: `536b2cc1-8aa0-4a53-86a6-1b887036607a`\n* provider/model: `local_text / gemma-4-12b-it`\n* compact StoryInput: 17 segments / 26,756 B\n* preflight metadata: context 32,768, reserved output 2,048, estimated input 29,719, `request_allowed=true`\n* actual LM Studio loaded instance after JIT: `contextLength=8,192`\n* actual prompt: 8,833 tokens; LM Studio `exceed_context_size_error`, HTTP 400\n* Story schema/Apply/render flow not reached.\n\n## Confirmed code root\n\nCurrent `provider_from_config()` resolves context from `story.context_length` / persisted model metadata / `ai.local` once and passes it into `LocalTextStoryProvider`. `LocalTextStoryProvider.context_metadata()` only returns that stored `self.context_length`; it does not re-resolve the exact live endpoint/model loaded-instance state immediately before request. Therefore a previously recorded `lmstudio.loaded_instance.contextLength=32768` can remain authoritative even after JIT reload actually uses 8192.\n\n## Scope\n\n1. Separate `configured/requested context` from `runtime verified context`. For local LM Studio, runtime exact endpoint/model instance must be authoritative whenever available; stale config/model metadata must never override a contradictory live value.\n2. Immediately before every Story HTTP attempt, including corrective retry, resolve/verify the target model's current runtime context capacity using a local-only, auditable provider path. Bind evidence to exact endpoint + model + loaded-instance identity/state where available.\n3. If the exact model is currently loaded, use the verified loaded-instance context for <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> preflight. Example: config 32768 + live 8192 => preflight must use 8192 and block before Story generation POST.\n4. If the model is not loaded and actual JIT context cannot be known safely before generation, do not assume config capacity. Either:\n   * use an existing provider-supported deterministic local ensure/load path only if it can be explicit, auditable, bounded, and does not download models or mutate persistent config; then re-query the loaded instance and preflight again; or\n   * fail closed before Story POST with `runtime_context_unverified` / equivalent actionable evidence.\n     Do not silently change context, cloud-switch, or use a paid provider.\n5. Any runtime load/reload/ensure transition must be followed by a fresh exact-binding context query before request. Cached context evidence must not survive a loaded-instance change unless identity/fingerprint proves it is still the same runtime state.\n6. Preserve <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> exact request-message budgeting and fail-closed behavior. Do not falsify token estimates or lower reserved output solely to pass acceptance.\n7. Improve provider audit/error mapping: if an endpoint still returns context-overflow, record actual provider reason/runtime metadata rather than only generic `HTTP 400 / local model unavailable`; no blind retry.\n8. Doctor Story context reporting and generation-time Story context must share the same authority semantics so Doctor cannot say 32768 while generation actually runs against an 8192 instance.\n\n## Regressions\n\n* stale config 32768 + exact live instance 8192 => effective context 8192; oversize request blocked before generation POST.\n* live exact instance 32768 + compact request within budget => preflight PASS.\n* model/endpoint mismatch cannot reuse another instance's context evidence.\n* unloaded/unknown runtime state cannot be treated as known capacity unless an explicit verified ensure/load step succeeds.\n* runtime reload from 32768 to 8192 invalidates prior evidence.\n* every HTTP attempt/retry revalidates runtime context.\n* public/non-loopback endpoint remains blocked; no cloud fallback/model download/persistent config mutation.\n* context-overflow HTTP response is classified/audited explicitly if it occurs.\n* <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> unknown/oversize tests remain 0 HTTP.\n\n## Real Coffee acceptance\n\nUse latest main + this branch in isolated Coffee workspace.\n\n* Doctor --full must report the same authoritative runtime Story context semantics used by generation.\n* two formal Perception clips remain PASS.\n* build same 17-segment compact StoryInput.\n* verify exact live `gemma-4-12b-it` runtime capacity before Story POST.\n* if live capacity is insufficient, formal generation must stop before POST with explicit runtime context evidence; do not fake pass.\n* if an explicit/safe local runtime ensure/load policy yields sufficient verified capacity, rerun <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> preflight and only then send Story POST; strict Story schema/validation must PASS.\n* after Story PASS, continue <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> through human review/Apply → approval → formal Render → Render Report/Final QC → Delivery QA → human final preview → `deliverable_ready`.\n* stop at the next authoritative blocker with evidence; do not mark <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> / <issue id=\"0b064e3d-4d7f-4e8e-b57c-3c7b621c7716\" href=\"https://linear.app/videoai/issue/VID-11/真實流程驗收-round-1阻塞修正與產品硬化\">VID-11</issue> Done early.\n* source SHA/size/mtime and production data/config unchanged.\n\nHandoff: dedicated branch from latest `origin/main`, Draft PR, HEAD/tests/CI/real acceptance evidence in PR + Linear.",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-22/story-provider-runtime-context-authoritylm-studio-loaded-instance",
+        "gitBranchName": "vid-22",
+        "createdAt": "2026-08-13T02:24:20.445Z",
+        "updatedAt": "2026-08-13T03:09:56.832Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-13T03:08:10.966Z",
+        "startedAt": "2026-08-13T02:24:21.433Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "6842fac9-2269-4bcd-aa01-0405aa785c76",
+            "title": "VID-22: verify live LM Studio Story context",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/95"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-13T02:24:20.445Z",
+            "endedAt": "2026-08-13T03:01:40.247Z"
+          },
+          {
+            "state": {
+              "id": "5483c4af-1579-4f03-8847-229c14bb1a15",
+              "name": "In Review",
+              "type": "started"
+            },
+            "startedAt": "2026-08-13T03:01:40.247Z",
+            "endedAt": "2026-08-13T03:07:48.254Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-13T03:07:48.254Z",
+            "endedAt": "2026-08-13T03:08:10.975Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-13T03:08:10.975Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-13",
+              "title": "Story Provider｜context budget preflight 與可解釋失敗"
+            },
+            {
+              "id": "VID-21",
+              "title": "StoryInput context compaction｜移除 per-segment 重複 clip summary"
+            },
+            {
+              "id": "VID-11",
+              "title": "真實流程驗收 Round 1｜阻塞修正與產品硬化"
+            },
+            {
+              "id": "VID-23",
+              "title": "Story runtime context provisioning｜安全建立足夠 context 的 LM Studio instance"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "a154e9cd-ddbf-4526-bf6a-1bf120874075",
+            "body": "Merged confirmed: PR #95 `merged=true`; squash merge commit `17697bffb457b07cdb75d57914c3edfa1d45616f`. VID-22 Done. VID-18 / VID-11 remain In Progress because the exact Story runtime instance is correctly verified at 8,192 context and still cannot fit the compact 17-segment request.",
+            "attachments": [],
+            "createdAt": "2026-08-13T03:09:25.711Z",
+            "updatedAt": "2026-08-13T03:09:25.652Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "e2b96cc7-ebbf-4341-83f8-597196741822",
+            "body": "## PASS — PR #95 HEAD `98c7ac8abda732acbd5cd1e9a04802acd7961bd9`\n\nVID-22 scope 驗收通過：\n\n- Story generation 與 Doctor 共用 fresh LM Studio native v1 loaded-instance context authority。\n- configured/persisted context 僅保留 audit；exact live instance value contradictory 時由 live value 優先。\n- 每次 Story HTTP attempt（含 corrective retry）前重新 query runtime context，reload/context change 不沿用舊 evidence。\n- unloaded / model mismatch / malformed / unavailable / non-loopback 均 fail-closed；不 auto-load、不下載模型、不修改 persistent config、不 cloud/paid fallback。\n- stale 32,768 + live 8,192 的正式 Coffee run 已在 Story generation POST 前 blocked：estimated input 29,719、reserved 2,048、live available input 6,144，`generation_post_calls=0`，LM Studio `lastUsedTime` unchanged。\n- residual provider context overflow 若發生會分類為 structured `provider_context_overflow`，不 blind retry。\n- targeted 91 pass；full Python 694 pass / 2 skip；frontend 262 pass + build；required CI `31661924044` 全綠。\n- Formal Perception 兩支 Coffee 均維持 PASS；source / production DB / config unchanged。\n\n下一個 authoritative blocker 已與本 PR scope 分離：exact Story instance 本身只有 8,192 context，無法容納目前 compact 17-segment Story request。後續應另做安全、顯式、可稽核的 local runtime context provisioning/ensure policy；不得把 8K 假報成 32K或放寬 VID-13。",
+            "attachments": [],
+            "createdAt": "2026-08-13T03:07:31.529Z",
+            "updatedAt": "2026-08-13T03:07:31.485Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "fcafe1ea-fd30-4773-8506-958574294588",
+            "body": "## VID-22 review handoff\n\n- Baseline: `894f2bce24b9e9e9686e547bca79ab0fb76c21cc`\n- Branch: `agent/vid-22` (standalone; merge-base exact)\n- HEAD: `98c7ac8abda732acbd5cd1e9a04802acd7961bd9`\n- Draft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/95\n- Required CI: https://github.com/DystopiaOwO/video-vault-ai/actions/runs/31661924044 — Windows authoritative / Ubuntu portability / Frontend all PASS; Media Smoke skipped by changed-file policy.\n\n### Fix\n\nStory generation and Doctor now share a fresh exact LM Studio loaded-instance authority. Before every Story HTTP attempt, the loopback endpoint/model is re-queried through `GET /api/v1/models`; only matching `loaded_instances[].config.context_length` is effective. Configured context remains audit-only. Unloaded/mismatch/malformed/unavailable/non-loopback states fail closed. No auto-load/download, persistent config mutation, cloud/paid fallback, or stale-cache reuse. Residual provider context overflow is structured audit, not generic HTTP 400.\n\nValidation:\n\n- targeted Story/runtime/Doctor: `91 passed`\n- full Python: `694 passed, 2 skipped`\n- frontend: `38 files / 262 tests passed`\n- production build + diff check: PASS\n\n### Real isolated Coffee\n\nDoctor `--full`: `25 pass / 0 blocked / 1 warning / 5 skipped`, `ok=true`.\n\n- E4B random 3-image challenge: semantic PASS / `verified_by_behavior` / loopback local-only.\n- Story exact instance: live `8,192`, configured `32,768`, disagreement explicitly audited.\n- Windows long-path mkdir/copy/read/cleanup: PASS.\n\nPerception retained:\n\n- clip 001 run `1450522e-1e3a-4516-bfb2-bd096bc8b44e`: 16 calls / mandatory / results / segments, exact UUID coverage, publish PASS.\n- clip 002 run `97209361-0bc6-4c09-a27b-655cbdbcc942`: minimal real rescue, 1 call / mandatory / result / segment, exact UUID coverage, publish PASS.\n- Storyboard: 17 segments.\n\nFormal WebUI Story:\n\n- input hash `88138f4a54bfc74428b099548efa3900d103dfff13caace6401ed8668f952f46`\n- estimated input / reserve / request: `29,719 / 2,048 / 31,767`\n- live context / available input: `8,192 / 6,144`\n- generation `686b2b41-cb38-45d1-8cc4-db1c31c50b48`: failed before network\n- persisted provider audit: `calls=0 / retries=0 / generation_post_calls=0`\n- LM Studio model `lastUsedTime` unchanged before/after\n- project remains revision `6`, `needs_review`\n\nThis is the intended VID-22 outcome: stale 32K no longer reaches POST/HTTP 400. The exact 8K instance still cannot fit the 17-segment StoryInput, so this is the first authoritative VID-18 blocker. Apply, approval, Render, Final QC, Delivery QA, human preview, and `deliverable_ready` were not started. VID-18 / VID-11 remain not Done.\n\nOriginal and isolated Coffee SHA/size/mtime match before. Storyboard/project plan unchanged. Production DB/config remain byte-identical:\n\n- DB `eb3976267872b11b76e98ec6dfb69c40b6881b13d5f8b9b4c9781bedd4b5bb15`\n- config `398a3aaaab9b35c10e53ef67ea738811aae6f83a00ab3f32a405ce46870ff72b`\n\nOnly the isolated DB records the expected failed-generation audit. Draft remains for review; no merge performed.",
+            "attachments": [],
+            "createdAt": "2026-08-13T03:01:34.810Z",
+            "updatedAt": "2026-08-13T03:01:34.709Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-23",
+        "uuid": "6c58fa87-df0d-4f94-a70c-a18e07e7ace9",
+        "title": "Story runtime context provisioning｜安全建立足夠 context 的 LM Studio instance",
+        "description": "<issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> 在 <issue id=\"8e45c876-4361-41ea-a2e1-858fffdbd076\" href=\"https://linear.app/videoai/issue/VID-22/story-provider-runtime-context-authoritylm-studio-loaded-instance\">VID-22</issue> 合併後已能正確以 exact live LM Studio loaded-instance context 做 fail-closed preflight。現在的第一個 authoritative blocker 不再是 metadata freshness，而是 Story model 實際只載入 8,192 context，無法容納 compact 17-segment Story request。\n\n## Authoritative baseline\n\n* latest merged main: `17697bffb457b07cdb75d57914c3edfa1d45616f`\n* provider/model: `local_text / gemma-4-12b-it`\n* compact StoryInput: 17 segments / 26,756 B\n* <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> estimate: input 29,719 / reserved output 2,048 / required request budget 31,767\n* exact live Story instance: 8,192 context / 6,144 available input\n* formal generation `686b2b41-cb38-45d1-8cc4-db1c31c50b48` correctly blocks before generation POST, calls=0\n* configured 32,768 is now audit/request intent only, not authoritative runtime capacity\n\n## Goal\n\nAdd a deterministic, explicit, auditable local runtime provisioning path that can use the already-installed Story model with sufficient context without lying to <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue>, downloading models, mutating persistent LM Studio/app config, switching cloud, or silently destroying an externally-owned loaded instance.\n\n## Scope\n\n 1. Keep <issue id=\"8e45c876-4361-41ea-a2e1-858fffdbd076\" href=\"https://linear.app/videoai/issue/VID-22/story-provider-runtime-context-authoritylm-studio-loaded-instance\">VID-22</issue> authority intact: configured/requested context is never treated as effective until a fresh exact loaded-instance query verifies it.\n 2. Define a Story runtime context target from the real request budget and configured policy. For current Coffee, the target must be >= 31,767; 32,768 is the existing requested target. Never lower reserved output or token estimate merely to pass.\n 3. Use an official LM Studio local runtime mechanism to provision an already-installed model instance with an explicit context length. Preferred path: native v1 model load with `context_length` and auditable returned load config/instance identity. No model download.\n 4. Do not silently unload, resize, or replace an unrelated/external loaded instance. If LM Studio can create/return a separate runtime instance safely, bind the Story attempt to that exact returned instance ID. If the server cannot safely provide a separate exact instance, fail closed with actionable evidence rather than mutating someone else’s runtime.\n 5. After any load/ensure operation, fresh-query `/api/v1/models` and verify exact returned instance identity + actual `config.context_length`; only this verified value enters <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> preflight.\n 6. If requested target exceeds model max context, load fails, resource limits reject the load, instance identity is ambiguous, or applied context is smaller than requested/required, fail closed before Story generation POST with structured audit.\n 7. Provisioning must be loopback-only, bounded, timeout-controlled, no paid/cloud fallback, no persistent config mutation, no model download.\n 8. Runtime ownership must be explicit. If the app creates a dedicated temporary Story instance, record ownership + instance ID + requested/applied context + timestamps. Clean up only app-owned temporary instance after Story completion/failure when safe; never unload pre-existing external instances.\n 9. Corrective retry must remain on the same verified owned instance or revalidate exact runtime state before retry; no blind JIT fallback.\n10. Doctor should report whether current Story runtime is ready as-is, provisionable by the explicit policy, or blocked; it must not perform destructive provisioning during ordinary health check unless the design has a clearly explicit acceptance-only/opt-in path.\n\n## Regressions\n\n* live 8K + required 31,767 + provisioning enabled -> request 32K (or policy target), verify applied exact context >= required, then Story POST allowed.\n* requested/applied mismatch -> 0 Story POST and fail closed.\n* model max < required -> 0 load attempt if determinable, 0 Story POST.\n* model already loaded with sufficient exact context -> no unnecessary load/reload.\n* existing external insufficient instance is not unloaded or mutated.\n* app-owned dedicated instance is distinguishable and only it may be cleaned up.\n* load failure/resource error -> structured audit, no fallback/download/config mutation.\n* endpoint/model/instance mismatch -> fail closed.\n* every actual Story HTTP attempt still passes <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> using fresh verified runtime context.\n* unknown/oversize <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> regressions remain 0 generation POST.\n\n## Real Coffee acceptance\n\nUse latest main + this branch in isolated Coffee workspace.\n\n* Doctor --full remains local-only and authoritative.\n* two formal Perception clips remain PASS.\n* same 17-segment compact StoryInput / input hash semantics remain unchanged.\n* safely provision the already-installed `gemma-4-12b-it` to sufficient runtime context only through the new explicit policy.\n* prove no model download and no production/persistent config mutation; preserve any pre-existing external instance.\n* fresh runtime query must show exact Story target instance with applied context sufficient for <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue>.\n* <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> preflight must genuinely PASS on that verified instance.\n* actual local Story POST > 0; strict Story JSON schema/validation PASS.\n* if Story PASS, continue <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> through human review/Apply -> approval -> formal Render -> Render Report/Final QC -> Delivery QA -> human final preview -> `deliverable_ready`.\n* stop at the next authoritative blocker with full evidence; do not mark <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> / <issue id=\"0b064e3d-4d7f-4e8e-b57c-3c7b621c7716\" href=\"https://linear.app/videoai/issue/VID-11/真實流程驗收-round-1阻塞修正與產品硬化\">VID-11</issue> Done early.\n* source SHA/size/mtime and production data/config unchanged.\n\nHandoff: dedicated branch from latest `origin/main`, Draft PR, HEAD/tests/CI/real acceptance evidence in PR + Linear.",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-23/story-runtime-context-provisioning安全建立足夠-context-的-lm-studio-instance",
+        "gitBranchName": "vid-23",
+        "createdAt": "2026-08-13T03:09:56.832Z",
+        "updatedAt": "2026-08-13T12:58:14.955Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-13T12:57:17.649Z",
+        "startedAt": "2026-08-13T03:09:57.096Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "3f05e16e-45d2-489f-8b3b-55e2cea6602e",
+            "title": "[VID-23] Provision app-owned Story runtime context",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/96"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-13T03:09:56.832Z",
+            "endedAt": "2026-08-13T12:57:17.660Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-13T12:57:17.660Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-11",
+              "title": "真實流程驗收 Round 1｜阻塞修正與產品硬化"
+            },
+            {
+              "id": "VID-13",
+              "title": "Story Provider｜context budget preflight 與可解釋失敗"
+            },
+            {
+              "id": "VID-22",
+              "title": "Story Provider runtime context authority｜LM Studio loaded instance freshness"
+            },
+            {
+              "id": "VID-24",
+              "title": "Story generation performance｜32K runtime 下 600s timeout root-cause"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "4f3883ce-7c6d-4043-b746-0275f2b36535",
+            "body": "## VID-23 handoff\n\n- Baseline: `origin/main 17697bffb457b07cdb75d57914c3edfa1d45616f`\n- Branch / Draft PR: `agent/vid-23`, https://github.com/DystopiaOwO/video-vault-ai/pull/96\n- HEAD: `282ef28f8422a1f4af835035eed74d17e741a85c`\n- Required CI: PASS, GitHub Actions run #352\n- Local regression: targeted `104 passed`; full Python 3.11 `707 passed, 2 skipped`; frontend `262 passed`; production build PASS; encoding/diff checks PASS.\n\nReal isolated Coffee evidence:\n- Doctor --full: 24 pass / 0 blocked / 5 skipped / 2 warnings; E4B behavior probe verified; loopback-only; no cloud/paid call, model download, or config mutation.\n- Existing exact `gemma-4-12b-it` runtime was live 8192. VID-23 used official LM Studio load HTTP 200 for app-owned `gemma-4-12b-it:2`, then re-queried live context 32768 >= required request budget 31767.\n- Story request used the returned instance ID; cleanup unloaded only the owned instance and preserved the external 8192 instance.\n- The real 17-segment Story request then timed out after the configured 600 seconds before strict schema completion. Generation `ba822993-25ec-4bce-a733-95b66538d657` failed closed; no Story pointer was committed.\n\nAuthoritative blocker:\n- Stop before Apply / approval / formal Render / Final QC / Delivery QA / human preview / `deliverable_ready`.\n- Do not mark VID-18 or VID-11 Done.\n- Source SHA/size/mtime, isolated storyboard, production DB/config remained unchanged; no gate bypass or manual FFmpeg.",
+            "attachments": [],
+            "createdAt": "2026-08-13T12:28:47.824Z",
+            "updatedAt": "2026-08-13T12:28:47.646Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-24",
+        "uuid": "b58a43d6-92e8-4ef9-ad84-28290eed18c6",
+        "title": "Story generation performance｜32K runtime 下 600s timeout root-cause",
+        "description": "## Authoritative blocker\n\n<issue id=\"6c58fa87-df0d-4f94-a70c-a18e07e7ace9\" href=\"https://linear.app/videoai/issue/VID-23/story-runtime-context-provisioning安全建立足夠-context-的-lm-studio-instance\">VID-23</issue> completed live LM Studio context authority and app-owned runtime provisioning, but the real Coffee Story request still timed out after 600 seconds before strict schema completion.\n\n* merged baseline/main: `92ad4e85d674b39c0dfa7c9773460cabd666682c`\n* provider/model: `local_text / gemma-4-12b-it`\n* real Coffee: 17 segments\n* app-owned runtime instance provisioned successfully\n* live applied context: 32,768\n* required Story budget: 31,767\n* <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> preflight: PASS\n* Story POST: >0\n* generation: `ba822993-25ec-4bce-a733-95b66538d657`\n* runtime cleanup: PASS; external 8K instance preserved\n* Story not published; Apply / approval / Render / Final QC / Delivery QA not started\n\n## Goal\n\nFind the measured root cause of the 600s timeout under the verified 32K runtime, then implement the smallest evidence-backed correction without weakening Story correctness or formal gates.\n\n## Required real-Coffee diagnosis\n\nUse an isolated real Coffee request and preserve auditable timing/evidence for:\n\n* whether LM Studio actually starts inference\n* prompt processing / prefill duration\n* first-token latency\n* output token generation rate\n* actual prompt and output token counts\n* whether reasoning/thinking continues or cannot be disabled\n* structured-output / JSON-schema behavior\n* GPU offload, VRAM pressure, CPU fallback\n* 32K KV-cache performance impact\n* LM Studio request start -> first token -> finish/timeout logs\n\nDo not treat a longer timeout as a fix.\n\n## Hard constraints\n\n* no timeout-only workaround\n* no <issue id=\"6d7b98d0-7825-4f59-8813-8e8683afc63c\" href=\"https://linear.app/videoai/issue/VID-13/story-providercontext-budget-preflight-與可解釋失敗\">VID-13</issue> relaxation or fabricated token estimate\n* no Story correctness/schema gate weakening\n* no cloud or paid provider\n* no mock provider\n* no manual DB patch\n* no deletion of mandatory human context\n* no production data/source mutation\n* retain fail-closed behavior\n\nIf a minimal correction makes strict Story schema PASS, continue <issue id=\"9e29bba9-7eef-4def-a7cd-bab447d02eb2\" href=\"https://linear.app/videoai/issue/VID-18/round-1-最終真實流程驗收重跑deliverable-ready-dod\">VID-18</issue> from Story review / Apply through approval, formal Render, Final QC, Delivery QA, human preview, and `deliverable_ready`. Stop at the first next authoritative blocker with complete evidence.",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-24/story-generation-performance32k-runtime-下-600s-timeout-root-cause",
+        "gitBranchName": "vid-24",
+        "createdAt": "2026-08-13T12:58:14.955Z",
+        "updatedAt": "2026-08-15T14:47:08.133Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-15T14:21:29.652Z",
+        "startedAt": "2026-08-13T12:58:15.068Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "3c2f2da4-171b-4c07-90a5-254f2caf8fc4",
+            "title": "[VID-24] Diagnose Story 32K timeout and disable reasoning",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/97"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-13T12:58:14.955Z",
+            "endedAt": "2026-08-15T13:56:30.911Z"
+          },
+          {
+            "state": {
+              "id": "5483c4af-1579-4f03-8847-229c14bb1a15",
+              "name": "In Review",
+              "type": "started"
+            },
+            "startedAt": "2026-08-15T13:56:30.911Z",
+            "endedAt": "2026-08-15T14:00:54.674Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-15T14:00:54.674Z",
+            "endedAt": "2026-08-15T14:21:29.672Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-15T14:21:29.672Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-18",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-11",
+              "title": "真實流程驗收 Round 1｜阻塞修正與產品硬化"
+            },
+            {
+              "id": "VID-23",
+              "title": "Story runtime context provisioning｜安全建立足夠 context 的 LM Studio instance"
+            },
+            {
+              "id": "VID-13",
+              "title": "Story Provider｜context budget preflight 與可解釋失敗"
+            },
+            {
+              "id": "VID-30",
+              "title": "Story semantic coverage｜mandatory segment 漏段的 corrective retry"
+            },
+            {
+              "id": "VID-25",
+              "title": "AI Editor UX v1｜Simple-first Creative Flow、Style Preview、Timeline Inspector"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "477cacda-591b-48c1-a587-1a8a9c26c73f",
+            "body": "### Code Review finding on PR #97\n\nRuntime diagnosis / reasoning fix is evidence-backed and CI run #356 is green, but merge is blocked by one cache-contract issue found in review:\n\n`story.reasoning_effort` now changes the actual LM Studio request, yet `story_cache_key()` does not include the effective reasoning mode. A generation after changing `low/medium/...` to `none` can therefore reuse an older normalized Story cache entry without issuing a new request, and cached provider audit may describe a different request contract than the active config.\n\nRequested minimal fix on the same PR branch:\n\n- include effective reasoning mode in Story cache identity;\n- invalidate/bump the pre-VID-24 request contract as needed;\n- regression test that same snapshot/provider/model with different reasoning modes cannot share cached generation;\n- preserve existing force/cache behavior, VID-13 preflight, strict schema, cleanup and fail-closed semantics.\n\nVID-30 remains separate and blocked by VID-24; do not fold mandatory-segment semantic retry into PR #97.",
+            "attachments": [],
+            "createdAt": "2026-08-15T14:01:11.082Z",
+            "updatedAt": "2026-08-15T14:01:10.917Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "091aa16f-51b3-4bdc-a273-dd1446de9ad8",
+            "body": "## VID-24 handoff\n\n- Baseline: `origin/main 92ad4e85d674b39c0dfa7c9773460cabd666682c`\n- Branch / Draft PR: `agent/vid-24`, https://github.com/DystopiaOwO/video-vault-ai/pull/97\n- HEAD: `1b183301e28819cf879b9712a0c409e2e36e498f`\n- Required CI: PASS, GitHub Actions run #356\n\nRoot cause diagnosis on real isolated Coffee:\n- 17 segments; VID-13 preflight PASS; required budget 31,767; live app-owned context 32,768; Story POST >0.\n- Without reasoning control, OpenAI-compatible response had empty content and reasoning tokens; previous formal request timed out at 600s.\n- `reasoning:\"off\"` is ignored by this LM Studio OpenAI-compatible endpoint.\n- `reasoning_effort:\"none\"` produced zero reasoning tokens and normal content.\n- Strict-schema diagnostic with `reasoning_effort:\"none\"`: first token 6.917s, 1,277 output tokens, 0 reasoning, 145.281s total, strict parser PASS.\n- Native LM Studio diagnostic: input 8,835 tokens, TTFT 7.358s, 7.906 tokens/s, total 217.114s.\n- Runtime had GPU KV offload and flash attention enabled; no cloud/model download/config mutation.\n\nMinimal code correction:\n- configurable `story.reasoning_effort`, default `none`\n- same value sent on every Story request and persisted in provider audit\n- no timeout/gate/token-estimate weakening\n\nCorrected formal generation `b5a183c4-e03d-453d-818f-702d3e2492b9` completed without timeout, cleanup PASS, external 8K preserved, but strict Story validation failed closed because mandatory segment `11cca33-e182-4c1c-883a-76fedcf958e0` was omitted.\n\nThis is the current authoritative blocker. Stop before Apply / approval / Render / Final QC / Delivery QA / human preview. VID-18 and VID-11 remain In Progress.\n\nValidation: targeted 61 passed; full Python 708 passed / 2 skipped; frontend 262 passed; build PASS; CI #356 PASS. Source SHA/size/mtime and production DB/config unchanged.",
+            "attachments": [],
+            "createdAt": "2026-08-15T13:53:30.877Z",
+            "updatedAt": "2026-08-15T13:53:30.823Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-25",
+        "uuid": "667da9da-b54d-4cf7-b1a2-a8034eef3256",
+        "title": "AI Editor UX v1｜Simple-first Creative Flow、Style Preview、Timeline Inspector",
+        "description": "## 定位\n\n把 Video Vault AI 從「功能都有，但使用者需要理解很多 contract / 參數」改成真正的 AI 剪片助手體驗：\n\n**AI 先提出可直接採用的結果 → 使用者看 Preview → 不滿意才展開詳細設定。**\n\n後端仍維持 Creative Brief、Visual Style、Title Style、Render、approval、provenance 等正式 contract；前端不要把後端複雜度等比例攤給使用者。\n\n參考 `chang416/cutcraft` 的 agent workflow / editorial UX 概念，但維持 Video Vault AI 現有 WebUI-first、persistent state、Perception、Story、approval、Render、Final QC、Delivery QA 架構；不引入 CutCraft runtime，不直接搬程式碼。\n\n## UX 第一原則：Simple-first / Progressive Disclosure\n\n一般使用者主流程只需要看到少數高價值決策：\n\n1. 輸出方向：橫向 16:9 / 直向 9:16，AI 標示推薦與理由。\n2. 真實素材視覺 Preview：Recommended / Diary Natural、Clean Minimal、Cinematic。\n3. 一個明確的「採用推薦」或「確認並開始剪輯」。\n\n其餘設定預設收起：\n\n* framing strategy\n* title typography / position / readability / motion\n* grading/LUT 細節\n* subtitle/caption 細節\n* renderer/capability/provenance 技術資訊\n\n只有使用者主動點「詳細設定 / 微調」才展開，而且詳細設定應分組、accordion 化，不一次把全部控制項攤開。\n\nUI 應使用人話，例如「裁切填滿 / 模糊背景補齊 / 保留完整畫面」，而不是要求一般使用者理解內部 strategy ID。\n\n## Scope / children\n\n1. Creative Brief：後端 contract 已完成；UI 要整合進 Simple-first creative flow。\n2. Visual Style Preview：後端與 Preview/Render parity 已完成；UI 要改成 preview-first，而不是 control-first。\n3. Simple-first Editor UX 重構：新增 child，先完成 progressive disclosure，再往後增加功能。\n4. Timeline Inspector：保留 drill-down 功能，但必須在簡化後的資訊架構上加入，不能讓主畫面重新變密集。\n5. Editorial Policy：在 UX v1 穩定後再進行。\n\n## 字幕範圍邊界\n\n字幕審核、中文字型、字幕樣式/編輯能力會由獨立字幕任務處理。\n\n本 epic 只定義 UX 邊界：\n\n* 字幕詳細控制預設收在 Advanced。\n* 主流程最多顯示字幕是否啟用與一個可理解的 style summary / preview。\n* 不在 Simple-first UX 任務重新設計字幕 engine、font registry、caption review workflow。\n\n## Persistence / safety\n\n* Simple UI 與 Advanced UI 必須操作同一份 persisted semantic contract，不可有兩套 source of truth。\n* 「採用 AI 推薦」必須等同於 materialize + human approval 正式 contract，不是前端快捷假動作。\n* Advanced 修改後必須讓既有 preview evidence 正確 stale / regenerate。\n* 不弱化既有 approval / fail-closed / provenance / QA 契約。\n* 不改動 source media。\n\n## Horizontal Extensibility Contract\n\n這裡有理論上可以水平增加的東西：未來還會加入 audio、BGM、字幕、transition、editorial policy、Timeline drill-down 等設定區塊。\n\n因此 Simple-first UI 第一版必須留下最小 extensibility contract：\n\n* stable section/control IDs\n* simple / advanced disclosure level metadata\n* summary renderer metadata\n* human label 與 internal ID 分離\n* capability / enabled / unavailable 狀態\n* deterministic ordering\n\n新增 sibling setting section 不應要求重寫主流程 component 的大型 special-case branch。\n\n不要求建立通用 plugin framework；metadata registry / schema + synthetic sibling fixture 即可。\n\n## DoD\n\n至少以 Coffee 真實 project 驗證：\n\n* 首屏不再同時出現大量 select / technical options。\n* 一般路徑可在 3 個主要決策內完成：方向 → style preview → 確認。\n* AI recommendation 可一鍵採用，但不跳過 human preview / approval gate。\n* Advanced 預設關閉，重新整理後 disclosure state 可採合理產品策略，但 persisted semantic values 不遺失。\n* 使用者可從 summary 看懂目前設定，例如：`16:9 · Diary Natural · 直向素材自動補背景 · Overlay 字卡`。\n* Advanced 修改會更新 summary 並要求重新 Preview；不 stale Story/Perception 等不相關 semantic state。\n* Timeline Inspector 後續可加入而不重新把主畫面變成控制面板。\n* 新增一個 synthetic setting section 可透過同一 disclosure metadata mechanism 出現在 Advanced / summary，不需主流程 special-case。",
+        "priority": {
+          "value": 2,
+          "name": "High"
+        },
+        "url": "https://linear.app/videoai/issue/VID-25/ai-editor-ux-v1simple-first-creative-flowstyle-previewtimeline",
+        "gitBranchName": "vid-25",
+        "createdAt": "2026-08-15T13:29:29.399Z",
+        "updatedAt": "2026-08-19T14:35:37.361Z",
+        "archivedAt": null,
+        "completedAt": null,
+        "startedAt": "2026-08-19T05:58:13.364Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "In Progress",
+        "statusType": "started",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "77b5fc35-ddae-4acc-acdc-996223660787",
+            "title": "CutCraft reference",
+            "subtitle": "",
+            "url": "https://github.com/chang416/cutcraft"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "1e34574f-fb6c-40cf-9b15-bf863c6fb156",
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "startedAt": "2026-08-15T13:29:29.399Z",
+            "endedAt": "2026-08-19T05:58:13.376Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-19T05:58:13.376Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [
+            {
+              "id": "VID-29",
+              "title": "Editorial Policy v1｜把剪輯 craft 變成可版本化決策規則"
+            }
+          ],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-24",
+              "title": "Story generation performance｜32K runtime 下 600s timeout root-cause"
+            },
+            {
+              "id": "VID-11",
+              "title": "真實流程驗收 Round 1｜阻塞修正與產品硬化"
+            },
+            {
+              "id": "VID-45",
+              "title": "Creative Brief UX｜方向卡選擇無明確回饋與確認 CTA 易誤判無反應"
+            },
+            {
+              "id": "VID-42",
+              "title": "Subtitle Workspace v1｜逐字稿、時間軸、繁中字型與人工校正"
+            },
+            {
+              "id": "VID-41",
+              "title": "Editor Workflow v2｜從素材匯入到成片的主流程重構"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "5cc8da87-e45a-4a1b-8956-f0316985807c",
+            "body": "### Project-level architecture rule — Horizontal Extensibility Contract\n\n新增專案級規範文件：`Horizontal Extensibility Contract｜水平擴充設計規範`。\n\n此規範適用 VID-25 與所有子/相關 roadmap issue。凡理論上會新增 sibling implementation 的地方（preset / strategy / policy / provider / renderer / codec / profile / QA rule / export target 等），第一次正式實作就必須留下 stable ID、versioned schema、registry/resolver、migration/deprecation、capability/fallback、invalidation、cache/provenance、fixtures/tests 等擴充契約。\n\nPR review 新增 DoD：若明顯可水平擴充的功能只 hard-code 第一個 case，且沒有可加入第二個 synthetic sibling implementation 的規範/測試，視為 design blocker（throwaway prototype 除外）。\n\n規範避免過度工程：不要求一律 plugin framework；最小可以只是 versioned schema + registry dictionary + resolver + tests。目標是讓第二個同類功能能安全加入而不改 unrelated core logic。",
+            "attachments": [],
+            "createdAt": "2026-08-17T13:54:12.480Z",
+            "updatedAt": "2026-08-17T13:54:12.449Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-26",
+        "uuid": "537ca3ee-e421-4404-8149-4d4baee0f20c",
+        "title": "Creative Brief｜一次完成 AI 建議與創意核准",
+        "description": "## 目標\n\n把目前分散在 project intent、itinerary、desired sequence/pacing、must-keep、exclude、audio/BGM、creator/story profile 等位置的創意設定，整合成一個可版本化、可核准的 `Creative Brief`。\n\nAI 必須先根據已完成的 Perception / project context 提出推薦值，再讓使用者一次確認；支援「全部採用建議」以及只覆寫少數欄位。\n\n## UX\n\nWebUI 在 Story generation 前提供單一 Creative Brief checkpoint，至少包含：\n\n* 內容目標 / 日記類型 / 主要敘事方向\n* 目標長度、節奏、素材排序策略\n* must-keep / exclude / forbidden\n* crop/reframe / aspect / resolution\n* color mood / grading intent\n* transition / effects 強度\n* audio policy / ambience / BGM mood\n* caption/subtitle policy（若啟用）\n* editorial autonomy：AI 可自行決定到什麼程度\n\n每個欄位顯示：`AI 建議`、`目前值`、`來源/理由`；使用者可個別改值或一次採用全部建議。\n\n## Data contract\n\n* 建立版本化 creative brief schema 與 project binding。\n* 保存 recommendation 與 human-approved value，不覆蓋彼此。\n* 明確定義 stale/invalidation：上游 Story-relevant Perception / project intent 改變時，舊核准不得被當成仍然有效。\n* StoryInput 必須讀取 approved brief，而不是重新猜測已經核准的偏好。\n* 不把 UI-only state 當 source of truth。\n\n## Acceptance\n\n* Coffee isolated project：AI 產生 recommendation → 全部採用建議 → approved brief → StoryInput 可稽核引用。\n* Travel isolated project：至少手動覆寫 2 個欄位，其餘採建議；StoryInput 精確保留 human overrides。\n* refresh / process restart 後核准內容仍一致。\n* 修改 Story-relevant upstream evidence 時能正確標示 stale 並要求重新確認，不可 silent reuse。\n* 不修改 source media；既有 project 在 migration 後仍可讀取。",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-26/creative-brief一次完成-ai-建議與創意核准",
+        "gitBranchName": "vid-26",
+        "createdAt": "2026-08-15T13:29:48.078Z",
+        "updatedAt": "2026-08-19T14:35:39.621Z",
+        "archivedAt": null,
+        "completedAt": null,
+        "startedAt": "2026-08-17T00:48:05.411Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "In Progress",
+        "statusType": "started",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "0aee80ae-c5ef-4a14-ba21-6df030d4baf6",
+            "title": "[VID-26] Add Creative Brief orientation checkpoint",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/106"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "1e34574f-fb6c-40cf-9b15-bf863c6fb156",
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "startedAt": "2026-08-15T13:29:48.078Z",
+            "endedAt": "2026-08-17T00:48:05.424Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-17T00:48:05.424Z",
+            "endedAt": "2026-08-17T14:53:06.171Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-17T14:53:06.171Z",
+            "endedAt": "2026-08-17T15:16:21.625Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-17T15:16:21.625Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-25",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [
+            {
+              "id": "VID-27",
+              "title": "Visual Style Preview｜用真實素材先核准字幕與視覺方向"
+            }
+          ],
+          "blockedBy": [],
+          "relatedTo": [
+            {
+              "id": "VID-18",
+              "title": "Round 1 最終真實流程驗收重跑｜deliverable_ready DoD"
+            },
+            {
+              "id": "VID-39",
+              "title": "Formal Render display geometry｜尊重 SAR / DAR / rotation / Display Matrix，避免 framing 失真"
+            },
+            {
+              "id": "VID-8",
+              "title": "Phase 3｜專案級故事理解"
+            },
+            {
+              "id": "VID-45",
+              "title": "Creative Brief UX｜方向卡選擇無明確回饋與確認 CTA 易誤判無反應"
+            },
+            {
+              "id": "VID-41",
+              "title": "Editor Workflow v2｜從素材匯入到成片的主流程重構"
+            },
+            {
+              "id": "VID-40",
+              "title": "Simple-first Editor UX｜Progressive Disclosure 與三步創意流程"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "661cd1fa-d6bd-4ff7-98b0-eb163b58fad5",
+            "body": "### ChatGPT final review — merged\n\nPR #106 final HEAD `1d5a51dc183d13742ee2026efa8cdfbee96cdae2` accepted and squash-merged.\n\nMain SHA: `cf94a33d8c84ea102244d55e3b4734410b186c84`\n\nAccepted evidence:\n- Creative Brief persistence / human approval / migration needs_confirmation\n- approved brief is Render / VID-27 source of truth\n- visual-only brief does not stale StoryInput\n- OutputContractRegistry / MismatchDirectionRegistry / FramingStrategyRegistry implemented\n- WebUI consumes API registry options and filters Round-1-enabled output contracts\n- synthetic `square_1_1_test` and `edge_extend_test` materialize through the same resolver without core special-case branches\n- unknown IDs / unsupported versions / disabled Round-1 contracts fail closed\n- approved values are materialized with stable IDs/versions + resolved semantics + registry hash\n- full CI run `32040067608` / #388 green\n\nVID-26 Done. Next implementation scope is VID-27 Visual Style Preview; no full Coffee Render should happen before true-frame visual preview and human style approval.",
+            "attachments": [],
+            "createdAt": "2026-08-17T14:53:29.045Z",
+            "updatedAt": "2026-08-17T14:53:28.974Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "26882959-52a7-472e-bf43-4d5b5a6468ee",
+            "body": "Horizontal Extensibility Contract review blocker completed on the same PR.\n\n- PR #106 remains Draft: https://github.com/DystopiaOwO/video-vault-ai/pull/106\n- HEAD: 1d5a51dc183d13742ee2026efa8cdfbee96cdae2\n\nImplemented:\n- deterministic OutputContractRegistry, MismatchDirectionRegistry, FramingStrategyRegistry\n- Round-1 output entries: landscape_16_9@1 -> 1920x1080/final_1080p; portrait_9_16@1 -> 1080x1920/final_1080p_portrait\n- stable direction entries for both mismatch directions\n- stable framing entries auto_recommended, crop_reframe, background_treatment, preserve_full_frame with version/applicability/semantic metadata and UI labels separated from IDs\n- API/project detail materializes registry options; WebUI consumes registry options rather than owning output/strategy lists\n- approved snapshots materialize output/strategy IDs, versions, resolved values, registry version/hash; current resolver validates exact stored contract and fails closed on unknown/unsupported/mismatched entries\n- disabled Round-1 output contracts cannot be approved through normal API path; internal synthetic test path is explicit\n- synthetic square_1_1_test 1080x1080 and edge_extend_test pass through the same registration/materialization/validation path without special-case resolver branches\n- registry-default update stability and legacy invariants retained\n\nValidation:\n- registry/Creative Brief/Render/Story targeted: 47 passed\n- full Python: 804 passed, 2 skipped\n- frontend targeted: 6 passed\n- frontend full: 39 files / 264 passed\n- frontend production build passed\n- UTF-8 and git diff --check passed\n- CI run 32040067608: all required checks green (Select PR test layers, Frontend, Windows authoritative Python 3.11, Ubuntu portability Python 3.13, Media Smoke Ubuntu)\n\nNo full Coffee Render, no VID-27, no Perception/Story ordering changes, no source or production data changes. 停止交 ChatGPT review。",
+            "attachments": [],
+            "createdAt": "2026-08-17T14:48:36.285Z",
+            "updatedAt": "2026-08-17T14:48:36.244Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "5a161733-db5f-4dc7-9b47-2afe44e2061d",
+            "body": "### ChatGPT review blocker — Horizontal Extensibility Contract 尚未落地\n\nPR #106 HEAD `8467810ffdcf1e03599b04b9acec089e7ec78672` 的核心 Creative Brief flow / persistence / Story invalidation / Render consumer 方向可接受，CI #387 (`32038502899`) 也全綠。\n\n但本 PR 尚未滿足專案級 `Horizontal Extensibility Contract｜水平擴充設計規範` 與 VID-26 既有 acceptance addition。\n\n目前 `src/video_vault/creative_brief.py` 仍直接 hard-code：\n\n- `ALLOWED_ORIENTATIONS = {landscape, portrait}`\n- `_output_for_orientation()` 用 `if landscape / if portrait` 回傳固定 aspect/resolution/render_profile_id\n- `ALLOWED_STRATEGIES` 為 module-level set\n- framing direction 也直接固定 iterate `portrait_source_in_landscape / landscape_source_in_portrait`\n\n而 `tests/test_creative_brief.py` 目前只有 16:9 / 9:16 與既有 framing strategy regression，沒有我們明確要求的「synthetic third profile/strategy 可透過同一 contract 註冊與驗證，且不需要 special-case branch」證據。\n\n這會讓之後加入 1:1、4:5、21:9、其他 framing strategy 時又要改 core resolver / UI / consumer 分支，違反新專案規範。\n\n## Required before merge\n\n1. 建立最小 deterministic registry/resolver，不需要大型 plugin framework。\n\n例如可有：\n\n- `OutputContractRegistry` / equivalent\n  - stable profile/format ID\n  - orientation\n  - aspect ratio\n  - width/height\n  - render_profile_id\n  - schema/version/capability metadata\n- `FramingStrategyRegistry` / equivalent\n  - stable strategy ID\n  - supported mismatch directions / semantics\n  - human-visible label/description 與 internal stable ID 分離\n\n2. Creative Brief persistence 存 stable IDs + materialized approved semantic values；不要 runtime 只依 mutable registry defaults。\n\n3. API/WebUI options 應由同一 registry/contract materialize；不要 UI 再各自 hard-code landscape/portrait/strategy 清單。\n\n4. Render/VID-27 consumer 仍只讀 approved Creative Brief；不得新增第二個 source of truth。\n\n5. 加 acceptance regression：\n\n- 註冊 synthetic 第三 output contract，例如 `square_1_1_test` / 1080x1080（僅測試 registry，不必 Round-1 UI 正式開放）\n- registry 可以 resolve/validate/materialize\n- 不需修改 `_output_for_orientation()` 類 special-case branch\n- 註冊 synthetic 新 framing strategy，可經相同 validation/resolver 通過\n- unknown/unsupported ID fail closed\n- approved snapshot materialized 後，registry default 日後改變不 silent 改掉既有 approved project\n\n6. 現有 Round-1 UX 仍只 expose 16:9 / 9:16 沒問題；「registry 支援第三個」不代表 UI 必須現在讓使用者選 1:1。\n\n7. 保持目前已通過的 invariants：\n- recommendation != human approval\n- migration 不自動 approval\n- visual-only brief 不 stale Perception/Story\n- approved brief 進 Render identity\n- legacy unapproved manifest hash 不變\n- source immutable\n\n不要開始 VID-27，不要跑完整 Coffee Render。\n\n更新同一 PR #106，補 targeted/full tests + CI 後停止 review。",
+            "attachments": [],
+            "createdAt": "2026-08-17T14:29:10.834Z",
+            "updatedAt": "2026-08-17T14:29:10.760Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "f0c38f49-1dfa-41b5-8eee-c592858848cb",
+            "body": "VID-26 implementation / Draft PR handoff\n\n- Baseline synced: origin/main c5acae8d84f6cb8f0c91f67b6db2642d9ed4ecd6\n- Branch: agent/vid-26\n- Draft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/106\n- HEAD: 8467810ffdcf1e03599b04b9acec089e7ec78672\n\nImplemented:\n- persisted Creative Brief schema v1 / contract creative-brief-v1 in independent creative_briefs table\n- VID-39 display-geometry evidence: display dimensions/ratio/DAR/SAR/rotation/Display Matrix and portrait/landscape counts\n- deterministic recommendation kept separate from human-approved output/framing intent\n- Round-1 landscape 16:9 1920x1080 and portrait 9:16 1080x1920 contracts\n- early WebUI checkpoint before Story; accept recommendation or manual override; refresh/restart persistence\n- Story API blocks generation until human Creative Brief approval\n- approved brief is Render/VID-27 consumer source of truth; portrait render profile added\n- visual-only brief excluded from StoryInput identity, so Perception/Story ordering is not made stale\n- legacy unapproved migration does not alter historical Render manifest hash; approved brief enters manifest identity\n\nValidation:\n- targeted backend 49 passed\n- full Python 800 passed, 2 skipped\n- frontend targeted 6 passed\n- frontend full 39 files / 264 passed\n- frontend production build passed\n- UTF-8 and git diff --check passed\n- GitHub Actions run 32038502899: all required checks green (Frontend, Media Smoke / Ubuntu, Ubuntu portability Python 3.13, Windows authoritative Python 3.11, Select PR test layers)\n\nAcceptance scope:\n- no full Coffee Render\n- no VID-27\n- no Perception/Story ordering changes\n- no source media or production data changes\n\n保持 Draft，交 ChatGPT review。",
+            "attachments": [],
+            "createdAt": "2026-08-17T14:21:41.716Z",
+            "updatedAt": "2026-08-17T14:21:41.622Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "c8182ce1-ff92-46e3-8479-499f9eefe15a",
+            "body": "### Apply project Horizontal Extensibility Contract to this PR\n\nVID-26 implementation/review must follow project document `Horizontal Extensibility Contract｜水平擴充設計規範`.\n\nIn this scope, at minimum treat these as horizontal extension points:\n- output aspect/profile (16:9 / 9:16 / future profiles)\n- framing intent strategies\n- Creative Brief field definitions / invalidation classes\n- recommendation strategy where multiple implementations may exist\n\nDo not hard-code 16:9/9:16 logic across UI/API/render consumers. Use stable IDs + versioned schema/registry/resolver sufficient for adding a third profile/strategy later without editing unrelated Story/Perception core logic.\n\nAcceptance addition: demonstrate at least one synthetic third profile/strategy can be registered/validated through the same contract without adding a special-case branch. Avoid over-engineering; a deterministic registry + schema + resolver + tests is sufficient.",
+            "attachments": [],
+            "createdAt": "2026-08-17T13:54:22.885Z",
+            "updatedAt": "2026-08-17T13:54:22.865Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "ba1e71bb-23db-4a13-8497-94cf8ebd3909",
+            "body": "### Round-1 execution focus after VID-39\n\nVID-39 is merged at main `c5acae8d84f6cb8f0c91f67b6db2642d9ed4ecd6`. Human feedback changes VID-26 from post-Round1 work into a prerequisite for VID-18 final preview.\n\nFor the next PR, implement the Creative Brief foundation with **target output orientation / aspect / resolution and mismatch framing intent as the first concrete vertical slice**. Do not mix VID-27 visual rendering yet.\n\n## Early checkpoint\nBefore Story generation / approval flow can proceed, WebUI must expose a project-level output format decision:\n\n- Landscape 16:9, default profile 1920x1080\n- Portrait 9:16, default profile 1080x1920\n- future custom aspect can remain schema-extensible but need not be enabled in Round-1\n\nAI recommendation may use project intent plus the normalized display geometry inventory from VID-39. Show recommendation + reason, but user can override. Persist recommendation separately from approved value.\n\n## Framing intent for orientation mismatch\nStore project-level approved intent for both mismatch directions; actual visual implementation/preview belongs to VID-27.\n\nLandscape target + portrait source preference:\n1. light/safe crop/reframe when subject remains intact\n2. otherwise background treatment (blurred/duplicated/edge-extended source)\n3. never geometric horizontal stretch of the foreground subject\n\nPortrait target + landscape source preference:\n1. prefer crop/reframe because left/right are normally more expendable\n2. otherwise background treatment\n3. never geometric vertical stretch of the foreground subject\n\nSchema should allow AI recommendation + human override, e.g. `auto_recommended`, `crop_reframe`, `background_treatment`, `preserve_full_frame`; exact naming may follow architecture. Do NOT pretend smart crop/background extension is implemented in VID-26 if it is not.\n\n## Invalidation boundary\nOutput aspect/resolution/framing intent are primarily visual/render semantics. Changing only these values must not automatically force a new Perception or Story generation if the ordered editorial/story content is otherwise unchanged. It must invalidate downstream visual-style/render approvals/caches as appropriate. Story-relevant Creative Brief fields should have their own explicit invalidation class.\n\nThis is important for the authoritative VID-18 revision-8 lineage: adopting the new visual brief must not gratuitously rerun Perception/Story/Apply.\n\n## Round-1 acceptance for this PR\n- persisted versioned Creative Brief schema/project binding\n- recommendation and human-approved value stored separately\n- WebUI checkpoint before Story showing target orientation/aspect/resolution\n- normalized source orientation summary (portrait/landscape counts/evidence) from product metadata, not filename guessing\n- user can approve recommendation or override 16:9 ↔ 9:16\n- mismatch framing intent can be approved/overridden for both directions\n- refresh/restart persists exact approved state\n- render/visual-style consumer can read the approved output contract; no duplicate UI-only source of truth\n- visual-only change does not invalidate current Story unnecessarily\n- source media immutable\n- focused Draft PR + tests/CI; no full Coffee Render\n\nAfter VID-26 merge, VID-27 implements the actual true-frame previews, LUT/grading application and crop/background/title-overlay treatments.",
+            "attachments": [],
+            "createdAt": "2026-08-17T00:48:35.437Z",
+            "updatedAt": "2026-08-17T00:48:35.299Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "8e6d0381-7381-4023-a18a-465b8a28be03",
+            "body": "### Human requirement — output orientation must be an early project decision\n\n在 Story / Render 前，Creative Brief 必須明確先確認成片方向，而不是等 Render 才隱含決定：\n\n- Landscape：16:9（例如 1920x1080）\n- Portrait：9:16（例如 1080x1920）\n- 後續可擴充其他 aspect，但 Round-1 至少明確支援這兩種。\n\nAI 可根據素材比例與 project intent 推薦，使用者必須能核准/覆寫。核准後 target orientation / aspect / resolution 成為 project-level visual contract，Story/Visual Preview/Render 都引用同一份值。\n\n當 source orientation 與 target orientation 不同時，Creative Brief / Visual Style Preview 還需要提供 framing policy 的推薦與核准，而不是 Render 自己猜：\n\n## Landscape output + portrait source\n推薦策略依序可包含：\n1. 保留主體的輕度 crop/reframe；\n2. 不足區域用 background treatment 補齊（例如 blurred/duplicated/edge-extended source background）；\n3. 未經明確允許不要直接把主體幾何橫向拉寬造成變形。\n\n## Portrait output + landscape source\n通常左右有較多可犧牲空間，因此推薦：\n1. crop/reframe to fill，優先保留主體 / action area；\n2. 若安全 crop 不成立，再使用 background treatment；\n3. 支援 human override。\n\nPreview 必須用真實 project frame 顯示至少 crop vs background treatment 的實際結果，讓使用者在 final Render 前決定。\n\n目前 VID-39 只提供底層 display-geometry correctness / render policy，不代表這個 early-project UX 已完成。",
+            "attachments": [],
+            "createdAt": "2026-08-16T14:50:53.285Z",
+            "updatedAt": "2026-08-16T14:50:53.234Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-27",
+        "uuid": "ed771ad6-fea2-497e-94be-d3fd29275b0c",
+        "title": "Visual Style Preview｜用真實素材先核准字幕與視覺方向",
+        "description": "## 目標\n\n在 Story / final render 前，用專案真實 frame 產生可比較的視覺方案，讓使用者看圖決定，而不是只讀「簡約 / 電影感 / 活潑」等抽象文字。\n\n## MVP\n\n由 approved Creative Brief + representative project frames 產生至少 3 個 deterministic preview variants：\n\n1. Recommended / Diary Natural\n2. Clean Minimal\n3. Cinematic\n\n依功能是否啟用，preview 可呈現：\n\n* subtitle / caption font、size、position、background、安全區\n* grading / color mood preview\n* chapter card / title treatment\n* overlay/effect intensity 的代表性畫面\n* aspect ratio / reframing safe-zone\n\nBGM mood 先以 metadata / sample selection 表示，不要求在此任務建立新的音樂生成系統。\n\n## Contract\n\n* Preview 必須由真實 source/proxy frame 產生並記錄 source segment/frame provenance。\n* 每個 variant 有穩定 ID、settings hash、creative brief revision binding。\n* 使用者核准某個 variant 或局部修改後，保存為 approved visual style state。\n* Creative Brief revision 改變時，舊 preview / approval 必須可辨識 stale。\n* Render 使用 approved values；不得在 render 階段重新隨機決定 style。\n* Preview failure 不得污染既有 approved state。\n\n## Acceptance\n\n* Coffee project：三套 preview 能明顯區分，且 Recommended 可一鍵核准。\n* Travel project：修改字幕位置或 grading intent 後重新 preview，只 invalidates 受影響的 style state。\n* refresh / restart 後 preview metadata、approval、provenance 一致。\n* preview 與 final render 的字幕位置 / style settings 可被自動比對，避免「預覽一套、輸出另一套」。\n* 無 source mutation；不新增未授權字型 / LUT / asset。",
+        "priority": {
+          "value": 1,
+          "name": "Urgent"
+        },
+        "url": "https://linear.app/videoai/issue/VID-27/visual-style-preview用真實素材先核准字幕與視覺方向",
+        "gitBranchName": "vid-27",
+        "createdAt": "2026-08-15T13:30:03.051Z",
+        "updatedAt": "2026-08-21T15:11:40.878Z",
+        "archivedAt": null,
+        "completedAt": "2026-08-18T14:43:39.570Z",
+        "startedAt": "2026-08-17T14:53:44.407Z",
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Done",
+        "statusType": "completed",
+        "labels": [],
+        "attachments": [
+          {
+            "id": "7e50dd0d-bc36-454a-8379-fac800bb0f98",
+            "title": "[VID-27] Add versioned visual style previews",
+            "subtitle": null,
+            "url": "https://github.com/DystopiaOwO/video-vault-ai/pull/107"
+          }
+        ],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "1e34574f-fb6c-40cf-9b15-bf863c6fb156",
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "startedAt": "2026-08-15T13:30:03.051Z",
+            "endedAt": "2026-08-17T14:53:44.430Z"
+          },
+          {
+            "state": {
+              "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+              "name": "In Progress",
+              "type": "started"
+            },
+            "startedAt": "2026-08-17T14:53:44.430Z",
+            "endedAt": "2026-08-18T14:43:39.594Z"
+          },
+          {
+            "state": {
+              "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+              "name": "Done",
+              "type": "completed"
+            },
+            "startedAt": "2026-08-18T14:43:39.594Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-25",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [
+            {
+              "id": "VID-26",
+              "title": "Creative Brief｜一次完成 AI 建議與創意核准"
+            }
+          ],
+          "relatedTo": [
+            {
+              "id": "VID-36",
+              "title": "Formal Render segment cache must bind resolved encoder contract"
+            },
+            {
+              "id": "VID-37",
+              "title": "Delivery QA audio provenance｜separate approval semantic identity from render cache identity"
+            },
+            {
+              "id": "VID-38",
+              "title": "Formal Render GPU pipeline｜NVDEC → CUDA filters → NVENC"
+            },
+            {
+              "id": "VID-39",
+              "title": "Formal Render display geometry｜尊重 SAR / DAR / rotation / Display Matrix，避免 framing 失真"
+            },
+            {
+              "id": "VID-18",
+              "title": "Round 1 最終真實流程驗收重跑｜deliverable_ready DoD"
+            },
+            {
+              "id": "VID-32",
+              "title": "Formal Delivery QA blocker｜chapter cards produce interior black intervals"
+            },
+            {
+              "id": "VID-50",
+              "title": "Title Design 微調｜Chapter title 縮小約 15% 並收斂底板"
+            },
+            {
+              "id": "VID-49",
+              "title": "Visual Style Preview correctness｜primary hero 宣稱 chapter-title 但實際 pixels 無可見字卡"
+            },
+            {
+              "id": "VID-46",
+              "title": "Visual Style Preview UX/runtime｜「產生真實畫面預覽」無可見反應"
+            },
+            {
+              "id": "VID-41",
+              "title": "Editor Workflow v2｜從素材匯入到成片的主流程重構"
+            },
+            {
+              "id": "VID-42",
+              "title": "Subtitle Workspace v1｜逐字稿、時間軸、繁中字型與人工校正"
+            },
+            {
+              "id": "VID-40",
+              "title": "Simple-first Editor UX｜Progressive Disclosure 與三步創意流程"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [
+          {
+            "id": "13893f7a-27ab-4b74-83a1-b50b99d0f195",
+            "body": "### ChatGPT final review — MERGED\n\nPR #107 final HEAD `ae744cc12a8333f6786999688b3340863397f3a5` passed review and CI run `32148840918` (#398). Round-7 sparse inherited title-role enumeration is resolver-backed and the unfiltered production API/frontend path is covered without child-specific branches.\n\nSquash merged to main:\n`9c40caeb5eb90919d96926f1f4cc1322435cc4b7`\n\nVID-27 implementation is complete / Done. No full Coffee Render, Perception/Story/Apply rerun, source/DB/config mutation, or Creative Brief auto-approval was performed.\n\nNext human gate for the authoritative Coffee flow: approve the VID-26 Creative Brief output/framing choice in WebUI first; then generate real Coffee Visual Style previews and human-approve the exact visual/title/LUT treatment before the next full VID-18 render.",
+            "attachments": [],
+            "createdAt": "2026-08-18T14:44:27.554Z",
+            "updatedAt": "2026-08-18T14:44:27.485Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "024e2e56-2a43-4ef9-94fd-a2a8e2a6d847",
+            "body": "### ChatGPT review round 7 — BLOCKED, one backend sparse-default enumeration bug\n\nHEAD `dbee3e8cc0a12a17d951673df1e1af4e11b6aca2`, CI #397 / run `32146955937` green. Round-6 nested override display and resolver-backed UI defaults are accepted.\n\nOne remaining Horizontal Extensibility bug:\n\n`visual_style_control_defaults()` enumerates `supported_roles` from the raw `TitleStyleRegistry.list()` entry before resolving inheritance. A valid sparse child intentionally omits inherited `supported_roles`, so the normal unfiltered project API emits zero `control_defaults` for that child. Existing sparse-child test hides this because it explicitly passes `title_role=\"location_title\"`.\n\nRequired: enumerate roles/capabilities from the resolved inherited title contract (or an equivalent resolved registry metadata API), then add an unfiltered API regression where a sparse child is a visual style's `default_title_style_id` and still produces complete inherited control defaults without any UI special-case branch.\n\nPR detail: GitHub comment `5329490407`. Same branch/PR only; no full Coffee Render, Perception/Story/Apply rerun, source/config/DB patch, or Creative Brief auto-approval.",
+            "attachments": [],
+            "createdAt": "2026-08-18T14:19:08.863Z",
+            "updatedAt": "2026-08-18T14:19:08.828Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "7a3c2c81-570b-42e6-a534-e38460670423",
+            "body": "### ChatGPT review round 6 — BLOCKED, one final UI/resolved-default contract fix\n\nHEAD `31430f6661da065fe6da6f32f6ce930cbe80a776`, CI #396 / run `32144739830` green. Round-5 role-token materialization, sparse inheritance and API option metadata are accepted.\n\nTwo concrete regressions remain:\n\n1. Nested `readability` / `motion` overrides are saved under `overrides.readability.surface` / `overrides.motion.preset`, but the WebUI control values read flat `effective(\"readability_surface\")` / `effective(\"motion_preset\")`. Human changes are therefore stored but the select visually falls back to the preset default before the next Preview.\n2. WebUI still derives effective defaults from raw `TITLE_STYLES.list()` entries. A future sparse inherited child intentionally omits parent fields, so the client will display hard-coded fallback values rather than the backend-resolved parent+child+role+aspect contract. This violates Horizontal Extensibility: the client must not reimplement inheritance/role resolution.\n\nRequired: expose resolver-backed effective control defaults from backend/API and render UI as nested override ?? resolved backend default. Add frontend regressions for nested override display persistence and a sparse inherited child whose UI defaults equal backend-resolved values without copying parent fields.\n\nPR detail: GitHub comment `5329244152`. Same branch/PR only; no full Coffee Render, Perception/Story/Apply rerun, source/config/DB patch, or Creative Brief auto-approval.",
+            "attachments": [],
+            "createdAt": "2026-08-18T13:59:26.248Z",
+            "updatedAt": "2026-08-18T13:59:26.224Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "3132692c-0ef3-4d16-91d6-ec59293ff0a5",
+            "body": "VID-27 follow-up legacy UI removal is implemented locally and pushed to the existing branch.\n\nFollow-up HEAD: 22c53c34ff85afcdb274c71ba5bc98622ad22535\nBranch: agent/vid-27\nImportant state: PR #107 had already merged at ae744cc12a8333f6786999688b3340863397f3a5 (merge commit 9c40caeb5eb90919d96926f1f4cc1322435cc4b7) before this follow-up. No new PR was opened.\n\nChanges:\n- Removed modern WebUI links to /classic and /classic-bgm.\n- Removed legacy HTML render entry points and disabled fallback to the old UI.\n- Direct GET /classic and /classic-bgm return 404.\n- Missing web/dist returns 503 instead of serving old HTML.\n- Legacy data/API compatibility paths remain; no production DB or source media mutation.\n\nValidation:\n- tests/test_ui_static.py: 13 passed\n- frontend targeted: 21 passed\n- frontend full: 40 files / 267 tests passed\n- frontend production build: PASS\n- full Python: 843 passed, 2 skipped\n- diff check / UTF-8: PASS\n- No CI run exists for 22c53c3 because the associated PR was already merged; local validation is green.\n\nLocal WebUI was restarted and verified with the modern navigation; /classic and /classic-bgm both returned 404.",
+            "attachments": [],
+            "createdAt": "2026-08-18T13:51:10.004Z",
+            "updatedAt": "2026-08-18T15:02:53.168Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "8e31d259-1fd8-4dad-ad9f-88bf0beb24fa",
+            "body": "### ChatGPT review round 5 — BLOCKED, final narrow fixes\n\nHEAD `3347f70e42d667f1f1fc3bfffe5ffea23e887ae1`, CI #395 / run `32141751983` green. Round-4 semantic hash, approval envelope, base_revision, overrides, animated preview, font/easing/currentity work is accepted.\n\nThree remaining blockers, all directly from the existing horizontal-extensibility/title-role contract:\n\n1. **Role token bug**: a snapshot materialized as `location_title` does not actually merge `role_tokens.location_title`; `_resolve_title_plan()` only applies role overrides when requested role differs from snapshot original role. Location preview can therefore be labeled Location while using base/chapter-like tokens. Materialize each role's tokens exactly once and add distinct chapter/location/lower-third regression.\n2. **Inheritance is not sparse**: `TitleStyleRegistry.register()` validates a full definition before resolving `extends`, so current synthetic child copies parent required fields just to register. Support child schema = stable id/version/extends + bounded overrides; parent resolves first, then deep-merge and validate final materialized style. Keep unknown parent/version/cycle fail-closed.\n3. **WebUI options are hard-coded**: backend already exposes anchors/motion/weights/sizes/palette/readability via `visual_style_options()`, but `VisualStylePreviewWorkspace.tsx` repeats literal option lists. UI must consume registry/API options so adding a sibling option does not require editing UI core.\n\nFull detail: PR #107 comment `5328885436`. Same PR/branch only. No full Coffee Render, Perception/Story/Apply rerun, source/config/DB patch, or Creative Brief auto-approval.",
+            "attachments": [],
+            "createdAt": "2026-08-18T13:31:26.399Z",
+            "updatedAt": "2026-08-18T13:31:26.378Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "b5205d49-3d46-4783-80f1-1eb54a5fffa3",
+            "body": "VID-27 Round 4 completed; PR #107 remains Draft/open for review.\n\nHEAD: `3347f70e42d667f1f1fc3bfffe5ffea23e887ae1`\n\nRound 4 fixes:\n- separated immutable pixel-semantic `semantic_hash`/`resolved_hash` from approval evidence envelope; preview/formal semantic plan remains identical after approval\n- Visual Style approval now enforces `base_revision` through `project_commit`; visual-only approval does not advance Story/Perception revision semantics\n- title capability honesty: seven anchors including `top-center`, real linear/ease-out expressions, non-zero letter-spacing fail-closed on the active FFmpeg contract, installed-only FontResolver audit\n- deterministic versioned title inheritance with parent/version/cycle/unknown-parent fail-closed behavior\n- bounded semantic overrides for typography, palette, composition, anchor, readability and motion; raw FFmpeg rejected; preview-before-approval currentity retained\n- real Chapter + Location/Lower Third static evidence and bounded animated MP4 preview evidence; standalone comparison is selectable; WebUI renders animation with video controls\n\nValidation:\n- targeted visual/render: 153 passed\n- full Python: 838 passed, 2 skipped\n- frontend: 39 files / 264 tests passed\n- production build: PASS\n- diff/UTF-8 checks: PASS\n- CI #32141751983: all required jobs PASS (Frontend, Ubuntu portability, Windows authoritative, Media Smoke, selector)\n\nNo full Coffee Render, Perception/Story/Apply rerun, Creative Brief auto-approval, DB patch, source mutation, or production data/config mutation. PR body updated. No remaining local blocker; waiting for ChatGPT review.",
+            "attachments": [],
+            "createdAt": "2026-08-18T13:22:57.089Z",
+            "updatedAt": "2026-08-18T13:22:57.045Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "699c4ac4-28c2-4209-ad20-28015833389d",
+            "body": "### ChatGPT review round 4 — BLOCKED, keep PR #107\n\nHEAD `e536e03a75dd240a5e91347a1688a44fe9dd3bf3`, CI #394 / run `32136904917` green. Round-3 blockers are substantially fixed: explicit visual graph ports, real Formal background `render_segment()` smoke, overlay-vs-standalone timeline behavior, persisted preview evidence, bottom-center/wrap/motion parse coverage all exist.\n\nDo **not** merge yet. Remaining blockers are now approval-contract correctness and the already-approved VID-27 Title Design System UX/extensibility boundary:\n\n1. Preview semantic hash is mutated by approval audit metadata. `save_visual_style_approval()` validates the preview against snapshot hash S0, then adds `approved_preview_*` fields and recomputes `resolved_hash` to S1. Formal plan is therefore not the exact semantic/hash contract human previewed. Separate pixel-semantic snapshot/hash from approval/evidence envelope.\n2. `base_revision` is ignored on Visual Style approval; enforce project revision/currentity fail closed without staling Story for visual-only approval.\n3. Title contract still advertises semantics not rendered: `easing='ease-out'` is not implemented, `letter_spacing` is unused, declared font/fallback chain is ignored by hard-coded font candidates, and `top-center` anchor is missing. Implement or explicitly mark/fail closed unsupported tokens.\n4. VID-27 human customization is incomplete: WebUI/API only approve whole style preset; accepted requirements need bounded semantic overrides for title family/weight/size, palette/accent, overlay-vs-standalone, position, readability and motion, all previewed before approval through the same registry/resolver.\n5. Preview is still static chapter-title PNG only; human needs real chapter + location/lower-third examples and a short bounded animated title preview for motion-enabled styles.\n6. Registry-level controlled title-style inheritance is missing; add minimal versioned parent/extends resolution with unknown-parent/cycle fail closed and synthetic child preset regression.\n\nFull detail in PR #107 comment `5328378065`. Keep all Round-3 fixes. Same branch/PR only; no full Coffee Render, Perception/Story/Apply rerun, source/config/DB patch, or Creative Brief auto-approval.",
+            "attachments": [],
+            "createdAt": "2026-08-18T12:48:37.472Z",
+            "updatedAt": "2026-08-18T12:48:37.433Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "6b0d2a90-1ba5-4d6d-9151-12ac2974e267",
+            "body": "VID-27 Round 3 completed and ready for review.\n\n- PR #107 remains Draft/open on branch `agent/vid-27`\n- HEAD: `e536e03a75dd240a5e91347a1688a44fe9dd3bf3`\n- CI run #32136904917: all required jobs PASS, including Media Smoke / Ubuntu (rerun after an infrastructure cancellation)\n- Local targeted visual/render suite: 146 passed\n- Local full Python: 831 passed, 2 skipped\n- Frontend: 39 test files passed / 264 tests passed; production build passed\n- `git diff --check` and UTF-8 checks passed\n\nRound 3 fixes include explicit formal/preview visual graph ports, chapter overlay vs standalone composition duration handling, persisted preview evidence bound to exact style/brief/LUT/source/title state, strict preview approval validation, title anchor/wrapping/clamping, and real motion smoke coverage for all supported presets. Existing VID-39 geometry, LUT currentity, GPU audit, VID-36 cache binding, and VID-37 provenance isolation remain intact.\n\nNo full Coffee Render, Perception/Story/Apply rerun, source mutation, or production data/config mutation was performed. PR body updated with the review finding, implementation, evidence, tests, and latest HEAD.",
+            "attachments": [],
+            "createdAt": "2026-08-18T12:39:54.060Z",
+            "updatedAt": "2026-08-18T12:39:54.018Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "95b9f8e3-afb0-453e-a07c-aabac08a7fb9",
+            "body": "### ChatGPT review round 3 — BLOCKED, keep PR #107\n\nHEAD `0cf31284c1d63c6db4ee686b8c314d9dcb33052a`, CI #392 green. Round-2 geometry/currentity/GPU/background architecture fixes are accepted directionally, but four remaining issues block merge:\n\n1. **Formal background graph is disconnected**: `visual-render-v1` background `filter_complex` has no `[0:v]` label, while Formal renderer creates `[visual_in]` then performs a no-op `.replace(\"[0:v]\", \"[visual_in]\")`. Preview smoke does not cover this Formal path. Need structured/input-port graph and a real tiny Formal `render_segment()` background smoke.\n2. **Chapter treatment correctness**: `_render_card()` uses `duration` before assignment and will crash with approved Visual Style. Also `render_visual_cards()` still inserts every `chapter_card` as standalone even when approved style composition is `overlay`, so current Coffee human feedback is not actually enforced. Overlay style must render on continuing footage; standalone only when selected.\n3. **Human preview approval fail-open**: API accepts any non-empty `preview_plan_hash`; it is not validated against generated current preview evidence/style/Creative Brief/LUT/source. Persist/validate preview evidence and reject arbitrary/wrong/stale hashes.\n4. **Title pixel/audit gaps**: `bottom-center` caption currently falls through to bottom-left; max-width does not yet prove wrapping/no clipping; lower-third evidence hash is recomputed with default chapter role; supported motion presets need bounded real FFmpeg smoke, not string-only evidence.\n\nFull regression list is in PR #107 comment `5327936737`. Keep Coffee Creative Brief human gate intact; no full Coffee Render, source mutation, DB patch, auto-approval, or Perception/Story/Apply rerun. Fix same branch, full CI, then stop for ChatGPT review.",
+            "attachments": [],
+            "createdAt": "2026-08-18T12:07:52.777Z",
+            "updatedAt": "2026-08-18T12:07:52.752Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "f57b535b-c32f-4d3c-88f8-cdce4c8aedef",
+            "body": "VID-27 / PR #107 Round 2 review handoff complete。\n\n- Branch: agent/vid-27\n- PR: #107（Draft、仍 open）\n- HEAD: 0cf31284c1d63c6db4ee686b8c314d9dcb33052a\n- CI run: #32048574606，required jobs 全部 PASS（Windows authoritative、Ubuntu portability、Frontend、Media Smoke、Select PR test layers）\n- Targeted tests: 96 passed\n- Full Python: 825 passed, 2 skipped\n- Frontend: 39 test files / 264 tests passed；production build PASS\n- diff --check / UTF-8 encoding check PASS\n\n本輪修正已涵蓋：\n- VID-39 canonical display geometry、rotation/SAR-aware framing，並保留 Display Matrix semantics\n- per-source framing resolution 與 mixed portrait/landscape\n- real background-treatment filter_complex（aspect-safe foreground）\n- technical/LUT identity、preview plan hash、Visual Style currentity 與 stale render fail-closed\n- truthful mixed GPU audit：NVDEC + CPU visual filter + NVENC，不再誤標 cuda filter\n- title motion/role/max-width semantics\n- visual plan/cache identity 綁定，避免舊 artifact 誤用\n\n範圍遵守：未跑完整 Coffee Render，未重跑 Perception/Story/Apply，未開始 VID-38，未修改 source/production data、Creative Brief auto-approval 或任何 gate。PR 保持 Draft，交回 review。",
+            "attachments": [],
+            "createdAt": "2026-08-17T17:06:32.495Z",
+            "updatedAt": "2026-08-17T17:06:32.415Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "2901f819-fed1-4b41-8384-9ca85c340578",
+            "body": "### Round 2 blocker handoff — PR #107\n\nBranch `agent/vid-27`, Draft PR #107, HEAD `0cf31284c1d63c6db4ee686b8c314d9dcb33052a`.\n\nImplemented:\n- Shared visual graph now consumes VID-39 canonical rotation/Display Matrix/SAR/DAR geometry before framing.\n- Framing resolves per source segment from source orientation + approved target; same-orientation sources do not receive mismatch treatment.\n- Real `filter_complex` background treatment: blurred/dimmed enlarged background plus aspect-preserving foreground overlay.\n- LUT/technical transform is materialized and hashed separately from creative look; preview/cache identity includes plan/technical/Creative Brief/source identity; stale Creative Brief or color transform blocks old Visual Style from Render.\n- Human Visual Style approval binds a resolved preview-plan hash.\n- Styled GPU audit is truthful as `nvdec_cpu_visual_nvenc` when visual filters cross to CPU; command/report/cache use the effective contract.\n- Title motion presets and role-specific tokens resolve to distinct pixel plans; max-width is bounded in the drawtext contract.\n\nValidation:\n- targeted visual/style/compositor/segment/cache/project: 96 passed\n- full Python: 825 passed, 2 skipped\n- frontend: 39 files / 264 tests passed\n- production build PASS\n- diff-check / UTF-8 PASS\n- required GitHub CI run `32048574606` is pending except Select PR test layers already PASS.\n\nScope preserved: no full Coffee Render, no Perception/Story/Apply rerun, no Creative Brief auto-approval, no DB patch, source/production data unchanged. PR remains Draft and is stopped for review.",
+            "attachments": [],
+            "createdAt": "2026-08-17T17:03:48.183Z",
+            "updatedAt": "2026-08-17T17:03:48.144Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "4b15b40c-a64a-448d-82c7-d9b0cb2a59fb",
+            "body": "### ChatGPT review round 2 — BLOCKED, keep PR #107\n\nHEAD `92e55fa689d51aa91501e0e29410b2f3200bf9d7`, CI #391 green. Previous metadata-only parity blocker is fixed: Formal Render now consumes the shared visual plan. Do **not** merge yet because current HEAD still has pixel/currentity regressions.\n\n1. **VID-39 geometry regression risk** — styled segment path bypasses `_display_geometry_normalization_filter(probe)`; shared visual resolver does not consume SAR/rotation canonicalization. Add `rotation + SAR != 1:1 + Visual Style` real/synthetic regression against canonical square-pixel equivalent.\n2. **Framing policy not per-source** — target landscape always picks `portrait_source_in_landscape`, target portrait always picks inverse; source orientation is not used. Mixed projects can apply mismatch treatment to same-orientation clips. Resolve framing per segment from canonical source orientation + target orientation.\n3. **Technical color currentity/cache is not bound** — preview snapshot is materialized without current color settings, but actual plan applies them; preview cache token can reuse stale PNG after LUT/color changes. Approved snapshot must bind exact technical transform/LUT SHA/resource identity; Formal Render must reject stale/current transform drift. Also enforce stored `creative_brief_hash`: visual-contract hash change => Visual Style stale; recommendation-only refresh with same visual hash must not stale.\n4. **GPU execution audit mismatch** — resolver can record `filter_used=cuda` while styled command actually `hwdownload`s and applies CPU framing/LUT/title filters, with no CUDA filter. Mixed NVDEC + CPU visual filters + NVENC is acceptable but must be truthfully modeled/audited/cached.\n5. **Title semantics partly metadata-only** — all non-none motions render as the same fixed fade; `fade_rise`/`slide_fade`, exit/easing and role hierarchy are not actually applied while metadata reports them. Implement current semantics or fail closed; chapter vs lower-third/location must resolve role-specific tokens through the same registry.\n6. **background_treatment quality** — current solid pad + whole-frame dim is not a real extended background and dims foreground. Implement one deterministic true background treatment (e.g. enlarged/cropped duplicate + blur/dim + foreground overlay), same Preview/Formal plan, no foreground stretch.\n\nRequired regressions are listed in PR #107 comment `5317631430`. Keep Coffee human Creative Brief gate intact; no auto-approval, DB patch, Perception/Story rerun, or full Coffee Render. Fix on same branch, full CI, then stop for ChatGPT review.",
+            "attachments": [],
+            "createdAt": "2026-08-17T16:23:30.505Z",
+            "updatedAt": "2026-08-17T16:23:30.476Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "a7edb21e-ef71-4dbc-b112-5efca7383e08",
+            "body": "Required CI completed green for HEAD `92e55fa689d51aa91501e0e29410b2f3200bf9d7`:\n\n- Frontend PASS\n- Media Smoke / Ubuntu PASS\n- Ubuntu portability / PR Core/Targeted / Python 3.13 PASS\n- Windows authoritative / PR Core/Targeted / Python 3.11 PASS\n\nPR #107 remains Draft and is ready for ChatGPT review. No full Coffee Render or human Creative Brief approval was performed.",
+            "attachments": [],
+            "createdAt": "2026-08-17T16:12:11.130Z",
+            "updatedAt": "2026-08-17T16:12:11.073Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "ef1a7733-c93f-43c7-a379-d5cedc7f5015",
+            "body": "## Review blocker update\n\nImplemented on the existing `agent/vid-27` / Draft PR #107.\n\nHEAD: `92e55fa689d51aa91501e0e29410b2f3200bf9d7`\n\n- Added shared `visual-render-v1` renderer-ready resolver consumed by Preview, formal segment rendering, visual cards, and lower-thirds.\n- Formal report now records approved Visual Style hash plus per-segment resolved render-plan hash/plan; segment cache binds the pixel-affecting style contract and title input.\n- Reused existing `color_pipeline.py` for DJI/LUT technical transforms and separate creative look. Missing user-managed `.cube` fails closed; CUDA paths expose the CPU filter boundary instead of silently skipping LUT/look.\n- Background treatment now has a distinct dimmed pixel treatment; title anchor/safe-zone/font/readability/motion semantics resolve into actual filters.\n- Representative previews select deterministic real-media bright and dark/complex frames with source fingerprint, project media UUID, timestamp, display geometry, luma/selection provenance; each frame has Diary Natural, Clean Minimal, Cinematic, and Standalone Card Compare variants.\n- Synthetic style/title and cache invalidation regressions added.\n\nValidation:\n- targeted visual/style/compositor/segment/cache/project: `75 passed`\n- full Python: `819 passed, 2 skipped`\n- frontend: `39 files / 264 tests passed`\n- frontend production build passed\n- diff check + UTF-8 passed\n- no full Coffee Render; no Perception/Story/Apply rerun; source/production data unchanged\n\nCoffee Creative Brief remains a human checkpoint; no auto-approval or human gate mutation performed. Required CI is running on the pushed HEAD; PR remains Draft for review.",
+            "attachments": [],
+            "createdAt": "2026-08-17T16:07:15.963Z",
+            "updatedAt": "2026-08-17T16:07:15.940Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "27f9ad40-1541-4fc4-9e31-58465f9d9d13",
+            "body": "### ChatGPT review — BLOCKED, keep PR #107 on same branch\n\nPR #107 HEAD `e6d689f5d404cac37d7409f4834b81074c278a0e` / CI green is **not sufficient for merge**. Current implementation misses VID-27 pixel-semantics DoD.\n\n#### Blocker 1 — Preview ↔ Formal Render parity is metadata-only\n`build_render_manifest()` stores `visual_style` / `visual_style_hash`, but `segment_renderer.build_segment_ffmpeg_command()` still renders from existing `segment.color/settings.color`, display geometry and GPU contract. It does **not** apply approved Visual Style grading/framing/title/palette/safe-zone/composition/motion semantics. Cache hash binding alone is not parity.\n\nRequired: one shared renderer-ready semantic resolver must drive both true-frame preview and Formal Render pixels. Formal renderer evidence must expose the exact resolved visual-style/title/grading/framing identities and fail closed on unsupported semantics.\n\n#### Blocker 2 — Coffee DJI D-Log / LUT requirement is not implemented\nCurrent preview grading is only `eq=brightness/contrast/saturation`, while style presets declare `source_colorspace=bt709`. Human feedback requires the expected Coffee LUT/grading to be truly applied. Existing `color_pipeline.py` already supports `dji_lut` / `dji_dlog` / `dji_dlog_m` with user-managed `.cube` LUT validation.\n\nRequired: model and audit **technical normalization** and **creative look** separately when applicable; apply both to Preview and Formal Render pixels. Do not label generic EQ as the expected LUT/look. No unauthorized LUT assets.\n\n#### Blocker 3 — Preview comparison surface incomplete\n`preview_visual_styles()` currently uses one source at fixed `0.5s`, and only UI-enabled A/B/C styles; `standalone_card_compare` is excluded. This does not satisfy bright + dark/complex representative-frame coverage or A/B/C/D comparison.\n\nRequired: deterministic representative-frame selection/evidence for at least bright and dark/complex real frames, and generate Diary Natural / Clean Minimal / Cinematic / Standalone comparison from those frames. Persist media UUID, fingerprint, timestamp and display geometry per preview.\n\n#### Blocker 4 — Title Design System tokens are not actually rendered\n`build_preview_filter()` hard-codes title placement `x=w*0.06:y=h*0.82` and only consumes a subset of stored tokens. Approved anchor/safe-zone/readability surface/typography/palette/responsive/composition/motion semantics must affect pixels and the same Formal Render resolver. Synthetic title preset must traverse that same pixel path without a special-case branch.\n\n#### Regression tests required\nAdd tests that would fail on current HEAD, including:\n- Formal segment/visual renderer command materially changes when approved visual grading/framing/title semantics change.\n- Preview and Formal Render resolve identical semantic contract/hash and pixel-affecting filter plan.\n- D-Log/LUT technical + creative layers are auditable and applied exactly once.\n- bright + dark/complex representative frames × A/B/C/D variants.\n- title anchor/safe-zone/readability/responsive tokens alter actual resolved pixel plan.\n- synthetic style/title uses the same resolver path.\n\nKeep human gate intact: do not auto-approve Coffee Creative Brief, DB patch, rerun Perception/Story, or run full Coffee Render. Fix PR #107 on `agent/vid-27`, rerun CI, update this issue, then stop for ChatGPT review.",
+            "attachments": [],
+            "createdAt": "2026-08-17T15:35:58.115Z",
+            "updatedAt": "2026-08-17T15:35:58.029Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "148c9dde-454c-4029-99f9-911e71f75083",
+            "body": "### CI follow-up\n\nPR #107 required checks completed green at HEAD `e6d689f`:\n- Select PR test layers: success\n- Frontend: success\n- Media Smoke / Ubuntu: success\n- Ubuntu portability / PR Core/Targeted / Python 3.13: success\n- Windows authoritative / PR Core/Targeted / Python 3.11: success\n\nPR remains Draft. No full Coffee Render or human Creative Brief approval was performed; Coffee authoritative preview remains correctly gated on human approval when `needs_confirmation`.",
+            "attachments": [],
+            "createdAt": "2026-08-17T15:31:24.539Z",
+            "updatedAt": "2026-08-17T15:31:24.458Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "c3217b8c-e7b8-4502-81aa-23f7dfbd6779",
+            "body": "## VID-27 implementation handoff\n\n- Baseline main: `cf94a33d8c84ea102244d55e3b4734410b186c84`\n- Branch: `agent/vid-27`\n- Draft PR: https://github.com/DystopiaOwO/video-vault-ai/pull/107\n- HEAD: `e6d689f`\n\n### Implemented\n- `visual-style-v1` / `visual-style-registry-v1`：VisualStyleRegistry，Diary Natural / Clean Minimal / Cinematic；optional standalone card；synthetic `test_soft_panel` 走同一 registry/resolver。\n- `title-style-v1` / `title-style-registry-v1`：semantic roles、typography/fallback、palette/readability、safe-zone/responsive、motion metadata；synthetic title preset 走同一 resolver。\n- persisted `visual_style_states`：recommendation / approved 分離、preview revision、Creative Brief revision/hash binding、source provenance、resolved snapshot/hash。\n- approved Creative Brief 是唯一 output/framing source；未 approved / `needs_confirmation` 時 preview API fail closed，不能自動核准或 patch Coffee。\n- true-frame preview 使用實際 source frame，FFmpeg filter 實際套用 display-safe framing、`setsar=1`、semantic `eq` grading 與 system CJK font fallback/title overlay；preview/render manifest 共用 materialized semantic contract。\n- approved visual style hash 綁入 visual artifact cache identity；不改 Story/Perception hash，亦不改 VID-26 approval identity。\n\n### Evidence\n- Real synthetic FFmpeg smoke：320x180 PNG，SAR `1:1`，DAR `16:9`；filter audit 含 force-aspect framing、setsar、eq、explicit installed `msyh.ttc`、title overlay。\n- Coffee authoritative preview 未執行：目前 Creative Brief 仍受 human `needs_confirmation` gate 控制；UI 僅呈現 recommendation/checkpoint，沒有 auto-approval/DB patch。\n- Source media / production data unchanged；沒有 full Coffee Render、Perception、Story、Apply、Approval rerun。\n\n### Validation\n- targeted visual/style/render/manifest/Creative Brief：52 passed\n- full Python：812 passed, 2 skipped\n- frontend：39 files / 264 passed\n- frontend production build：passed\n- git diff --check：passed\n- UTF-8 check：passed\n- commit：`e6d689f`\n\nPR #107 保持 Draft，等待 review/CI。",
+            "attachments": [],
+            "createdAt": "2026-08-17T15:28:30.271Z",
+            "updatedAt": "2026-08-17T15:28:30.083Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "ac0b855d-6e5c-4d98-bf89-b7f834a7e33b",
+            "body": "### Execution focus after VID-26 merge\n\nBaseline main: `cf94a33d8c84ea102244d55e3b4734410b186c84`.\n\nVID-27 now owns the true-frame visual approval layer before the next full VID-18 Render. Implement against the approved Creative Brief contract from VID-26 and the project-level `Horizontal Extensibility Contract`.\n\nKey Round-1 scope:\n- deterministic VisualStyleRegistry / versioned approved visual-style snapshot\n- true project-frame previews for Diary Natural / Clean Minimal / Cinematic, plus optional standalone-card comparison\n- actual LUT/grading transform in preview with auditable identity; do not represent an unapplied color mood as grading\n- framing treatment preview driven by approved Creative Brief output/framing intent; no foreground stretch\n- crop/reframe vs background treatment where applicable\n- high-quality Title Design System from existing VID-27 comments: semantic roles, typography/palette/readability/motion/safe-zone/responsive 16:9+9:16, CJK fallback, overlay default\n- title/card preset extensibility registry; demonstrate a synthetic new preset without special-case render branch\n- preview and final-render resolver must consume the same materialized semantic contract\n- partial visual changes invalidate only affected visual state; do not stale Perception/Story unnecessarily\n- no source mutation / unauthorized font/LUT/assets\n- no full Coffee Render in this PR\n\nHuman-gate rule: authoritative Coffee previews require an approved VID-26 Creative Brief. If Coffee is still `needs_confirmation`, do not auto-approve or patch DB. Build/test the VID-27 infrastructure with fixtures, then surface the current Coffee recommendation/checkpoint and stop for human 16:9/9:16 approval before generating authoritative Coffee style previews.",
+            "attachments": [],
+            "createdAt": "2026-08-17T14:54:07.994Z",
+            "updatedAt": "2026-08-17T14:54:07.898Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "94226888-a240-46f3-8162-7a145ac29ba6",
+            "body": "### Extensibility contract — future title/card additions must follow one registry/schema\n\nHuman requirement: VID-27 must leave a clear, enforceable path for adding new title/card styles later. Future additions must not require ad-hoc renderer branches or one-off FFmpeg strings.\n\n## 1. Separate semantic role from visual preset\n\nTitle/card data must distinguish:\n\n- semantic role, e.g. `chapter_title`, `section_title`, `location_title`, `date_time_title`, `lower_third`, `caption`\n- visual preset / treatment, e.g. `diary_natural_overlay`, `clean_minimal_overlay`, `cinematic_overlay`, `standalone_card`\n\nA new style should normally be added by registering a new preset against supported roles, not by creating a new renderer code path.\n\n## 2. Versioned schema\n\nCreate a versioned title-style contract with stable fields for:\n\n- preset ID + preset version\n- supported roles\n- typography tokens\n- palette tokens\n- layout / anchors / safe-zone rules\n- readability treatment\n- overlay vs standalone composition\n- motion preset + timing/easing\n- responsive 16:9 / 9:16 rules\n- asset/font requirements\n- renderer capability requirements\n\nUnknown required fields / unsupported preset versions must fail closed or produce an explicit migration/unsupported state; never silently downgrade to a generic style.\n\n## 3. Registry-driven design\n\nUse a central `TitleStyleRegistry` / equivalent source of truth that can:\n\n- register preset metadata\n- validate schema\n- list supported roles/aspects\n- resolve semantic tokens into renderer-ready values\n- expose preview metadata to WebUI\n- expose compatibility/capability status\n\nPreview and final Render must resolve through the same registry.\n\nDo not scatter preset IDs, colors, font sizes or FFmpeg expressions across UI/API/renderer modules.\n\n## 4. Inheritance / composition\n\nSupport controlled inheritance so new presets can reuse stable foundations without copying every field. Example:\n\n`diary_natural_overlay_v2` may inherit base typography/safe-zone behavior and override palette/motion.\n\nInheritance must be resolved deterministically into a fully materialized approved style snapshot before render. Runtime must not depend on mutable parent preset definitions after approval.\n\n## 5. Approved snapshot semantics\n\nWhen a user approves a visual style, persist the fully resolved semantic style values plus:\n\n- preset ID/version\n- registry/schema version\n- resolved token hash\n- font/asset identity\n\nThis prevents an app update that changes a preset from silently changing an already-approved project.\n\nIf preset defaults later change, existing approved projects keep their resolved approved values until the user explicitly refreshes/re-approves.\n\n## 6. Adding a new title/card preset\n\nA future preset should require a predictable checklist only:\n\n1. define stable preset ID/version\n2. declare supported semantic roles\n3. define typography/layout/palette/readability/motion tokens\n4. define 16:9 and 9:16 responsive rules\n5. declare required fonts/assets/capabilities\n6. add deterministic preview fixtures\n7. add registry validation tests\n8. add preview ↔ render parity test\n9. add migration/compatibility behavior if replacing an older preset\n10. add human-visible preset name/description separately from stable internal ID\n\nIt should NOT require editing unrelated Story/Perception logic.\n\n## 7. New semantic role rules\n\nAdding an entirely new role (for example `product_callout` or `quote_card`) requires:\n\n- explicit role schema\n- allowed content fields\n- layout/safe-zone behavior\n- accessibility/readability constraints\n- supported preset matrix\n- preview fixture\n- render parity test\n\nDo not let arbitrary unknown role names fall through to `chapter_title` styling.\n\n## 8. Quality gates for every new preset\n\nEach new preset must pass at minimum:\n\n- bright background readability\n- dark/complex background readability\n- Traditional Chinese\n- English\n- mixed CJK/Latin\n- long title wrapping\n- short title\n- 16:9\n- 9:16\n- overlay safe-zone\n- missing preferred font fallback\n- deterministic preview/render equivalence\n- no clipping / no missing glyph boxes\n\nMotion-enabled presets also need a short animated regression sample.\n\n## 9. Capability degradation\n\nIf a preset asks for an effect unsupported by the current renderer/platform:\n\n- declare capability mismatch explicitly\n- either use a versioned documented fallback preset/treatment or fail closed\n- audit the actual resolved treatment\n\nNever silently omit shadow/background/motion/etc. while still reporting the original preset as rendered.\n\n## 10. Custom/user-defined styles — future-ready boundary\n\nRound-1 does not need a full custom style editor, but schema should allow future user-defined presets to be stored as versioned resolved token sets derived from the same contract.\n\nFuture custom presets must not inject raw arbitrary FFmpeg/filter command strings into the render path.\n\n## Acceptance addition\n\nVID-27 is not complete unless the implementation demonstrates that one additional synthetic/new title preset can be registered and previewed/rendered through the same registry without modifying core Story logic or adding a special-case render branch.",
+            "attachments": [],
+            "createdAt": "2026-08-17T13:52:29.380Z",
+            "updatedAt": "2026-08-17T13:52:28.472Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "0a3fa067-2ee2-4f50-bc97-2ae8bf75f97d",
+            "body": "### Visual quality expansion — Title Design System / high-quality title treatment\n\nHuman feedback: chapter/title treatment should not stop at “text exists”. VID-27 must treat titles as a small deterministic design system so final output has intentional typography, color, hierarchy and motion quality.\n\n## 1. Default treatment\n\nFor diary/travel/coffee projects, default chapter/title treatment should be **overlay on continuing footage**, not a standalone full-screen card.\n\nStandalone chapter card remains an explicit optional variant only when:\n- human selects it, or\n- the visual style intentionally calls for a scene break.\n\nVID-32 black-frame correctness remains valid, but standalone cards are no longer the recommended Coffee default.\n\n## 2. Title hierarchy\n\nSupport at least these semantic roles:\n\n- `chapter_title`\n- `section_title`\n- `location_title`\n- `date_time_title`\n- `lower_third`\n- `caption/subtitle`\n\nEach role must map to deterministic style tokens rather than one generic text preset.\n\nTitle style tokens should include at minimum:\n\n- font family / fallback chain\n- weight\n- size / responsive scale\n- line height\n- letter spacing\n- alignment\n- max width / wrapping policy\n- position / anchor\n- safe-area margins\n- text color\n- accent color\n- background treatment\n- outline / shadow / glow (if enabled)\n- corner radius / padding for boxes\n- opacity\n- entrance / exit motion\n- duration / hold timing\n\nDo not bundle arbitrary FFmpeg strings as the source of truth; persist semantic style values and resolve them in renderer.\n\n## 3. Quality presets\n\nThe existing three preview families remain, but title treatments must be genuinely distinct rather than only changing font size:\n\n### Recommended / Diary Natural\n- restrained typography\n- overlay over footage\n- soft/high-readability treatment\n- minimal motion\n- warm/neutral accent derived from approved visual palette\n- should feel like a personal diary, not advertising\n\n### Clean Minimal\n- high whitespace discipline\n- simple sans-serif treatment\n- strong hierarchy\n- little/no decorative effect\n- clean boxed or subtle shadow readability aid\n\n### Cinematic\n- more deliberate spacing and placement\n- stronger title hierarchy\n- restrained cinematic motion\n- may use uppercase/small-title treatment where language permits\n- no exaggerated trailer-style effects by default\n\n## 4. Color system\n\nTitles should use semantic palette tokens, not ad-hoc hard-coded colors per shot:\n\n- `text_primary`\n- `text_secondary`\n- `accent`\n- `surface_overlay`\n- `surface_overlay_strong`\n- `shadow`\n\nEach Visual Style variant owns a palette.\n\nPreview must show exact resolved colors.\n\nOptional deterministic adaptive readability may inspect the representative frame behind the title and choose between approved light/dark text variants, but:\n- it must stay inside the approved palette\n- decision must be deterministic/auditable\n- render must use the same resolved decision as preview\n- no random per-frame styling\n\n## 5. Readability / contrast\n\nTitle treatment must remain readable over real footage.\n\nAt minimum support deterministic readability aids:\n- subtle shadow\n- outline/stroke\n- translucent background/gradient surface\n- local dark/light overlay behind title region\n\nDo not globally darken the entire frame just to make a small title readable unless the selected style explicitly asks for it.\n\nPreview should include at least one bright and one dark/complex Coffee frame so we do not approve a title style that only works on one background.\n\n## 6. Position / composition\n\nUse safe-zone-aware anchors such as:\n- top-left\n- top-center\n- bottom-left\n- bottom-center\n- center\n\nDefault placement should avoid covering the detected/known primary subject where practical.\n\nVID-27 does not need a full tracking system, but representative preview should allow manual position override and preserve that approved value.\n\n16:9 and 9:16 must have separate responsive layout rules; do not reuse raw pixel offsets from landscape in portrait.\n\n## 7. Motion quality\n\nSupport a small controlled set of deterministic title motions, e.g.:\n- fade\n- fade + slight rise\n- slide/fade\n- scale/fade (very subtle)\n- none\n\nExpose duration/easing as semantic presets. Avoid flashy/random transitions.\n\nPreview should include a short animated sample where technically practical; static frame preview alone is insufficient to judge title motion.\n\n## 8. Chinese / English / Japanese text resilience\n\nThe title system must handle mixed Traditional Chinese / English / Japanese safely:\n- deterministic fallback font chain\n- no missing glyph boxes\n- wrapping and line-height remain valid\n- no unauthorized bundled font assets\n\nUse only fonts/assets already allowed by the project/system, and audit the resolved font identity in preview/render metadata.\n\n## 9. Preview UX\n\nFor each style variant, show real project footage with:\n- chapter title\n- lower-third/location example\n- subtitle/caption example if enabled\n- grading/LUT applied\n- chosen framing treatment applied\n- exact title palette and typography metadata\n\nAllow human to:\n- approve whole variant\n- change title family/weight/size\n- change accent/text palette within allowed options\n- choose overlay vs standalone\n- change position\n- change readability aid\n- change motion preset\n\nPartial changes should invalidate only affected visual-style state.\n\n## 10. Preview ↔ Render contract\n\nApproved title design must become a versioned `title_style` / visual-style contract bound to the approved visual-style revision.\n\nFinal Render Report must expose enough evidence to compare:\n- title role\n- resolved font/fallback identity\n- typography tokens\n- palette tokens / resolved colors\n- position/safe-zone\n- background/readability treatment\n- motion preset/timing\n- overlay vs standalone treatment\n\nPreview and final render must resolve from the same semantic contract; no “preview looks good but render uses another preset”.\n\n## 11. Round-1 Coffee acceptance\n\nAt minimum generate Coffee previews that make these visibly comparable:\n\nA. Diary Natural overlay — recommended\nB. Clean Minimal overlay\nC. Cinematic overlay\nD. optional standalone card comparison\n\nUse real Coffee frame(s), with the expected LUT/grading actually applied.\n\nHuman must be able to select a title treatment before the next full VID-18 render.\n\nQuality bar: the preview should look like a deliberate finished title design, not a debugging label or generic drawtext sample.",
+            "attachments": [],
+            "createdAt": "2026-08-17T13:50:33.382Z",
+            "updatedAt": "2026-08-17T13:50:33.319Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          },
+          {
+            "id": "794fa842-61b0-4967-8785-94d293326e94",
+            "body": "### VID-18 human-preview concrete feedback\n\n這次 Coffee final human preview 提供了兩個可直接作為 Visual Style Preview / final render acceptance 的具體要求：\n\n1. **LUT / grading 必須實際套用**\n   - 目前 final output 明顯是未套預期 LUT 的畫面，不可接受為最終 visual treatment。\n   - Preview 必須能用真實 Coffee frame 顯示「未套 / 套用 approved LUT/grading」差異，並在 final Render Report audit 實際使用的 LUT/grading identity。\n   - 不得只保存 `color mood` 文字卻在 Render 階段完全沒套 transform。\n\n2. **chapter/title treatment 預設改成疊在原始畫面上**\n   - 目前獨立切一張 chapter card 的呈現讓使用者覺得突兀。\n   - Coffee diary 的 Recommended treatment 應優先採用 overlay title：文字直接疊在當下影片畫面，保留 footage continuity；只有 human 明確選擇 standalone card 時才切獨立畫面。\n   - Preview variant 必須讓使用者直接比較 overlay vs standalone，而不是等 final render 才發現。\n\n這兩點是 human feedback，不代表 VID-32 黑畫面修正回歸；VID-32 解的是 QA correctness，而這裡是 visual treatment / UX。\n\nRound-1 目前 first correctness blocker 仍是 VID-39 display geometry。不要在 VID-39 PR 混入 LUT / title UX；geometry 修好後再以 VID-27 / focused visual-treatment work 接續。",
+            "attachments": [],
+            "createdAt": "2026-08-16T13:27:18.613Z",
+            "updatedAt": "2026-08-16T13:27:18.544Z",
+            "parentId": null,
+            "resolvedAt": null,
+            "quotedText": null,
+            "author": {
+              "id": "8dffdecd-aedc-4937-8436-13869826da44",
+              "name": "DystopiaOwO"
+            },
+            "onBehalfOf": null
+          }
+        ],
+        "hasNextPage": false
+      }
+    },
+    {
+      "issue": {
+        "id": "VID-28",
+        "uuid": "aa20b1ac-06a1-47fa-b137-39e4c3159fc4",
+        "title": "Timeline Inspector｜Filmstrip + Waveform + Perception drill-down",
+        "description": "## 目標\n\n在 WebUI 提供 segment / ambiguous edit point 的視覺化 drill-down，不建立完整 NLE timeline，而是讓使用者與 Story/editorial logic 能快速確認「這裡為什麼切、畫面前後發生什麼、聲音是否連續」。\n\n**執行順序調整：先完成** <issue id=\"18a7a130-9a21-4265-98f6-e35bcf672ac8\" href=\"https://linear.app/videoai/issue/VID-40/simple-first-editor-uxprogressive-disclosure-與三步創意流程\">VID-40</issue> **Simple-first Editor UX，再開始本任務。** Timeline Inspector 應作為需要時才進入的 drill-down，不可重新把主 creative flow 變成密集控制面板。\n\n設計參考 CutCraft `timeline_view.py` 的 filmstrip + waveform 概念，但資料層直接使用 Video Vault AI 已有 Perception / audio evidence / storyboard / source fingerprint。\n\n## Simple-first integration\n\n* 主流程只顯示「查看剪輯細節 / Inspector」入口與必要 warning / ambiguity summary。\n* filmstrip、waveform、confidence、source/provenance 等資訊只在使用者 drill-down 後載入。\n* 不在 creative-flow 首屏常駐完整 Inspector。\n* Inspector 自身仍可有 overview → detailed evidence 的 progressive disclosure。\n\n## MVP UI\n\n針對單一 segment 或指定時間範圍顯示：\n\n* evenly sampled filmstrip frames + timestamps\n* audio waveform / silence ranges\n* dialogue / ambience / detected audio events（有 evidence 才顯示）\n* perception segment summary / action / shot role / confidence\n* scene boundaries / hard gaps\n* current cut-in / cut-out\n* source clip identity與 output/story segment UUID\n\n可由 Storyboard / review 畫面點擊進入，不要求使用者拖拉完整 timeline。\n\n## Performance / provenance\n\n* inspection frame/proxy 必須 cache，禁止每次 API request 對大型 source 重算 full hash。\n* reuse 現有 source fingerprint contract；source 變更要正確 invalidate。\n* 所有 frame / waveform / evidence 能追溯至 immutable source 與 generation。\n* 長影片只做 on-demand range drill-down，不在背景對所有 segment 預生成高成本 composite。\n* Windows long path、concurrent requests、stale project revision 要有明確處理。\n\n## Editing integration\n\nMVP 先允許檢視與精準輸入 cut-in / cut-out adjustment；變更後走既有 project revision / approval invalidation 契約，不直接繞過 Story / review。\n\n後續才考慮拖拉 handle、J/L cut 或更完整 timeline editing，本任務不擴張成 NLE。\n\n## Horizontal Extensibility Contract\n\n這裡有理論上可水平增加的 evidence lane / inspector panel，例如 waveform、speech、perception、scene boundary、future motion/face/subject tracking。\n\n第一版必須留下 stable lane/panel ID、versioned metadata、capability/availability、order、cache/provenance identity 與 synthetic sibling fixture；不要求大型 plugin framework。\n\n## Acceptance\n\n* Coffee：可從 storyboard 任一 segment 打開 inspector，filmstrip / waveform / perception evidence 與 source time range 對得上。\n* Travel：至少驗證 scene boundary、環境音與較長移動鏡頭的 on-demand drill-down。\n* 2GB+ source 重複開同一 range 時不重做 full-file hash；cache hit 可稽核。\n* 修改 cut boundary 後 project revision 前進、既有 approval 正確 invalidated，source 不變。\n* frontend refresh / server restart 後 inspector 仍能從 persistent project state 重建。\n* 不破壞 <issue id=\"18a7a130-9a21-4265-98f6-e35bcf672ac8\" href=\"https://linear.app/videoai/issue/VID-40/simple-first-editor-uxprogressive-disclosure-與三步創意流程\">VID-40</issue> 的 Simple-first 主流程；Inspector 預設不佔 creative-flow 首屏主要空間。",
+        "priority": {
+          "value": 3,
+          "name": "Medium"
+        },
+        "url": "https://linear.app/videoai/issue/VID-28/timeline-inspectorfilmstrip-waveform-perception-drill-down",
+        "gitBranchName": "vid-28",
+        "createdAt": "2026-08-15T13:30:20.674Z",
+        "updatedAt": "2026-08-20T16:57:42.600Z",
+        "archivedAt": null,
+        "completedAt": null,
+        "startedAt": null,
+        "canceledAt": null,
+        "dueDate": null,
+        "slaStartedAt": null,
+        "slaMediumRiskAt": null,
+        "slaHighRiskAt": null,
+        "slaBreachesAt": null,
+        "status": "Backlog",
+        "statusType": "backlog",
+        "labels": [],
+        "attachments": [],
+        "documents": [],
+        "stateHistory": [
+          {
+            "state": {
+              "id": "1e34574f-fb6c-40cf-9b15-bf863c6fb156",
+              "name": "Backlog",
+              "type": "backlog"
+            },
+            "startedAt": "2026-08-15T13:30:20.674Z",
+            "endedAt": null
+          }
+        ],
+        "customerNeeds": [],
+        "releases": [],
+        "createdBy": "DystopiaOwO",
+        "createdById": "8dffdecd-aedc-4937-8436-13869826da44",
+        "assignee": "DystopiaOwO",
+        "assigneeId": "8dffdecd-aedc-4937-8436-13869826da44",
+        "project": "Video Vault AI",
+        "projectId": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+        "parentId": "VID-25",
+        "team": "Videoai",
+        "teamId": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "relations": {
+          "blocks": [],
+          "blockedBy": [
+            {
+              "id": "VID-40",
+              "title": "Simple-first Editor UX｜Progressive Disclosure 與三步創意流程"
+            }
+          ],
+          "relatedTo": [
+            {
+              "id": "VID-49",
+              "title": "Visual Style Preview correctness｜primary hero 宣稱 chapter-title 但實際 pixels 無可見字卡"
+            },
+            {
+              "id": "VID-48",
+              "title": "Visual Style Preview performance｜600s timeout、primary-first 與 bounded seek"
+            },
+            {
+              "id": "VID-47",
+              "title": "Source fingerprint revalidation｜Windows device identity drift 的安全 content-equal rebind"
+            },
+            {
+              "id": "VID-46",
+              "title": "Visual Style Preview UX/runtime｜「產生真實畫面預覽」無可見反應"
+            },
+            {
+              "id": "VID-45",
+              "title": "Creative Brief UX｜方向卡選擇無明確回饋與確認 CTA 易誤判無反應"
+            },
+            {
+              "id": "VID-44",
+              "title": "Storage Workspace UX｜Artifact 明細預設收合與類型彙總"
+            },
+            {
+              "id": "VID-43",
+              "title": "WebUI Jobs panel｜mixed updated_at timestamp 排序崩潰"
+            },
+            {
+              "id": "VID-42",
+              "title": "Subtitle Workspace v1｜逐字稿、時間軸、繁中字型與人工校正"
+            },
+            {
+              "id": "VID-41",
+              "title": "Editor Workflow v2｜從素材匯入到成片的主流程重構"
+            }
+          ],
+          "duplicateOf": null
+        }
+      },
+      "comments": {
+        "comments": [],
+        "hasNextPage": false
+      }
+    }
+  ]
+}
