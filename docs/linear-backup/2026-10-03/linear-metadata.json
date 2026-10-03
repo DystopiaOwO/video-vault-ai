@@ -1,0 +1,164 @@
+{
+  "exportedAt": "2026-10-03T22:13:00+08:00",
+  "team": {
+    "id": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+    "icon": "Video",
+    "name": "Videoai",
+    "visibility": "public",
+    "createdAt": "2026-08-07T16:49:12.444Z",
+    "updatedAt": "2026-09-14T08:26:11.709Z"
+  },
+  "project": {
+    "id": "P-VID-1",
+    "uuid": "60f82f3b-a430-4f14-bf12-0ffbb6ff9838",
+    "icon": null,
+    "color": "#95a2b3",
+    "name": "Video Vault AI",
+    "summary": "WebUI-first 的 AI 影片剪輯助手，主打多影片、日記感內容與人工審核流程。",
+    "description": "Repository: [https://github.com/DystopiaOwO/video-vault-ai](<https://github.com/DystopiaOwO/video-vault-ai>)\n\n此 Linear Project 作為「開發任務與規格」的主要管理來源；GitHub 仍是程式碼、branch、CI、Pull Request 與 merge 歷史的 source of truth。\n\n工作流程：\n\n1. 在 Linear 建立精簡、可執行的 task/spec。\n2. Codex 讀取 Linear Issue 後實作，並建立 Draft PR。\n3. GitHub CI 對 PR 執行驗證。\n4. ChatGPT 網頁版依 Linear 驗收條件進行唯讀 Code Review。\n5. 若有 finding，將修正要求交給 Codex 在同一 PR branch 修正。\n6. 重複 Review / Fix，直到最新 HEAD 為 PASS。\n7. 只有 CI 全綠、GPT Review PASS，且沒有未解 blocker 時才能 merge。\n\nGitHub Issue #75、#77、#78 為目前主要開發來源；Linear 只保留目前執行所需的精簡規格，歷史與詳細背景需要時再讀 GitHub 原始 Issue。",
+    "url": "https://linear.app/videoai/project/video-vault-ai-5ea2abbe8781",
+    "resourceCount": 2,
+    "createdAt": "2026-08-07T16:58:55.298Z",
+    "updatedAt": "2026-08-21T21:00:06.604Z",
+    "startedAt": "2026-08-07T16:59:07.774Z",
+    "completedAt": null,
+    "canceledAt": null,
+    "startDate": "2026-08-07",
+    "startDateResolution": null,
+    "targetDate": null,
+    "targetDateResolution": null,
+    "priority": {
+      "value": 2,
+      "name": "High"
+    },
+    "labels": [],
+    "initiatives": [],
+    "lead": {
+      "id": "8dffdecd-aedc-4937-8436-13869826da44",
+      "name": "DystopiaOwO"
+    },
+    "leadTeam": {
+      "id": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+      "name": "Videoai",
+      "key": "VID"
+    },
+    "status": {
+      "id": "e990cce0-cc24-4bef-8912-8dc1ffe2b321",
+      "name": "In Progress",
+      "type": "started"
+    },
+    "teams": [
+      {
+        "id": "e5b4a4c1-ce07-410c-aa59-94bc7127d7f8",
+        "name": "Videoai",
+        "key": "VID"
+      }
+    ],
+    "members": [
+      {
+        "id": "8dffdecd-aedc-4937-8436-13869826da44",
+        "name": "DystopiaOwO",
+        "email": "b3b3b3b3tw@gmail.com"
+      }
+    ],
+    "milestones": [],
+    "resources": [
+      {
+        "type": "document",
+        "id": "c8c64fb4-cf33-4c17-93a5-9f5e43f37b54",
+        "title": "Horizontal Extensibility Contract｜水平擴充設計規範",
+        "icon": null,
+        "color": null,
+        "url": "https://linear.app/videoai/document/horizontal-extensibility-contract水平擴充設計規範-25a9dacc0c87",
+        "createdAt": "2026-08-17T13:53:58.456Z",
+        "updatedAt": "2026-08-17T13:53:59.448Z"
+      },
+      {
+        "type": "document",
+        "id": "ddec22ec-ff27-45a2-856e-33ef0aad1a6a",
+        "title": "Codex → GPT Review 工作流程",
+        "icon": null,
+        "color": null,
+        "url": "https://linear.app/videoai/document/codex-gpt-review-工作流程-919df46a2c8d",
+        "createdAt": "2026-08-07T17:00:36.167Z",
+        "updatedAt": "2026-08-07T17:07:01.805Z"
+      }
+    ]
+  },
+  "issueStatuses": [
+    {
+      "id": "5483c4af-1579-4f03-8847-229c14bb1a15",
+      "type": "started",
+      "name": "In Review"
+    },
+    {
+      "id": "a9c8b57d-2a03-44ae-858d-aa2f8a5d5c59",
+      "type": "duplicate",
+      "name": "Duplicate"
+    },
+    {
+      "id": "9ffd9ed6-7dc9-4466-b9d3-bf3535ad549e",
+      "type": "unstarted",
+      "name": "Todo"
+    },
+    {
+      "id": "70d81f7f-cbc3-4eb8-8f9e-709afd6dda83",
+      "type": "started",
+      "name": "In Progress"
+    },
+    {
+      "id": "4bc3d4f4-76b5-4963-9588-3a6cb661c13e",
+      "type": "completed",
+      "name": "Done"
+    },
+    {
+      "id": "1e34574f-fb6c-40cf-9b15-bf863c6fb156",
+      "type": "backlog",
+      "name": "Backlog"
+    },
+    {
+      "id": "0fab4989-4370-49e6-8354-fd52df13e5ec",
+      "type": "canceled",
+      "name": "Canceled"
+    }
+  ],
+  "issueLabels": {
+    "labels": [
+      {
+        "id": "ec781036-e0fd-4d91-90d8-f3ee856fe61c",
+        "name": "Feature",
+        "color": "#BB87FC",
+        "description": null,
+        "archivedAt": null
+      },
+      {
+        "id": "c405143c-3dd0-4eae-acc0-3097c6f71ae4",
+        "name": "Improvement",
+        "color": "#4EA7FC",
+        "description": null,
+        "archivedAt": null
+      },
+      {
+        "id": "b5e3a5c7-c1be-4655-8c35-3f740b9f4c8d",
+        "name": "Bug",
+        "color": "#EB5757",
+        "description": null,
+        "archivedAt": null
+      }
+    ],
+    "hasNextPage": false
+  },
+  "cycles": [],
+  "projectStatusUpdates": {
+    "statusUpdates": [],
+    "hasNextPage": false
+  },
+  "projectComments": {
+    "comments": [],
+    "hasNextPage": false
+  },
+  "documentIndex": {
+    "documents": [],
+    "hasNextPage": false
+  }
+}
